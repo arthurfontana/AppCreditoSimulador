@@ -8,15 +8,24 @@ const SW = 144, SH = 82;
 const CSV_W = 500, CSV_H = 310, CSV_TH = 38; // title bar height
 const CSV_MINI_W = 160, CSV_MINI_H = 64;
 const MAX_ROWS = 200;
+const MAX_DISTINCT = 10;
 
 const COLORS = ["#ffffff","#dbeafe","#fef3c7","#dcfce7","#fce7f3","#e0e7ff","#ffedd5","#fef9c3"];
 const TOOLS  = [
-  { id:"hand",    icon:"✋", label:"Mover"      },
-  { id:"select",  icon:"↖",  label:"Selecionar" },
-  { id:"rect",    icon:"▭",  label:"Retângulo"  },
-  { id:"circle",  icon:"◯",  label:"Círculo"    },
-  { id:"diamond", icon:"◇",  label:"Losango"    },
-  { id:"connect", icon:"⟶",  label:"Conectar"   },
+  { id:"hand",     icon:"✋", label:"Mover"      },
+  { id:"select",   icon:"↖",  label:"Selecionar" },
+  { id:"rect",     icon:"▭",  label:"Retângulo"  },
+  { id:"circle",   icon:"◯",  label:"Círculo"    },
+  { id:"diamond",  icon:"◇",  label:"Losango"    },
+  { id:"connect",  icon:"⟶",  label:"Conectar"   },
+  { id:"approved", icon:"✅", label:"Aprovado"   },
+  { id:"rejected", icon:"❌", label:"Reprovado"  },
+];
+
+const COL_TYPES = [
+  { value:"id",       icon:"🔑", label:"ID"      },
+  { value:"decision", icon:"🔀", label:"Decisão" },
+  { value:"qty",      icon:"📊", label:"Qtd"     },
 ];
 
 const DELIMITERS = [
@@ -88,17 +97,22 @@ export default function App() {
   const [palette,    setPalette]    = useState(false);
   const [hint,       setHint]       = useState(null);
   // CSV state
-  const [csvStore,   setCsvStore]   = useState({});     // {[csvId]: {name,headers,rows}}
+  const [csvStore,   setCsvStore]   = useState({});     // {[csvId]: {name,headers,rows,columnTypes}}
   const [wizard,     setWizard]     = useState(null);   // null | wizard obj
   const [activeCell, setActiveCell] = useState(null);   // {shapeId,csvId,ri,ci}
+  // Credit simulator state
+  const [editConn,   setEditConn]   = useState(null);   // {id, val} — edição de label de conexão
+  const [panelDrag,  setPanelDrag]  = useState(null);   // {col, csvId} — drag em andamento
+  const [ghostPos,   setGhostPos]   = useState(null);   // {x, y} — posição do ghost element
 
   // ── Refs ──────────────────────────────────────────────────────
-  const svgRef      = useRef(null);
-  const fileInputRef= useRef(null);
-  const dragR       = useRef(null);
-  const pinchR      = useRef(null);
-  const movedR      = useRef(false);
-  const longTimer   = useRef(null);
+  const svgRef        = useRef(null);
+  const fileInputRef  = useRef(null);
+  const dragR         = useRef(null);
+  const pinchR        = useRef(null);
+  const movedR        = useRef(false);
+  const longTimer     = useRef(null);
+  const connClickTimer= useRef(null);
 
   const vpR         = useRef(vp);         useEffect(()=>{vpR.current=vp},         [vp]);
   const shapesR     = useRef(shapes);     useEffect(()=>{shapesR.current=shapes},  [shapes]);
@@ -106,8 +120,10 @@ export default function App() {
   const toolR       = useRef(tool);       useEffect(()=>{toolR.current=tool},      [tool]);
   const fromIdR     = useRef(fromId);     useEffect(()=>{fromIdR.current=fromId},  [fromId]);
   const editR       = useRef(edit);       useEffect(()=>{editR.current=edit},      [edit]);
-  const csvStoreR   = useRef(csvStore);   useEffect(()=>{csvStoreR.current=csvStore},[csvStore]);
+  const csvStoreR   = useRef(csvStore);   useEffect(()=>{csvStoreR.current=csvStore},  [csvStore]);
   const activeCellR = useRef(activeCell); useEffect(()=>{activeCellR.current=activeCell},[activeCell]);
+  const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
+  const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
 
   // ── Geometry ──────────────────────────────────────────────────
   const getBR   = () => svgRef.current.getBoundingClientRect();
@@ -179,7 +195,7 @@ export default function App() {
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
-      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s,id=uid();setShapes(p=>[...p,{id,type:curTool,x:wx-SW/2,y:wy-SH/2,w:SW,h:SH,label:"",color:"#ffffff"}]);setSel(id);}
+      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s,id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}
     }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
@@ -196,6 +212,7 @@ export default function App() {
 
   // ── Mouse handlers ────────────────────────────────────────────
   const onCanvasDown = (e) => {
+    if (panelDragR.current) return;
     if (e.button!==0) return;
     movedR.current=false; setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
     const [sx,sy]=svgPt(e.clientX,e.clientY);
@@ -205,7 +222,10 @@ export default function App() {
     if (movedR.current) return;
     if (tool!=="hand"&&tool!=="select"&&tool!=="connect") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy),id=uid();
-      setShapes(p=>[...p,{id,type:tool,x:wx-SW/2,y:wy-SH/2,w:SW,h:SH,label:"",color:"#ffffff"}]);
+      const isTerminal=tool==="approved"||tool==="rejected";
+      const nw=isTerminal?120:SW, nh=isTerminal?44:SH;
+      const lbl=tool==="approved"?"Aprovado":tool==="rejected"?"Reprovado":"";
+      setShapes(p=>[...p,{id,type:tool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);
       setSel(id);
     }
   };
@@ -264,8 +284,7 @@ export default function App() {
         }
       }
       if ((e.key==="Delete"||e.key==="Backspace")&&sel){
-        setShapes(p=>p.filter(s=>s.id!==sel)); setConns(p=>p.filter(c=>c.from!==sel&&c.to!==sel));
-        setSel(null); setPalette(false);
+        deleteShape(sel);
       }
       if (e.key==="Escape"){setFromId(null);setSel(null);}
     };
@@ -281,7 +300,7 @@ export default function App() {
     reader.onload=(ev)=>{
       const text=ev.target.result;
       const {delimiter,confident}=detectDelimiter(text);
-      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true});
+      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{}});
     };
     reader.readAsText(file);
     e.target.value="";
@@ -289,16 +308,87 @@ export default function App() {
 
   const onImportConfirm = () => {
     if (!wizard) return;
-    const {rawText,filename,delimiter,hasHeader}=wizard;
+    const {rawText,filename,delimiter,hasHeader,columnTypes}=wizard;
     const {headers,rows}=parseCSV(rawText,delimiter,hasHeader);
     const csvId=uid();
-    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers,rows}}));
+    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers,rows,columnTypes:columnTypes||{}}}));
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
     const nodeId=uid();
     setShapes(p=>[...p,{id:nodeId,type:"csv",x:cx-CSV_W/2,y:cy-CSV_H/2,w:CSV_W,h:CSV_H,label:filename,csvId,minimized:false}]);
     setSel(nodeId); setWizard(null);
   };
+
+  // ── deleteShape (com cascade de ports filhos) ─────────────────
+  const deleteShape = (id) => {
+    const shape = shapesR.current.find(s=>s.id===id);
+    const portIds = shape?.type==="decision"
+      ? connsR.current.filter(c=>c.from===id).map(c=>c.to).filter(toId=>shapesR.current.find(s=>s.id===toId&&s.type==="port"))
+      : [];
+    const removeIds = [id,...portIds];
+    setShapes(p=>p.filter(s=>!removeIds.includes(s.id)));
+    setConns(p=>p.filter(c=>!removeIds.includes(c.from)&&!removeIds.includes(c.to)));
+    setSel(null); setPalette(false);
+  };
+
+  // ── createDecisionNode ────────────────────────────────────────
+  const createDecisionNode = (variableCol, csvId, wx, wy) => {
+    const csv = csvStoreR.current[csvId];
+    if (!csv) return;
+    const colIdx = csv.headers.indexOf(variableCol);
+    if (colIdx === -1) return;
+    const allVals = [...new Set(csv.rows.map(r=>r[colIdx]??"").filter(v=>v!==""))];
+    const distinctVals = allVals.slice(0, MAX_DISTINCT);
+    const decId = uid();
+    const decisionShape = {id:decId,type:"decision",x:wx-SW/2,y:wy-SH/2,w:SW,h:SH,label:variableCol,color:"#fef3c7",variableCol,csvId};
+    const PORT_W=80, PORT_H=32, DIST=200;
+    const n = distinctVals.length;
+    const ports = distinctVals.map((val,i)=>{
+      let angle;
+      if (n===1)      angle=0;
+      else if (n===2) angle=i===0?-Math.PI/4:Math.PI/4;
+      else { const span=Math.min(Math.PI*0.75,(n-1)*0.4); angle=-span/2+(span/(n-1))*i; }
+      const px=wx+Math.cos(angle)*DIST-PORT_W/2;
+      const py=wy+Math.sin(angle)*DIST-PORT_H/2;
+      return {id:uid(),type:"port",x:px,y:py,w:PORT_W,h:PORT_H,label:val,color:"#f0fdf4"};
+    });
+    const newConns = ports.map(p=>({id:uid(),from:decId,to:p.id,label:p.label}));
+    setShapes(prev=>[...prev,decisionShape,...ports]);
+    setConns(prev=>[...prev,...newConns]);
+    setSel(decId);
+  };
+
+  // ── startPanelDrag ────────────────────────────────────────────
+  const startPanelDrag = (e, col, csvId) => {
+    e.preventDefault();
+    setPanelDrag({col,csvId});
+    setGhostPos({x:e.clientX,y:e.clientY});
+  };
+
+  // ── Global mouse listeners for panel→canvas drag ──────────────
+  useEffect(()=>{
+    const onMove=(e)=>{
+      if (!panelDragR.current) return;
+      setGhostPos({x:e.clientX,y:e.clientY});
+    };
+    const onUp=(e)=>{
+      const drag=panelDragR.current;
+      if (!drag) return;
+      const svgEl=svgRef.current;
+      if (svgEl) {
+        const rect=svgEl.getBoundingClientRect();
+        if (e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom) {
+          const sx=e.clientX-rect.left,sy=e.clientY-rect.top;
+          const {x:vx,y:vy,s}=vpR.current;
+          createDecisionNode(drag.col,drag.csvId,(sx-vx)/s,(sy-vy)/s);
+        }
+      }
+      setPanelDrag(null); setGhostPos(null);
+    };
+    window.addEventListener('mousemove',onMove);
+    window.addEventListener('mouseup',onUp);
+    return()=>{ window.removeEventListener('mousemove',onMove); window.removeEventListener('mouseup',onUp); };
+  },[]); // eslint-disable-line
 
   // ── Wizard preview ────────────────────────────────────────────
   const wizardPreview = wizard ? parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader) : null;
@@ -311,11 +401,25 @@ export default function App() {
     const so=Math.max(from.w,from.h)/2+4, eo=Math.max(to.w,to.h)/2+10;
     const sx=fx+(dx/len)*so,sy=fy+(dy/len)*so,ex=tx-(dx/len)*eo,ey=ty-(dy/len)*eo;
     const mx=(sx+ex)/2,my=(sy+ey)/2,cv=Math.min(40,len*0.15);
-    const d=`M ${sx} ${sy} Q ${mx+(-dy/len)*cv} ${my+(dx/len)*cv} ${ex} ${ey}`;
+    const cpx=mx+(-dy/len)*cv, cpy=my+(dx/len)*cv;
+    const lx=0.25*sx+0.5*cpx+0.25*ex, ly=0.25*sy+0.5*cpy+0.25*ey;
+    const d=`M ${sx} ${sy} Q ${cpx} ${cpy} ${ex} ${ey}`;
+    const labelText=conn.label?trunc(conn.label,12):null;
     return (
       <g key={conn.id}>
-        <path d={d} fill="none" stroke="transparent" strokeWidth={18} style={{cursor:"pointer"}} onClick={e=>{e.stopPropagation();setConns(p=>p.filter(c=>c.id!==conn.id));}}/>
+        <path d={d} fill="none" stroke="transparent" strokeWidth={18} style={{cursor:"pointer"}}
+          onClick={e=>{e.stopPropagation();connClickTimer.current=setTimeout(()=>{setConns(p=>p.filter(c=>c.id!==conn.id));},220);}}
+          onDoubleClick={e=>{e.stopPropagation();clearTimeout(connClickTimer.current);setEditConn({id:conn.id,val:conn.label||""});}}/>
         <path d={d} fill="none" stroke="#3b82f6" strokeWidth={2} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
+        {labelText&&(
+          <>
+            <rect x={lx-28} y={ly-10} width={56} height={20} rx={5}
+              fill="#fff" stroke="#e2e8f0" strokeWidth={1} style={{pointerEvents:"none"}}/>
+            <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
+              fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fill="#475569"
+              style={{pointerEvents:"none",userSelect:"none"}}>{labelText}</text>
+          </>
+        )}
       </g>
     );
   };
@@ -486,6 +590,51 @@ export default function App() {
     if (type==="rect")    return <g key={id} {...gp}><rect data-sid={id} x={x} y={y} width={w} height={h} rx={10} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}</g>;
     if (type==="circle")  return <g key={id} {...gp}><ellipse data-sid={id} cx={x+w/2} cy={y+h/2} rx={w/2} ry={h/2} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}</g>;
     if (type==="diamond"){const pts=`${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`;return <g key={id} {...gp}><polygon data-sid={id} points={pts} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}</g>;}
+    if (type==="decision") {
+      const pts=`${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`;
+      return (
+        <g key={id} {...gp}>
+          <polygon data-sid={id} points={pts} fill="#fef3c7" stroke={isFrom?"#f59e0b":isSel?"#3b82f6":"#d97706"} strokeWidth={sw}/>
+          <text x={x+w/2} y={y+h/2-9} textAnchor="middle" fontSize={9} fill="#92400e"
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>decisão</text>
+          <text x={x+w/2} y={y+h/2+7} textAnchor="middle" fontSize={12} fontWeight="600" fill="#1e293b"
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{trunc(label,14)}</text>
+        </g>
+      );
+    }
+    if (type==="port") {
+      return (
+        <g key={id} {...gp}>
+          <rect data-sid={id} x={x} y={y} width={w} height={h} rx={h/2}
+            fill="#f0fdf4" stroke={isFrom?"#f59e0b":isSel?"#3b82f6":"#86efac"} strokeWidth={sw}/>
+          <text x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
+            fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="500" fill="#166534"
+            style={{pointerEvents:"none",userSelect:"none"}}>{trunc(label,10)}</text>
+        </g>
+      );
+    }
+    if (type==="approved") {
+      return (
+        <g key={id} {...gp}>
+          <rect data-sid={id} x={x} y={y} width={w} height={h} rx={22}
+            fill="#dcfce7" stroke={isSel?"#3b82f6":"#16a34a"} strokeWidth={sw}/>
+          <text x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
+            fontSize={12} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill="#15803d"
+            style={{pointerEvents:"none",userSelect:"none"}}>✅ {label||"Aprovado"}</text>
+        </g>
+      );
+    }
+    if (type==="rejected") {
+      return (
+        <g key={id} {...gp}>
+          <rect data-sid={id} x={x} y={y} width={w} height={h} rx={22}
+            fill="#fee2e2" stroke={isSel?"#3b82f6":"#dc2626"} strokeWidth={sw}/>
+          <text x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
+            fontSize={12} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill="#dc2626"
+            style={{pointerEvents:"none",userSelect:"none"}}>❌ {label||"Reprovado"}</text>
+        </g>
+      );
+    }
     return null;
   };
 
@@ -494,6 +643,13 @@ export default function App() {
   const commitEdit=()=>{if(!edit)return;setShapes(p=>p.map(s=>s.id===edit.id?{...s,label:edit.val}:s));setEdit(null);};
   const selShape=sel?shapes.find(s=>s.id===sel):null;
   const canvasCursor=tool==="hand"?"grab":tool==="select"?"default":"crosshair";
+
+  // ── Decision variables computed for right panel ───────────────
+  const decisionVars = Object.entries(csvStore).flatMap(([csvId,csv])=>
+    Object.entries(csv.columnTypes||{})
+      .filter(([,type])=>type==="decision")
+      .map(([col])=>({col,csvId}))
+  );
 
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
@@ -533,7 +689,7 @@ export default function App() {
                 border:`2px solid ${palette?"#3b82f6":"#e2e8f0"}`,
                 background:selShape.color||"#fff",cursor:"pointer",transition:"border-color .15s"}}/>
           )}
-          <button className="wbt" onClick={()=>{if(!sel)return;setShapes(p=>p.filter(s=>s.id!==sel));setConns(p=>p.filter(c=>c.from!==sel&&c.to!==sel));setSel(null);setPalette(false);}}
+          <button className="wbt" onClick={()=>{if(!sel)return;deleteShape(sel);}}
             disabled={!sel}
             style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
               background:sel?"#fff1f2":"transparent",color:sel?"#e11d48":"#cbd5e1",
@@ -595,10 +751,27 @@ export default function App() {
           </g>
         </svg>
 
-        {/* Inline label editor */}
+        {/* Inline label editor — shapes */}
         {edit&&editShape&&(()=>{
           const ex=editShape.x*vp.s+vp.x,ey=editShape.y*vp.s+vp.y,ew=editShape.w*vp.s,eh=editShape.h*vp.s;
           return <input autoFocus value={edit.val} onChange={e=>setEdit(p=>({...p,val:e.target.value}))} onBlur={commitEdit} onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")commitEdit();}} style={{position:"absolute",left:ex+ew/2,top:ey+eh/2,transform:"translate(-50%,-50%)",width:ew*0.8,background:"transparent",border:"none",outline:"none",textAlign:"center",fontSize:Math.max(11,12*vp.s),fontFamily:"'DM Sans',system-ui,sans-serif",fontWeight:500,color:"#1e293b",zIndex:500}}/>;
+        })()}
+        {/* Inline label editor — connections */}
+        {editConn&&(()=>{
+          const conn=conns.find(c=>c.id===editConn.id);
+          if(!conn) return null;
+          const from=shapes.find(s=>s.id===conn.from),to=shapes.find(s=>s.id===conn.to);
+          if(!from||!to) return null;
+          const [fx,fy]=ctr(from),[tx,ty]=ctr(to);
+          const mx=(fx+tx)/2*vp.s+vp.x, my=(fy+ty)/2*vp.s+vp.y;
+          return <input autoFocus value={editConn.val}
+            onChange={e=>setEditConn(p=>({...p,val:e.target.value}))}
+            onBlur={()=>{setConns(p=>p.map(c=>c.id===editConn.id?{...c,label:editConn.val}:c));setEditConn(null);}}
+            onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape"){setConns(p=>p.map(c=>c.id===editConn.id?{...c,label:editConn.val}:c));setEditConn(null);}}}
+            style={{position:"absolute",left:mx,top:my,transform:"translate(-50%,-50%)",
+              width:90,background:"#fff",border:"1.5px solid #3b82f6",borderRadius:6,
+              outline:"none",textAlign:"center",fontSize:11,
+              fontFamily:"'DM Sans',system-ui,sans-serif",color:"#475569",padding:"3px 8px",zIndex:500}}/>;
         })()}
       </div>
 
@@ -638,6 +811,27 @@ export default function App() {
           </div>
         )}
 
+        {/* Decision Variables */}
+        {decisionVars.length > 0 && (
+          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
+            <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Variáveis de Decisão</p>
+            <p style={{fontSize:10.5,color:"#cbd5e1",marginBottom:8,lineHeight:1.5}}>Arraste para o canvas para criar um nó de decisão</p>
+            {decisionVars.map(({col,csvId})=>(
+              <div key={`${csvId}-${col}`}
+                onMouseDown={(e)=>startPanelDrag(e,col,csvId)}
+                style={{display:"flex",alignItems:"center",gap:6,padding:"7px 10px",borderRadius:8,
+                  border:"1.5px solid #fde68a",background:"#fef9c3",marginBottom:4,
+                  cursor:"grab",userSelect:"none",fontSize:12,fontWeight:500,color:"#92400e",transition:"all .12s"}}
+                onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
+                onMouseLeave={e=>{e.currentTarget.style.background="#fef9c3";e.currentTarget.style.borderColor="#fde68a";}}>
+                <span>◇</span>
+                <span style={{flex:1}}>{col}</span>
+                <span style={{fontSize:14,opacity:.5}}>⠿</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Empty state */}
         {Object.keys(csvStore).length === 0 && (
           <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:24,color:"#cbd5e1"}}>
@@ -652,6 +846,17 @@ export default function App() {
         )}
       </div>
 
+      {/* ═══════════════ GHOST ELEMENT (panel drag) ═══════════════ */}
+      {ghostPos&&panelDrag&&(
+        <div style={{position:"fixed",left:ghostPos.x,top:ghostPos.y,transform:"translate(-50%,-50%)",
+          background:"#fef3c7",border:"1.5px solid #f59e0b",borderRadius:8,
+          padding:"5px 12px",fontSize:12,fontWeight:600,color:"#92400e",
+          pointerEvents:"none",zIndex:2000,boxShadow:"0 4px 16px rgba(0,0,0,.15)",
+          display:"flex",alignItems:"center",gap:6}}>
+          ◇ {panelDrag.col}
+        </div>
+      )}
+
       {/* ═══════════════ IMPORT WIZARD MODAL ═══════════════ */}
       {wizard && (
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -663,77 +868,144 @@ export default function App() {
                 <div>
                   <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:3}}>Importar CSV</h2>
                   <p style={{fontSize:12.5,color:"#64748b"}}>{wizard.filename}</p>
+                  {/* Progress indicator */}
+                  <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
+                    <div style={{width:24,height:4,borderRadius:2,background:"#3b82f6"}}/>
+                    <div style={{width:24,height:4,borderRadius:2,background:wizard.step>=2?"#3b82f6":"#e2e8f0"}}/>
+                    <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {wizard.step} de 2</span>
+                  </div>
                 </div>
                 <button onClick={()=>setWizard(null)} style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
               </div>
             </div>
 
             <div style={{padding:"20px 28px",overflowY:"auto",flex:1}}>
-
-              {/* Delimiter detection */}
-              <div style={{marginBottom:20}}>
-                <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>
-                  Delimitador
-                  {wizard.confident && <span style={{marginLeft:8,fontSize:11,color:"#16a34a",background:"#f0fdf4",border:"1px solid #bbf7d0",padding:"1px 8px",borderRadius:20}}>detectado automaticamente</span>}
-                  {!wizard.confident && <span style={{marginLeft:8,fontSize:11,color:"#d97706",background:"#fffbeb",border:"1px solid #fde68a",padding:"1px 8px",borderRadius:20}}>verifique abaixo</span>}
-                </p>
-                <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-                  {DELIMITERS.map(d=>(
-                    <label key={d.value} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",borderRadius:9,border:`1.5px solid ${wizard.delimiter===d.value?"#3b82f6":"#e2e8f0"}`,background:wizard.delimiter===d.value?"#eff6ff":"#fafafa",cursor:"pointer",fontSize:13,color:wizard.delimiter===d.value?"#1d4ed8":"#475569",fontWeight:wizard.delimiter===d.value?600:400,transition:"all .12s"}}>
-                      <input type="radio" name="delim" value={d.value} checked={wizard.delimiter===d.value} onChange={()=>setWizard(w=>({...w,delimiter:d.value}))} style={{accentColor:"#3b82f6"}}/>
-                      {d.label}
+              {wizard.step===1 ? (
+                <>
+                  {/* Delimiter detection */}
+                  <div style={{marginBottom:20}}>
+                    <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>
+                      Delimitador
+                      {wizard.confident && <span style={{marginLeft:8,fontSize:11,color:"#16a34a",background:"#f0fdf4",border:"1px solid #bbf7d0",padding:"1px 8px",borderRadius:20}}>detectado automaticamente</span>}
+                      {!wizard.confident && <span style={{marginLeft:8,fontSize:11,color:"#d97706",background:"#fffbeb",border:"1px solid #fde68a",padding:"1px 8px",borderRadius:20}}>verifique abaixo</span>}
+                    </p>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                      {DELIMITERS.map(d=>(
+                        <label key={d.value} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",borderRadius:9,border:`1.5px solid ${wizard.delimiter===d.value?"#3b82f6":"#e2e8f0"}`,background:wizard.delimiter===d.value?"#eff6ff":"#fafafa",cursor:"pointer",fontSize:13,color:wizard.delimiter===d.value?"#1d4ed8":"#475569",fontWeight:wizard.delimiter===d.value?600:400,transition:"all .12s"}}>
+                          <input type="radio" name="delim" value={d.value} checked={wizard.delimiter===d.value} onChange={()=>setWizard(w=>({...w,delimiter:d.value}))} style={{accentColor:"#3b82f6"}}/>
+                          {d.label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Header row */}
+                  <div style={{marginBottom:20}}>
+                    <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+                      <input type="checkbox" checked={wizard.hasHeader} onChange={e=>setWizard(w=>({...w,hasHeader:e.target.checked}))} style={{width:16,height:16,accentColor:"#3b82f6"}}/>
+                      <span style={{fontSize:13,color:"#1e293b",fontWeight:500}}>Primeira linha como cabeçalho</span>
                     </label>
-                  ))}
-                </div>
-              </div>
-
-              {/* Header row */}
-              <div style={{marginBottom:20}}>
-                <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
-                  <input type="checkbox" checked={wizard.hasHeader} onChange={e=>setWizard(w=>({...w,hasHeader:e.target.checked}))} style={{width:16,height:16,accentColor:"#3b82f6"}}/>
-                  <span style={{fontSize:13,color:"#1e293b",fontWeight:500}}>Primeira linha como cabeçalho</span>
-                </label>
-              </div>
-
-              {/* Preview */}
-              <div>
-                <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Prévia (5 primeiras linhas)</p>
-                <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"auto",maxHeight:200}}>
-                  {wizardPreview && wizardPreview.headers.length > 0 ? (
-                    <table style={{borderCollapse:"collapse",fontSize:12,fontFamily:"inherit",width:"max-content",minWidth:"100%"}}>
-                      <thead>
-                        <tr>
-                          {wizardPreview.headers.map((h,i)=>(
-                            <th key={i} style={{background:"#f8fafc",border:"1px solid #e2e8f0",padding:"6px 12px",color:"#475569",fontWeight:600,whiteSpace:"nowrap",minWidth:80}}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {wizardPreview.rows.slice(0,5).map((row,ri)=>(
-                          <tr key={ri} style={{background:ri%2===0?"#fff":"#fafafa"}}>
-                            {wizardPreview.headers.map((_,ci)=>(
-                              <td key={ci} style={{border:"1px solid #f1f5f9",padding:"5px 12px",color:"#334155",whiteSpace:"nowrap"}}>{row[ci]??""}</td>
+                  </div>
+                  {/* Preview */}
+                  <div>
+                    <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Prévia (5 primeiras linhas)</p>
+                    <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"auto",maxHeight:200}}>
+                      {wizardPreview && wizardPreview.headers.length > 0 ? (
+                        <table style={{borderCollapse:"collapse",fontSize:12,fontFamily:"inherit",width:"max-content",minWidth:"100%"}}>
+                          <thead>
+                            <tr>
+                              {wizardPreview.headers.map((h,i)=>(<th key={i} style={{background:"#f8fafc",border:"1px solid #e2e8f0",padding:"6px 12px",color:"#475569",fontWeight:600,whiteSpace:"nowrap",minWidth:80}}>{h}</th>))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {wizardPreview.rows.slice(0,5).map((row,ri)=>(
+                              <tr key={ri} style={{background:ri%2===0?"#fff":"#fafafa"}}>
+                                {wizardPreview.headers.map((_,ci)=>(<td key={ci} style={{border:"1px solid #f1f5f9",padding:"5px 12px",color:"#334155",whiteSpace:"nowrap"}}>{row[ci]??""}</td>))}
+                              </tr>
                             ))}
-                          </tr>
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div style={{padding:20,textAlign:"center",color:"#94a3b8",fontSize:13}}>Nenhum dado detectado com este delimitador</div>
+                      )}
+                    </div>
+                    {wizardPreview && <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>{wizardPreview.rows.length} linhas · {wizardPreview.headers.length} colunas encontradas</p>}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Step 2: Column classification */}
+                  <p style={{fontSize:13,color:"#475569",marginBottom:16,lineHeight:1.6}}>
+                    Classifique cada coluna para habilitar o simulador de crédito.
+                  </p>
+                  <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
+                    {/* Header row */}
+                    <div style={{display:"flex",alignItems:"center",padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>
+                      <span style={{flex:1,fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Coluna</span>
+                      <div style={{display:"flex",gap:6}}>
+                        {COL_TYPES.map(ct=>(
+                          <span key={ct.value} style={{width:86,textAlign:"center",fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>{ct.icon} {ct.label}</span>
                         ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <div style={{padding:20,textAlign:"center",color:"#94a3b8",fontSize:13}}>Nenhum dado detectado com este delimitador</div>
-                  )}
-                </div>
-                {wizardPreview && <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>{wizardPreview.rows.length} linhas · {wizardPreview.headers.length} colunas encontradas</p>}
-              </div>
+                      </div>
+                    </div>
+                    {(wizardPreview?.headers||[]).map((colName,i)=>(
+                      <div key={i} style={{display:"flex",alignItems:"center",padding:"10px 14px",borderBottom:i<(wizardPreview.headers.length-1)?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                        <span style={{flex:1,fontSize:13,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:180}}>{colName}</span>
+                        <div style={{display:"flex",gap:6}}>
+                          {COL_TYPES.map(ct=>{
+                            const isSelected=wizard.columnTypes[colName]===ct.value;
+                            return (
+                              <label key={ct.value} style={{width:86,display:"flex",justifyContent:"center",cursor:"pointer"}}>
+                                <input type="radio" name={`col-${i}`} value={ct.value}
+                                  checked={isSelected}
+                                  onChange={()=>setWizard(w=>({...w,columnTypes:{...w.columnTypes,[colName]:ct.value}}))}
+                                  style={{display:"none"}}/>
+                                <div style={{width:22,height:22,borderRadius:6,
+                                  border:`2px solid ${isSelected?"#3b82f6":"#e2e8f0"}`,
+                                  background:isSelected?"#3b82f6":"#fff",
+                                  display:"flex",alignItems:"center",justifyContent:"center",
+                                  transition:"all .12s"}}>
+                                  {isSelected&&<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <p style={{fontSize:11,color:"#94a3b8",marginTop:10,lineHeight:1.6}}>
+                    As colunas marcadas como <strong>Decisão</strong> estarão disponíveis para arrastar ao canvas.
+                  </p>
+                </>
+              )}
             </div>
 
             {/* Wizard footer */}
-            <div style={{padding:"16px 28px",borderTop:"1px solid #f1f5f9",display:"flex",justifyContent:"flex-end",gap:10}}>
-              <button onClick={()=>setWizard(null)} style={{padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>Cancelar</button>
-              <button onClick={onImportConfirm}
-                disabled={!wizardPreview||wizardPreview.headers.length===0}
-                style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
-                Importar →
-              </button>
+            <div style={{padding:"16px 28px",borderTop:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+              <div>
+                {wizard.step===2&&(
+                  <button onClick={()=>setWizard(w=>({...w,step:1}))}
+                    style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                    ← Voltar
+                  </button>
+                )}
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={()=>setWizard(null)} style={{padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>Cancelar</button>
+                {wizard.step===1 ? (
+                  <button onClick={()=>setWizard(w=>({...w,step:2}))}
+                    disabled={!wizardPreview||wizardPreview.headers.length===0}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
+                    Próximo →
+                  </button>
+                ) : (
+                  <button onClick={onImportConfirm}
+                    disabled={!wizardPreview||wizardPreview.headers.length===0}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
+                    Importar →
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
