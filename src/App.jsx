@@ -10,16 +10,27 @@ const CSV_MINI_W = 160, CSV_MINI_H = 64;
 const MAX_ROWS = 200;
 const MAX_DISTINCT = 10;
 
+// ── Cineminha (Cross Decision Matrix) constants ───────────────────────────────
+const CINEMA_CELL_W   = 70;
+const CINEMA_CELL_H   = 30;
+const CINEMA_TITLE_H  = 38;
+const CINEMA_HDR_H    = 32;
+const CINEMA_LBL_W    = 84;
+const CINEMA_PAD      = 12;
+const CINEMA_MAX_W    = 540;
+const CINEMA_MAX_H    = 420;
+
 const COLORS = ["#ffffff","#dbeafe","#fef3c7","#dcfce7","#fce7f3","#e0e7ff","#ffedd5","#fef9c3"];
 const TOOLS  = [
-  { id:"hand",     icon:"✋", label:"Mover"      },
-  { id:"select",   icon:"↖",  label:"Selecionar" },
-  { id:"rect",     icon:"▭",  label:"Retângulo"  },
-  { id:"circle",   icon:"◯",  label:"Círculo"    },
-  { id:"diamond",  icon:"◇",  label:"Losango"    },
-  { id:"connect",  icon:"⟶",  label:"Conectar"   },
-  { id:"approved", icon:"✅", label:"Aprovado"   },
-  { id:"rejected", icon:"❌", label:"Reprovado"  },
+  { id:"hand",      icon:"✋",  label:"Mover"      },
+  { id:"select",    icon:"↖",   label:"Selecionar" },
+  { id:"rect",      icon:"▭",   label:"Retângulo"  },
+  { id:"circle",    icon:"◯",   label:"Círculo"    },
+  { id:"diamond",   icon:"◇",   label:"Losango"    },
+  { id:"cineminha", icon:"⊞",   label:"Cineminha"  },
+  { id:"connect",   icon:"⟶",   label:"Conectar"   },
+  { id:"approved",  icon:"✅",  label:"Aprovado"   },
+  { id:"rejected",  icon:"❌",  label:"Reprovado"  },
 ];
 
 const COL_TYPES = [
@@ -77,6 +88,25 @@ const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
 const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
 const normalizeColName = (s) => (s || "").toLowerCase().replace(/[\s_\-\.]+/g, "").trim();
 
+function sortDomain(values) {
+  const allNum = values.length > 0 && values.every(v => v !== "" && !isNaN(parseFloat(v)) && isFinite(Number(v)));
+  return allNum
+    ? [...values].sort((a,b) => parseFloat(a)-parseFloat(b))
+    : [...values].sort((a,b) => String(a).localeCompare(String(b),"pt-BR",{numeric:true,sensitivity:"base"}));
+}
+
+function computeCinemaSize(rowDomain, colDomain) {
+  const nR = rowDomain.length, nC = colDomain.length;
+  if (nR === 0 && nC === 0) return {w:170, h:100};
+  const nCeff = Math.max(nC, 1), nReff = Math.max(nR, 1);
+  const idealW = CINEMA_LBL_W + nCeff * CINEMA_CELL_W + CINEMA_PAD;
+  const idealH = CINEMA_TITLE_H + CINEMA_HDR_H + nReff * CINEMA_CELL_H + CINEMA_PAD;
+  return {
+    w: Math.min(CINEMA_MAX_W, Math.max(210, idealW)),
+    h: Math.min(CINEMA_MAX_H, Math.max(120, idealH)),
+  };
+}
+
 // ── Flow engine ──────────────────────────────────────────────────────────────
 function buildFlowGraph(shapes, conns) {
   const out = {}, inc = {};
@@ -90,7 +120,7 @@ function buildFlowGraph(shapes, conns) {
 
 function validateFlow(shapes, conns) {
   const errors = {};
-  const FLOW = new Set(['decision','port','approved','rejected']);
+  const FLOW = new Set(['decision','port','approved','rejected','cineminha']);
   const TERM = new Set(['approved','rejected']);
   const flowShapes = shapes.filter(s => FLOW.has(s.type));
   if (flowShapes.length === 0) return errors;
@@ -109,7 +139,7 @@ function validateFlow(shapes, conns) {
     if (!ok && !errors[nodeId]) errors[nodeId] = 'Possui caminhos sem finalização';
     return ok;
   }
-  shapes.filter(s => s.type === 'decision').forEach(d => dfs(d.id, new Set()));
+  shapes.filter(s => s.type === 'decision' || s.type === 'cineminha').forEach(d => dfs(d.id, new Set()));
   return errors;
 }
 
@@ -119,8 +149,10 @@ function runSimulation(shapes, conns, csvStore) {
   const TERM = new Set(['approved','rejected']);
   const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
   const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
-  const rootDecisions = shapes.filter(s => s.type === 'decision' && !decWithPortInc.has(s.id));
-  if (rootDecisions.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0};
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha') && !decWithPortInc.has(s.id)
+  );
+  if (rootNodes.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0};
 
   function traverseRow(row, headers, startId) {
     let cur = startId; const visited = new Set();
@@ -135,6 +167,20 @@ function runSimulation(shapes, conns, csvStore) {
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
         if (!match) return null;
         cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const rowIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const colIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rowVal = node.rowVar && rowIdx >= 0 ? (row[rowIdx] ?? '').trim() : '';
+        const colVal = node.colVar && colIdx >= 0 ? (row[colIdx] ?? '').trim() : '';
+        if (!node.rowVar && !node.colVar) return null;
+        const rKey = node.rowVar ? rowVal : '*';
+        const cKey = node.colVar ? colVal : '*';
+        const cellKey = `${rKey}|${cKey}`;
+        const isEligible = (node.cells ?? {})[cellKey] !== false;
+        const targetLabel = isEligible ? 'Elegível' : 'Não Elegível';
+        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        if (!match) return null;
+        cur = match.to;
       } else if (node.type === 'port') {
         const edges = out[cur] || []; if (edges.length === 0) return null;
         cur = edges[0].to;
@@ -147,7 +193,12 @@ function runSimulation(shapes, conns, csvStore) {
   for (const [csvId, csv] of Object.entries(csvStore)) {
     const qtyColName = Object.entries(csv.columnTypes || {}).find(([,t]) => t === 'qty')?.[0];
     const qtyIdx = qtyColName ? csv.headers.indexOf(qtyColName) : -1;
-    const csvRoots = rootDecisions.filter(d => d.csvId === csvId);
+    // Find root decision nodes for this CSV (decision nodes by csvId, cineminha by rowVar/colVar csvId)
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision') return d.csvId === csvId;
+      if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      return false;
+    });
     if (csvRoots.length === 0) continue;
     const rootId = csvRoots[0].id;
     for (const row of csv.rows) {
@@ -193,6 +244,7 @@ export default function App() {
   const [importError,setImportError]= useState(null);   // string | null — erro de importação de fluxo
   const [importWarn, setImportWarn] = useState(null);   // string | null — aviso pós-importação
   const [exportModal,setExportModal]= useState(false);  // boolean — modal de escolha de exportação
+  const [axisModal,  setAxisModal]  = useState(null);   // null | {shapeId, col, csvId}
 
   // ── Refs ──────────────────────────────────────────────────────
   const svgRef        = useRef(null);
@@ -214,6 +266,7 @@ export default function App() {
   const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
   const flowImportRef = useRef(null);
+  const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
@@ -289,7 +342,7 @@ export default function App() {
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
-      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s,id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}
+      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
     }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
@@ -314,6 +367,10 @@ export default function App() {
   };
   const onCanvasClick = (e) => {
     if (movedR.current) return;
+    if (tool==="cineminha") {
+      const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
+      createCinemaNode(wx,wy); return;
+    }
     if (tool!=="hand"&&tool!=="select"&&tool!=="connect") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy),id=uid();
       const isTerminal=tool==="approved"||tool==="rejected";
@@ -331,6 +388,10 @@ export default function App() {
       if (shape?.type==="csv"&&!shape.minimized) {
         const [sx,sy]=svgPt(e.clientX,e.clientY),[,wy]=toWorld(sx,sy);
         if (wy>shape.y+CSV_TH) return; // inside table area — don't drag
+      }
+      if (shape?.type==="cineminha"&&(shape.rowVar||shape.colVar)) {
+        const [sx,sy]=svgPt(e.clientX,e.clientY),[,wy]=toWorld(sx,sy);
+        if (wy>shape.y+CINEMA_TITLE_H) return; // inside matrix area — don't drag
       }
       setSel(id); setPalette(false);
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
@@ -438,14 +499,55 @@ export default function App() {
       // We treat any decision node whose csvId is NOT in the current store OR whose csvId IS missing as orphan.
       const currentStoreKeys = new Set(Object.keys(csvStoreR.current));
       const reconciledShapes = p.map(s => {
-        if (s.type !== "decision" || !s.variableCol) return s;
-        // Already bound to a valid (existing or new) csv → no change
-        if (s.csvId === csvId) return s;
-        if (s.csvId && currentStoreKeys.has(s.csvId)) return s;
-        // Orphan: try normalized match
-        const matchedHeader = normMap[normalizeColName(s.variableCol)];
-        if (matchedHeader) {
-          return {...s, csvId, variableCol: matchedHeader};
+        if (s.type === "decision") {
+          if (!s.variableCol) return s;
+          if (s.csvId === csvId) return s;
+          if (s.csvId && currentStoreKeys.has(s.csvId)) return s;
+          const matchedHeader = normMap[normalizeColName(s.variableCol)];
+          if (matchedHeader) return {...s, csvId, variableCol: matchedHeader};
+          return s;
+        }
+        if (s.type === "cineminha") {
+          let updated = {...s};
+          let changed = false;
+          // Reconcile rowVar
+          if (s.rowVar && !currentStoreKeys.has(s.rowVar.csvId) && s.rowVar.csvId !== csvId) {
+            const matched = normMap[normalizeColName(s.rowVar.col)];
+            if (matched) { updated.rowVar = {col:matched, csvId}; changed = true; }
+          }
+          // Reconcile colVar
+          if (s.colVar && !currentStoreKeys.has(s.colVar.csvId) && s.colVar.csvId !== csvId) {
+            const matched = normMap[normalizeColName(s.colVar.col)];
+            if (matched) { updated.colVar = {col:matched, csvId}; changed = true; }
+          }
+          if (!changed) return s;
+          // Recompute domains from new data
+          if (updated.rowVar) {
+            const ci = headers.indexOf(updated.rowVar.col);
+            if (ci >= 0) {
+              const vals = [...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];
+              updated.rowDomain = sortDomain(vals);
+            }
+          }
+          if (updated.colVar) {
+            const ci = headers.indexOf(updated.colVar.col);
+            if (ci >= 0) {
+              const vals = [...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];
+              updated.colDomain = sortDomain(vals);
+            }
+          }
+          // Rebuild cells preserving existing states
+          const rDom = updated.rowDomain.length>0 ? updated.rowDomain : ['*'];
+          const cDom = updated.colDomain.length>0 ? updated.colDomain : ['*'];
+          const newCells = {};
+          for (const r of rDom) for (const c of cDom) {
+            const key=`${r}|${c}`;
+            newCells[key] = (s.cells??{})[key] !== false ? true : false;
+          }
+          updated.cells = newCells;
+          const {w:nw,h:nh} = computeCinemaSize(updated.rowDomain, updated.colDomain);
+          updated.w = nw; updated.h = nh;
+          return updated;
         }
         return s;
       });
@@ -459,7 +561,7 @@ export default function App() {
   // ── deleteShape (com cascade de ports filhos) ─────────────────
   const deleteShape = (id) => {
     const shape = shapesR.current.find(s=>s.id===id);
-    const portIds = shape?.type==="decision"
+    const portIds = (shape?.type==="decision" || shape?.type==="cineminha")
       ? connsR.current.filter(c=>c.from===id).map(c=>c.to).filter(toId=>shapesR.current.find(s=>s.id===toId&&s.type==="port"))
       : [];
     const removeIds = [id,...portIds];
@@ -519,16 +621,22 @@ export default function App() {
     const allIds = [...data.shapes.map(s => s.id), ...data.conns.map(c => c.id)];
     const maxNum = Math.max(0, ...allIds.map(id => parseInt(id.replace(/\D/g,''))).filter(n => !isNaN(n)));
     if (maxNum >= _id) _id = maxNum + 1;
-    // Detect missing variables (decision nodes whose column doesn't exist in the stored CSV)
+    // Detect missing variables (decision/cineminha nodes whose columns don't exist in the stored CSV)
     const importedCsvStore = data.csvStore || {};
     const noDataset = Object.keys(importedCsvStore).length === 0;
-    const missingVars = data.shapes
-      .filter(s => s.type === 'decision' && s.csvId && s.variableCol)
-      .filter(s => {
+    const missingVars = data.shapes.flatMap(s => {
+      if (s.type === 'decision' && s.csvId && s.variableCol) {
         const csv = importedCsvStore[s.csvId];
-        return !csv || !csv.headers.includes(s.variableCol);
-      })
-      .map(s => s.variableCol);
+        return (!csv || !csv.headers.includes(s.variableCol)) ? [s.variableCol] : [];
+      }
+      if (s.type === 'cineminha') {
+        const missing = [];
+        if (s.rowVar) { const csv=importedCsvStore[s.rowVar.csvId]; if(!csv||!csv.headers.includes(s.rowVar.col)) missing.push(s.rowVar.col); }
+        if (s.colVar) { const csv=importedCsvStore[s.colVar.csvId]; if(!csv||!csv.headers.includes(s.colVar.col)) missing.push(s.colVar.col); }
+        return missing;
+      }
+      return [];
+    });
     // Restore state
     setShapes(data.shapes);
     setConns(data.conns);
@@ -587,6 +695,64 @@ export default function App() {
     setSel(decId);
   };
 
+  // ── toggleCinemaCell ──────────────────────────────────────────
+  const toggleCinemaCell = useCallback((shapeId, cellKey) => {
+    setShapes(prev => prev.map(s => {
+      if (s.id !== shapeId) return s;
+      const cur = (s.cells ?? {})[cellKey];
+      return {...s, cells: {...(s.cells??{}), [cellKey]: cur === false ? true : false}};
+    }));
+  }, []);
+
+  // ── createCinemaNode ──────────────────────────────────────────
+  const createCinemaNode = useCallback((wx, wy) => {
+    const id = uid();
+    const W = 170, H = 100;
+    const cinemaShape = {
+      id, type:"cineminha", x:wx-W/2, y:wy-H/2, w:W, h:H,
+      label:"Cineminha", color:"#fff",
+      rowVar:null, colVar:null, rowDomain:[], colDomain:[], cells:{},
+    };
+    const PORT_W = 100, PORT_H = 32;
+    const eligId = uid(), notId = uid();
+    const eligPort = {id:eligId, type:"port", x:wx+W/2+36, y:wy-PORT_H-6, w:PORT_W, h:PORT_H, label:"Elegível",    color:"#f0fdf4"};
+    const notPort  = {id:notId,  type:"port", x:wx+W/2+36, y:wy+6,         w:PORT_W, h:PORT_H, label:"Não Elegível",color:"#fff1f2"};
+    const newConns = [
+      {id:uid(), from:id, to:eligId, label:"Elegível"},
+      {id:uid(), from:id, to:notId,  label:"Não Elegível"},
+    ];
+    setShapes(prev => [...prev, cinemaShape, eligPort, notPort]);
+    setConns(prev  => [...prev, ...newConns]);
+    setSel(id);
+  }, []); // eslint-disable-line
+
+  // ── assignCinemaVar ───────────────────────────────────────────
+  const assignCinemaVar = useCallback((shapeId, col, csvId, axis) => {
+    const csv = csvStoreR.current[csvId];
+    if (!csv) return;
+    const colIdx = csv.headers.indexOf(col);
+    if (colIdx === -1) return;
+    const allVals = [...new Set(csv.rows.map(r => r[colIdx]??'').filter(v=>v!==''))];
+    const domain  = sortDomain(allVals);
+    setShapes(prev => prev.map(s => {
+      if (s.id !== shapeId) return s;
+      const newRowVar    = axis==='row' ? {col,csvId} : s.rowVar;
+      const newColVar    = axis==='col' ? {col,csvId} : s.colVar;
+      const newRowDomain = axis==='row' ? domain : s.rowDomain;
+      const newColDomain = axis==='col' ? domain : s.colDomain;
+      const rDom = newRowDomain.length>0 ? newRowDomain : ['*'];
+      const cDom = newColDomain.length>0 ? newColDomain : ['*'];
+      const newCells = {};
+      for (const r of rDom) for (const c of cDom) {
+        const key = `${r}|${c}`;
+        newCells[key] = (s.cells??{})[key] !== false ? true : false;
+      }
+      const {w:nw, h:nh} = computeCinemaSize(newRowDomain, newColDomain);
+      return {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
+    }));
+    setAxisModal(null);
+  }, []); // eslint-disable-line
+
   // ── startPanelDrag ────────────────────────────────────────────
   const startPanelDrag = (e, col, csvId) => {
     e.preventDefault();
@@ -609,7 +775,14 @@ export default function App() {
         if (e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom) {
           const sx=e.clientX-rect.left,sy=e.clientY-rect.top;
           const {x:vx,y:vy,s}=vpR.current;
-          createDecisionNode(drag.col,drag.csvId,(sx-vx)/s,(sy-vy)/s);
+          const wx=(sx-vx)/s, wy=(sy-vy)/s;
+          // Check if dropped on a cineminha node
+          const cinema=shapesR.current.find(sh=>sh.type==='cineminha'&&wx>=sh.x&&wx<=sh.x+sh.w&&wy>=sh.y&&wy<=sh.y+sh.h);
+          if (cinema) {
+            setAxisModal({shapeId:cinema.id, col:drag.col, csvId:drag.csvId});
+          } else {
+            createDecisionNode(drag.col,drag.csvId,wx,wy);
+          }
         }
       }
       setPanelDrag(null); setGhostPos(null);
@@ -800,10 +973,165 @@ export default function App() {
     );
   };
 
+  // ── Render: Cineminha (Cross Decision Matrix) ─────────────────
+  const renderCinemaNode = (shape) => {
+    const {id, x, y, w, h, rowVar, colVar, rowDomain, colDomain, cells} = shape;
+    const isSel=sel===id, isFrom=fromId===id;
+    const hasErr=!!flowErrors[id];
+    const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#6366f1";
+    const sw=isSel||isFrom?2:hasErr?2.5:1.5;
+    const flt=hasErr?"drop-shadow(0 0 6px rgba(220,38,38,.5))":
+               isSel?"drop-shadow(0 0 0 2px rgba(99,102,241,.25)) drop-shadow(0 2px 8px rgba(99,102,241,.18))":
+               isFrom?"drop-shadow(0 0 0 2px rgba(245,158,11,.25)) drop-shadow(0 2px 8px rgba(245,158,11,.18))":
+               "drop-shadow(0 2px 12px rgba(99,102,241,.15))";
+    const cur=tool==="connect"?"crosshair":tool==="select"?"grab":"default";
+    const hasVars = rowVar || colVar;
+
+    // ── Empty state ──
+    if (!hasVars) {
+      return (
+        <g key={id} data-sid={id}
+          onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
+          style={{cursor:cur, filter:flt}}>
+          <rect data-sid={id} x={x} y={y} width={w} height={h} rx={12}
+            fill="#fff" stroke={stroke} strokeWidth={sw}/>
+          {/* Mini matrix icon: 3×2 colored cells */}
+          {[0,1,2].map(ci=>[0,1].map(ri=>{
+            const colors=["#22c55e","#ef4444","#22c55e","#ef4444","#22c55e","#22c55e"];
+            return <rect key={`${ci}-${ri}`} x={x+20+ci*16} y={y+20+ri*14} width={13} height={11} rx={2} fill={colors[ri*3+ci]} opacity={.85}/>;
+          }))}
+          <text x={x+w/2} y={y+62} textAnchor="middle" fontSize={10.5}
+            fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill="#6366f1"
+            style={{pointerEvents:"none",userSelect:"none"}}>Cineminha</text>
+          <text x={x+w/2} y={y+76} textAnchor="middle" fontSize={9} fill="#94a3b8"
+            fontFamily="'DM Sans',system-ui,sans-serif"
+            style={{pointerEvents:"none",userSelect:"none"}}>Arraste variáveis aqui</text>
+          {hasErr&&<>
+            <circle cx={x+w} cy={y} r={9} fill="#dc2626" style={{pointerEvents:"none"}}/>
+            <text x={x+w} y={y+4} textAnchor="middle" fontSize={11} fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>!</text>
+          </>}
+        </g>
+      );
+    }
+
+    // ── Matrix state (1D or 2D) ──
+    const rDom = rowDomain.length>0 ? rowDomain : ['*'];
+    const cDom = colDomain.length>0 ? colDomain : ['*'];
+    const show2D = rowVar && colVar;
+
+    return (
+      <g key={id} data-sid={id} style={{filter:flt}}>
+        {/* Frame */}
+        <rect x={x} y={y} width={w} height={h} rx={12} fill="#fff" stroke={stroke} strokeWidth={sw}/>
+
+        {/* Title bar — drag handle */}
+        <rect data-sid={id} x={x} y={y} width={w} height={CINEMA_TITLE_H} rx={12} fill="#6366f1"
+          onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} style={{cursor:"grab"}}/>
+        <rect x={x} y={y+CINEMA_TITLE_H-8} width={w} height={8} fill="#6366f1"/>
+
+        {/* Title text */}
+        <text x={x+12} y={y+24} fontSize={11} fontWeight="700" fill="#fff"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⊞ Cineminha</text>
+
+        {/* Variable labels */}
+        {rowVar&&<text x={x+w-12} y={y+16} textAnchor="end" fontSize={9} fill="#c7d2fe"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>L: {trunc(rowVar.col,12)}</text>}
+        {colVar&&<text x={x+w-12} y={y+28} textAnchor="end" fontSize={9} fill="#c7d2fe"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>C: {trunc(colVar.col,12)}</text>}
+
+        {/* Interactive matrix via foreignObject */}
+        <foreignObject x={x+1} y={y+CINEMA_TITLE_H} width={w-2} height={h-CINEMA_TITLE_H-1}>
+          <div
+            xmlns="http://www.w3.org/1999/xhtml"
+            style={{width:"100%",height:"100%",overflow:"auto",background:"#fff",
+              borderBottomLeftRadius:11,borderBottomRightRadius:11,
+              fontFamily:"'DM Sans',system-ui,sans-serif"}}
+            onMouseDown={e=>e.stopPropagation()}
+            onWheel={e=>e.stopPropagation()}
+            onClick={e=>e.stopPropagation()}
+            onTouchStart={e=>e.stopPropagation()}>
+            <table style={{borderCollapse:"collapse",fontSize:11,width:"max-content",minWidth:"100%",tableLayout:"fixed"}}>
+              {show2D&&(
+                <thead>
+                  <tr>
+                    <th style={{width:CINEMA_LBL_W,background:"#f8fafc",border:"1px solid #e2e8f0",
+                      padding:"4px 6px",fontSize:10,color:"#94a3b8",fontWeight:600,position:"sticky",top:0,left:0,zIndex:3}}>
+                      {trunc(rowVar.col,8)} \ {trunc(colVar.col,8)}
+                    </th>
+                    {cDom.map(cv=>(
+                      <th key={cv} style={{width:CINEMA_CELL_W,background:"#eef2ff",border:"1px solid #e2e8f0",
+                        padding:"4px 6px",fontSize:10,color:"#4f46e5",fontWeight:600,textAlign:"center",
+                        position:"sticky",top:0,zIndex:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                        {cv}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+              )}
+              <tbody>
+                {rDom.map(rv=>(
+                  <tr key={rv}>
+                    {/* Row label */}
+                    {rowVar&&(
+                      <td style={{width:CINEMA_LBL_W,background:"#eef2ff",border:"1px solid #e2e8f0",
+                        padding:"3px 8px",fontSize:10.5,fontWeight:600,color:"#4f46e5",
+                        position:"sticky",left:0,zIndex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                        {rv}
+                      </td>
+                    )}
+                    {cDom.map(cv=>{
+                      const rKey = rowVar ? rv : '*';
+                      const cKey = colVar ? cv : '*';
+                      const cellKey = `${rKey}|${cKey}`;
+                      const eligible = (cells??{})[cellKey] !== false;
+                      return (
+                        <td key={cv} style={{width:CINEMA_CELL_W,padding:2,border:"1px solid #f1f5f9",textAlign:"center",background:"#fff"}}>
+                          {!rowVar&&colVar&&(
+                            <div style={{fontSize:10.5,fontWeight:600,color:"#4f46e5",marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:CINEMA_CELL_W-4}}>
+                              {cv}
+                            </div>
+                          )}
+                          <button
+                            onClick={()=>toggleCinemaCell(id, cellKey)}
+                            title={eligible?"Elegível (clique para reprovar)":"Não Elegível (clique para aprovar)"}
+                            style={{
+                              width:"100%",height:CINEMA_CELL_H-6,border:"none",borderRadius:4,
+                              background:eligible?"#22c55e":"#ef4444",
+                              color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,
+                              display:"flex",alignItems:"center",justifyContent:"center",
+                              transition:"background .12s",
+                            }}>
+                            {eligible?"✓":"✗"}
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </foreignObject>
+
+        {/* Invisible pointer overlay for title bar clicks */}
+        <rect data-sid={id} x={x} y={y} width={w} height={CINEMA_TITLE_H}
+          fill="transparent" stroke="none"
+          onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
+          style={{cursor:"grab"}}/>
+
+        {hasErr&&<>
+          <circle cx={x+w} cy={y} r={9} fill="#dc2626" style={{pointerEvents:"none"}}/>
+          <text x={x+w} y={y+4} textAnchor="middle" fontSize={11} fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>!</text>
+        </>}
+      </g>
+    );
+  };
+
   // ── Render: regular shape ─────────────────────────────────────
   const renderShape = (shape) => {
-    if (shape.type==="csv") return renderCSVNode(shape);
-    if (shape.type==="simPanel") return renderSimPanel(shape);
+    if (shape.type==="csv")       return renderCSVNode(shape);
+    if (shape.type==="simPanel")  return renderSimPanel(shape);
+    if (shape.type==="cineminha") return renderCinemaNode(shape);
     const {id,type,x,y,w,h,label,color}=shape;
     const isSel=sel===id, isFrom=fromId===id;
     const hasErr=!!flowErrors[id];
@@ -842,14 +1170,17 @@ export default function App() {
       );
     }
     if (type==="port") {
-      const portStroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#86efac";
+      const isRed = (color==="#fff1f2");
+      const portFill  = hasErr?"#fff1f2":(color||"#f0fdf4");
+      const portTxt   = hasErr?"#dc2626":isRed?"#991b1b":"#166534";
+      const portStroke= isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":isRed?"#fca5a5":"#86efac";
       return (
         <g key={id} {...gp}>
           <rect data-sid={id} x={x} y={y} width={w} height={h} rx={h/2}
-            fill={hasErr?"#fff1f2":"#f0fdf4"} stroke={portStroke} strokeWidth={sw}/>
+            fill={portFill} stroke={portStroke} strokeWidth={sw}/>
           <text x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
-            fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="500" fill={hasErr?"#dc2626":"#166534"}
-            style={{pointerEvents:"none",userSelect:"none"}}>{trunc(label,10)}</text>
+            fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="500" fill={portTxt}
+            style={{pointerEvents:"none",userSelect:"none"}}>{trunc(label,14)}</text>
           {errBadge}
         </g>
       );
@@ -1140,7 +1471,7 @@ export default function App() {
         {decisionVars.length > 0 && (
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
             <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Variáveis de Decisão</p>
-            <p style={{fontSize:10.5,color:"#cbd5e1",marginBottom:8,lineHeight:1.5}}>Arraste para o canvas para criar um nó de decisão</p>
+            <p style={{fontSize:10.5,color:"#cbd5e1",marginBottom:8,lineHeight:1.5}}>Arraste para o canvas → losango, ou sobre um ⊞ Cineminha → matriz cruzada</p>
             {decisionVars.map(({col,csvId})=>(
               <div key={`${csvId}-${col}`}
                 onMouseDown={(e)=>startPanelDrag(e,col,csvId)}
@@ -1225,6 +1556,46 @@ export default function App() {
           pointerEvents:"none",zIndex:2000,boxShadow:"0 4px 16px rgba(0,0,0,.15)",
           display:"flex",alignItems:"center",gap:6}}>
           ◇ {panelDrag.col}
+        </div>
+      )}
+
+      {/* ═══════════════ AXIS SELECTION MODAL (Cineminha) ═══════════ */}
+      {axisModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:400,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:20}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                <div style={{width:38,height:38,borderRadius:10,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⊞</div>
+                <div>
+                  <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>Adicionar ao Cineminha</h3>
+                  <p style={{fontSize:12.5,color:"#64748b"}}>Variável: <strong>{axisModal.col}</strong></p>
+                </div>
+              </div>
+              <p style={{fontSize:13,color:"#475569",lineHeight:1.6}}>Como deseja posicionar esta variável na matriz?</p>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>assignCinemaVar(axisModal.shapeId, axisModal.col, axisModal.csvId, 'row')}
+                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"16px 10px",borderRadius:12,border:"1.5px solid #c7d2fe",background:"#eef2ff",cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="#818cf8";e.currentTarget.style.background="#e0e7ff";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="#c7d2fe";e.currentTarget.style.background="#eef2ff";}}>
+                <span style={{fontSize:22}}>↕</span>
+                <span style={{fontSize:13,fontWeight:700,color:"#4f46e5"}}>Linhas</span>
+                <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valores como linhas da matriz</span>
+              </button>
+              <button onClick={()=>assignCinemaVar(axisModal.shapeId, axisModal.col, axisModal.csvId, 'col')}
+                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"16px 10px",borderRadius:12,border:"1.5px solid #c7d2fe",background:"#eef2ff",cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="#818cf8";e.currentTarget.style.background="#e0e7ff";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="#c7d2fe";e.currentTarget.style.background="#eef2ff";}}>
+                <span style={{fontSize:22}}>↔</span>
+                <span style={{fontSize:13,fontWeight:700,color:"#4f46e5"}}>Colunas</span>
+                <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valores como colunas da matriz</span>
+              </button>
+            </div>
+            <button onClick={()=>setAxisModal(null)}
+              style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+              Cancelar
+            </button>
+          </div>
         </div>
       )}
 
