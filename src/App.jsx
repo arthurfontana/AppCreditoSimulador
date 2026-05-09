@@ -112,6 +112,19 @@ function computeCinemaSize(rowDomain, colDomain) {
   };
 }
 
+// ── Color helpers ────────────────────────────────────────────────────────────
+function lerpColor(a, b, t) {
+  const ah=parseInt(a.slice(1),16), bh=parseInt(b.slice(1),16);
+  const ar=(ah>>16)&255, ag=(ah>>8)&255, ab=ah&255;
+  const br=(bh>>16)&255, bg=(bh>>8)&255, bb=bh&255;
+  const r=Math.round(ar+(br-ar)*t), g=Math.round(ag+(bg-ag)*t), bl2=Math.round(ab+(bb-ab)*t);
+  return `#${((1<<24)|(r<<16)|(g<<8)|bl2).toString(16).slice(1)}`;
+}
+function inadColor(t) { // t in [0,1]
+  if (t<=0.5) return lerpColor("#86efac","#fde68a",t*2);
+  return lerpColor("#fde68a","#fca5a5",(t-0.5)*2);
+}
+
 // ── Flow engine ──────────────────────────────────────────────────────────────
 function buildFlowGraph(shapes, conns) {
   const out = {}, inc = {};
@@ -157,41 +170,61 @@ function runSimulation(shapes, conns, csvStore) {
   const rootNodes = shapes.filter(s =>
     (s.type === 'decision' || s.type === 'cineminha') && !decWithPortInc.has(s.id)
   );
-  if (rootNodes.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0};
+  if (rootNodes.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0, edgeStats:{}};
 
-  function traverseRow(row, headers, startId) {
+  // Build edge lookup: edgeLookup[fromId][toId+"::"+label] = connId
+  const edgeLookup = {};
+  for (const c of conns) {
+    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
+    const key = `${c.to}::${c.label??''}`;
+    edgeLookup[c.from][key] = c.id;
+  }
+
+  // edgeStats accumulator
+  const edgeAcc = {}; // connId -> {qty,approvedQty,rejectedQty,inadRealSum,inadInferidaSum,qtdAltasSum}
+  const initEdge = (cid) => { if (!edgeAcc[cid]) edgeAcc[cid]={qty:0,approvedQty:0,rejectedQty:0,inadRealSum:0,inadInferidaSum:0,qtdAltasSum:0}; };
+
+  function traverseRow(row, headers, startId, rowMeta) {
     let cur = startId; const visited = new Set();
+    const path = []; // connIds traversed
     while (cur) {
-      if (visited.has(cur)) return null;
+      if (visited.has(cur)) return {result:null, path};
       visited.add(cur);
-      const node = shapesMap[cur]; if (!node) return null;
-      if (TERM.has(node.type)) return node.type;
+      const node = shapesMap[cur]; if (!node) return {result:null, path};
+      if (TERM.has(node.type)) return {result:node.type, path};
       if (node.type === 'decision') {
         const colIdx = headers.indexOf(node.variableCol);
         const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
-        if (!match) return null;
+        if (!match) return {result:null, path};
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
         cur = match.to;
       } else if (node.type === 'cineminha') {
         const rowIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const colIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
         const rowVal = node.rowVar && rowIdx >= 0 ? (row[rowIdx] ?? '').trim() : '';
         const colVal = node.colVar && colIdx >= 0 ? (row[colIdx] ?? '').trim() : '';
-        if (!node.rowVar && !node.colVar) return null;
+        if (!node.rowVar && !node.colVar) return {result:null, path};
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
         const cellKey = `${rKey}|${cKey}`;
         const isEligible = (node.cells ?? {})[cellKey] !== false;
         const targetLabel = isEligible ? 'Elegível' : 'Não Elegível';
         const match = (out[cur] || []).find(e => e.label === targetLabel);
-        if (!match) return null;
+        if (!match) return {result:null, path};
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
         cur = match.to;
       } else if (node.type === 'port') {
-        const edges = out[cur] || []; if (edges.length === 0) return null;
-        cur = edges[0].to;
-      } else return null;
+        const edges = out[cur] || []; if (edges.length === 0) return {result:null, path};
+        const match = edges[0];
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
+        cur = match.to;
+      } else return {result:null, path};
     }
-    return null;
+    return {result:null, path};
   }
 
   let totalQty = 0, approvedQty = 0, rejectedQty = 0;
@@ -215,22 +248,53 @@ function runSimulation(shapes, conns, csvStore) {
     const rootId = csvRoots[0].id;
     for (const row of csv.rows) {
       const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
+      const qtdAltas = qtdAltasIdx >= 0 ? (parseFloat(row[qtdAltasIdx]) || 0) : 0;
+      const inadR = inadRealIdx >= 0 ? (parseFloat(row[inadRealIdx]) || 0) : 0;
+      const inadI = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
       totalQty += qty;
-      const res = traverseRow(row, csv.headers, rootId);
-      if (res === 'approved') {
+      const {result:res, path} = traverseRow(row, csv.headers, rootId, {qty, qtdAltas, inadR, inadI});
+      const isApproved = res === 'approved', isRejected = res === 'rejected';
+      if (isApproved) {
         approvedQty += qty;
-        if (qtdAltasIdx    >= 0) qtdAltasSum     += parseFloat(row[qtdAltasIdx])     || 0;
-        if (inadRealIdx    >= 0) inadRealSum      += parseFloat(row[inadRealIdx])     || 0;
-        if (inadInferidaIdx>= 0) inadInferidaSum  += parseFloat(row[inadInferidaIdx]) || 0;
-      } else if (res === 'rejected') rejectedQty += qty;
+        qtdAltasSum    += qtdAltas;
+        inadRealSum    += inadR;
+        inadInferidaSum+= inadI;
+      } else if (isRejected) rejectedQty += qty;
+      // Accumulate edge stats for every traversed edge
+      for (const cid of path) {
+        initEdge(cid);
+        edgeAcc[cid].qty += qty;
+        if (isApproved) {
+          edgeAcc[cid].approvedQty += qty;
+          edgeAcc[cid].qtdAltasSum += qtdAltas;
+          edgeAcc[cid].inadRealSum += inadR;
+          edgeAcc[cid].inadInferidaSum += inadI;
+        } else if (isRejected) edgeAcc[cid].rejectedQty += qty;
+      }
     }
   }
   const inadReal     = qtdAltasSum > 0    ? inadRealSum / qtdAltasSum   : null;
   const inadInferida = approvedQty  > 0   ? inadInferidaSum / approvedQty : null;
+
+  // Compute derived per-edge stats
+  const edgeStats = {};
+  for (const [cid, acc] of Object.entries(edgeAcc)) {
+    edgeStats[cid] = {
+      qty: acc.qty,
+      approvedQty: acc.approvedQty,
+      rejectedQty: acc.rejectedQty,
+      qtdAltas: acc.qtdAltasSum,
+      approvalRate: acc.qty > 0 ? acc.approvedQty / acc.qty : null,
+      inadReal: acc.qtdAltasSum > 0 ? acc.inadRealSum / acc.qtdAltasSum : null,
+      inadInferida: acc.approvedQty > 0 ? acc.inadInferidaSum / acc.approvedQty : null,
+    };
+  }
+
   return {
     totalQty, approvedQty, rejectedQty,
     approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
     inadReal, inadInferida,
+    edgeStats,
   };
 }
 
@@ -270,6 +334,12 @@ export default function App() {
   const [varSearch,  setVarSearch]  = useState("");     // filtro de busca no painel
   const [multiSel,   setMultiSel]   = useState(new Set()); // ids selecionados em grupo
   const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
+  // Feature: analytics
+  const [hoveredConn,       setHoveredConn]       = useState(null);
+  const [enableDynThickness,setEnableDynThickness] = useState(false);
+  // Feature: tooltips
+  const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
+  const tooltipTimer = useRef(null);
 
   // ── Refs ──────────────────────────────────────────────────────
   const svgRef        = useRef(null);
@@ -291,6 +361,7 @@ export default function App() {
   const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
   const flowImportRef = useRef(null);
+  const prevToolR     = useRef(null);
   const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
   const multiSelR     = useRef(multiSel);   useEffect(()=>{multiSelR.current=multiSel},   [multiSel]);
   const selRectR      = useRef(selRect);    useEffect(()=>{selRectR.current=selRect},      [selRect]);
@@ -381,7 +452,17 @@ export default function App() {
     el.addEventListener("touchstart",onTouchStart,o); el.addEventListener("touchmove",onTouchMove,o);
     el.addEventListener("touchend",onTouchEnd,o);     el.addEventListener("touchcancel",onTouchEnd,o);
     el.addEventListener("wheel",onWheel,o);
-    return()=>{el.removeEventListener("touchstart",onTouchStart);el.removeEventListener("touchmove",onTouchMove);el.removeEventListener("touchend",onTouchEnd);el.removeEventListener("touchcancel",onTouchEnd);el.removeEventListener("wheel",onWheel);};
+    const onMidDown=(e)=>{
+      if (e.button!==1) return;
+      e.preventDefault();
+      movedR.current=false;
+      const r=el.getBoundingClientRect();
+      const sx=e.clientX-r.left, sy=e.clientY-r.top;
+      prevToolR.current=toolR.current;
+      dragR.current={type:"midpan",sx,sy,ox:vpR.current.x,oy:vpR.current.y};
+    };
+    el.addEventListener("mousedown",onMidDown,o);
+    return()=>{el.removeEventListener("touchstart",onTouchStart);el.removeEventListener("touchmove",onTouchMove);el.removeEventListener("touchend",onTouchEnd);el.removeEventListener("touchcancel",onTouchEnd);el.removeEventListener("wheel",onWheel);el.removeEventListener("mousedown",onMidDown);};
   },[onTouchStart,onTouchMove,onTouchEnd,onWheel]);
 
   // ── Mouse handlers ────────────────────────────────────────────
@@ -472,7 +553,7 @@ export default function App() {
     const dr=dragR.current; if (!dr) return;
     const [sx,sy]=svgPt(e.clientX,e.clientY),dx=sx-dr.sx,dy=sy-dr.sy;
     if (Math.abs(dx)>3||Math.abs(dy)>3) movedR.current=true;
-    if (dr.type==="pan"){const ox=dr.ox,oy=dr.oy;setVp(v=>({...v,x:ox+dx,y:oy+dy}));}
+    if (dr.type==="pan"||dr.type==="midpan"){const ox=dr.ox,oy=dr.oy;setVp(v=>({...v,x:ox+dx,y:oy+dy}));}
     else if(dr.type==="shape"){
       const id=dr.id,offX=dr.offX,offY=dr.offY,[wx,wy]=toWorld(sx,sy);
       const ms=multiSelR.current;
@@ -515,6 +596,7 @@ export default function App() {
   const onMouseUp = () => {
     const dr=dragR.current;
     if(dr?.type==="selRect") setSelRect(null);
+    if(dr?.type==="midpan"&&prevToolR.current!=null) setTool(prevToolR.current);
     dragR.current=null;
   };
 
@@ -885,6 +967,25 @@ export default function App() {
   // ── Wizard preview ────────────────────────────────────────────
   const wizardPreview = wizard ? parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader) : null;
 
+  // ── Analytics color scale ─────────────────────────────────────
+  const edgeColorScale = useMemo(() => {
+    const stats = simResult.edgeStats || {};
+    const vals = Object.values(stats).map(s => s.inadInferida).filter(v => v !== null);
+    if (vals.length < 2) return null;
+    const mn = Math.min(...vals), mx = Math.max(...vals);
+    if (mx === mn) return null;
+    return {mn, mx};
+  }, [simResult]);
+
+  const edgeQtyScale = useMemo(() => {
+    const stats = simResult.edgeStats || {};
+    const vals = Object.values(stats).map(s => s.qty);
+    if (vals.length === 0) return null;
+    const mn = Math.min(...vals), mx = Math.max(...vals);
+    if (mx === mn) return null;
+    return {mn, mx};
+  }, [simResult]);
+
   // ── Render: connection (adaptive routing) ─────────────────────
   const renderConn = (conn) => {
     const from=shapes.find(s=>s.id===conn.from), to=shapes.find(s=>s.id===conn.to);
@@ -920,12 +1021,38 @@ export default function App() {
     const lx=0.125*sx+0.375*c1x+0.375*c2x+0.125*aex;
     const ly=0.125*sy+0.375*c1y+0.375*c2y+0.125*aey;
     const labelText=conn.label?trunc(conn.label,12):null;
+
+    // Analytics
+    const es = simResult.edgeStats?.[conn.id];
+    let strokeColor = "#3b82f6";
+    if (es && edgeColorScale) {
+      const t = (es.inadInferida !== null)
+        ? (es.inadInferida - edgeColorScale.mn) / (edgeColorScale.mx - edgeColorScale.mn)
+        : null;
+      if (t !== null) strokeColor = inadColor(Math.max(0, Math.min(1, t)));
+    }
+    let strokeW = 2;
+    if (enableDynThickness && es && edgeQtyScale) {
+      const t2 = (es.qty - edgeQtyScale.mn) / (edgeQtyScale.mx - edgeQtyScale.mn);
+      strokeW = 1.5 + t2 * 2.5;
+    }
+    const analyticsLabel = es
+      ? `${fmtQty(es.qty)} | ${fmtPct(es.inadReal)} | ${fmtPct(es.inadInferida)}`
+      : null;
+
+    // Hover card position in screen coords
+    const isHovered = hoveredConn === conn.id;
+    const hcScreenX = lx * vp.s + vp.x + 10;
+    const hcScreenY = ly * vp.s + vp.y - 80;
+
     return (
       <g key={conn.id}>
         <path d={d} fill="none" stroke="transparent" strokeWidth={18} style={{cursor:"pointer"}}
+          onMouseEnter={()=>setHoveredConn(conn.id)}
+          onMouseLeave={()=>setHoveredConn(null)}
           onClick={e=>{e.stopPropagation();connClickTimer.current=setTimeout(()=>{setConns(p=>p.filter(c=>c.id!==conn.id));},220);}}
           onDoubleClick={e=>{e.stopPropagation();clearTimeout(connClickTimer.current);setEditConn({id:conn.id,val:conn.label||""});}}/>
-        <path d={d} fill="none" stroke="#3b82f6" strokeWidth={2} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
+        <path d={d} fill="none" stroke={strokeColor} strokeWidth={strokeW} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
         {labelText&&(
           <>
             <rect x={lx-28} y={ly-10} width={56} height={20} rx={5}
@@ -934,6 +1061,30 @@ export default function App() {
               fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fill="#475569"
               style={{pointerEvents:"none",userSelect:"none"}}>{labelText}</text>
           </>
+        )}
+        {analyticsLabel&&(
+          <text x={lx} y={ly+(labelText?14:4)} textAnchor="middle"
+            fontSize={9} fontFamily="'DM Sans',system-ui,sans-serif" fill="#64748b"
+            style={{pointerEvents:"none",userSelect:"none"}}>{analyticsLabel}</text>
+        )}
+        {isHovered&&es&&(
+          <foreignObject x={lx+10/vp.s} y={ly-80/vp.s} width={160/vp.s} height={200/vp.s} style={{pointerEvents:"none",overflow:"visible"}}>
+            <div xmlns="http://www.w3.org/1999/xhtml" style={{
+              background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,padding:10,
+              boxShadow:"0 4px 16px rgba(0,0,0,.12)",fontSize:`${11/vp.s}px`,
+              fontFamily:"'DM Sans',system-ui,sans-serif",color:"#1e293b",lineHeight:1.6,
+              pointerEvents:"none",width:`${160/vp.s}px`,whiteSpace:"nowrap"
+            }}>
+              <div><strong>Vol. de Propostas:</strong> {fmtQty(es.qty)}</div>
+              <div><strong>Vol. Aprovado:</strong> {fmtQty(es.approvedQty)}</div>
+              <div><strong>Vol. Reprovado:</strong> {fmtQty(es.rejectedQty)}</div>
+              <div><strong>Taxa de Aprovação:</strong> {fmtPct(es.approvalRate)}</div>
+              <div><strong>Inad. Real:</strong> {fmtPct(es.inadReal)}</div>
+              <div><strong>Inad. Inferida:</strong> {fmtPct(es.inadInferida)}</div>
+              <div><strong>Qtd Altas/Vendas:</strong> {fmtQty(es.qtdAltas)}</div>
+              {simResult.totalQty>0&&<div><strong>Part. no fluxo:</strong> {((es.qty/simResult.totalQty)*100).toFixed(1)}%</div>}
+            </div>
+          </foreignObject>
         )}
       </g>
     );
@@ -1086,9 +1237,17 @@ export default function App() {
     );
   };
 
+  const onCinemaResizeDown = (e, id, dir) => {
+    e.stopPropagation(); if (e.button!==0) return;
+    movedR.current=false;
+    const shape=shapesR.current.find(s=>s.id===id); if (!shape) return;
+    const [sx,sy]=svgPt(e.clientX,e.clientY);
+    dragR.current={type:"resize",id,dir,sx,sy,ix:shape.x,iy:shape.y,iw:shape.w,ih:shape.h};
+  };
+
   // ── Render: Cineminha (Cross Decision Matrix) ─────────────────
   const renderCinemaNode = (shape) => {
-    const {id, x, y, w, h, rowVar, colVar, rowDomain, colDomain, cells} = shape;
+    const {id, x, y, w, h, rowVar, colVar, rowDomain, colDomain, cells, minimized} = shape;
     const isSel=sel===id, isFrom=fromId===id;
     const hasErr=!!flowErrors[id];
     const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#6366f1";
@@ -1099,6 +1258,23 @@ export default function App() {
                "drop-shadow(0 2px 12px rgba(99,102,241,.15))";
     const cur=tool==="connect"?"crosshair":tool==="select"?"grab":"default";
     const hasVars = rowVar || colVar;
+
+    // ── Minimized state ──
+    if (minimized) {
+      const MW=170, MH=44;
+      return (
+        <g key={id} data-sid={id}
+          onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
+          style={{cursor:cur, filter:flt}}>
+          <rect x={x} y={y} width={MW} height={MH} rx={10} fill="#6366f1" stroke={stroke} strokeWidth={sw}/>
+          <text x={x+12} y={y+27} fontSize={13} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",14)}</text>
+          <g onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,...computeCinemaSize(s.rowDomain||[],s.colDomain||[])}:s));}} style={{cursor:"pointer"}}>
+            <rect x={x+MW-28} y={y+8} width={22} height={22} rx={6} fill="rgba(255,255,255,.2)"/>
+            <text x={x+MW-17} y={y+23} fontSize={13} textAnchor="middle" fill="#fff">⤢</text>
+          </g>
+        </g>
+      );
+    }
 
     // ── Empty state ──
     if (!hasVars) {
@@ -1144,7 +1320,12 @@ export default function App() {
 
         {/* Title text */}
         <text x={x+12} y={y+24} fontSize={11} fontWeight="700" fill="#fff"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⊞ Cineminha</text>
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",16)}</text>
+        {/* Minimize btn */}
+        <g onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:true}:s));}} style={{cursor:"pointer"}}>
+          <rect x={x+w-28} y={y+8} width={22} height={22} rx={6} fill="rgba(255,255,255,.2)"/>
+          <text x={x+w-17} y={y+23} fontSize={14} textAnchor="middle" fill="#fff">−</text>
+        </g>
 
         {/* Variable labels */}
         {rowVar&&<text x={x+w-12} y={y+16} textAnchor="end" fontSize={9} fill="#c7d2fe"
@@ -1236,6 +1417,17 @@ export default function App() {
           <circle cx={x+w} cy={y} r={9} fill="#dc2626" style={{pointerEvents:"none"}}/>
           <text x={x+w} y={y+4} textAnchor="middle" fontSize={11} fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>!</text>
         </>}
+        {/* Resize handles when selected */}
+        {isSel&&hasVars&&[
+          [x,y,"nw"],[x+w/2,y,"n"],[x+w,y,"ne"],
+          [x+w,y+h/2,"e"],[x+w,y+h,"se"],[x+w/2,y+h,"s"],
+          [x,y+h,"sw"],[x,y+h/2,"w"],
+        ].map(([hx,hy,dir])=>(
+          <rect key={dir} x={hx-5} y={hy-5} width={10} height={10} rx={3}
+            fill="#6366f1" stroke="#fff" strokeWidth={1.5}
+            style={{cursor:resizeCursor(dir)}}
+            onMouseDown={e=>onCinemaResizeDown(e,id,dir)}/>
+        ))}
       </g>
     );
   };
@@ -1265,7 +1457,21 @@ export default function App() {
     const txt=(<text data-sid={id} x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
       fontSize={12} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="500" fill="#1e293b"
       style={{pointerEvents:"none",userSelect:"none"}}>{label}</text>);
-    const gp={"data-sid":id,onMouseDown:(e)=>onShapeDown(e,id),onClick:(e)=>onShapeClick(e,id),onDoubleClick:(e)=>onShapeDbl(e,id),style:{cursor:cur,filter:flt}};
+    const showTooltip=()=>{
+      clearTimeout(tooltipTimer.current);
+      tooltipTimer.current=setTimeout(()=>{
+        const sx2=shape.x*vp.s+vp.x, sy2=shape.y*vp.s+vp.y;
+        let lines=[label];
+        if(type==="decision"){
+          lines=[shape.label,shape.variableCol||""];
+          const csv2=shape.csvId&&csvStore[shape.csvId];
+          if(csv2){const ci=csv2.headers.indexOf(shape.variableCol);if(ci>=0){const cnt=new Set(csv2.rows.map(r=>r[ci]??'')).size;lines.push(`${cnt} valores distintos`);}}
+        } else if(type==="port"){lines=[shape.label];}
+        setTooltip({x:sx2,y:sy2,lines});
+      },400);
+    };
+    const hideTooltip=()=>{clearTimeout(tooltipTimer.current);setTooltip(null);};
+    const gp={"data-sid":id,onMouseDown:(e)=>onShapeDown(e,id),onClick:(e)=>onShapeClick(e,id),onDoubleClick:(e)=>onShapeDbl(e,id),onMouseEnter:showTooltip,onMouseLeave:hideTooltip,style:{cursor:cur,filter:flt}};
     if (type==="rect")    return <g key={id} {...gp}><rect data-sid={id} x={x} y={y} width={w} height={h} rx={10} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}{errBadge}</g>;
     if (type==="circle")  return <g key={id} {...gp}><ellipse data-sid={id} cx={x+w/2} cy={y+h/2} rx={w/2} ry={h/2} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}{errBadge}</g>;
     if (type==="diamond"){const pts=`${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`;return <g key={id} {...gp}><polygon data-sid={id} points={pts} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}{errBadge}</g>;}
@@ -1511,6 +1717,52 @@ export default function App() {
           </button>
         </div>
 
+        {/* Alignment toolbar — shows when multiSel.size > 1 */}
+        {multiSel.size>1&&(()=>{
+          const applyAlign=(dir)=>{
+            const sel2=shapes.filter(s=>multiSel.has(s.id));
+            if(sel2.length<2) return;
+            setShapes(prev=>prev.map(s=>{
+              if(!multiSel.has(s.id)) return s;
+              if(dir==="left")  return {...s,x:Math.min(...sel2.map(q=>q.x))};
+              if(dir==="right") return {...s,x:Math.max(...sel2.map(q=>q.x+q.w))-s.w};
+              if(dir==="top")   return {...s,y:Math.min(...sel2.map(q=>q.y))};
+              if(dir==="bottom")return {...s,y:Math.max(...sel2.map(q=>q.y+q.h))-s.h};
+              if(dir==="distH"){
+                const sorted=[...sel2].sort((a,b)=>(a.x+a.w/2)-(b.x+b.w/2));
+                const totalW=sorted.reduce((a,q)=>a+q.w,0);
+                const span=Math.max(...sorted.map(q=>q.x+q.w))-Math.min(...sorted.map(q=>q.x));
+                const gap=(span-totalW)/(sorted.length-1);
+                let cx2=Math.min(...sorted.map(q=>q.x));
+                const posMap={};
+                for(const q of sorted){posMap[q.id]=cx2;cx2+=q.w+gap;}
+                return {...s,x:posMap[s.id]??s.x};
+              }
+              if(dir==="distV"){
+                const sorted=[...sel2].sort((a,b)=>(a.y+a.h/2)-(b.y+b.h/2));
+                const totalH=sorted.reduce((a,q)=>a+q.h,0);
+                const span=Math.max(...sorted.map(q=>q.y+q.h))-Math.min(...sorted.map(q=>q.y));
+                const gap=(span-totalH)/(sorted.length-1);
+                let cy2=Math.min(...sorted.map(q=>q.y));
+                const posMap={};
+                for(const q of sorted){posMap[q.id]=cy2;cy2+=q.h+gap;}
+                return {...s,y:posMap[s.id]??s.y};
+              }
+              return s;
+            }));
+          };
+          const btnStyle={padding:"5px 10px",borderRadius:7,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",whiteSpace:"nowrap"};
+          return (
+            <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
+              display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+              border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
+              {[["left","Alinhar Esq"],["right","Alinhar Dir"],["top","Topo"],["bottom","Base"],["distH","Dist. Horiz"],["distV","Dist. Vert"]].map(([d,l])=>(
+                <button key={d} style={btnStyle} onClick={()=>applyAlign(d)}>{l}</button>
+              ))}
+            </div>
+          );
+        })()}
+
         {/* Color palette */}
         {palette&&selShape&&(
           <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:400,
@@ -1579,6 +1831,18 @@ export default function App() {
           const ex=editShape.x*vp.s+vp.x,ey=editShape.y*vp.s+vp.y,ew=editShape.w*vp.s,eh=editShape.h*vp.s;
           return <input autoFocus value={edit.val} onChange={e=>setEdit(p=>({...p,val:e.target.value}))} onBlur={commitEdit} onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")commitEdit();}} style={{position:"absolute",left:ex+ew/2,top:ey+eh/2,transform:"translate(-50%,-50%)",width:ew*0.8,background:"transparent",border:"none",outline:"none",textAlign:"center",fontSize:Math.max(11,12*vp.s),fontFamily:"'DM Sans',system-ui,sans-serif",fontWeight:500,color:"#1e293b",zIndex:500}}/>;
         })()}
+        {/* Tooltip */}
+        {tooltip&&(
+          <div style={{position:"fixed",left:tooltip.x+12,top:tooltip.y-4,zIndex:3000,pointerEvents:"none",
+            background:"#fff",border:"1px solid #e2e8f0",borderRadius:8,padding:"6px 10px",
+            fontSize:11.5,fontFamily:"'DM Sans',system-ui,sans-serif",maxWidth:240,
+            boxShadow:"0 4px 16px rgba(0,0,0,.12)",color:"#1e293b"}}>
+            {tooltip.lines.filter(Boolean).map((l,i)=>(
+              <div key={i} style={{fontWeight:i===0?700:400,color:i===0?"#1e293b":"#64748b"}}>{l}</div>
+            ))}
+          </div>
+        )}
+
         {/* Inline label editor — connections */}
         {editConn&&(()=>{
           const conn=conns.find(c=>c.id===editConn.id);
@@ -1789,6 +2053,17 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* Feature flags */}
+        <div style={{padding:"10px 16px",borderBottom:"1px solid #f1f5f9"}}>
+          <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Visualização</p>
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+            <input type="checkbox" checked={enableDynThickness} onChange={()=>setEnableDynThickness(v=>!v)}
+              style={{width:15,height:15,accentColor:"#6366f1"}}/>
+            Espessura Dinâmica
+          </label>
+          <div style={{fontSize:10.5,color:"#94a3b8",marginTop:3,marginLeft:23}}>Arestas mais espessas = maior volume</div>
+        </div>
 
         {/* Empty state */}
         {Object.keys(csvStore).length === 0 && (
