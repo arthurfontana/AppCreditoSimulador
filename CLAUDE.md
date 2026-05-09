@@ -1,17 +1,17 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~1050 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~1220 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas
 
 ## O que é
-Whiteboard interativo + simulador de regras de crédito. O usuário carrega um CSV sumarizado, classifica colunas, arrasta variáveis de decisão para o canvas como losangos e monta um fluxo de política de crédito.
+Whiteboard interativo + simulador de regras de crédito. O usuário carrega um CSV sumarizado, classifica colunas, arrasta variáveis de decisão para o canvas como losangos e monta um fluxo de política de crédito. O sistema executa a política sobre todos os registros e exibe a taxa de aprovação em tempo real.
 
 ## Estrutura de dados (src/App.jsx)
 
 ### Estado principal
-- `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`
+- `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
 - `csvStore`: `{[csvId]: {name, headers, rows, columnTypes: {[colName]: 'id'|'decision'|'qty'}}}`
 - `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes}`
@@ -23,9 +23,19 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
+- `renderSimPanel(shape)`: painel analítico de simulação arrastável no canvas
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, etc.) para uso em event listeners sem closure stale.
+
+### Engine de simulação (funções puras, fora do componente)
+- `buildFlowGraph(shapes, conns)`: compila mapas de adjacência `out`/`inc`
+- `validateFlow(shapes, conns)`: DFS detecta loops, branches sem finalização e nós sem saída — retorna `{[nodeId]: errorMsg}`
+- `runSimulation(shapes, conns, csvStore)`: percorre o grafo para cada linha do CSV acumulando QTD; retorna `{totalQty, approvedQty, rejectedQty, approvalRate}`
+
+### Memos reativos
+- `flowErrors = useMemo(...)`: recalcula validação a cada mudança em shapes/conns
+- `simResult = useMemo(...)`: recalcula simulação a cada mudança em shapes/conns/csvStore
 
 ## Fluxo do simulador
 1. Importar CSV → Passo 1 (delimitador) → Passo 2 (classificar colunas)
@@ -33,6 +43,13 @@ Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, etc.) para uso em
 3. Arrastar chip → losango criado com ports de saída automáticos (valores distintos, até 10)
 4. Conectar ports a outros losangos ou a ✅ Aprovado / ❌ Reprovado
 5. Duplo-clique em seta → editar label
+6. Nós com fluxo inválido recebem borda vermelha + badge `!` automaticamente
+7. Painel `simPanel` criado automaticamente ao importar CSV — exibe taxa de aprovação reativa
+
+## Regras do simPanel
+- Não pode ser conectado a nenhum nó do fluxo
+- Pode ser movido livremente no canvas (tool select)
+- Taxa de Aprovação = (Σ QTD aprovados / Σ QTD total) × 100
 
 ## Branch de desenvolvimento
-`claude/github-beginner-setup-aY869`
+`claude/credit-policy-simulator-dLd3r`
