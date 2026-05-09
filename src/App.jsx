@@ -416,10 +416,10 @@ export default function App() {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
       const ms=multiSelR.current;
       if (ms.size>1&&ms.has(id)) {
-        // drag entire multi-selection — snapshot positions
+        // drag entire multi-selection — snapshot positions + anchor point
         const snaps={};
         shapesR.current.forEach(s=>{if(ms.has(s.id)) snaps[s.id]={x:s.x,y:s.y};});
-        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,snapX:wx-shape.x,snapY:wy-shape.y,snaps};
+        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,wx0:wx,wy0:wy,snaps};
       } else {
         setSel(id); setMultiSel(new Set()); setPalette(false);
         dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,snaps:{}};
@@ -457,7 +457,7 @@ export default function App() {
       const ms=multiSelR.current;
       if (ms.size>1&&ms.has(id)) {
         // move all selected shapes preserving relative positions
-        const deltX=wx-offX-dr.snapX, deltY=wy-offY-dr.snapY;
+        const deltX=wx-dr.wx0, deltY=wy-dr.wy0;
         setShapes(p=>p.map(s=>{
           const snap=dr.snaps[s.id]; if(!snap) return s;
           return {...s,x:snap.x+deltX,y:snap.y+deltY};
