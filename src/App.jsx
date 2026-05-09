@@ -74,6 +74,91 @@ function parseCSV(text, delimiter, hasHeader) {
 
 const tDist = (t) => { const dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY; return Math.sqrt(dx*dx+dy*dy); };
 const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
+const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
+
+// ── Flow engine ──────────────────────────────────────────────────────────────
+function buildFlowGraph(shapes, conns) {
+  const out = {}, inc = {};
+  for (const s of shapes) { out[s.id] = []; inc[s.id] = []; }
+  for (const c of conns) {
+    if (out[c.from]) out[c.from].push({to: c.to, label: c.label ?? ''});
+    if (inc[c.to])   inc[c.to].push({from: c.from, label: c.label ?? ''});
+  }
+  return {out, inc};
+}
+
+function validateFlow(shapes, conns) {
+  const errors = {};
+  const FLOW = new Set(['decision','port','approved','rejected']);
+  const TERM = new Set(['approved','rejected']);
+  const flowShapes = shapes.filter(s => FLOW.has(s.type));
+  if (flowShapes.length === 0) return errors;
+  const {out} = buildFlowGraph(shapes, conns);
+
+  function dfs(nodeId, path) {
+    if (path.has(nodeId)) { errors[nodeId] = 'Loop infinito detectado'; return false; }
+    const node = shapes.find(s => s.id === nodeId);
+    if (!node) return false;
+    if (TERM.has(node.type)) return true;
+    const edges = out[nodeId] || [];
+    if (edges.length === 0) { errors[nodeId] = 'Caminho sem finalização'; return false; }
+    path.add(nodeId);
+    let ok = true;
+    for (const e of edges) { if (!dfs(e.to, new Set(path))) ok = false; }
+    if (!ok && !errors[nodeId]) errors[nodeId] = 'Possui caminhos sem finalização';
+    return ok;
+  }
+  shapes.filter(s => s.type === 'decision').forEach(d => dfs(d.id, new Set()));
+  return errors;
+}
+
+function runSimulation(shapes, conns, csvStore) {
+  const {out} = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved','rejected']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootDecisions = shapes.filter(s => s.type === 'decision' && !decWithPortInc.has(s.id));
+  if (rootDecisions.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0};
+
+  function traverseRow(row, headers, startId) {
+    let cur = startId; const visited = new Set();
+    while (cur) {
+      if (visited.has(cur)) return null;
+      visited.add(cur);
+      const node = shapesMap[cur]; if (!node) return null;
+      if (TERM.has(node.type)) return node.type;
+      if (node.type === 'decision') {
+        const colIdx = headers.indexOf(node.variableCol);
+        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) return null;
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || []; if (edges.length === 0) return null;
+        cur = edges[0].to;
+      } else return null;
+    }
+    return null;
+  }
+
+  let totalQty = 0, approvedQty = 0, rejectedQty = 0;
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const qtyColName = Object.entries(csv.columnTypes || {}).find(([,t]) => t === 'qty')?.[0];
+    const qtyIdx = qtyColName ? csv.headers.indexOf(qtyColName) : -1;
+    const csvRoots = rootDecisions.filter(d => d.csvId === csvId);
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+    for (const row of csv.rows) {
+      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
+      totalQty += qty;
+      const res = traverseRow(row, csv.headers, rootId);
+      if (res === 'approved') approvedQty += qty;
+      else if (res === 'rejected') rejectedQty += qty;
+    }
+  }
+  return {totalQty, approvedQty, rejectedQty, approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0};
+}
 
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -124,6 +209,10 @@ export default function App() {
   const activeCellR = useRef(activeCell); useEffect(()=>{activeCellR.current=activeCell},[activeCell]);
   const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
+
+  // ── Simulation engine (reactive) ──────────────────────────────
+  const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
+  const simResult  = useMemo(() => runSimulation(shapes, conns, csvStore), [shapes, conns, csvStore]);
 
   // ── Geometry ──────────────────────────────────────────────────
   const getBR   = () => svgRef.current.getBoundingClientRect();
@@ -245,7 +334,18 @@ export default function App() {
   };
   const onShapeClick = (e, id) => {
     e.stopPropagation(); if (movedR.current) return;
-    if (tool==="connect"){if(!fromId){setFromId(id);}else if(fromId!==id){if(!conns.some(c=>c.from===fromId&&c.to===id))setConns(p=>[...p,{id:uid(),from:fromId,to:id}]);setFromId(null);}}
+    if (tool==="connect"){
+      const s=shapes.find(sh=>sh.id===id);
+      if (s?.type==="simPanel") return; // simPanel cannot be connected
+      if(!fromId){setFromId(id);}
+      else if(fromId!==id){
+        const fromShape=shapes.find(sh=>sh.id===fromId);
+        if (fromShape?.type!=="simPanel") {
+          if(!conns.some(c=>c.from===fromId&&c.to===id)) setConns(p=>[...p,{id:uid(),from:fromId,to:id}]);
+        }
+        setFromId(null);
+      }
+    }
     else if(tool==="select") setSel(id);
   };
   const onShapeDbl = (e, id) => {
@@ -315,7 +415,12 @@ export default function App() {
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
     const nodeId=uid();
-    setShapes(p=>[...p,{id:nodeId,type:"csv",x:cx-CSV_W/2,y:cy-CSV_H/2,w:CSV_W,h:CSV_H,label:filename,csvId,minimized:false}]);
+    setShapes(p=>{
+      const csvNode={id:nodeId,type:"csv",x:cx-CSV_W/2,y:cy-CSV_H/2,w:CSV_W,h:CSV_H,label:filename,csvId,minimized:false};
+      const hasPanel=p.some(s=>s.type==="simPanel");
+      const panelNodes=hasPanel?[]:[{id:uid(),type:"simPanel",x:cx+CSV_W/2+50,y:cy-80,w:260,h:190,label:"Simulação",color:"#fff"}];
+      return [...p,csvNode,...panelNodes];
+    });
     setSel(nodeId); setWizard(null);
   };
 
@@ -574,42 +679,54 @@ export default function App() {
   // ── Render: regular shape ─────────────────────────────────────
   const renderShape = (shape) => {
     if (shape.type==="csv") return renderCSVNode(shape);
+    if (shape.type==="simPanel") return renderSimPanel(shape);
     const {id,type,x,y,w,h,label,color}=shape;
     const isSel=sel===id, isFrom=fromId===id;
-    const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":"#94a3b8";
-    const sw=isSel||isFrom?2:1.5;
+    const hasErr=!!flowErrors[id];
+    const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#94a3b8";
+    const sw=isSel||isFrom?2:hasErr?2.5:1.5;
     const fill=color||"#fff";
-    const flt=isSel?"drop-shadow(0 0 0 2px rgba(59,130,246,.25)) drop-shadow(0 2px 8px rgba(59,130,246,.18))":
+    const flt=hasErr?"drop-shadow(0 0 6px rgba(220,38,38,.5))":
+               isSel?"drop-shadow(0 0 0 2px rgba(59,130,246,.25)) drop-shadow(0 2px 8px rgba(59,130,246,.18))":
                isFrom?"drop-shadow(0 0 0 2px rgba(245,158,11,.25)) drop-shadow(0 2px 8px rgba(245,158,11,.18))":
                "drop-shadow(0 1px 4px rgba(0,0,0,.1))";
     const cur=tool==="connect"?"crosshair":tool==="select"?"grab":"default";
+    const errBadge=hasErr&&(<>
+      <circle cx={x+w} cy={y} r={9} fill="#dc2626" style={{pointerEvents:"none"}}/>
+      <text x={x+w} y={y+4} textAnchor="middle" fontSize={11} fontWeight="700" fill="#fff"
+        style={{pointerEvents:"none",userSelect:"none"}}>!</text>
+    </>);
     const txt=(<text data-sid={id} x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
       fontSize={12} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="500" fill="#1e293b"
       style={{pointerEvents:"none",userSelect:"none"}}>{label}</text>);
     const gp={"data-sid":id,onMouseDown:(e)=>onShapeDown(e,id),onClick:(e)=>onShapeClick(e,id),onDoubleClick:(e)=>onShapeDbl(e,id),style:{cursor:cur,filter:flt}};
-    if (type==="rect")    return <g key={id} {...gp}><rect data-sid={id} x={x} y={y} width={w} height={h} rx={10} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}</g>;
-    if (type==="circle")  return <g key={id} {...gp}><ellipse data-sid={id} cx={x+w/2} cy={y+h/2} rx={w/2} ry={h/2} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}</g>;
-    if (type==="diamond"){const pts=`${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`;return <g key={id} {...gp}><polygon data-sid={id} points={pts} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}</g>;}
+    if (type==="rect")    return <g key={id} {...gp}><rect data-sid={id} x={x} y={y} width={w} height={h} rx={10} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}{errBadge}</g>;
+    if (type==="circle")  return <g key={id} {...gp}><ellipse data-sid={id} cx={x+w/2} cy={y+h/2} rx={w/2} ry={h/2} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}{errBadge}</g>;
+    if (type==="diamond"){const pts=`${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`;return <g key={id} {...gp}><polygon data-sid={id} points={pts} fill={fill} stroke={stroke} strokeWidth={sw}/>{txt}{errBadge}</g>;}
     if (type==="decision") {
       const pts=`${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`;
+      const decStroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#d97706";
       return (
         <g key={id} {...gp}>
-          <polygon data-sid={id} points={pts} fill="#fef3c7" stroke={isFrom?"#f59e0b":isSel?"#3b82f6":"#d97706"} strokeWidth={sw}/>
-          <text x={x+w/2} y={y+h/2-9} textAnchor="middle" fontSize={9} fill="#92400e"
+          <polygon data-sid={id} points={pts} fill={hasErr?"#fff1f2":"#fef3c7"} stroke={decStroke} strokeWidth={sw}/>
+          <text x={x+w/2} y={y+h/2-9} textAnchor="middle" fontSize={9} fill={hasErr?"#dc2626":"#92400e"}
             fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>decisão</text>
           <text x={x+w/2} y={y+h/2+7} textAnchor="middle" fontSize={12} fontWeight="600" fill="#1e293b"
             fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{trunc(label,14)}</text>
+          {errBadge}
         </g>
       );
     }
     if (type==="port") {
+      const portStroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#86efac";
       return (
         <g key={id} {...gp}>
           <rect data-sid={id} x={x} y={y} width={w} height={h} rx={h/2}
-            fill="#f0fdf4" stroke={isFrom?"#f59e0b":isSel?"#3b82f6":"#86efac"} strokeWidth={sw}/>
+            fill={hasErr?"#fff1f2":"#f0fdf4"} stroke={portStroke} strokeWidth={sw}/>
           <text x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
-            fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="500" fill="#166534"
+            fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="500" fill={hasErr?"#dc2626":"#166534"}
             style={{pointerEvents:"none",userSelect:"none"}}>{trunc(label,10)}</text>
+          {errBadge}
         </g>
       );
     }
@@ -636,6 +753,56 @@ export default function App() {
       );
     }
     return null;
+  };
+
+  // ── Render: simulation panel ──────────────────────────────────
+  const renderSimPanel = (shape) => {
+    const {id,x,y,w,h}=shape;
+    const isSel=sel===id;
+    const rate=simResult.approvalRate;
+    const rateColor=rate>=70?"#16a34a":rate>=40?"#d97706":"#dc2626";
+    const barW=Math.max(0,(w-32)*rate/100);
+    const hasData=simResult.totalQty>0;
+    return (
+      <g key={id} data-sid={id}
+        onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)}
+        style={{cursor:tool==="select"?"grab":"default",
+          filter:isSel?"drop-shadow(0 0 0 2px rgba(99,102,241,.3)) drop-shadow(0 4px 20px rgba(99,102,241,.2))":"drop-shadow(0 4px 20px rgba(0,0,0,.13))"}}>
+        {/* Frame */}
+        <rect x={x} y={y} width={w} height={h} rx={14} fill="#fff" stroke={isSel?"#6366f1":"#c7d2fe"} strokeWidth={isSel?2:1.5}/>
+        {/* Header bar */}
+        <rect x={x} y={y} width={w} height={46} rx={14} fill="#6366f1"/>
+        <rect x={x} y={y+32} width={w} height={14} fill="#6366f1"/>
+        <text x={x+14} y={y+29} fontSize={13} fontWeight="700" fill="#fff"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>📊 Painel de Simulação</text>
+        {/* Rate big number */}
+        <text x={x+w/2} y={y+94} textAnchor="middle" fontSize={38} fontWeight="800" fill={hasData?rateColor:"#cbd5e1"}
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+          {hasData?`${rate.toFixed(1)}%`:"0%"}
+        </text>
+        <text x={x+w/2} y={y+112} textAnchor="middle" fontSize={11} fill="#94a3b8"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>Taxa de Aprovação</text>
+        {/* Progress bar */}
+        <rect x={x+16} y={y+122} width={w-32} height={8} rx={4} fill="#f1f5f9"/>
+        {hasData&&<rect x={x+16} y={y+122} width={barW} height={8} rx={4} fill={rateColor}/>}
+        {/* Stats */}
+        <text x={x+w/2-56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill="#16a34a"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+          ✅ {fmtQty(simResult.approvedQty)}
+        </text>
+        <text x={x+w/2} y={y+150} textAnchor="middle" fontSize={11} fill="#cbd5e1"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>/</text>
+        <text x={x+w/2+56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill="#dc2626"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+          ❌ {fmtQty(simResult.rejectedQty)}
+        </text>
+        {/* Total */}
+        <text x={x+w/2} y={y+170} textAnchor="middle" fontSize={10} fill="#94a3b8"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+          {hasData?`Total: ${fmtQty(simResult.totalQty)} registros`:"Importe um CSV e monte o fluxo"}
+        </text>
+      </g>
+    );
   };
 
   // ── Edit & helpers ────────────────────────────────────────────
@@ -829,6 +996,43 @@ export default function App() {
                 <span style={{fontSize:14,opacity:.5}}>⠿</span>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Simulation panel button */}
+        {Object.keys(csvStore).length > 0 && (
+          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
+            <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Simulação</p>
+            <button
+              onClick={()=>{
+                if (shapes.some(s=>s.type==="simPanel")) return;
+                const svgEl=svgRef.current;
+                const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
+                setShapes(p=>[...p,{id:uid(),type:"simPanel",x:cx-130,y:cy-95,w:260,h:190,label:"Simulação",color:"#fff"}]);
+              }}
+              disabled={shapes.some(s=>s.type==="simPanel")}
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"10px 14px",borderRadius:10,
+                border:"1.5px solid",borderColor:shapes.some(s=>s.type==="simPanel")?"#c7d2fe":"#a5b4fc",
+                background:shapes.some(s=>s.type==="simPanel")?"#f5f3ff":"#eef2ff",
+                color:shapes.some(s=>s.type==="simPanel")?"#a78bfa":"#4f46e5",
+                cursor:shapes.some(s=>s.type==="simPanel")?"default":"pointer",
+                fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{if(!shapes.some(s=>s.type==="simPanel")){e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#818cf8";}}}
+              onMouseLeave={e=>{e.currentTarget.style.background=shapes.some(s=>s.type==="simPanel")?"#f5f3ff":"#eef2ff";e.currentTarget.style.borderColor=shapes.some(s=>s.type==="simPanel")?"#c7d2fe":"#a5b4fc";}}>
+              <span style={{fontSize:16}}>📊</span>
+              {shapes.some(s=>s.type==="simPanel")?"Painel ativo no canvas":"Adicionar Painel"}
+            </button>
+            <div style={{marginTop:10,padding:"8px 10px",borderRadius:8,background:"#f8fafc",border:"1px solid #f1f5f9"}}>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:500}}>Taxa de Aprovação</div>
+              <div style={{fontSize:22,fontWeight:800,color:simResult.approvalRate>=70?"#16a34a":simResult.approvalRate>=40?"#d97706":"#dc2626"}}>
+                {simResult.approvalRate.toFixed(1)}%
+              </div>
+              {simResult.totalQty>0&&(
+                <div style={{fontSize:10.5,color:"#94a3b8",marginTop:2}}>
+                  ✅ {fmtQty(simResult.approvedQty)} · ❌ {fmtQty(simResult.rejectedQty)} · Total {fmtQty(simResult.totalQty)}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
