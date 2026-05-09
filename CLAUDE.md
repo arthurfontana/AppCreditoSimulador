@@ -34,5 +34,10 @@ Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, etc.) para uso em
 4. Conectar ports a outros losangos ou a ✅ Aprovado / ❌ Reprovado
 5. Duplo-clique em seta → editar label
 
+### Multi-seleção (`dragR`)
+- `multiSelR`: `Set` com ids das shapes selecionadas
+- Drag de multi-seleção armazena `wx0`/`wy0` (posição inicial do mouse em coords de mundo) + `snaps` (posições iniciais de cada shape)
+- Delta calculado como `wx - wx0` para mover todas as shapes preservando posições relativas
+
 ## Branch de desenvolvimento
-`claude/github-beginner-setup-aY869`
+`claude/fix-multi-select-movement-aFHYt`
