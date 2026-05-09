@@ -4,7 +4,10 @@ let _id = 1;
 const uid = () => `e${_id++}`;
 
 const SW = 144, SH = 82;
-const COLORS = ["#ffffff","#dbeafe","#fef3c7","#dcfce7","#fce7f3","#e0e7ff","#ffedd5","#fef9c3"];
+const COLORS = [
+  "#ffffff","#dbeafe","#fef3c7","#dcfce7",
+  "#fce7f3","#e0e7ff","#ffedd5","#fef9c3",
+];
 const TOOLS = [
   { id:"hand",    icon:"✋", label:"Mover"      },
   { id:"select",  icon:"↖",  label:"Selecionar" },
@@ -16,7 +19,7 @@ const TOOLS = [
 
 const tDist = (t) => {
   const dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
-  return Math.sqrt(dx*dx + dy*dy);
+  return Math.sqrt(dx * dx + dy * dy);
 };
 
 export default function App() {
@@ -38,7 +41,7 @@ export default function App() {
   const [vp,      setVp]      = useState({ x:20, y:40, s:1 });
   const [edit,    setEdit]    = useState(null);
   const [palette, setPalette] = useState(false);
-  const [hint,    setHint]    = useState(null); // string | null
+  const [hint,    setHint]    = useState(null);
 
   const svgRef    = useRef(null);
   const dragR     = useRef(null);
@@ -46,20 +49,17 @@ export default function App() {
   const movedR    = useRef(false);
   const longTimer = useRef(null);
 
-  // Mirror state into refs so native event listeners stay fresh
-  const vpR      = useRef(vp);      useEffect(() => { vpR.current = vp; },      [vp]);
-  const shapesR  = useRef(shapes);  useEffect(() => { shapesR.current = shapes; },[shapes]);
-  const connsR   = useRef(conns);   useEffect(() => { connsR.current = conns; },  [conns]);
-  const toolR    = useRef(tool);    useEffect(() => { toolR.current = tool; },    [tool]);
-  const fromIdR  = useRef(fromId);  useEffect(() => { fromIdR.current = fromId; },[fromId]);
-  const editR    = useRef(edit);    useEffect(() => { editR.current = edit; },    [edit]);
+  const vpR     = useRef(vp);     useEffect(() => { vpR.current = vp; },      [vp]);
+  const shapesR = useRef(shapes); useEffect(() => { shapesR.current = shapes; },[shapes]);
+  const connsR  = useRef(conns);  useEffect(() => { connsR.current = conns; },  [conns]);
+  const toolR   = useRef(tool);   useEffect(() => { toolR.current = tool; },    [tool]);
+  const fromIdR = useRef(fromId); useEffect(() => { fromIdR.current = fromId; },[fromId]);
+  const editR   = useRef(edit);   useEffect(() => { editR.current = edit; },    [edit]);
 
-  // ── Helpers ────────────────────────────────────────────────────
-  const getBR    = () => svgRef.current.getBoundingClientRect();
-  const svgPt    = (cx, cy) => { const r = getBR(); return [cx-r.left, cy-r.top]; };
-  // toWorld uses vpR ref so even a stale closure gets fresh values
-  const toWorld  = (sx, sy) => { const {x,y,s} = vpR.current; return [(sx-x)/s, (sy-y)/s]; };
-  const ctr      = (s) => [s.x+s.w/2, s.y+s.h/2];
+  const getBR   = () => svgRef.current.getBoundingClientRect();
+  const svgPt   = (cx, cy) => { const r = getBR(); return [cx - r.left, cy - r.top]; };
+  const toWorld = (sx, sy) => { const {x,y,s} = vpR.current; return [(sx-x)/s, (sy-y)/s]; };
+  const ctr     = (s) => [s.x + s.w/2, s.y + s.h/2];
 
   const getSid = (el) => {
     while (el && el !== svgRef.current) {
@@ -70,28 +70,21 @@ export default function App() {
     return null;
   };
 
-  // ── Zoom ────────────────────────────────────────────────────────
   const doZoom = useCallback((sx, sy, f) => {
     setVp(v => {
-      const ns = Math.max(0.1, Math.min(5, v.s*f));
-      const wx = (sx-v.x)/v.s, wy = (sy-v.y)/v.s;
-      return { s:ns, x:sx-wx*ns, y:sy-wy*ns };
+      const ns = Math.max(0.1, Math.min(5, v.s * f));
+      const wx = (sx - v.x)/v.s, wy = (sy - v.y)/v.s;
+      return { s:ns, x: sx - wx*ns, y: sy - wy*ns };
     });
   }, []);
 
-  // ══════════════════════════════════════════════════════════════
-  //  TOUCH HANDLERS — registered as native listeners (passive:false)
-  //  All mutable data is accessed via refs. Values needed inside
-  //  setState callbacks are captured into local variables BEFORE
-  //  the call (the null bug fix).
-  // ══════════════════════════════════════════════════════════════
+  // ── Touch handlers ─────────────────────────────────────────────
   const onTouchStart = useCallback((e) => {
     e.preventDefault();
     clearTimeout(longTimer.current);
     movedR.current = false;
     const touches = e.touches;
 
-    // 2-finger: start pinch
     if (touches.length === 2) {
       dragR.current = null;
       const r = getBR();
@@ -112,27 +105,18 @@ export default function App() {
     if (sid && curTool !== "hand") {
       const shape = shapesR.current.find(s => s.id === sid);
       if (!shape) return;
-
       if (curTool === "select") {
         setSel(sid); setPalette(false);
         const [wx, wy] = toWorld(sx, sy);
         dragR.current = { type:"shape", id:sid, sx, sy, offX:wx-shape.x, offY:wy-shape.y };
-        // long-press = edit label
         longTimer.current = setTimeout(() => {
-          if (!movedR.current) {
-            setHint(null);
-            setEdit({ id:sid, val:shape.label||"" });
-          }
+          if (!movedR.current) { setHint(null); setEdit({ id:sid, val:shape.label||"" }); }
         }, 620);
         setTimeout(() => { if (!movedR.current) setHint("Segure para editar..."); }, 200);
-
       } else if (curTool === "connect") {
         dragR.current = { type:"tap-connect", id:sid };
       }
-      // for shape-placement tools: tapping an existing shape does nothing special
-
     } else {
-      // background (or hand tool)
       setSel(null); setFromId(null); setPalette(false);
       const { x:ox, y:oy } = vpR.current;
       dragR.current = { type:"pan", sx, sy, ox, oy };
@@ -143,89 +127,65 @@ export default function App() {
     e.preventDefault();
     const touches = e.touches;
 
-    // 2-finger pinch + pan
     if (touches.length === 2 && pinchR.current) {
       const r   = getBR();
       const mx  = (touches[0].clientX + touches[1].clientX)/2 - r.left;
       const my  = (touches[0].clientY + touches[1].clientY)/2 - r.top;
-      const dist  = tDist(touches);
-      const scale = dist / pinchR.current.dist;
+      const scale = tDist(touches) / pinchR.current.dist;
       const { mx:pmx, my:pmy, vpSnap:{x:ox,y:oy,s:os} } = pinchR.current;
-      const ns  = Math.max(0.1, Math.min(5, os * scale));
-      const wx  = (pmx - ox)/os, wy = (pmy - oy)/os;
-      // Capture all locals; no ref access inside setState callback
-      const nx  = pmx - wx*ns + (mx - pmx);
-      const ny  = pmy - wy*ns + (my - pmy);
-      setVp({ s:ns, x:nx, y:ny });
+      const ns = Math.max(0.1, Math.min(5, os * scale));
+      const wx = (pmx - ox)/os, wy = (pmy - oy)/os;
+      setVp({ s:ns, x: pmx - wx*ns + (mx-pmx), y: pmy - wy*ns + (my-pmy) });
       return;
     }
 
     const dr = dragR.current;
     if (!dr) return;
-
     const t  = touches[0];
     const r  = getBR();
-    const sx = t.clientX - r.left;
-    const sy = t.clientY - r.top;
+    const sx = t.clientX - r.left, sy = t.clientY - r.top;
     const dx = sx - dr.sx, dy = sy - dr.sy;
 
     if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
-      movedR.current = true;
-      setHint(null);
-      clearTimeout(longTimer.current);
+      movedR.current = true; setHint(null); clearTimeout(longTimer.current);
     }
 
     if (dr.type === "pan") {
-      // ⚠️ capture BEFORE setState — dr may be null inside the callback
       const ox = dr.ox, oy = dr.oy;
       setVp(v => ({ ...v, x: ox+dx, y: oy+dy }));
-
     } else if (dr.type === "shape") {
-      // ⚠️ capture BEFORE setState
       const id = dr.id, offX = dr.offX, offY = dr.offY;
       const { x:vx, y:vy, s } = vpR.current;
       const wx = (sx-vx)/s, wy = (sy-vy)/s;
-      setShapes(p => p.map(sh => sh.id === id
-        ? { ...sh, x: wx-offX, y: wy-offY }
-        : sh
-      ));
+      setShapes(p => p.map(sh => sh.id === id ? { ...sh, x:wx-offX, y:wy-offY } : sh));
     }
   }, []); // eslint-disable-line
 
   const onTouchEnd = useCallback((e) => {
     e.preventDefault();
-    clearTimeout(longTimer.current);
-    setHint(null);
-    const moved = movedR.current;
-    const dr    = dragR.current;
+    clearTimeout(longTimer.current); setHint(null);
+    const moved = movedR.current, dr = dragR.current;
     const curTool = toolR.current;
 
     if (!moved && dr) {
       if (dr.type === "tap-connect") {
         const sid = dr.id, fid = fromIdR.current;
-        if (!fid) {
-          setFromId(sid);
-        } else if (fid !== sid) {
+        if (!fid) { setFromId(sid); }
+        else if (fid !== sid) {
           if (!connsR.current.some(c => c.from===fid && c.to===sid))
             setConns(p => [...p, { id:uid(), from:fid, to:sid }]);
           setFromId(null);
         }
       }
-      if (dr.type === "pan") {
-        // tap on background → place shape?
-        if (curTool!=="hand" && curTool!=="select" && curTool!=="connect") {
-          const { x:vx, y:vy, s } = vpR.current;
-          const wx = (dr.sx - vx)/s, wy = (dr.sy - vy)/s;
-          const id = uid();
-          setShapes(p => [...p, { id, type:curTool, x:wx-SW/2, y:wy-SH/2, w:SW, h:SH, label:"", color:"#ffffff" }]);
-          setSel(id);
-        }
+      if (dr.type === "pan" && curTool!=="hand" && curTool!=="select" && curTool!=="connect") {
+        const { x:vx, y:vy, s } = vpR.current;
+        const wx = (dr.sx-vx)/s, wy = (dr.sy-vy)/s;
+        const id = uid();
+        setShapes(p => [...p, { id, type:curTool, x:wx-SW/2, y:wy-SH/2, w:SW, h:SH, label:"", color:"#ffffff" }]);
+        setSel(id);
       }
     }
-
-    dragR.current  = null;
-    pinchR.current = null;
-    movedR.current = false;
+    dragR.current = null; pinchR.current = null; movedR.current = false;
   }, []); // eslint-disable-line
 
   const onWheel = useCallback((e) => {
@@ -250,15 +210,12 @@ export default function App() {
     };
   }, [onTouchStart, onTouchMove, onTouchEnd, onWheel]);
 
-  // ══════════════════════════════════════════════════════════════
-  //  MOUSE HANDLERS (React synthetic events — desktop)
-  // ══════════════════════════════════════════════════════════════
+  // ── Mouse handlers ─────────────────────────────────────────────
   const onCanvasDown = (e) => {
     if (e.button !== 0) return;
     movedR.current = false;
     const [sx, sy] = svgPt(e.clientX, e.clientY);
     setSel(null); setFromId(null); setPalette(false);
-    // Always allow pan from background regardless of tool
     dragR.current = { type:"pan", sx, sy, ox:vp.x, oy:vp.y };
   };
 
@@ -296,9 +253,7 @@ export default function App() {
           setConns(p => [...p, { id:uid(), from:fromId, to:id }]);
         setFromId(null);
       }
-    } else if (tool === "select") {
-      setSel(id);
-    }
+    } else if (tool === "select") { setSel(id); }
   };
 
   const onShapeDbl = (e, id) => {
@@ -308,32 +263,24 @@ export default function App() {
   };
 
   const onMouseMove = (e) => {
-    const dr = dragR.current; // capture ref value NOW
+    const dr = dragR.current;
     if (!dr) return;
-
     const [sx, sy] = svgPt(e.clientX, e.clientY);
     const dx = sx - dr.sx, dy = sy - dr.sy;
     if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedR.current = true;
 
     if (dr.type === "pan") {
-      // ⚠️ Capture ox/oy BEFORE setState — dr could be null inside callback
       const ox = dr.ox, oy = dr.oy;
-      setVp(v => ({ ...v, x:ox+dx, y:oy+dy }));
-
+      setVp(v => ({ ...v, x: ox+dx, y: oy+dy }));
     } else if (dr.type === "shape") {
-      // ⚠️ Capture id/offsets BEFORE setState
       const id = dr.id, offX = dr.offX, offY = dr.offY;
       const [wx, wy] = toWorld(sx, sy);
-      setShapes(p => p.map(s => s.id === id
-        ? { ...s, x:wx-offX, y:wy-offY }
-        : s
-      ));
+      setShapes(p => p.map(s => s.id === id ? { ...s, x:wx-offX, y:wy-offY } : s));
     }
   };
 
   const onMouseUp = () => { dragR.current = null; };
 
-  // ── Keyboard ──────────────────────────────────────────────────
   useEffect(() => {
     const h = (e) => {
       if (editR.current) return;
@@ -348,19 +295,13 @@ export default function App() {
     return () => window.removeEventListener("keydown", h);
   }, [sel]);
 
-  const zoomCenter = (f) => {
-    const r = getBR();
-    doZoom(r.width/2, r.height/2, f);
-  };
+  const zoomCenter = (f) => { const r = getBR(); doZoom(r.width/2, r.height/2, f); };
 
-  // ══════════════════════════════════════════════════════════════
-  //  RENDER
-  // ══════════════════════════════════════════════════════════════
+  // ── Render ──────────────────────────────────────────────────────
   const renderConn = (conn) => {
     const from = shapes.find(s => s.id===conn.from);
     const to   = shapes.find(s => s.id===conn.to);
     if (!from || !to) return null;
-
     const [fx,fy] = ctr(from), [tx,ty] = ctr(to);
     const dx = tx-fx, dy = ty-fy, len = Math.sqrt(dx*dx+dy*dy)||1;
     const so = Math.max(from.w,from.h)/2+4, eo = Math.max(to.w,to.h)/2+10;
@@ -369,7 +310,6 @@ export default function App() {
     const mx = (sx+ex)/2, my = (sy+ey)/2;
     const cv = Math.min(40, len*0.15);
     const d  = `M ${sx} ${sy} Q ${mx+(-dy/len)*cv} ${my+(dx/len)*cv} ${ex} ${ey}`;
-
     return (
       <g key={conn.id}>
         <path d={d} fill="none" stroke="transparent" strokeWidth={18}
@@ -377,8 +317,7 @@ export default function App() {
           onClick={e => { e.stopPropagation(); setConns(p => p.filter(c => c.id!==conn.id)); }}
         />
         <path d={d} fill="none" stroke="#3b82f6" strokeWidth={2}
-          markerEnd="url(#arr)" style={{ pointerEvents:"none" }}
-        />
+          markerEnd="url(#arr)" style={{ pointerEvents:"none" }} />
       </g>
     );
   };
@@ -386,52 +325,49 @@ export default function App() {
   const renderShape = (shape) => {
     const { id, type, x, y, w, h, label, color } = shape;
     const isSel  = sel    === id, isFrom = fromId === id;
-    const stroke = isFrom ? "#f59e0b" : isSel ? "#3b82f6" : "#64748b";
-    const sw     = isSel||isFrom ? 2.5 : 1.5;
-    const fill   = color||"#ffffff";
-    const flt    = isSel  ? "drop-shadow(0 0 11px rgba(59,130,246,.75))"
-                 : isFrom ? "drop-shadow(0 0 11px rgba(245,158,11,.75))"
-                 :          "drop-shadow(0 2px 6px rgba(0,0,0,.3))";
+    const stroke = isFrom ? "#f59e0b" : isSel ? "#3b82f6" : "#94a3b8";
+    const sw     = isSel||isFrom ? 2 : 1.5;
+    const fill   = color || "#ffffff";
+    const flt    = isSel  ? "drop-shadow(0 0 0 2px rgba(59,130,246,.3)) drop-shadow(0 2px 8px rgba(59,130,246,.2))"
+                 : isFrom ? "drop-shadow(0 0 0 2px rgba(245,158,11,.3)) drop-shadow(0 2px 8px rgba(245,158,11,.2))"
+                 :          "drop-shadow(0 1px 4px rgba(0,0,0,.1))";
     const cur    = tool==="connect" ? "crosshair" : tool==="select" ? "grab" : "default";
 
     const txt = (
       <text data-sid={id} x={x+w/2} y={y+h/2}
         textAnchor="middle" dominantBaseline="middle"
-        fontSize={11.5} fontFamily="system-ui,sans-serif" fontWeight="500" fill="#1e293b"
-        style={{ pointerEvents:"none", userSelect:"none" }}>
+        fontSize={12} fontFamily="'DM Sans', system-ui, sans-serif" fontWeight="500"
+        fill="#1e293b" style={{ pointerEvents:"none", userSelect:"none" }}>
         {label}
       </text>
     );
     const gp = {
-      "data-sid":    id,
+      "data-sid": id,
       onMouseDown:   (e) => onShapeDown(e, id),
       onClick:       (e) => onShapeClick(e, id),
       onDoubleClick: (e) => onShapeDbl(e, id),
       style: { cursor:cur, filter:flt },
     };
 
-    if (type==="rect")
-      return (
-        <g key={id} {...gp}>
-          <rect data-sid={id} x={x} y={y} width={w} height={h} rx={9}
-            fill={fill} stroke={stroke} strokeWidth={sw}/>
-          {txt}
-        </g>
-      );
-    if (type==="circle")
-      return (
-        <g key={id} {...gp}>
-          <ellipse data-sid={id} cx={x+w/2} cy={y+h/2} rx={w/2} ry={h/2}
-            fill={fill} stroke={stroke} strokeWidth={sw}/>
-          {txt}
-        </g>
-      );
-    if (type==="diamond") {
+    if (type === "rect") return (
+      <g key={id} {...gp}>
+        <rect data-sid={id} x={x} y={y} width={w} height={h} rx={10}
+          fill={fill} stroke={stroke} strokeWidth={sw}/>
+        {txt}
+      </g>
+    );
+    if (type === "circle") return (
+      <g key={id} {...gp}>
+        <ellipse data-sid={id} cx={x+w/2} cy={y+h/2} rx={w/2} ry={h/2}
+          fill={fill} stroke={stroke} strokeWidth={sw}/>
+        {txt}
+      </g>
+    );
+    if (type === "diamond") {
       const pts = `${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`;
       return (
         <g key={id} {...gp}>
-          <polygon data-sid={id} points={pts}
-            fill={fill} stroke={stroke} strokeWidth={sw}/>
+          <polygon data-sid={id} points={pts} fill={fill} stroke={stroke} strokeWidth={sw}/>
           {txt}
         </g>
       );
@@ -448,195 +384,264 @@ export default function App() {
   const selShape = sel ? shapes.find(s => s.id===sel) : null;
   const canvasCursor = tool==="hand" ? "grab" : tool==="select" ? "default" : "crosshair";
 
-  // ── JSX ────────────────────────────────────────────────────────
+  // ── JSX ─────────────────────────────────────────────────────────
   return (
-    <div style={{ width:"100%", height:"100vh", overflow:"hidden", position:"relative", background:"#080f1e" }}>
+    <div style={{ display:"flex", width:"100%", height:"100vh", overflow:"hidden",
+      fontFamily:"'DM Sans', system-ui, sans-serif", background:"#f1f5f9" }}>
+
       <style>{`
-        .wbt { transition:background .12s,color .12s; }
-        .wbt:hover { background:rgba(59,130,246,.15)!important; color:#93c5fd!important; }
-        .wbz:hover { background:rgba(59,130,246,.18)!important; color:#93c5fd!important; }
-        @media(max-width:520px){ .wbl{ display:none!important; } }
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap');
+        * { box-sizing:border-box; margin:0; padding:0; }
+        .wbt { transition: background .12s, color .12s; }
+        .wbt:hover { background: #eff6ff !important; color: #2563eb !important; }
+        .wbz:hover { background: #eff6ff !important; color: #2563eb !important; }
+        .wbz:active { transform: scale(.93); }
+        .pal-chip:hover { transform: scale(1.15); outline: 2px solid #3b82f6; }
+        @media(max-width:560px){ .wbl{ display:none!important; } }
       `}</style>
 
-      {/* ── Toolbar ── */}
-      <div style={{
-        position:"absolute", top:12, left:"50%", transform:"translateX(-50%)",
-        zIndex:300, display:"flex", gap:2, alignItems:"center",
-        background:"rgba(8,15,30,.97)", backdropFilter:"blur(20px)",
-        padding:"6px 8px", borderRadius:14,
-        border:"1px solid rgba(148,163,184,.1)",
-        boxShadow:"0 8px 40px rgba(0,0,0,.7)",
-        maxWidth:"calc(100vw - 20px)", overflowX:"auto",
-      }}>
-        {TOOLS.map(t => (
-          <button key={t.id} className="wbt"
-            onClick={() => { setTool(t.id); setFromId(null); }}
-            title={t.label}
+      {/* ════════════════ CANVAS AREA ════════════════ */}
+      <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+
+        {/* ── Toolbar ── */}
+        <div style={{
+          position:"absolute", top:14, left:"50%", transform:"translateX(-50%)",
+          zIndex:300, display:"flex", gap:2, alignItems:"center",
+          background:"#ffffff",
+          padding:"6px 8px", borderRadius:14,
+          border:"1px solid #e2e8f0",
+          boxShadow:"0 2px 12px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.06)",
+          maxWidth:"calc(100% - 24px)", overflowX:"auto",
+        }}>
+          {TOOLS.map(t => (
+            <button key={t.id} className="wbt"
+              onClick={() => { setTool(t.id); setFromId(null); }}
+              title={t.label}
+              style={{
+                display:"flex", alignItems:"center", gap:5,
+                padding:"6px 11px", borderRadius:9, border:"none",
+                background: tool===t.id ? "#2563eb" : "transparent",
+                color:      tool===t.id ? "#ffffff" : "#475569",
+                cursor:"pointer", fontSize:12.5, fontWeight:500,
+                fontFamily:"inherit", whiteSpace:"nowrap",
+              }}>
+              <span style={{ fontSize:15, lineHeight:1 }}>{t.icon}</span>
+              <span className="wbl">{t.label}</span>
+            </button>
+          ))}
+
+          <div style={{ width:1, height:22, background:"#e2e8f0", margin:"0 3px", flexShrink:0 }}/>
+
+          {/* Color swatch */}
+          {selShape && (
+            <button className="wbt"
+              onClick={() => setPalette(v => !v)}
+              title="Cor do elemento"
+              style={{
+                width:28, height:28, borderRadius:8, flexShrink:0,
+                border:`2px solid ${palette ? "#3b82f6" : "#e2e8f0"}`,
+                background:selShape.color||"#fff", cursor:"pointer",
+                transition:"border-color .15s",
+              }}/>
+          )}
+
+          {/* Delete */}
+          <button className="wbt"
+            onClick={() => {
+              if (!sel) return;
+              setShapes(p => p.filter(s => s.id!==sel));
+              setConns(p  => p.filter(c => c.from!==sel && c.to!==sel));
+              setSel(null); setPalette(false);
+            }}
+            disabled={!sel}
             style={{
               display:"flex", alignItems:"center", gap:4,
               padding:"6px 10px", borderRadius:9, border:"none",
-              background: tool===t.id ? "#2563eb" : "transparent",
-              color:      tool===t.id ? "#fff"    : "#64748b",
-              cursor:"pointer", fontSize:12, fontWeight:500,
-              fontFamily:"system-ui,sans-serif", whiteSpace:"nowrap",
+              background: sel ? "#fff1f2" : "transparent",
+              color:      sel ? "#e11d48" : "#cbd5e1",
+              cursor:     sel ? "pointer" : "default",
+              fontSize:12.5, fontWeight:500, fontFamily:"inherit", flexShrink:0,
             }}>
-            <span style={{ fontSize:15 }}>{t.icon}</span>
-            <span className="wbl">{t.label}</span>
+            🗑 <span className="wbl">Deletar</span>
           </button>
-        ))}
+        </div>
 
-        <div style={{ width:1, height:20, background:"rgba(148,163,184,.12)", margin:"0 2px", flexShrink:0 }}/>
-
-        {selShape && (
-          <button className="wbt"
-            onClick={() => setPalette(v => !v)} title="Cor"
-            style={{
-              width:26, height:26, borderRadius:7, flexShrink:0,
-              border:`2px solid ${palette?"#3b82f6":"rgba(148,163,184,.25)"}`,
-              background:selShape.color||"#fff", cursor:"pointer",
-            }}/>
+        {/* ── Color palette dropdown ── */}
+        {palette && selShape && (
+          <div style={{
+            position:"absolute", top:70, left:"50%", transform:"translateX(-50%)",
+            zIndex:400, display:"flex", gap:6, padding:"10px 14px",
+            background:"#ffffff", border:"1px solid #e2e8f0", borderRadius:12,
+            boxShadow:"0 8px 24px rgba(0,0,0,.1)",
+          }}>
+            {COLORS.map(c => (
+              <div key={c} className="pal-chip"
+                onClick={() => {
+                  setShapes(p => p.map(s => s.id===sel ? {...s,color:c} : s));
+                  setPalette(false);
+                }}
+                style={{
+                  width:26, height:26, borderRadius:7, background:c, cursor:"pointer",
+                  border: selShape.color===c ? "2.5px solid #3b82f6" : "1.5px solid #e2e8f0",
+                  transition:"transform .12s",
+                }}/>
+            ))}
+          </div>
         )}
 
-        <button className="wbt"
-          onClick={() => {
-            if (!sel) return;
-            setShapes(p => p.filter(s => s.id!==sel));
-            setConns(p  => p.filter(c => c.from!==sel&&c.to!==sel));
-            setSel(null); setPalette(false);
-          }}
-          disabled={!sel}
-          style={{
-            display:"flex", alignItems:"center", gap:3,
-            padding:"6px 9px", borderRadius:9, border:"none",
-            background:sel?"rgba(239,68,68,.1)":"transparent",
-            color:sel?"#f87171":"#374151",
-            cursor:sel?"pointer":"default",
-            fontSize:12, fontWeight:500,
-            fontFamily:"system-ui,sans-serif", flexShrink:0,
-          }}>
-          🗑 <span className="wbl">Deletar</span>
-        </button>
-      </div>
-
-      {/* ── Palette ── */}
-      {palette && selShape && (
+        {/* ── Zoom controls ── */}
         <div style={{
-          position:"absolute", top:66, left:"50%", transform:"translateX(-50%)",
-          zIndex:400, display:"flex", gap:5, padding:"8px 12px",
-          background:"rgba(8,15,30,.97)", backdropFilter:"blur(20px)",
-          border:"1px solid rgba(148,163,184,.1)", borderRadius:12,
-          boxShadow:"0 8px 32px rgba(0,0,0,.6)",
+          position:"absolute", bottom:16, right:16, zIndex:200,
+          display:"flex", flexDirection:"column", alignItems:"center", gap:3,
         }}>
-          {COLORS.map(c => (
-            <div key={c}
-              onClick={() => { setShapes(p=>p.map(s=>s.id===sel?{...s,color:c}:s)); setPalette(false); }}
+          {[
+            ["+", () => zoomCenter(1.2),   "Zoom in"],
+            ["−", () => zoomCenter(1/1.2), "Zoom out"],
+            ["⌂", () => setVp({x:20,y:40,s:1}), "Resetar"],
+          ].map(([icon, fn, title]) => (
+            <button key={icon} className="wbz" onClick={fn} title={title}
               style={{
-                width:24, height:24, borderRadius:6, background:c, cursor:"pointer",
-                border:selShape.color===c?"2px solid #3b82f6":"2px solid rgba(148,163,184,.2)",
-              }}/>
+                width:36, height:36, borderRadius:10,
+                border:"1px solid #e2e8f0",
+                background:"#ffffff",
+                boxShadow:"0 1px 4px rgba(0,0,0,.08)",
+                color:"#64748b", cursor:"pointer", fontSize:17,
+                display:"flex", alignItems:"center", justifyContent:"center",
+                fontFamily:"inherit", transition:"all .15s",
+              }}>{icon}</button>
           ))}
+          <div style={{ color:"#94a3b8", fontSize:10, fontFamily:"inherit", marginTop:1 }}>
+            {Math.round(vp.s * 100)}%
+          </div>
         </div>
-      )}
 
-      {/* ── Zoom ── */}
-      <div style={{ position:"absolute", bottom:16, right:16, zIndex:200,
-        display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
-        {[
-          ["+", ()=>zoomCenter(1.2)],
-          ["−", ()=>zoomCenter(1/1.2)],
-          ["⌂", ()=>setVp({x:20,y:40,s:1})],
-        ].map(([icon,fn]) => (
-          <button key={icon} className="wbz" onClick={fn} style={{
-            width:38, height:38, borderRadius:10,
-            border:"1px solid rgba(148,163,184,.12)",
-            background:"rgba(8,15,30,.92)", backdropFilter:"blur(10px)",
-            color:"#64748b", cursor:"pointer", fontSize:17,
-            display:"flex", alignItems:"center", justifyContent:"center",
-            fontFamily:"system-ui,sans-serif", transition:"all .15s",
-          }}>{icon}</button>
-        ))}
-        <div style={{ color:"#334155", fontSize:10, fontFamily:"system-ui,sans-serif", marginTop:2 }}>
-          {Math.round(vp.s*100)}%
-        </div>
-      </div>
+        {/* ── Floating hint (connect / long-press) ── */}
+        {(fromId || hint) && (
+          <div style={{
+            position:"absolute", bottom:16, left:"50%", transform:"translateX(-50%)",
+            zIndex:200, padding:"8px 18px", borderRadius:10,
+            background: fromId ? "#fffbeb" : "#eff6ff",
+            border:     fromId ? "1px solid #fde68a" : "1px solid #bfdbfe",
+            color:      fromId ? "#92400e"            : "#1d4ed8",
+            fontSize:12.5, fontFamily:"inherit", whiteSpace:"nowrap",
+            boxShadow:"0 2px 8px rgba(0,0,0,.08)",
+          }}>
+            {fromId
+              ? "⟶ Clique em outro elemento para conectar · Esc cancela"
+              : hint}
+          </div>
+        )}
 
-      {/* ── Floating hints (connect / long-press) ── */}
-      {(fromId || hint) && (
+        {/* ── Tips badge ── */}
         <div style={{
-          position:"absolute", bottom:16, left:"50%", transform:"translateX(-50%)",
-          zIndex:200, padding:"7px 16px", borderRadius:9,
-          background: fromId ? "rgba(245,158,11,.1)" : "rgba(59,130,246,.1)",
-          border: fromId ? "1px solid rgba(245,158,11,.25)" : "1px solid rgba(59,130,246,.25)",
-          color: fromId ? "#fbbf24" : "#93c5fd",
-          fontSize:12, fontFamily:"system-ui,sans-serif", whiteSpace:"nowrap",
+          position:"absolute", bottom:16, left:16, zIndex:100,
+          background:"#ffffff", border:"1px solid #e2e8f0",
+          boxShadow:"0 1px 4px rgba(0,0,0,.06)",
+          color:"#94a3b8", padding:"7px 11px", borderRadius:10,
+          fontSize:10.5, fontFamily:"inherit", lineHeight:1.9,
         }}>
-          {fromId ? "⟶ Toque em outro elemento para conectar · Esc cancela" : hint}
+          <span style={{ color:"#64748b", fontWeight:600 }}>Dicas</span><br/>
+          ✋ Mover → arrasta para navegar<br/>
+          ↖ Selecionar → clica e arrasta elementos<br/>
+          📱 Pinça → zoom · Segurar → editar texto<br/>
+          Clique na seta → deletar conexão
         </div>
-      )}
 
-      {/* ── Dicas ── */}
-      <div style={{
-        position:"absolute", bottom:16, left:16, zIndex:100,
-        background:"rgba(8,15,30,.8)", backdropFilter:"blur(10px)",
-        border:"1px solid rgba(148,163,184,.07)",
-        color:"#2d3f52", padding:"6px 10px", borderRadius:9,
-        fontSize:10, fontFamily:"system-ui,sans-serif", lineHeight:1.9,
-      }}>
-        <span style={{ color:"#475569", fontWeight:600 }}>Como usar</span><br/>
-        ✋ Mover → arrasta o fundo para navegar<br/>
-        ↖ Selecionar → clica/arrasta elementos<br/>
-        📱 Pinça 2 dedos → zoom · Segurar → editar<br/>
-        Clique na seta → deletar conexão
+        {/* ── SVG Canvas ── */}
+        <svg ref={svgRef} width="100%" height="100%"
+          onMouseDown={onCanvasDown}
+          onMouseMove={onMouseMove}
+          onMouseUp={onMouseUp}
+          onClick={onCanvasClick}
+          style={{ display:"block", cursor:canvasCursor, touchAction:"none" }}>
+
+          <defs>
+            {/* dot grid */}
+            <pattern id="pg" width={28*vp.s} height={28*vp.s} patternUnits="userSpaceOnUse"
+              x={vp.x%(28*vp.s)} y={vp.y%(28*vp.s)}>
+              <circle cx={14*vp.s} cy={14*vp.s} r={1} fill="#c8d3de"/>
+            </pattern>
+            {/* arrowhead */}
+            <marker id="arr" markerWidth="7" markerHeight="7" refX="6.5" refY="3.5" orient="auto">
+              <polygon points="0 0.8,6.5 3.5,0 6.2" fill="#3b82f6"/>
+            </marker>
+          </defs>
+
+          <rect width="100%" height="100%" fill="url(#pg)"/>
+
+          <g transform={`translate(${vp.x},${vp.y}) scale(${vp.s})`}>
+            {conns.map(renderConn)}
+            {shapes.map(renderShape)}
+          </g>
+        </svg>
+
+        {/* ── Inline label editor ── */}
+        {edit && editShape && (() => {
+          const ex = editShape.x*vp.s+vp.x, ey = editShape.y*vp.s+vp.y;
+          const ew = editShape.w*vp.s,       eh = editShape.h*vp.s;
+          return (
+            <input autoFocus
+              value={edit.val}
+              onChange={e => setEdit(p => ({...p, val:e.target.value}))}
+              onBlur={commitEdit}
+              onKeyDown={e => { if(e.key==="Enter"||e.key==="Escape") commitEdit(); }}
+              style={{
+                position:"absolute",
+                left: ex + ew/2, top: ey + eh/2,
+                transform:"translate(-50%,-50%)",
+                width: ew * 0.8,
+                background:"transparent", border:"none", outline:"none",
+                textAlign:"center",
+                fontSize: Math.max(11, 12*vp.s),
+                fontFamily:"'DM Sans', system-ui, sans-serif",
+                fontWeight:500, color:"#1e293b", zIndex:500,
+              }}/>
+          );
+        })()}
       </div>
 
-      {/* ── SVG ── */}
-      <svg ref={svgRef} width="100%" height="100%"
-        onMouseDown={onCanvasDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp}
-        onClick={onCanvasClick}
-        style={{ display:"block", cursor:canvasCursor, touchAction:"none" }}>
+      {/* ════════════════ RIGHT PANEL ════════════════ */}
+      <div style={{
+        width:272, flexShrink:0,
+        background:"#ffffff",
+        borderLeft:"1px solid #e2e8f0",
+        display:"flex", flexDirection:"column",
+        overflow:"hidden",
+      }}>
+        {/* Panel header */}
+        <div style={{
+          padding:"16px 18px 14px",
+          borderBottom:"1px solid #f1f5f9",
+          display:"flex", alignItems:"center", gap:8,
+        }}>
+          <div style={{
+            width:6, height:6, borderRadius:"50%", background:"#3b82f6",
+            boxShadow:"0 0 0 3px #dbeafe",
+          }}/>
+          <span style={{ fontSize:13, fontWeight:600, color:"#1e293b", letterSpacing:.1 }}>
+            Painel
+          </span>
+        </div>
 
-        <defs>
-          <pattern id="pg" width={28*vp.s} height={28*vp.s} patternUnits="userSpaceOnUse"
-            x={vp.x%(28*vp.s)} y={vp.y%(28*vp.s)}>
-            <circle cx={14*vp.s} cy={14*vp.s} r={.9} fill="#0f1e35"/>
-          </pattern>
-          <marker id="arr" markerWidth="7" markerHeight="7" refX="6.5" refY="3.5" orient="auto">
-            <polygon points="0 0.8,6.5 3.5,0 6.2" fill="#3b82f6"/>
-          </marker>
-        </defs>
+        {/* Empty state */}
+        <div style={{
+          flex:1, display:"flex", flexDirection:"column",
+          alignItems:"center", justifyContent:"center",
+          gap:10, padding:24, color:"#cbd5e1",
+        }}>
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <rect x="6" y="6" width="36" height="36" rx="8"
+              stroke="#e2e8f0" strokeWidth="2" strokeDasharray="4 3"/>
+            <circle cx="24" cy="22" r="5" stroke="#dde3ea" strokeWidth="1.5"/>
+            <path d="M16 34 Q24 28 32 34" stroke="#dde3ea" strokeWidth="1.5"
+              strokeLinecap="round" fill="none"/>
+          </svg>
+          <p style={{ fontSize:12, color:"#94a3b8", textAlign:"center", lineHeight:1.6 }}>
+            Funcionalidades em breve
+          </p>
+        </div>
+      </div>
 
-        <rect width="100%" height="100%" fill="url(#pg)"/>
-
-        <g transform={`translate(${vp.x},${vp.y}) scale(${vp.s})`}>
-          {conns.map(renderConn)}
-          {shapes.map(renderShape)}
-        </g>
-      </svg>
-
-      {/* ── Label editor overlay ── */}
-      {edit && editShape && (() => {
-        const ex = editShape.x*vp.s+vp.x, ey = editShape.y*vp.s+vp.y;
-        const ew = editShape.w*vp.s,       eh = editShape.h*vp.s;
-        return (
-          <input autoFocus
-            value={edit.val}
-            onChange={e => setEdit(p => ({...p, val:e.target.value}))}
-            onBlur={commitEdit}
-            onKeyDown={e => { if(e.key==="Enter"||e.key==="Escape") commitEdit(); }}
-            style={{
-              position:"absolute",
-              left:ex+ew/2, top:ey+eh/2,
-              transform:"translate(-50%,-50%)",
-              width:ew*0.8, background:"transparent",
-              border:"none", outline:"none", textAlign:"center",
-              fontSize:Math.max(11, 11.5*vp.s),
-              fontFamily:"system-ui,sans-serif", fontWeight:500,
-              color:"#1e293b", zIndex:500,
-            }}/>
-        );
-      })()}
     </div>
   );
 }
