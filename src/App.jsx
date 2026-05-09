@@ -967,6 +967,25 @@ export default function App() {
   // ── Wizard preview ────────────────────────────────────────────
   const wizardPreview = wizard ? parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader) : null;
 
+  // ── Analytics color scale ─────────────────────────────────────
+  const edgeColorScale = useMemo(() => {
+    const stats = simResult.edgeStats || {};
+    const vals = Object.values(stats).map(s => s.inadInferida).filter(v => v !== null);
+    if (vals.length < 2) return null;
+    const mn = Math.min(...vals), mx = Math.max(...vals);
+    if (mx === mn) return null;
+    return {mn, mx};
+  }, [simResult]);
+
+  const edgeQtyScale = useMemo(() => {
+    const stats = simResult.edgeStats || {};
+    const vals = Object.values(stats).map(s => s.qty);
+    if (vals.length === 0) return null;
+    const mn = Math.min(...vals), mx = Math.max(...vals);
+    if (mx === mn) return null;
+    return {mn, mx};
+  }, [simResult]);
+
   // ── Render: connection (adaptive routing) ─────────────────────
   const renderConn = (conn) => {
     const from=shapes.find(s=>s.id===conn.from), to=shapes.find(s=>s.id===conn.to);
@@ -1002,12 +1021,38 @@ export default function App() {
     const lx=0.125*sx+0.375*c1x+0.375*c2x+0.125*aex;
     const ly=0.125*sy+0.375*c1y+0.375*c2y+0.125*aey;
     const labelText=conn.label?trunc(conn.label,12):null;
+
+    // Analytics
+    const es = simResult.edgeStats?.[conn.id];
+    let strokeColor = "#3b82f6";
+    if (es && edgeColorScale) {
+      const t = (es.inadInferida !== null)
+        ? (es.inadInferida - edgeColorScale.mn) / (edgeColorScale.mx - edgeColorScale.mn)
+        : null;
+      if (t !== null) strokeColor = inadColor(Math.max(0, Math.min(1, t)));
+    }
+    let strokeW = 2;
+    if (enableDynThickness && es && edgeQtyScale) {
+      const t2 = (es.qty - edgeQtyScale.mn) / (edgeQtyScale.mx - edgeQtyScale.mn);
+      strokeW = 1.5 + t2 * 2.5;
+    }
+    const analyticsLabel = es
+      ? `${fmtQty(es.qty)} | ${fmtPct(es.inadReal)} | ${fmtPct(es.inadInferida)}`
+      : null;
+
+    // Hover card position in screen coords
+    const isHovered = hoveredConn === conn.id;
+    const hcScreenX = lx * vp.s + vp.x + 10;
+    const hcScreenY = ly * vp.s + vp.y - 80;
+
     return (
       <g key={conn.id}>
         <path d={d} fill="none" stroke="transparent" strokeWidth={18} style={{cursor:"pointer"}}
+          onMouseEnter={()=>setHoveredConn(conn.id)}
+          onMouseLeave={()=>setHoveredConn(null)}
           onClick={e=>{e.stopPropagation();connClickTimer.current=setTimeout(()=>{setConns(p=>p.filter(c=>c.id!==conn.id));},220);}}
           onDoubleClick={e=>{e.stopPropagation();clearTimeout(connClickTimer.current);setEditConn({id:conn.id,val:conn.label||""});}}/>
-        <path d={d} fill="none" stroke="#3b82f6" strokeWidth={2} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
+        <path d={d} fill="none" stroke={strokeColor} strokeWidth={strokeW} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
         {labelText&&(
           <>
             <rect x={lx-28} y={ly-10} width={56} height={20} rx={5}
@@ -1016,6 +1061,30 @@ export default function App() {
               fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fill="#475569"
               style={{pointerEvents:"none",userSelect:"none"}}>{labelText}</text>
           </>
+        )}
+        {analyticsLabel&&(
+          <text x={lx} y={ly+(labelText?14:4)} textAnchor="middle"
+            fontSize={9} fontFamily="'DM Sans',system-ui,sans-serif" fill="#64748b"
+            style={{pointerEvents:"none",userSelect:"none"}}>{analyticsLabel}</text>
+        )}
+        {isHovered&&es&&(
+          <foreignObject x={lx+10/vp.s} y={ly-80/vp.s} width={160/vp.s} height={200/vp.s} style={{pointerEvents:"none",overflow:"visible"}}>
+            <div xmlns="http://www.w3.org/1999/xhtml" style={{
+              background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,padding:10,
+              boxShadow:"0 4px 16px rgba(0,0,0,.12)",fontSize:`${11/vp.s}px`,
+              fontFamily:"'DM Sans',system-ui,sans-serif",color:"#1e293b",lineHeight:1.6,
+              pointerEvents:"none",width:`${160/vp.s}px`,whiteSpace:"nowrap"
+            }}>
+              <div><strong>Vol. de Propostas:</strong> {fmtQty(es.qty)}</div>
+              <div><strong>Vol. Aprovado:</strong> {fmtQty(es.approvedQty)}</div>
+              <div><strong>Vol. Reprovado:</strong> {fmtQty(es.rejectedQty)}</div>
+              <div><strong>Taxa de Aprovação:</strong> {fmtPct(es.approvalRate)}</div>
+              <div><strong>Inad. Real:</strong> {fmtPct(es.inadReal)}</div>
+              <div><strong>Inad. Inferida:</strong> {fmtPct(es.inadInferida)}</div>
+              <div><strong>Qtd Altas/Vendas:</strong> {fmtQty(es.qtdAltas)}</div>
+              {simResult.totalQty>0&&<div><strong>Part. no fluxo:</strong> {((es.qty/simResult.totalQty)*100).toFixed(1)}%</div>}
+            </div>
+          </foreignObject>
         )}
       </g>
     );
