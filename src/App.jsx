@@ -335,8 +335,11 @@ export default function App() {
   const [multiSel,   setMultiSel]   = useState(new Set()); // ids selecionados em grupo
   const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
   // Feature: analytics
-  const [hoveredConn,       setHoveredConn]       = useState(null);
+  const [hoveredConn,       setHoveredConn]       = useState(null); // null | {id, screenX, screenY}
   const [enableDynThickness,setEnableDynThickness] = useState(false);
+  const [showEdgeVol,       setShowEdgeVol]        = useState(true);
+  const [showEdgeInadReal,  setShowEdgeInadReal]   = useState(true);
+  const [showEdgeInadInf,   setShowEdgeInadInf]    = useState(true);
   // Feature: tooltips
   const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
   const tooltipTimer = useRef(null);
@@ -1033,22 +1036,46 @@ export default function App() {
     }
     let strokeW = 2;
     if (enableDynThickness && es && edgeQtyScale) {
-      const t2 = (es.qty - edgeQtyScale.mn) / (edgeQtyScale.mx - edgeQtyScale.mn);
+      const t2 = edgeQtyScale.mx > edgeQtyScale.mn
+        ? (es.qty - edgeQtyScale.mn) / (edgeQtyScale.mx - edgeQtyScale.mn)
+        : 0;
       strokeW = 1.5 + t2 * 2.5;
     }
-    const analyticsLabel = es
-      ? `${fmtQty(es.qty)} | ${fmtPct(es.inadReal)} | ${fmtPct(es.inadInferida)}`
-      : null;
 
-    // Hover card position in screen coords
-    const isHovered = hoveredConn === conn.id;
-    const hcScreenX = lx * vp.s + vp.x + 10;
-    const hcScreenY = ly * vp.s + vp.y - 80;
+    // Build metric chips — only show enabled + non-null metrics
+    const chips = [];
+    if (showEdgeVol && es) {
+      chips.push({label: fmtQty(es.qty), bg:"#f1f5f9", color:"#475569", title:"Volume"});
+    }
+    if (showEdgeInadReal && es && es.inadReal !== null) {
+      const t = edgeColorScale && edgeColorScale.mx > edgeColorScale.mn
+        ? (es.inadReal - edgeColorScale.mn) / (edgeColorScale.mx - edgeColorScale.mn)
+        : 0;
+      chips.push({label:`${(es.inadReal*100).toFixed(1)}%`, bg: inadColor(Math.max(0,Math.min(1,t))), color:"#1e293b", title:"Inad. Real"});
+    }
+    if (showEdgeInadInf && es && es.inadInferida !== null) {
+      const t = edgeColorScale && edgeColorScale.mx > edgeColorScale.mn
+        ? (es.inadInferida - edgeColorScale.mn) / (edgeColorScale.mx - edgeColorScale.mn)
+        : 0;
+      chips.push({label:`${(es.inadInferida*100).toFixed(1)}%`, bg: inadColor(Math.max(0,Math.min(1,t))), color:"#1e293b", title:"Inad. Inf."});
+    }
+
+    const CHIP_W = 42, CHIP_H = 15, CHIP_GAP = 3;
+    const chipsY = ly + (labelText ? 16 : 6);
+    const chipsTotalW = chips.length * CHIP_W + (chips.length - 1) * CHIP_GAP;
+    const chipsX0 = lx - chipsTotalW / 2;
+
+    // Hover card — rendered as fixed div outside SVG (always on top)
+    const isHovered = hoveredConn?.id === conn.id;
 
     return (
       <g key={conn.id}>
         <path d={d} fill="none" stroke="transparent" strokeWidth={18} style={{cursor:"pointer"}}
-          onMouseEnter={()=>setHoveredConn(conn.id)}
+          onMouseEnter={(e)=>{
+            const screenMidX = lx * vp.s + vp.x;
+            const screenMidY = ly * vp.s + vp.y;
+            setHoveredConn({id:conn.id, screenX:screenMidX, screenY:screenMidY});
+          }}
           onMouseLeave={()=>setHoveredConn(null)}
           onClick={e=>{e.stopPropagation();connClickTimer.current=setTimeout(()=>{setConns(p=>p.filter(c=>c.id!==conn.id));},220);}}
           onDoubleClick={e=>{e.stopPropagation();clearTimeout(connClickTimer.current);setEditConn({id:conn.id,val:conn.label||""});}}/>
@@ -1062,29 +1089,21 @@ export default function App() {
               style={{pointerEvents:"none",userSelect:"none"}}>{labelText}</text>
           </>
         )}
-        {analyticsLabel&&(
-          <text x={lx} y={ly+(labelText?14:4)} textAnchor="middle"
-            fontSize={9} fontFamily="'DM Sans',system-ui,sans-serif" fill="#64748b"
-            style={{pointerEvents:"none",userSelect:"none"}}>{analyticsLabel}</text>
-        )}
-        {isHovered&&es&&(
-          <foreignObject x={lx+10/vp.s} y={ly-80/vp.s} width={160/vp.s} height={200/vp.s} style={{pointerEvents:"none",overflow:"visible"}}>
-            <div xmlns="http://www.w3.org/1999/xhtml" style={{
-              background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,padding:10,
-              boxShadow:"0 4px 16px rgba(0,0,0,.12)",fontSize:`${11/vp.s}px`,
-              fontFamily:"'DM Sans',system-ui,sans-serif",color:"#1e293b",lineHeight:1.6,
-              pointerEvents:"none",width:`${160/vp.s}px`,whiteSpace:"nowrap"
-            }}>
-              <div><strong>Vol. de Propostas:</strong> {fmtQty(es.qty)}</div>
-              <div><strong>Vol. Aprovado:</strong> {fmtQty(es.approvedQty)}</div>
-              <div><strong>Vol. Reprovado:</strong> {fmtQty(es.rejectedQty)}</div>
-              <div><strong>Taxa de Aprovação:</strong> {fmtPct(es.approvalRate)}</div>
-              <div><strong>Inad. Real:</strong> {fmtPct(es.inadReal)}</div>
-              <div><strong>Inad. Inferida:</strong> {fmtPct(es.inadInferida)}</div>
-              <div><strong>Qtd Altas/Vendas:</strong> {fmtQty(es.qtdAltas)}</div>
-              {simResult.totalQty>0&&<div><strong>Part. no fluxo:</strong> {((es.qty/simResult.totalQty)*100).toFixed(1)}%</div>}
-            </div>
-          </foreignObject>
+        {chips.length > 0 && (
+          <g style={{pointerEvents:"none"}}>
+            {chips.map((chip, i) => {
+              const cx = chipsX0 + i * (CHIP_W + CHIP_GAP);
+              return (
+                <g key={i}>
+                  <rect x={cx} y={chipsY} width={CHIP_W} height={CHIP_H} rx={CHIP_H/2}
+                    fill={chip.bg} stroke="rgba(0,0,0,.1)" strokeWidth={0.5}/>
+                  <text x={cx+CHIP_W/2} y={chipsY+CHIP_H/2+0.5} textAnchor="middle" dominantBaseline="middle"
+                    fontSize={8.5} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill={chip.color}
+                    style={{userSelect:"none"}}>{chip.label}</text>
+                </g>
+              );
+            })}
+          </g>
         )}
       </g>
     );
@@ -2056,13 +2075,22 @@ export default function App() {
 
         {/* Feature flags */}
         <div style={{padding:"10px 16px",borderBottom:"1px solid #f1f5f9"}}>
-          <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Visualização</p>
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
-            <input type="checkbox" checked={enableDynThickness} onChange={()=>setEnableDynThickness(v=>!v)}
-              style={{width:15,height:15,accentColor:"#6366f1"}}/>
-            Espessura Dinâmica
-          </label>
-          <div style={{fontSize:10.5,color:"#94a3b8",marginTop:3,marginLeft:23}}>Arestas mais espessas = maior volume</div>
+          <p style={{fontSize:11,color:"#94a3b8",marginBottom:10,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Visualização</p>
+          {[
+            {label:"Volume por Aresta",      sub:"Quantidade de propostas no galho",  checked:showEdgeVol,       set:setShowEdgeVol},
+            {label:"Inad. Real por Aresta",  sub:"Inadimplência real acumulada",       checked:showEdgeInadReal,  set:setShowEdgeInadReal},
+            {label:"Inad. Inf. por Aresta",  sub:"Inadimplência inferida acumulada",   checked:showEdgeInadInf,   set:setShowEdgeInadInf},
+            {label:"Espessura Dinâmica",     sub:"Arestas mais espessas = maior vol.", checked:enableDynThickness,set:setEnableDynThickness},
+          ].map(({label,sub,checked,set})=>(
+            <label key={label} style={{display:"flex",alignItems:"flex-start",gap:8,cursor:"pointer",marginBottom:8}}>
+              <input type="checkbox" checked={checked} onChange={()=>set(v=>!v)}
+                style={{width:15,height:15,accentColor:"#6366f1",marginTop:2,flexShrink:0}}/>
+              <div>
+                <div style={{fontSize:12.5,color:"#475569",fontWeight:500}}>{label}</div>
+                <div style={{fontSize:10.5,color:"#94a3b8"}}>{sub}</div>
+              </div>
+            </label>
+          ))}
         </div>
 
         {/* Empty state */}
@@ -2080,6 +2108,55 @@ export default function App() {
 
         </div>{/* end scrollable area */}
       </div>
+
+      {/* ═══════════════ EDGE ANALYTICS HOVER CARD ═══════════════ */}
+      {hoveredConn && simResult.edgeStats?.[hoveredConn.id] && (()=>{
+        const es = simResult.edgeStats[hoveredConn.id];
+        const cardW = 210;
+        // Clamp to viewport
+        const svgRect = svgRef.current?.getBoundingClientRect();
+        const vpW = svgRect?.width || window.innerWidth;
+        const vpH = svgRect?.height || window.innerHeight;
+        let cx = hoveredConn.screenX + 16;
+        let cy = hoveredConn.screenY - 120;
+        if (cx + cardW > vpW - 8) cx = hoveredConn.screenX - cardW - 16;
+        if (cy < 8) cy = hoveredConn.screenY + 20;
+        const inadRealColor = es.inadReal === null ? "#94a3b8" : es.inadReal > 0.05 ? "#dc2626" : "#16a34a";
+        const inadInfColor  = es.inadInferida === null ? "#94a3b8" : es.inadInferida > 0.05 ? "#dc2626" : "#16a34a";
+        const approvalColor = es.approvalRate >= 70 ? "#16a34a" : es.approvalRate >= 40 ? "#d97706" : "#dc2626";
+        return (
+          <div style={{
+            position:"fixed", left:cx, top:cy, width:cardW, zIndex:4000,
+            background:"#fff", border:"1px solid #e2e8f0", borderRadius:12,
+            boxShadow:"0 8px 32px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.08)",
+            fontFamily:"'DM Sans',system-ui,sans-serif", pointerEvents:"none",
+            overflow:"hidden",
+          }}>
+            {/* Card header */}
+            <div style={{padding:"9px 12px 7px",background:"#f8fafc",borderBottom:"1px solid #f1f5f9",fontSize:10.5,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:.5}}>
+              Analytics da Conexão
+            </div>
+            {/* Metrics */}
+            <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:4}}>
+              {[
+                {label:"Vol. de Propostas", value: fmtQty(es.qty),          color:"#1e293b"},
+                {label:"Vol. Aprovado",     value: fmtQty(es.approvedQty),   color:"#16a34a"},
+                {label:"Vol. Reprovado",    value: fmtQty(es.rejectedQty),   color:"#dc2626"},
+                {label:"Taxa de Aprovação", value: `${(es.approvalRate*100).toFixed(1)}%`, color:approvalColor},
+                {label:"Inad. Real",        value: es.inadReal!==null?`${(es.inadReal*100).toFixed(2)}%`:"—", color:inadRealColor},
+                {label:"Inad. Inferida",    value: es.inadInferida!==null?`${(es.inadInferida*100).toFixed(2)}%`:"—", color:inadInfColor},
+                {label:"Qtd Altas/Vendas",  value: fmtQty(es.qtdAltas),     color:"#1e293b"},
+                ...(simResult.totalQty>0?[{label:"Part. no Fluxo", value:`${((es.qty/simResult.totalQty)*100).toFixed(1)}%`, color:"#6366f1"}]:[]),
+              ].map(({label,value,color})=>(
+                <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11.5}}>
+                  <span style={{color:"#64748b"}}>{label}</span>
+                  <span style={{fontWeight:700,color}}>{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═══════════════ GHOST ELEMENT (panel drag) ═══════════════ */}
       {ghostPos&&panelDrag&&(
