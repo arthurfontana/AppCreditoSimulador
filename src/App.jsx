@@ -112,6 +112,19 @@ function computeCinemaSize(rowDomain, colDomain) {
   };
 }
 
+// ── Color helpers ────────────────────────────────────────────────────────────
+function lerpColor(a, b, t) {
+  const ah=parseInt(a.slice(1),16), bh=parseInt(b.slice(1),16);
+  const ar=(ah>>16)&255, ag=(ah>>8)&255, ab=ah&255;
+  const br=(bh>>16)&255, bg=(bh>>8)&255, bb=bh&255;
+  const r=Math.round(ar+(br-ar)*t), g=Math.round(ag+(bg-ag)*t), bl2=Math.round(ab+(bb-ab)*t);
+  return `#${((1<<24)|(r<<16)|(g<<8)|bl2).toString(16).slice(1)}`;
+}
+function inadColor(t) { // t in [0,1]
+  if (t<=0.5) return lerpColor("#86efac","#fde68a",t*2);
+  return lerpColor("#fde68a","#fca5a5",(t-0.5)*2);
+}
+
 // ── Flow engine ──────────────────────────────────────────────────────────────
 function buildFlowGraph(shapes, conns) {
   const out = {}, inc = {};
@@ -157,41 +170,61 @@ function runSimulation(shapes, conns, csvStore) {
   const rootNodes = shapes.filter(s =>
     (s.type === 'decision' || s.type === 'cineminha') && !decWithPortInc.has(s.id)
   );
-  if (rootNodes.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0};
+  if (rootNodes.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0, edgeStats:{}};
 
-  function traverseRow(row, headers, startId) {
+  // Build edge lookup: edgeLookup[fromId][toId+"::"+label] = connId
+  const edgeLookup = {};
+  for (const c of conns) {
+    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
+    const key = `${c.to}::${c.label??''}`;
+    edgeLookup[c.from][key] = c.id;
+  }
+
+  // edgeStats accumulator
+  const edgeAcc = {}; // connId -> {qty,approvedQty,rejectedQty,inadRealSum,inadInferidaSum,qtdAltasSum}
+  const initEdge = (cid) => { if (!edgeAcc[cid]) edgeAcc[cid]={qty:0,approvedQty:0,rejectedQty:0,inadRealSum:0,inadInferidaSum:0,qtdAltasSum:0}; };
+
+  function traverseRow(row, headers, startId, rowMeta) {
     let cur = startId; const visited = new Set();
+    const path = []; // connIds traversed
     while (cur) {
-      if (visited.has(cur)) return null;
+      if (visited.has(cur)) return {result:null, path};
       visited.add(cur);
-      const node = shapesMap[cur]; if (!node) return null;
-      if (TERM.has(node.type)) return node.type;
+      const node = shapesMap[cur]; if (!node) return {result:null, path};
+      if (TERM.has(node.type)) return {result:node.type, path};
       if (node.type === 'decision') {
         const colIdx = headers.indexOf(node.variableCol);
         const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
-        if (!match) return null;
+        if (!match) return {result:null, path};
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
         cur = match.to;
       } else if (node.type === 'cineminha') {
         const rowIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const colIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
         const rowVal = node.rowVar && rowIdx >= 0 ? (row[rowIdx] ?? '').trim() : '';
         const colVal = node.colVar && colIdx >= 0 ? (row[colIdx] ?? '').trim() : '';
-        if (!node.rowVar && !node.colVar) return null;
+        if (!node.rowVar && !node.colVar) return {result:null, path};
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
         const cellKey = `${rKey}|${cKey}`;
         const isEligible = (node.cells ?? {})[cellKey] !== false;
         const targetLabel = isEligible ? 'Elegível' : 'Não Elegível';
         const match = (out[cur] || []).find(e => e.label === targetLabel);
-        if (!match) return null;
+        if (!match) return {result:null, path};
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
         cur = match.to;
       } else if (node.type === 'port') {
-        const edges = out[cur] || []; if (edges.length === 0) return null;
-        cur = edges[0].to;
-      } else return null;
+        const edges = out[cur] || []; if (edges.length === 0) return {result:null, path};
+        const match = edges[0];
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
+        cur = match.to;
+      } else return {result:null, path};
     }
-    return null;
+    return {result:null, path};
   }
 
   let totalQty = 0, approvedQty = 0, rejectedQty = 0;
@@ -215,22 +248,53 @@ function runSimulation(shapes, conns, csvStore) {
     const rootId = csvRoots[0].id;
     for (const row of csv.rows) {
       const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
+      const qtdAltas = qtdAltasIdx >= 0 ? (parseFloat(row[qtdAltasIdx]) || 0) : 0;
+      const inadR = inadRealIdx >= 0 ? (parseFloat(row[inadRealIdx]) || 0) : 0;
+      const inadI = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
       totalQty += qty;
-      const res = traverseRow(row, csv.headers, rootId);
-      if (res === 'approved') {
+      const {result:res, path} = traverseRow(row, csv.headers, rootId, {qty, qtdAltas, inadR, inadI});
+      const isApproved = res === 'approved', isRejected = res === 'rejected';
+      if (isApproved) {
         approvedQty += qty;
-        if (qtdAltasIdx    >= 0) qtdAltasSum     += parseFloat(row[qtdAltasIdx])     || 0;
-        if (inadRealIdx    >= 0) inadRealSum      += parseFloat(row[inadRealIdx])     || 0;
-        if (inadInferidaIdx>= 0) inadInferidaSum  += parseFloat(row[inadInferidaIdx]) || 0;
-      } else if (res === 'rejected') rejectedQty += qty;
+        qtdAltasSum    += qtdAltas;
+        inadRealSum    += inadR;
+        inadInferidaSum+= inadI;
+      } else if (isRejected) rejectedQty += qty;
+      // Accumulate edge stats for every traversed edge
+      for (const cid of path) {
+        initEdge(cid);
+        edgeAcc[cid].qty += qty;
+        if (isApproved) {
+          edgeAcc[cid].approvedQty += qty;
+          edgeAcc[cid].qtdAltasSum += qtdAltas;
+          edgeAcc[cid].inadRealSum += inadR;
+          edgeAcc[cid].inadInferidaSum += inadI;
+        } else if (isRejected) edgeAcc[cid].rejectedQty += qty;
+      }
     }
   }
   const inadReal     = qtdAltasSum > 0    ? inadRealSum / qtdAltasSum   : null;
   const inadInferida = approvedQty  > 0   ? inadInferidaSum / approvedQty : null;
+
+  // Compute derived per-edge stats
+  const edgeStats = {};
+  for (const [cid, acc] of Object.entries(edgeAcc)) {
+    edgeStats[cid] = {
+      qty: acc.qty,
+      approvedQty: acc.approvedQty,
+      rejectedQty: acc.rejectedQty,
+      qtdAltas: acc.qtdAltasSum,
+      approvalRate: acc.qty > 0 ? acc.approvedQty / acc.qty : null,
+      inadReal: acc.qtdAltasSum > 0 ? acc.inadRealSum / acc.qtdAltasSum : null,
+      inadInferida: acc.approvedQty > 0 ? acc.inadInferidaSum / acc.approvedQty : null,
+    };
+  }
+
   return {
     totalQty, approvedQty, rejectedQty,
     approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
     inadReal, inadInferida,
+    edgeStats,
   };
 }
 
@@ -270,6 +334,12 @@ export default function App() {
   const [varSearch,  setVarSearch]  = useState("");     // filtro de busca no painel
   const [multiSel,   setMultiSel]   = useState(new Set()); // ids selecionados em grupo
   const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
+  // Feature: analytics
+  const [hoveredConn,       setHoveredConn]       = useState(null);
+  const [enableDynThickness,setEnableDynThickness] = useState(false);
+  // Feature: tooltips
+  const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
+  const tooltipTimer = useRef(null);
 
   // ── Refs ──────────────────────────────────────────────────────
   const svgRef        = useRef(null);
@@ -291,6 +361,7 @@ export default function App() {
   const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
   const flowImportRef = useRef(null);
+  const prevToolR     = useRef(null);
   const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
   const multiSelR     = useRef(multiSel);   useEffect(()=>{multiSelR.current=multiSel},   [multiSel]);
   const selRectR      = useRef(selRect);    useEffect(()=>{selRectR.current=selRect},      [selRect]);
@@ -381,7 +452,17 @@ export default function App() {
     el.addEventListener("touchstart",onTouchStart,o); el.addEventListener("touchmove",onTouchMove,o);
     el.addEventListener("touchend",onTouchEnd,o);     el.addEventListener("touchcancel",onTouchEnd,o);
     el.addEventListener("wheel",onWheel,o);
-    return()=>{el.removeEventListener("touchstart",onTouchStart);el.removeEventListener("touchmove",onTouchMove);el.removeEventListener("touchend",onTouchEnd);el.removeEventListener("touchcancel",onTouchEnd);el.removeEventListener("wheel",onWheel);};
+    const onMidDown=(e)=>{
+      if (e.button!==1) return;
+      e.preventDefault();
+      movedR.current=false;
+      const r=el.getBoundingClientRect();
+      const sx=e.clientX-r.left, sy=e.clientY-r.top;
+      prevToolR.current=toolR.current;
+      dragR.current={type:"midpan",sx,sy,ox:vpR.current.x,oy:vpR.current.y};
+    };
+    el.addEventListener("mousedown",onMidDown,o);
+    return()=>{el.removeEventListener("touchstart",onTouchStart);el.removeEventListener("touchmove",onTouchMove);el.removeEventListener("touchend",onTouchEnd);el.removeEventListener("touchcancel",onTouchEnd);el.removeEventListener("wheel",onWheel);el.removeEventListener("mousedown",onMidDown);};
   },[onTouchStart,onTouchMove,onTouchEnd,onWheel]);
 
   // ── Mouse handlers ────────────────────────────────────────────
@@ -472,7 +553,7 @@ export default function App() {
     const dr=dragR.current; if (!dr) return;
     const [sx,sy]=svgPt(e.clientX,e.clientY),dx=sx-dr.sx,dy=sy-dr.sy;
     if (Math.abs(dx)>3||Math.abs(dy)>3) movedR.current=true;
-    if (dr.type==="pan"){const ox=dr.ox,oy=dr.oy;setVp(v=>({...v,x:ox+dx,y:oy+dy}));}
+    if (dr.type==="pan"||dr.type==="midpan"){const ox=dr.ox,oy=dr.oy;setVp(v=>({...v,x:ox+dx,y:oy+dy}));}
     else if(dr.type==="shape"){
       const id=dr.id,offX=dr.offX,offY=dr.offY,[wx,wy]=toWorld(sx,sy);
       const ms=multiSelR.current;
@@ -515,6 +596,7 @@ export default function App() {
   const onMouseUp = () => {
     const dr=dragR.current;
     if(dr?.type==="selRect") setSelRect(null);
+    if(dr?.type==="midpan"&&prevToolR.current!=null) setTool(prevToolR.current);
     dragR.current=null;
   };
 
