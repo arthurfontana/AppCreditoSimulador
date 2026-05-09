@@ -75,6 +75,7 @@ function parseCSV(text, delimiter, hasHeader) {
 const tDist = (t) => { const dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY; return Math.sqrt(dx*dx+dy*dy); };
 const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
 const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
+const normalizeColName = (s) => (s || "").toLowerCase().replace(/[\s_\-\.]+/g, "").trim();
 
 // ── Flow engine ──────────────────────────────────────────────────────────────
 function buildFlowGraph(shapes, conns) {
@@ -191,6 +192,7 @@ export default function App() {
   const [ghostPos,   setGhostPos]   = useState(null);   // {x, y} — posição do ghost element
   const [importError,setImportError]= useState(null);   // string | null — erro de importação de fluxo
   const [importWarn, setImportWarn] = useState(null);   // string | null — aviso pós-importação
+  const [exportModal,setExportModal]= useState(false);  // boolean — modal de escolha de exportação
 
   // ── Refs ──────────────────────────────────────────────────────
   const svgRef        = useRef(null);
@@ -414,17 +416,44 @@ export default function App() {
     const {rawText,filename,delimiter,hasHeader,columnTypes}=wizard;
     const {headers,rows}=parseCSV(rawText,delimiter,hasHeader);
     const csvId=uid();
+
+    // Build normalized name → original header map for reconciliation
+    const normMap = {};
+    for (const h of headers) normMap[normalizeColName(h)] = h;
+
     setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers,rows,columnTypes:columnTypes||{}}}));
+
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
     const nodeId=uid();
+
     setShapes(p=>{
       const csvNode={id:nodeId,type:"csv",x:cx-CSV_W/2,y:cy-CSV_H/2,w:CSV_W,h:CSV_H,label:filename,csvId,minimized:false};
       const hasPanel=p.some(s=>s.type==="simPanel");
       const panelNodes=hasPanel?[]:[{id:uid(),type:"simPanel",x:cx+CSV_W/2+50,y:cy-80,w:260,h:190,label:"Simulação",color:"#fff"}];
-      return [...p,csvNode,...panelNodes];
+
+      // Reconcile orphan decision nodes: nodes whose csvId no longer has a matching store entry
+      // We pass the full updated store (prev + new entry) via closure is not possible here,
+      // so we compare against current csvStoreR which excludes the new entry (added above via setCsvStore).
+      // We treat any decision node whose csvId is NOT in the current store OR whose csvId IS missing as orphan.
+      const currentStoreKeys = new Set(Object.keys(csvStoreR.current));
+      const reconciledShapes = p.map(s => {
+        if (s.type !== "decision" || !s.variableCol) return s;
+        // Already bound to a valid (existing or new) csv → no change
+        if (s.csvId === csvId) return s;
+        if (s.csvId && currentStoreKeys.has(s.csvId)) return s;
+        // Orphan: try normalized match
+        const matchedHeader = normMap[normalizeColName(s.variableCol)];
+        if (matchedHeader) {
+          return {...s, csvId, variableCol: matchedHeader};
+        }
+        return s;
+      });
+
+      return [...reconciledShapes, csvNode, ...panelNodes];
     });
-    setSel(nodeId); setWizard(null);
+
+    setSel(nodeId); setWizard(null); setImportWarn(null);
   };
 
   // ── deleteShape (com cascade de ports filhos) ─────────────────
@@ -439,24 +468,37 @@ export default function App() {
     setSel(null); setPalette(false);
   };
 
+  // ── deleteCsvDataset ──────────────────────────────────────
+  const deleteCsvDataset = (csvId) => {
+    setCsvStore(prev => { const next = {...prev}; delete next[csvId]; return next; });
+    // Remove the CSV canvas node for this dataset
+    setShapes(prev => prev.filter(s => !(s.type === "csv" && s.csvId === csvId)));
+    // Decision nodes keep their structure; simulation naturally returns 0 with no csvStore entry
+    setImportWarn(null);
+  };
+
   // ── exportFlow ────────────────────────────────────────────
-  const exportFlow = () => {
+  const exportFlow = () => setExportModal(true);
+
+  const doExport = (includeData) => {
     const payload = {
       schemaVersion: "1.0",
       generatedAt: new Date().toISOString(),
       flowId: uid(),
+      exportMode: includeData ? "flow+dataset" : "flow-only",
       viewport: vp,
       shapes,
       conns,
-      csvStore,
+      csvStore: includeData ? csvStore : {},
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `fluxo_credito_${new Date().toISOString().slice(0,10)}.json`;
+    a.download = `fluxo_credito_${new Date().toISOString().slice(0,10)}${includeData?"_com_dados":""}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    setExportModal(false);
   };
 
   // ── validateAndImportFlow ─────────────────────────────────
@@ -479,6 +521,7 @@ export default function App() {
     if (maxNum >= _id) _id = maxNum + 1;
     // Detect missing variables (decision nodes whose column doesn't exist in the stored CSV)
     const importedCsvStore = data.csvStore || {};
+    const noDataset = Object.keys(importedCsvStore).length === 0;
     const missingVars = data.shapes
       .filter(s => s.type === 'decision' && s.csvId && s.variableCol)
       .filter(s => {
@@ -493,7 +536,9 @@ export default function App() {
     if (data.viewport) setVp(data.viewport);
     setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
     setImportError(null);
-    if (missingVars.length > 0) {
+    if (noDataset) {
+      setImportWarn("Fluxo importado sem dataset. A política pode ser editada normalmente. Importe um CSV compatível para ativar a simulação.");
+    } else if (missingVars.length > 0) {
       setImportWarn(`Fluxo importado. Variáveis ausentes na base: ${[...new Set(missingVars)].join(", ")}. Importe um CSV compatível para reativar a simulação.`);
     } else {
       setImportWarn(null);
@@ -857,7 +902,7 @@ export default function App() {
         {/* Rate big number */}
         <text x={x+w/2} y={y+94} textAnchor="middle" fontSize={38} fontWeight="800" fill={hasData?rateColor:"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData?`${rate.toFixed(1)}%`:"0%"}
+          {hasData?`${rate.toFixed(1)}%`:"—"}
         </text>
         <text x={x+w/2} y={y+112} textAnchor="middle" fontSize={11} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>Taxa de Aprovação</text>
@@ -865,20 +910,20 @@ export default function App() {
         <rect x={x+16} y={y+122} width={w-32} height={8} rx={4} fill="#f1f5f9"/>
         {hasData&&<rect x={x+16} y={y+122} width={barW} height={8} rx={4} fill={rateColor}/>}
         {/* Stats */}
-        <text x={x+w/2-56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill="#16a34a"
+        <text x={x+w/2-56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#16a34a":"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          ✅ {fmtQty(simResult.approvedQty)}
+          ✅ {hasData?fmtQty(simResult.approvedQty):"0"}
         </text>
         <text x={x+w/2} y={y+150} textAnchor="middle" fontSize={11} fill="#cbd5e1"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>/</text>
-        <text x={x+w/2+56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill="#dc2626"
+        <text x={x+w/2+56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#dc2626":"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          ❌ {fmtQty(simResult.rejectedQty)}
+          ❌ {hasData?fmtQty(simResult.rejectedQty):"0"}
         </text>
-        {/* Total */}
+        {/* Total / status message */}
         <text x={x+w/2} y={y+170} textAnchor="middle" fontSize={10} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData?`Total: ${fmtQty(simResult.totalQty)} registros`:"Importe um CSV e monte o fluxo"}
+          {hasData?`Total: ${fmtQty(simResult.totalQty)} registros`:"Sem dados carregados"}
         </text>
       </g>
     );
@@ -1078,6 +1123,14 @@ export default function App() {
                   <div style={{fontSize:12,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{csv.name}</div>
                   <div style={{fontSize:10.5,color:"#94a3b8"}}>{csv.rows.length} linhas · {csv.headers.length} colunas</div>
                 </div>
+                <button
+                  title="Remover dataset"
+                  onClick={()=>deleteCsvDataset(cid)}
+                  style={{width:22,height:22,borderRadius:6,border:"1px solid #fecaca",background:"#fff1f2",color:"#e11d48",cursor:"pointer",fontSize:13,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,lineHeight:1,padding:0,transition:"all .12s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.background="#fee2e2";e.currentTarget.style.borderColor="#fca5a5";}}
+                  onMouseLeave={e=>{e.currentTarget.style.background="#fff1f2";e.currentTarget.style.borderColor="#fecaca";}}>
+                  ✕
+                </button>
               </div>
             ))}
           </div>
@@ -1104,8 +1157,8 @@ export default function App() {
           </div>
         )}
 
-        {/* Simulation panel button */}
-        {Object.keys(csvStore).length > 0 && (
+        {/* Simulation panel button — always shown so user can add the panel even without data */}
+        {true && (
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
             <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Simulação</p>
             <button
@@ -1129,13 +1182,22 @@ export default function App() {
             </button>
             <div style={{marginTop:10,padding:"8px 10px",borderRadius:8,background:"#f8fafc",border:"1px solid #f1f5f9"}}>
               <div style={{fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:500}}>Taxa de Aprovação</div>
-              <div style={{fontSize:22,fontWeight:800,color:simResult.approvalRate>=70?"#16a34a":simResult.approvalRate>=40?"#d97706":"#dc2626"}}>
-                {simResult.approvalRate.toFixed(1)}%
-              </div>
-              {simResult.totalQty>0&&(
-                <div style={{fontSize:10.5,color:"#94a3b8",marginTop:2}}>
-                  ✅ {fmtQty(simResult.approvedQty)} · ❌ {fmtQty(simResult.rejectedQty)} · Total {fmtQty(simResult.totalQty)}
-                </div>
+              {simResult.totalQty > 0 ? (
+                <>
+                  <div style={{fontSize:22,fontWeight:800,color:simResult.approvalRate>=70?"#16a34a":simResult.approvalRate>=40?"#d97706":"#dc2626"}}>
+                    {simResult.approvalRate.toFixed(1)}%
+                  </div>
+                  <div style={{fontSize:10.5,color:"#94a3b8",marginTop:2}}>
+                    ✅ {fmtQty(simResult.approvedQty)} · ❌ {fmtQty(simResult.rejectedQty)} · Total {fmtQty(simResult.totalQty)}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{fontSize:22,fontWeight:800,color:"#cbd5e1"}}>0%</div>
+                  <div style={{fontSize:10.5,color:"#cbd5e1",marginTop:2}}>
+                    {Object.keys(csvStore).length===0?"Sem dados carregados":"Monte o fluxo para simular"}
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -1180,6 +1242,57 @@ export default function App() {
             <button onClick={()=>setImportError(null)}
               style={{alignSelf:"flex-end",padding:"9px 22px",borderRadius:9,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
               Entendido
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════ EXPORT MODAL ═══════════════ */}
+      {exportModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:480,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:20}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div>
+                <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:4}}>Exportar Fluxo</h2>
+                <p style={{fontSize:12.5,color:"#64748b"}}>Escolha o que incluir na exportação</p>
+              </div>
+              <button onClick={()=>setExportModal(false)} style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+            </div>
+
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {/* Option 1: Flow only */}
+              <button onClick={()=>doExport(false)}
+                style={{display:"flex",alignItems:"flex-start",gap:14,padding:"16px 18px",borderRadius:12,border:"1.5px solid #e0e7ff",background:"#f5f3ff",cursor:"pointer",textAlign:"left",fontFamily:"inherit",transition:"all .15s"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="#818cf8";e.currentTarget.style.background="#ede9fe";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="#e0e7ff";e.currentTarget.style.background="#f5f3ff";}}>
+                <div style={{width:38,height:38,borderRadius:10,background:"#ede9fe",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>📋</div>
+                <div>
+                  <div style={{fontSize:13.5,fontWeight:700,color:"#4f46e5",marginBottom:3}}>Somente a Política</div>
+                  <div style={{fontSize:12,color:"#6b7280",lineHeight:1.5}}>Exporta estrutura, nós, conexões, regras e posicionamento visual. Nenhum dado do CSV é incluído.</div>
+                </div>
+              </button>
+
+              {/* Option 2: Flow + dataset */}
+              <button onClick={()=>doExport(true)}
+                disabled={Object.keys(csvStore).length===0}
+                style={{display:"flex",alignItems:"flex-start",gap:14,padding:"16px 18px",borderRadius:12,border:`1.5px solid ${Object.keys(csvStore).length===0?"#e2e8f0":"#c7d2fe"}`,background:Object.keys(csvStore).length===0?"#f8fafc":"#eef2ff",cursor:Object.keys(csvStore).length===0?"not-allowed":"pointer",textAlign:"left",fontFamily:"inherit",opacity:Object.keys(csvStore).length===0?0.55:1,transition:"all .15s"}}
+                onMouseEnter={e=>{if(Object.keys(csvStore).length>0){e.currentTarget.style.borderColor="#818cf8";e.currentTarget.style.background="#e0e7ff";}}}
+                onMouseLeave={e=>{if(Object.keys(csvStore).length>0){e.currentTarget.style.borderColor="#c7d2fe";e.currentTarget.style.background="#eef2ff";}}}>
+                <div style={{width:38,height:38,borderRadius:10,background:Object.keys(csvStore).length===0?"#f1f5f9":"#e0e7ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>📦</div>
+                <div>
+                  <div style={{fontSize:13.5,fontWeight:700,color:Object.keys(csvStore).length===0?"#94a3b8":"#3730a3",marginBottom:3}}>Política + Dataset</div>
+                  <div style={{fontSize:12,color:"#6b7280",lineHeight:1.5}}>
+                    {Object.keys(csvStore).length===0
+                      ? "Nenhum dataset carregado no momento."
+                      : "Exporta a política completa junto com os dados do CSV carregado e metadados de relacionamento."}
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            <button onClick={()=>setExportModal(false)}
+              style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+              Cancelar
             </button>
           </div>
         </div>
