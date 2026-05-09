@@ -35,9 +35,12 @@ const TOOLS  = [
 ];
 
 const COL_TYPES = [
-  { value:"id",       icon:"🔑", label:"ID"      },
-  { value:"decision", icon:"🔀", label:"Decisão" },
-  { value:"qty",      icon:"📊", label:"Qtd"     },
+  { value:"id",           icon:"🔑", label:"ID",               shortLabel:"ID"       },
+  { value:"decision",     icon:"🔀", label:"Filtro",           shortLabel:"Filtro"   },
+  { value:"qty",          icon:"📊", label:"Vol. Propostas",   shortLabel:"Vol."     },
+  { value:"qtdAltas",     icon:"📈", label:"Qtd Altas/Vendas", shortLabel:"Altas"    },
+  { value:"inadReal",     icon:"⚠️", label:"Inad. Real",       shortLabel:"Inad.R"   },
+  { value:"inadInferida", icon:"🎯", label:"Inad. Inferida",   shortLabel:"Inad.I"   },
 ];
 
 const DELIMITERS = [
@@ -87,6 +90,7 @@ function parseCSV(text, delimiter, hasHeader) {
 const tDist = (t) => { const dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY; return Math.sqrt(dx*dx+dy*dy); };
 const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
 const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
+const fmtPct = (v) => v === null ? "N/A" : `${(v * 100).toFixed(2)}%`;
 const normalizeColName = (s) => (s || "").toLowerCase().replace(/[\s_\-\.]+/g, "").trim();
 
 function sortDomain(values) {
@@ -191,10 +195,17 @@ function runSimulation(shapes, conns, csvStore) {
   }
 
   let totalQty = 0, approvedQty = 0, rejectedQty = 0;
+  let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0;
   for (const [csvId, csv] of Object.entries(csvStore)) {
-    const qtyColName = Object.entries(csv.columnTypes || {}).find(([,t]) => t === 'qty')?.[0];
-    const qtyIdx = qtyColName ? csv.headers.indexOf(qtyColName) : -1;
-    // Find root decision nodes for this CSV (decision nodes by csvId, cineminha by rowVar/colVar csvId)
+    const types = csv.columnTypes || {};
+    const colIdx = (type) => {
+      const col = Object.entries(types).find(([,t]) => t === type)?.[0];
+      return col ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx         = colIdx('qty');
+    const qtdAltasIdx    = colIdx('qtdAltas');
+    const inadRealIdx    = colIdx('inadReal');
+    const inadInferidaIdx= colIdx('inadInferida');
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
@@ -206,11 +217,21 @@ function runSimulation(shapes, conns, csvStore) {
       const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
       totalQty += qty;
       const res = traverseRow(row, csv.headers, rootId);
-      if (res === 'approved') approvedQty += qty;
-      else if (res === 'rejected') rejectedQty += qty;
+      if (res === 'approved') {
+        approvedQty += qty;
+        if (qtdAltasIdx    >= 0) qtdAltasSum     += parseFloat(row[qtdAltasIdx])     || 0;
+        if (inadRealIdx    >= 0) inadRealSum      += parseFloat(row[inadRealIdx])     || 0;
+        if (inadInferidaIdx>= 0) inadInferidaSum  += parseFloat(row[inadInferidaIdx]) || 0;
+      } else if (res === 'rejected') rejectedQty += qty;
     }
   }
-  return {totalQty, approvedQty, rejectedQty, approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0};
+  const inadReal     = qtdAltasSum > 0    ? inadRealSum / qtdAltasSum   : null;
+  const inadInferida = approvedQty  > 0   ? inadInferidaSum / approvedQty : null;
+  return {
+    totalQty, approvedQty, rejectedQty,
+    approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
+    inadReal, inadInferida,
+  };
 }
 
 // ── App ──────────────────────────────────────────────────────────────────────
@@ -560,7 +581,7 @@ export default function App() {
     setShapes(p=>{
       const csvNode={id:nodeId,type:"csv",x:cx-CSV_W/2,y:cy-CSV_H/2,w:CSV_W,h:CSV_H,label:filename,csvId,minimized:false};
       const hasPanel=p.some(s=>s.type==="simPanel");
-      const panelNodes=hasPanel?[]:[{id:uid(),type:"simPanel",x:cx+CSV_W/2+50,y:cy-80,w:260,h:190,label:"Simulação",color:"#fff"}];
+      const panelNodes=hasPanel?[]:[{id:uid(),type:"simPanel",x:cx+CSV_W/2+50,y:cy-80,w:260,h:280,label:"Simulação",color:"#fff"}];
 
       // Reconcile orphan decision nodes: nodes whose csvId no longer has a matching store entry
       // We pass the full updated store (prev + new entry) via closure is not possible here,
@@ -1311,6 +1332,11 @@ export default function App() {
     const rateColor=rate>=70?"#16a34a":rate>=40?"#d97706":"#dc2626";
     const barW=Math.max(0,(w-32)*rate/100);
     const hasData=simResult.totalQty>0;
+    const inadRealColor  = simResult.inadReal    === null ? "#94a3b8" : simResult.inadReal    > 0.05 ? "#dc2626" : "#d97706";
+    const inadInfColor   = simResult.inadInferida=== null ? "#94a3b8" : simResult.inadInferida> 0.05 ? "#dc2626" : "#d97706";
+    // Row y positions
+    const hdr = y+46, rateY = y+92, rateLabel = y+110, barY = y+120, statsY = y+148, totalY = y+165;
+    const sep1 = y+180, ind1Y = y+215, ind2Y = y+255;
     return (
       <g key={id} data-sid={id}
         onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)}
@@ -1319,36 +1345,55 @@ export default function App() {
         {/* Frame */}
         <rect x={x} y={y} width={w} height={h} rx={14} fill="#fff" stroke={isSel?"#6366f1":"#c7d2fe"} strokeWidth={isSel?2:1.5}/>
         {/* Header bar */}
-        <rect x={x} y={y} width={w} height={46} rx={14} fill="#6366f1"/>
+        <rect x={x} y={y} width={w} height={hdr-y} rx={14} fill="#6366f1"/>
         <rect x={x} y={y+32} width={w} height={14} fill="#6366f1"/>
         <text x={x+14} y={y+29} fontSize={13} fontWeight="700" fill="#fff"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>📊 Painel de Simulação</text>
-        {/* Rate big number */}
-        <text x={x+w/2} y={y+94} textAnchor="middle" fontSize={38} fontWeight="800" fill={hasData?rateColor:"#cbd5e1"}
+        {/* Approval rate */}
+        <text x={x+w/2} y={rateY} textAnchor="middle" fontSize={38} fontWeight="800" fill={hasData?rateColor:"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
           {hasData?`${rate.toFixed(1)}%`:"—"}
         </text>
-        <text x={x+w/2} y={y+112} textAnchor="middle" fontSize={11} fill="#94a3b8"
+        <text x={x+w/2} y={rateLabel} textAnchor="middle" fontSize={11} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>Taxa de Aprovação</text>
-        {/* Progress bar */}
-        <rect x={x+16} y={y+122} width={w-32} height={8} rx={4} fill="#f1f5f9"/>
-        {hasData&&<rect x={x+16} y={y+122} width={barW} height={8} rx={4} fill={rateColor}/>}
-        {/* Stats */}
-        <text x={x+w/2-56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#16a34a":"#cbd5e1"}
+        <rect x={x+16} y={barY} width={w-32} height={7} rx={3.5} fill="#f1f5f9"/>
+        {hasData&&<rect x={x+16} y={barY} width={barW} height={7} rx={3.5} fill={rateColor}/>}
+        <text x={x+w/2-52} y={statsY} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#16a34a":"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
           ✅ {hasData?fmtQty(simResult.approvedQty):"0"}
         </text>
-        <text x={x+w/2} y={y+150} textAnchor="middle" fontSize={11} fill="#cbd5e1"
+        <text x={x+w/2} y={statsY} textAnchor="middle" fontSize={11} fill="#cbd5e1"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>/</text>
-        <text x={x+w/2+56} y={y+150} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#dc2626":"#cbd5e1"}
+        <text x={x+w/2+52} y={statsY} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#dc2626":"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
           ❌ {hasData?fmtQty(simResult.rejectedQty):"0"}
         </text>
-        {/* Total / status message */}
-        <text x={x+w/2} y={y+170} textAnchor="middle" fontSize={10} fill="#94a3b8"
+        <text x={x+w/2} y={totalY} textAnchor="middle" fontSize={10} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
           {hasData?`Total: ${fmtQty(simResult.totalQty)} registros`:"Sem dados carregados"}
         </text>
+        {/* Divider */}
+        <line x1={x+16} y1={sep1} x2={x+w-16} y2={sep1} stroke="#f1f5f9" strokeWidth={1}/>
+        {/* Inad. Real */}
+        <rect x={x+12} y={sep1+8} width={w-24} height={36} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
+        <text x={x+24} y={sep1+22} fontSize={10} fill="#94a3b8"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⚠️ Inadimplência Real</text>
+        <text x={x+w-24} y={sep1+22} textAnchor="end" fontSize={12} fontWeight="700" fill={inadRealColor}
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+          {hasData ? fmtPct(simResult.inadReal) : "—"}
+        </text>
+        <text x={x+24} y={sep1+36} fontSize={9} fill="#cbd5e1"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Real / ∑ Altas aprovadas</text>
+        {/* Inad. Inferida */}
+        <rect x={x+12} y={sep1+52} width={w-24} height={36} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
+        <text x={x+24} y={sep1+66} fontSize={10} fill="#94a3b8"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>🎯 Inadimplência Inferida</text>
+        <text x={x+w-24} y={sep1+66} textAnchor="end" fontSize={12} fontWeight="700" fill={inadInfColor}
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+          {hasData ? fmtPct(simResult.inadInferida) : "—"}
+        </text>
+        <text x={x+24} y={sep1+80} fontSize={9} fill="#cbd5e1"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Inferida / Vol. Aprovado</text>
       </g>
     );
   };
@@ -1685,7 +1730,7 @@ export default function App() {
                 if (shapes.some(s=>s.type==="simPanel")) return;
                 const svgEl=svgRef.current;
                 const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
-                setShapes(p=>[...p,{id:uid(),type:"simPanel",x:cx-130,y:cy-95,w:260,h:190,label:"Simulação",color:"#fff"}]);
+                setShapes(p=>[...p,{id:uid(),type:"simPanel",x:cx-130,y:cy-95,w:260,h:280,label:"Simulação",color:"#fff"}]);
               }}
               disabled={shapes.some(s=>s.type==="simPanel")}
               style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"10px 14px",borderRadius:10,
@@ -1699,25 +1744,48 @@ export default function App() {
               <span style={{fontSize:16}}>📊</span>
               {shapes.some(s=>s.type==="simPanel")?"Painel ativo no canvas":"Adicionar Painel"}
             </button>
-            <div style={{marginTop:10,padding:"8px 10px",borderRadius:8,background:"#f8fafc",border:"1px solid #f1f5f9"}}>
-              <div style={{fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:500}}>Taxa de Aprovação</div>
-              {simResult.totalQty > 0 ? (
-                <>
-                  <div style={{fontSize:22,fontWeight:800,color:simResult.approvalRate>=70?"#16a34a":simResult.approvalRate>=40?"#d97706":"#dc2626"}}>
-                    {simResult.approvalRate.toFixed(1)}%
-                  </div>
-                  <div style={{fontSize:10.5,color:"#94a3b8",marginTop:2}}>
-                    ✅ {fmtQty(simResult.approvedQty)} · ❌ {fmtQty(simResult.rejectedQty)} · Total {fmtQty(simResult.totalQty)}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div style={{fontSize:22,fontWeight:800,color:"#cbd5e1"}}>0%</div>
-                  <div style={{fontSize:10.5,color:"#cbd5e1",marginTop:2}}>
-                    {Object.keys(csvStore).length===0?"Sem dados carregados":"Monte o fluxo para simular"}
-                  </div>
-                </>
-              )}
+            <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6}}>
+              {/* Taxa de Aprovação */}
+              <div style={{padding:"8px 10px",borderRadius:8,background:"#f8fafc",border:"1px solid #f1f5f9"}}>
+                <div style={{fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:500}}>📊 Taxa de Aprovação</div>
+                {simResult.totalQty > 0 ? (
+                  <>
+                    <div style={{fontSize:22,fontWeight:800,color:simResult.approvalRate>=70?"#16a34a":simResult.approvalRate>=40?"#d97706":"#dc2626"}}>
+                      {simResult.approvalRate.toFixed(1)}%
+                    </div>
+                    <div style={{fontSize:10.5,color:"#94a3b8",marginTop:2}}>
+                      ✅ {fmtQty(simResult.approvedQty)} · ❌ {fmtQty(simResult.rejectedQty)} · Total {fmtQty(simResult.totalQty)}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{fontSize:22,fontWeight:800,color:"#cbd5e1"}}>—</div>
+                    <div style={{fontSize:10.5,color:"#cbd5e1",marginTop:2}}>
+                      {Object.keys(csvStore).length===0?"Sem dados carregados":"Monte o fluxo para simular"}
+                    </div>
+                  </>
+                )}
+              </div>
+              {/* Inadimplência Real */}
+              <div style={{padding:"7px 10px",borderRadius:8,background:"#fafafa",border:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:10,color:"#94a3b8",fontWeight:500}}>⚠️ Inad. Real</div>
+                  <div style={{fontSize:9,color:"#cbd5e1",marginTop:1}}>∑ Inad.Real / ∑ Altas</div>
+                </div>
+                <div style={{fontSize:15,fontWeight:800,color:simResult.inadReal===null?"#cbd5e1":simResult.inadReal>0.05?"#dc2626":"#d97706"}}>
+                  {simResult.totalQty>0 ? fmtPct(simResult.inadReal) : "—"}
+                </div>
+              </div>
+              {/* Inadimplência Inferida */}
+              <div style={{padding:"7px 10px",borderRadius:8,background:"#fafafa",border:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:10,color:"#94a3b8",fontWeight:500}}>🎯 Inad. Inferida</div>
+                  <div style={{fontSize:9,color:"#cbd5e1",marginTop:1}}>∑ Inad.Inf / Vol. Aprov.</div>
+                </div>
+                <div style={{fontSize:15,fontWeight:800,color:simResult.inadInferida===null?"#cbd5e1":simResult.inadInferida>0.05?"#dc2626":"#d97706"}}>
+                  {simResult.totalQty>0 ? fmtPct(simResult.inadInferida) : "—"}
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -1862,7 +1930,7 @@ export default function App() {
       {/* ═══════════════ IMPORT WIZARD MODAL ═══════════════ */}
       {wizard && (
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)"}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?780:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
 
             {/* Wizard header */}
             <div style={{padding:"22px 28px 18px",borderBottom:"1px solid #f1f5f9"}}>
@@ -1939,44 +2007,50 @@ export default function App() {
                   <p style={{fontSize:13,color:"#475569",marginBottom:16,lineHeight:1.6}}>
                     Classifique cada coluna para habilitar o simulador de crédito.
                   </p>
+                  {/* Fixed-layout table for perfect alignment */}
                   <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
-                    {/* Header row */}
-                    <div style={{display:"flex",alignItems:"center",padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>
-                      <span style={{flex:1,fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Coluna</span>
-                      <div style={{display:"flex",gap:6}}>
-                        {COL_TYPES.map(ct=>(
-                          <span key={ct.value} style={{width:86,textAlign:"center",fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>{ct.icon} {ct.label}</span>
-                        ))}
-                      </div>
-                    </div>
-                    {(wizardPreview?.headers||[]).map((colName,i)=>(
-                      <div key={i} style={{display:"flex",alignItems:"center",padding:"10px 14px",borderBottom:i<(wizardPreview.headers.length-1)?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
-                        <span style={{flex:1,fontSize:13,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:180}}>{colName}</span>
-                        <div style={{display:"flex",gap:6}}>
-                          {COL_TYPES.map(ct=>{
-                            const isSelected=wizard.columnTypes[colName]===ct.value;
-                            return (
-                              <label key={ct.value} style={{width:86,display:"flex",justifyContent:"center",cursor:"pointer"}}>
-                                <input type="radio" name={`col-${i}`} value={ct.value}
-                                  checked={isSelected}
-                                  onChange={()=>setWizard(w=>({...w,columnTypes:{...w.columnTypes,[colName]:ct.value}}))}
-                                  style={{display:"none"}}/>
-                                <div style={{width:22,height:22,borderRadius:6,
-                                  border:`2px solid ${isSelected?"#3b82f6":"#e2e8f0"}`,
-                                  background:isSelected?"#3b82f6":"#fff",
-                                  display:"flex",alignItems:"center",justifyContent:"center",
-                                  transition:"all .12s"}}>
-                                  {isSelected&&<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-                                </div>
-                              </label>
-                            );
-                          })}
+                    {/* Header — sticky */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 68px)",alignItems:"center",padding:"8px 14px",background:"#f8fafc",borderBottom:"2px solid #e2e8f0",position:"sticky",top:0,zIndex:1}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Coluna</span>
+                      {COL_TYPES.map(ct=>(
+                        <div key={ct.value} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                          <span style={{fontSize:13}}>{ct.icon}</span>
+                          <span style={{fontSize:9.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.3,textAlign:"center",lineHeight:1.2}}>{ct.shortLabel}</span>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
+                    {/* Scrollable rows */}
+                    <div style={{maxHeight:340,overflowY:"auto",overflowX:"hidden"}}>
+                      {(wizardPreview?.headers||[]).map((colName,i)=>{
+                        const selected = wizard.columnTypes[colName];
+                        return (
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 68px)",alignItems:"center",padding:"9px 14px",borderBottom:i<(wizardPreview.headers.length-1)?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                            <span style={{fontSize:13,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",paddingRight:8}} title={colName}>{colName}</span>
+                            {COL_TYPES.map(ct=>{
+                              const isSelected = selected === ct.value;
+                              return (
+                                <label key={ct.value} style={{display:"flex",justifyContent:"center",cursor:"pointer"}}>
+                                  <input type="radio" name={`col-${i}`} value={ct.value}
+                                    checked={isSelected}
+                                    onChange={()=>setWizard(w=>({...w,columnTypes:{...w.columnTypes,[colName]:ct.value}}))}
+                                    style={{display:"none"}}/>
+                                  <div style={{width:22,height:22,borderRadius:6,
+                                    border:`2px solid ${isSelected?"#3b82f6":"#e2e8f0"}`,
+                                    background:isSelected?"#3b82f6":"#fff",
+                                    display:"flex",alignItems:"center",justifyContent:"center",
+                                    transition:"all .12s",flexShrink:0}}>
+                                    {isSelected&&<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                                  </div>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                   <p style={{fontSize:11,color:"#94a3b8",marginTop:10,lineHeight:1.6}}>
-                    As colunas marcadas como <strong>Decisão</strong> estarão disponíveis para arrastar ao canvas.
+                    Colunas <strong>Filtro</strong> ficam disponíveis no canvas · <strong>Vol. Propostas</strong>, <strong>Qtd Altas</strong> e indicadores de inadimplência alimentam o painel analítico.
                   </p>
                 </>
               )}
