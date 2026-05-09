@@ -189,6 +189,8 @@ export default function App() {
   const [editConn,   setEditConn]   = useState(null);   // {id, val} — edição de label de conexão
   const [panelDrag,  setPanelDrag]  = useState(null);   // {col, csvId} — drag em andamento
   const [ghostPos,   setGhostPos]   = useState(null);   // {x, y} — posição do ghost element
+  const [importError,setImportError]= useState(null);   // string | null — erro de importação de fluxo
+  const [importWarn, setImportWarn] = useState(null);   // string | null — aviso pós-importação
 
   // ── Refs ──────────────────────────────────────────────────────
   const svgRef        = useRef(null);
@@ -209,6 +211,7 @@ export default function App() {
   const activeCellR = useRef(activeCell); useEffect(()=>{activeCellR.current=activeCell},[activeCell]);
   const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
+  const flowImportRef = useRef(null);
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
@@ -434,6 +437,82 @@ export default function App() {
     setShapes(p=>p.filter(s=>!removeIds.includes(s.id)));
     setConns(p=>p.filter(c=>!removeIds.includes(c.from)&&!removeIds.includes(c.to)));
     setSel(null); setPalette(false);
+  };
+
+  // ── exportFlow ────────────────────────────────────────────
+  const exportFlow = () => {
+    const payload = {
+      schemaVersion: "1.0",
+      generatedAt: new Date().toISOString(),
+      flowId: uid(),
+      viewport: vp,
+      shapes,
+      conns,
+      csvStore,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `fluxo_credito_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ── validateAndImportFlow ─────────────────────────────────
+  const validateAndImportFlow = (data) => {
+    // Schema integrity
+    if (!data.schemaVersion || !Array.isArray(data.shapes) || !Array.isArray(data.conns)) {
+      setImportError("Arquivo inválido: estrutura do fluxo não reconhecida. Verifique se é um arquivo exportado por este sistema.");
+      return;
+    }
+    // Connection integrity
+    const shapeIds = new Set(data.shapes.map(s => s.id));
+    const badConns = data.conns.filter(c => !shapeIds.has(c.from) || !shapeIds.has(c.to));
+    if (badConns.length > 0) {
+      setImportError(`Integridade comprometida: ${badConns.length} conexão(ões) referenciam elementos inexistentes.`);
+      return;
+    }
+    // Bump _id counter to avoid ID collisions with new elements
+    const allIds = [...data.shapes.map(s => s.id), ...data.conns.map(c => c.id)];
+    const maxNum = Math.max(0, ...allIds.map(id => parseInt(id.replace(/\D/g,''))).filter(n => !isNaN(n)));
+    if (maxNum >= _id) _id = maxNum + 1;
+    // Detect missing variables (decision nodes whose column doesn't exist in the stored CSV)
+    const importedCsvStore = data.csvStore || {};
+    const missingVars = data.shapes
+      .filter(s => s.type === 'decision' && s.csvId && s.variableCol)
+      .filter(s => {
+        const csv = importedCsvStore[s.csvId];
+        return !csv || !csv.headers.includes(s.variableCol);
+      })
+      .map(s => s.variableCol);
+    // Restore state
+    setShapes(data.shapes);
+    setConns(data.conns);
+    setCsvStore(importedCsvStore);
+    if (data.viewport) setVp(data.viewport);
+    setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
+    setImportError(null);
+    if (missingVars.length > 0) {
+      setImportWarn(`Fluxo importado. Variáveis ausentes na base: ${[...new Set(missingVars)].join(", ")}. Importe um CSV compatível para reativar a simulação.`);
+    } else {
+      setImportWarn(null);
+    }
+  };
+
+  const onFlowFileChange = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        validateAndImportFlow(data);
+      } catch {
+        setImportError("Arquivo inválido: não foi possível ler o JSON. Verifique se o arquivo não está corrompido.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
   };
 
   // ── createDecisionNode ────────────────────────────────────────
@@ -962,6 +1041,32 @@ export default function App() {
           <input ref={fileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onFileChange}/>
         </div>
 
+        {/* Exportar / Importar Fluxo */}
+        <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
+          <p style={{fontSize:11,color:"#94a3b8",marginBottom:10,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Fluxo</p>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <button onClick={exportFlow}
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #a5b4fc",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#818cf8";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#a5b4fc";}}>
+              <span style={{fontSize:16}}>⬇</span> Exportar Fluxo
+            </button>
+            <button onClick={()=>flowImportRef.current?.click()}
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px dashed #a5b4fc",background:"#fafafa",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor="#6366f1";e.currentTarget.style.background="#eef2ff";}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor="#a5b4fc";e.currentTarget.style.background="#fafafa";}}>
+              <span style={{fontSize:16}}>⬆</span> Importar Fluxo
+            </button>
+            <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
+          </div>
+          {importWarn&&(
+            <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#fffbeb",border:"1px solid #fde68a",fontSize:11,color:"#92400e",lineHeight:1.5,display:"flex",gap:6,alignItems:"flex-start"}}>
+              <span style={{flexShrink:0}}>⚠</span>
+              <span>{importWarn}</span>
+            </div>
+          )}
+        </div>
+
         {/* Loaded CSVs list */}
         {Object.keys(csvStore).length > 0 && (
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
@@ -1058,6 +1163,25 @@ export default function App() {
           pointerEvents:"none",zIndex:2000,boxShadow:"0 4px 16px rgba(0,0,0,.15)",
           display:"flex",alignItems:"center",gap:6}}>
           ◇ {panelDrag.col}
+        </div>
+      )}
+
+      {/* ═══════════════ IMPORT FLOW ERROR MODAL ═══════════ */}
+      {importError&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:440,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:40,height:40,borderRadius:12,background:"#fee2e2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⚠</div>
+              <div>
+                <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>Erro ao Importar Fluxo</h3>
+                <p style={{fontSize:12.5,color:"#64748b",lineHeight:1.5}}>{importError}</p>
+              </div>
+            </div>
+            <button onClick={()=>setImportError(null)}
+              style={{alignSelf:"flex-end",padding:"9px 22px",borderRadius:9,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
+              Entendido
+            </button>
+          </div>
         </div>
       )}
 
