@@ -298,6 +298,60 @@ function runSimulation(shapes, conns, csvStore) {
   };
 }
 
+// ── SimIndicators — right panel simulation card ───────────────────────────────
+function SimIndicators({ simResult, csvStore }) {
+  const hasData = simResult.totalQty > 0;
+  const rate = hasData ? simResult.approvalRate : null;
+  const rateColor = rate === null ? "#cbd5e1" : rate >= 70 ? "#16a34a" : rate >= 40 ? "#d97706" : "#dc2626";
+  const irV = simResult.inadReal;
+  const irColor = irV === null ? "#94a3b8" : irV > 0.05 ? "#dc2626" : "#d97706";
+  const irBg = irV === null ? "#fafafa" : irV > 0.05 ? "#fff1f2" : "#fffbeb";
+  const irBorder = irV === null ? "#f1f5f9" : irV > 0.05 ? "#fecaca" : "#fde68a";
+  const iiV = simResult.inadInferida;
+  const iiColor = iiV === null ? "#94a3b8" : iiV > 0.05 ? "#dc2626" : "#d97706";
+  const iiBg = iiV === null ? "#fafafa" : iiV > 0.05 ? "#fff1f2" : "#fffbeb";
+  const iiBorder = iiV === null ? "#f1f5f9" : iiV > 0.05 ? "#fecaca" : "#fde68a";
+  return (
+    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6}}>
+      <div style={{borderRadius:10,background:hasData?"#f0fdf4":"#f8fafc",border:"1.5px solid "+(hasData?"#bbf7d0":"#f1f5f9"),overflow:"hidden"}}>
+        <div style={{padding:"10px 12px 8px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:hasData?6:0}}>
+            <span style={{fontSize:11,color:"#64748b",fontWeight:600}}>Taxa de Aprovacao</span>
+            <span style={{fontSize:20,fontWeight:800,color:rateColor}}>{hasData ? rate.toFixed(1)+"%" : "N/A"}</span>
+          </div>
+          {hasData && (
+            <div>
+              <div style={{height:6,borderRadius:3,background:"#e2e8f0",overflow:"hidden",marginBottom:5}}>
+                <div style={{height:"100%",width:rate+"%",borderRadius:3,background:rateColor}}/>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10.5,color:"#64748b"}}>
+                <span>Aprov: {fmtQty(simResult.approvedQty)}</span>
+                <span>Repr: {fmtQty(simResult.rejectedQty)}</span>
+              </div>
+              <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>Total: {fmtQty(simResult.totalQty)}</div>
+            </div>
+          )}
+          {!hasData && <div style={{fontSize:10.5,color:"#cbd5e1"}}>{Object.keys(csvStore).length===0?"Sem dados":"Monte o fluxo"}</div>}
+        </div>
+      </div>
+      <div style={{borderRadius:10,background:irBg,border:"1.5px solid "+irBorder,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontSize:11,color:"#64748b",fontWeight:600}}>Inad. Real</div>
+          <div style={{fontSize:9.5,color:"#94a3b8"}}>Inad.Real / Altas aprov.</div>
+        </div>
+        <div style={{fontSize:16,fontWeight:800,color:irColor}}>{hasData ? fmtPct(irV) : "N/A"}</div>
+      </div>
+      <div style={{borderRadius:10,background:iiBg,border:"1.5px solid "+iiBorder,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontSize:11,color:"#64748b",fontWeight:600}}>Inad. Inferida</div>
+          <div style={{fontSize:9.5,color:"#94a3b8"}}>Inad.Inf / Vol. aprov.</div>
+        </div>
+        <div style={{fontSize:16,fontWeight:800,color:iiColor}}>{hasData ? fmtPct(iiV) : "N/A"}</div>
+      </div>
+    </div>
+  );
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [shapes, setShapes] = useState([
@@ -336,7 +390,11 @@ export default function App() {
   const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
   // Feature: analytics
   const [hoveredConn,       setHoveredConn]       = useState(null);
+  const [hoveredConnPos,    setHoveredConnPos]    = useState(null); // {x,y} screen coords
   const [enableDynThickness,setEnableDynThickness] = useState(false);
+  const [showEdgeVol,       setShowEdgeVol]        = useState(true);
+  const [showEdgeInadReal,  setShowEdgeInadReal]   = useState(true);
+  const [showEdgeInadInf,   setShowEdgeInadInf]    = useState(true);
   // Feature: tooltips
   const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
   const tooltipTimer = useRef(null);
@@ -1036,9 +1094,11 @@ export default function App() {
       const t2 = (es.qty - edgeQtyScale.mn) / (edgeQtyScale.mx - edgeQtyScale.mn);
       strokeW = 1.5 + t2 * 2.5;
     }
-    const analyticsLabel = es
-      ? `${fmtQty(es.qty)} | ${fmtPct(es.inadReal)} | ${fmtPct(es.inadInferida)}`
-      : null;
+    const analyticsLabel = es ? [
+      showEdgeVol     && fmtQty(es.qty),
+      showEdgeInadReal && fmtPct(es.inadReal),
+      showEdgeInadInf  && fmtPct(es.inadInferida),
+    ].filter(Boolean).join(" · ") || null : null;
 
     // Hover card position in screen coords
     const isHovered = hoveredConn === conn.id;
@@ -1048,8 +1108,9 @@ export default function App() {
     return (
       <g key={conn.id}>
         <path d={d} fill="none" stroke="transparent" strokeWidth={18} style={{cursor:"pointer"}}
-          onMouseEnter={()=>setHoveredConn(conn.id)}
-          onMouseLeave={()=>setHoveredConn(null)}
+          onMouseEnter={e=>{setHoveredConn(conn.id);setHoveredConnPos({x:e.clientX+12,y:e.clientY-20});}}
+          onMouseMove={e=>{setHoveredConnPos({x:e.clientX+12,y:e.clientY-20});}}
+          onMouseLeave={()=>{setHoveredConn(null);setHoveredConnPos(null);}}
           onClick={e=>{e.stopPropagation();connClickTimer.current=setTimeout(()=>{setConns(p=>p.filter(c=>c.id!==conn.id));},220);}}
           onDoubleClick={e=>{e.stopPropagation();clearTimeout(connClickTimer.current);setEditConn({id:conn.id,val:conn.label||""});}}/>
         <path d={d} fill="none" stroke={strokeColor} strokeWidth={strokeW} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
@@ -1063,28 +1124,13 @@ export default function App() {
           </>
         )}
         {analyticsLabel&&(
-          <text x={lx} y={ly+(labelText?14:4)} textAnchor="middle"
-            fontSize={9} fontFamily="'DM Sans',system-ui,sans-serif" fill="#64748b"
-            style={{pointerEvents:"none",userSelect:"none"}}>{analyticsLabel}</text>
-        )}
-        {isHovered&&es&&(
-          <foreignObject x={lx+10/vp.s} y={ly-80/vp.s} width={160/vp.s} height={200/vp.s} style={{pointerEvents:"none",overflow:"visible"}}>
-            <div xmlns="http://www.w3.org/1999/xhtml" style={{
-              background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,padding:10,
-              boxShadow:"0 4px 16px rgba(0,0,0,.12)",fontSize:`${11/vp.s}px`,
-              fontFamily:"'DM Sans',system-ui,sans-serif",color:"#1e293b",lineHeight:1.6,
-              pointerEvents:"none",width:`${160/vp.s}px`,whiteSpace:"nowrap"
-            }}>
-              <div><strong>Vol. de Propostas:</strong> {fmtQty(es.qty)}</div>
-              <div><strong>Vol. Aprovado:</strong> {fmtQty(es.approvedQty)}</div>
-              <div><strong>Vol. Reprovado:</strong> {fmtQty(es.rejectedQty)}</div>
-              <div><strong>Taxa de Aprovação:</strong> {fmtPct(es.approvalRate)}</div>
-              <div><strong>Inad. Real:</strong> {fmtPct(es.inadReal)}</div>
-              <div><strong>Inad. Inferida:</strong> {fmtPct(es.inadInferida)}</div>
-              <div><strong>Qtd Altas/Vendas:</strong> {fmtQty(es.qtdAltas)}</div>
-              {simResult.totalQty>0&&<div><strong>Part. no fluxo:</strong> {((es.qty/simResult.totalQty)*100).toFixed(1)}%</div>}
-            </div>
-          </foreignObject>
+          <>
+            <rect x={lx - analyticsLabel.length * 3.2} y={ly+(labelText?10:-3)} width={analyticsLabel.length*6.4} height={14} rx={4}
+              fill="rgba(255,255,255,0.92)" stroke="#e2e8f0" strokeWidth={0.8} style={{pointerEvents:"none"}}/>
+            <text x={lx} y={ly+(labelText?20:7)} textAnchor="middle"
+              fontSize={9} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill="#475569"
+              style={{pointerEvents:"none",userSelect:"none"}}>{analyticsLabel}</text>
+          </>
         )}
       </g>
     );
@@ -1321,16 +1367,11 @@ export default function App() {
         {/* Title text */}
         <text x={x+12} y={y+24} fontSize={11} fontWeight="700" fill="#fff"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",16)}</text>
-        {/* Minimize btn */}
-        <g onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:true}:s));}} style={{cursor:"pointer"}}>
-          <rect x={x+w-28} y={y+8} width={22} height={22} rx={6} fill="rgba(255,255,255,.2)"/>
-          <text x={x+w-17} y={y+23} fontSize={14} textAnchor="middle" fill="#fff">−</text>
-        </g>
 
         {/* Variable labels */}
-        {rowVar&&<text x={x+w-12} y={y+16} textAnchor="end" fontSize={9} fill="#c7d2fe"
+        {rowVar&&<text x={x+w-40} y={y+16} textAnchor="end" fontSize={9} fill="#c7d2fe"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>L: {trunc(rowVar.col,12)}</text>}
-        {colVar&&<text x={x+w-12} y={y+28} textAnchor="end" fontSize={9} fill="#c7d2fe"
+        {colVar&&<text x={x+w-40} y={y+28} textAnchor="end" fontSize={9} fill="#c7d2fe"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>C: {trunc(colVar.col,12)}</text>}
 
         {/* Interactive matrix via foreignObject */}
@@ -1407,11 +1448,16 @@ export default function App() {
           </div>
         </foreignObject>
 
-        {/* Invisible pointer overlay for title bar clicks */}
-        <rect data-sid={id} x={x} y={y} width={w} height={CINEMA_TITLE_H}
+        {/* Invisible pointer overlay for title bar clicks — excludes minimize btn area */}
+        <rect data-sid={id} x={x} y={y} width={w-34} height={CINEMA_TITLE_H}
           fill="transparent" stroke="none"
           onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
           style={{cursor:"grab"}}/>
+        {/* Minimize btn — rendered above overlay */}
+        <g onMouseDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:true}:s));}} style={{cursor:"pointer"}}>
+          <rect x={x+w-30} y={y+7} width={24} height={24} rx={6} fill="rgba(255,255,255,.2)"/>
+          <text x={x+w-18} y={y+23} fontSize={15} textAnchor="middle" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>−</text>
+        </g>
 
         {hasErr&&<>
           <circle cx={x+w} cy={y} r={9} fill="#dc2626" style={{pointerEvents:"none"}}/>
@@ -1829,7 +1875,13 @@ export default function App() {
         {/* Inline label editor — shapes */}
         {edit&&editShape&&(()=>{
           const ex=editShape.x*vp.s+vp.x,ey=editShape.y*vp.s+vp.y,ew=editShape.w*vp.s,eh=editShape.h*vp.s;
-          return <input autoFocus value={edit.val} onChange={e=>setEdit(p=>({...p,val:e.target.value}))} onBlur={commitEdit} onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")commitEdit();}} style={{position:"absolute",left:ex+ew/2,top:ey+eh/2,transform:"translate(-50%,-50%)",width:ew*0.8,background:"transparent",border:"none",outline:"none",textAlign:"center",fontSize:Math.max(11,12*vp.s),fontFamily:"'DM Sans',system-ui,sans-serif",fontWeight:500,color:"#1e293b",zIndex:500}}/>;
+          const isCinema = editShape.type==="cineminha";
+          const iTop = isCinema ? ey + CINEMA_TITLE_H*vp.s/2 : ey+eh/2;
+          const iLeft = isCinema ? ex + ew/2 - (ew*0.5)/2 : ex+ew/2;
+          const iW = isCinema ? ew*0.5 : ew*0.8;
+          const iBg = isCinema ? "rgba(99,102,241,0.9)" : "transparent";
+          const iColor = isCinema ? "#fff" : "#1e293b";
+          return <input autoFocus value={edit.val} onChange={e=>setEdit(p=>({...p,val:e.target.value}))} onBlur={commitEdit} onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")commitEdit();}} style={{position:"absolute",left:iLeft,top:iTop,transform:"translate(-50%,-50%)",width:iW,background:iBg,border:"none",outline:"none",textAlign:"center",fontSize:Math.max(11,12*vp.s),fontFamily:"'DM Sans',system-ui,sans-serif",fontWeight:isCinema?700:500,color:iColor,zIndex:500,borderRadius:isCinema?6:0,padding:isCinema?"2px 6px":0}}/>;
         })()}
         {/* Tooltip */}
         {tooltip&&(
@@ -1859,6 +1911,31 @@ export default function App() {
               width:90,background:"#fff",border:"1.5px solid #3b82f6",borderRadius:6,
               outline:"none",textAlign:"center",fontSize:11,
               fontFamily:"'DM Sans',system-ui,sans-serif",color:"#475569",padding:"3px 8px",zIndex:500}}/>;
+        })()}
+
+        {/* ═══ Edge hover card (above all SVG content) ═══ */}
+        {hoveredConn&&hoveredConnPos&&(()=>{
+          const conn=conns.find(c=>c.id===hoveredConn);
+          const es=conn&&simResult.edgeStats?.[conn.id];
+          if(!es) return null;
+          return (
+            <div style={{position:"fixed",left:hoveredConnPos.x,top:hoveredConnPos.y,zIndex:4000,pointerEvents:"none",
+              background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,padding:"10px 14px",
+              boxShadow:"0 8px 28px rgba(0,0,0,.14)",fontSize:12,
+              fontFamily:"'DM Sans',system-ui,sans-serif",color:"#1e293b",lineHeight:1.8,minWidth:190,whiteSpace:"nowrap"}}>
+              <div style={{fontWeight:700,fontSize:12.5,color:"#1e293b",marginBottom:4,borderBottom:"1px solid #f1f5f9",paddingBottom:4}}>📊 Estatísticas da Aresta</div>
+              <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"1px 10px"}}>
+                <span style={{color:"#94a3b8",fontSize:11}}>Vol. Propostas</span><span style={{fontWeight:600}}>{fmtQty(es.qty)}</span>
+                <span style={{color:"#94a3b8",fontSize:11}}>Vol. Aprovado</span><span style={{fontWeight:600,color:"#16a34a"}}>{fmtQty(es.approvedQty)}</span>
+                <span style={{color:"#94a3b8",fontSize:11}}>Vol. Reprovado</span><span style={{fontWeight:600,color:"#dc2626"}}>{fmtQty(es.rejectedQty)}</span>
+                <span style={{color:"#94a3b8",fontSize:11}}>Taxa de Aprovação</span><span style={{fontWeight:700,color:es.approvalRate>=70?"#16a34a":es.approvalRate>=40?"#d97706":"#dc2626"}}>{fmtPct(es.approvalRate)}</span>
+                <span style={{color:"#94a3b8",fontSize:11}}>Inad. Real</span><span style={{fontWeight:600,color:es.inadReal===null?"#94a3b8":es.inadReal>0.05?"#dc2626":"#d97706"}}>{fmtPct(es.inadReal)}</span>
+                <span style={{color:"#94a3b8",fontSize:11}}>Inad. Inferida</span><span style={{fontWeight:600,color:es.inadInferida===null?"#94a3b8":es.inadInferida>0.05?"#dc2626":"#d97706"}}>{fmtPct(es.inadInferida)}</span>
+                <span style={{color:"#94a3b8",fontSize:11}}>Qtd Altas/Vendas</span><span style={{fontWeight:600}}>{fmtQty(es.qtdAltas)}</span>
+                {simResult.totalQty>0&&<><span style={{color:"#94a3b8",fontSize:11}}>Part. no fluxo</span><span style={{fontWeight:600}}>{((es.qty/simResult.totalQty)*100).toFixed(1)}%</span></>}
+              </div>
+            </div>
+          );
         })()}
       </div>
 
@@ -2008,49 +2085,7 @@ export default function App() {
               <span style={{fontSize:16}}>📊</span>
               {shapes.some(s=>s.type==="simPanel")?"Painel ativo no canvas":"Adicionar Painel"}
             </button>
-            <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6}}>
-              {/* Taxa de Aprovação */}
-              <div style={{padding:"8px 10px",borderRadius:8,background:"#f8fafc",border:"1px solid #f1f5f9"}}>
-                <div style={{fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:500}}>📊 Taxa de Aprovação</div>
-                {simResult.totalQty > 0 ? (
-                  <>
-                    <div style={{fontSize:22,fontWeight:800,color:simResult.approvalRate>=70?"#16a34a":simResult.approvalRate>=40?"#d97706":"#dc2626"}}>
-                      {simResult.approvalRate.toFixed(1)}%
-                    </div>
-                    <div style={{fontSize:10.5,color:"#94a3b8",marginTop:2}}>
-                      ✅ {fmtQty(simResult.approvedQty)} · ❌ {fmtQty(simResult.rejectedQty)} · Total {fmtQty(simResult.totalQty)}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{fontSize:22,fontWeight:800,color:"#cbd5e1"}}>—</div>
-                    <div style={{fontSize:10.5,color:"#cbd5e1",marginTop:2}}>
-                      {Object.keys(csvStore).length===0?"Sem dados carregados":"Monte o fluxo para simular"}
-                    </div>
-                  </>
-                )}
-              </div>
-              {/* Inadimplência Real */}
-              <div style={{padding:"7px 10px",borderRadius:8,background:"#fafafa",border:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div>
-                  <div style={{fontSize:10,color:"#94a3b8",fontWeight:500}}>⚠️ Inad. Real</div>
-                  <div style={{fontSize:9,color:"#cbd5e1",marginTop:1}}>∑ Inad.Real / ∑ Altas</div>
-                </div>
-                <div style={{fontSize:15,fontWeight:800,color:simResult.inadReal===null?"#cbd5e1":simResult.inadReal>0.05?"#dc2626":"#d97706"}}>
-                  {simResult.totalQty>0 ? fmtPct(simResult.inadReal) : "—"}
-                </div>
-              </div>
-              {/* Inadimplência Inferida */}
-              <div style={{padding:"7px 10px",borderRadius:8,background:"#fafafa",border:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div>
-                  <div style={{fontSize:10,color:"#94a3b8",fontWeight:500}}>🎯 Inad. Inferida</div>
-                  <div style={{fontSize:9,color:"#cbd5e1",marginTop:1}}>∑ Inad.Inf / Vol. Aprov.</div>
-                </div>
-                <div style={{fontSize:15,fontWeight:800,color:simResult.inadInferida===null?"#cbd5e1":simResult.inadInferida>0.05?"#dc2626":"#d97706"}}>
-                  {simResult.totalQty>0 ? fmtPct(simResult.inadInferida) : "—"}
-                </div>
-              </div>
-            </div>
+            <SimIndicators simResult={simResult} csvStore={csvStore} />
           </div>
         )}
 
@@ -2063,6 +2098,24 @@ export default function App() {
             Espessura Dinâmica
           </label>
           <div style={{fontSize:10.5,color:"#94a3b8",marginTop:3,marginLeft:23}}>Arestas mais espessas = maior volume</div>
+          <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:5}}>
+            <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:2}}>Indicadores nas Arestas</p>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+              <input type="checkbox" checked={showEdgeVol} onChange={()=>setShowEdgeVol(v=>!v)}
+                style={{width:15,height:15,accentColor:"#6366f1"}}/>
+              📊 Volume de Propostas
+            </label>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+              <input type="checkbox" checked={showEdgeInadReal} onChange={()=>setShowEdgeInadReal(v=>!v)}
+                style={{width:15,height:15,accentColor:"#6366f1"}}/>
+              ⚠️ Inad. Real
+            </label>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+              <input type="checkbox" checked={showEdgeInadInf} onChange={()=>setShowEdgeInadInf(v=>!v)}
+                style={{width:15,height:15,accentColor:"#6366f1"}}/>
+              🎯 Inad. Inferida
+            </label>
+          </div>
         </div>
 
         {/* Empty state */}
