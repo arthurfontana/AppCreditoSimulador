@@ -24,6 +24,7 @@ const COLORS = ["#ffffff","#dbeafe","#fef3c7","#dcfce7","#fce7f3","#e0e7ff","#ff
 const TOOLS  = [
   { id:"hand",      icon:"✋",  label:"Mover"      },
   { id:"select",    icon:"↖",   label:"Selecionar" },
+  { id:"frame",     icon:"⬚",   label:"Frame"      },
   { id:"rect",      icon:"▭",   label:"Retângulo"  },
   { id:"circle",    icon:"◯",   label:"Círculo"    },
   { id:"diamond",   icon:"◇",   label:"Losango"    },
@@ -245,6 +246,9 @@ export default function App() {
   const [importWarn, setImportWarn] = useState(null);   // string | null — aviso pós-importação
   const [exportModal,setExportModal]= useState(false);  // boolean — modal de escolha de exportação
   const [axisModal,  setAxisModal]  = useState(null);   // null | {shapeId, col, csvId}
+  const [varSearch,  setVarSearch]  = useState("");     // filtro de busca no painel
+  const [multiSel,   setMultiSel]   = useState(new Set()); // ids selecionados em grupo
+  const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
 
   // ── Refs ──────────────────────────────────────────────────────
   const svgRef        = useRef(null);
@@ -267,6 +271,8 @@ export default function App() {
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
   const flowImportRef = useRef(null);
   const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
+  const multiSelR     = useRef(multiSel);   useEffect(()=>{multiSelR.current=multiSel},   [multiSel]);
+  const selRectR      = useRef(selRect);    useEffect(()=>{selRectR.current=selRect},      [selRect]);
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
@@ -342,7 +348,7 @@ export default function App() {
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
-      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
+      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
     }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
@@ -363,13 +369,27 @@ export default function App() {
     if (e.button!==0) return;
     movedR.current=false; setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
     const [sx,sy]=svgPt(e.clientX,e.clientY);
-    dragR.current={type:"pan",sx,sy,ox:vp.x,oy:vp.y};
+    if (toolR.current==="select") {
+      // start selection rectangle in world coords
+      const [wx,wy]=toWorld(sx,sy);
+      setMultiSel(new Set());
+      setSelRect(null);
+      dragR.current={type:"selRect",sx,sy,wx,wy};
+    } else {
+      setMultiSel(new Set());
+      dragR.current={type:"pan",sx,sy,ox:vp.x,oy:vp.y};
+    }
   };
   const onCanvasClick = (e) => {
     if (movedR.current) return;
     if (tool==="cineminha") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
       createCinemaNode(wx,wy); return;
+    }
+    if (tool==="frame") {
+      const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy),id=uid();
+      setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);
+      setSel(id); return;
     }
     if (tool!=="hand"&&tool!=="select"&&tool!=="connect") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy),id=uid();
@@ -387,15 +407,23 @@ export default function App() {
     if (tool==="select") {
       if (shape?.type==="csv"&&!shape.minimized) {
         const [sx,sy]=svgPt(e.clientX,e.clientY),[,wy]=toWorld(sx,sy);
-        if (wy>shape.y+CSV_TH) return; // inside table area — don't drag
+        if (wy>shape.y+CSV_TH) return;
       }
       if (shape?.type==="cineminha"&&(shape.rowVar||shape.colVar)) {
         const [sx,sy]=svgPt(e.clientX,e.clientY),[,wy]=toWorld(sx,sy);
-        if (wy>shape.y+CINEMA_TITLE_H) return; // inside matrix area — don't drag
+        if (wy>shape.y+CINEMA_TITLE_H) return;
       }
-      setSel(id); setPalette(false);
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
-      dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y};
+      const ms=multiSelR.current;
+      if (ms.size>1&&ms.has(id)) {
+        // drag entire multi-selection — snapshot positions
+        const snaps={};
+        shapesR.current.forEach(s=>{if(ms.has(s.id)) snaps[s.id]={x:s.x,y:s.y};});
+        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,snapX:wx-shape.x,snapY:wy-shape.y,snaps};
+      } else {
+        setSel(id); setMultiSel(new Set()); setPalette(false);
+        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,snaps:{}};
+      }
     }
   };
   const onShapeClick = (e, id) => {
@@ -424,9 +452,50 @@ export default function App() {
     const [sx,sy]=svgPt(e.clientX,e.clientY),dx=sx-dr.sx,dy=sy-dr.sy;
     if (Math.abs(dx)>3||Math.abs(dy)>3) movedR.current=true;
     if (dr.type==="pan"){const ox=dr.ox,oy=dr.oy;setVp(v=>({...v,x:ox+dx,y:oy+dy}));}
-    else if(dr.type==="shape"){const id=dr.id,offX=dr.offX,offY=dr.offY,[wx,wy]=toWorld(sx,sy);setShapes(p=>p.map(s=>s.id===id?{...s,x:wx-offX,y:wy-offY}:s));}
+    else if(dr.type==="shape"){
+      const id=dr.id,offX=dr.offX,offY=dr.offY,[wx,wy]=toWorld(sx,sy);
+      const ms=multiSelR.current;
+      if (ms.size>1&&ms.has(id)) {
+        // move all selected shapes preserving relative positions
+        const deltX=wx-offX-dr.snapX, deltY=wy-offY-dr.snapY;
+        setShapes(p=>p.map(s=>{
+          const snap=dr.snaps[s.id]; if(!snap) return s;
+          return {...s,x:snap.x+deltX,y:snap.y+deltY};
+        }));
+      } else {
+        setShapes(p=>p.map(s=>s.id===id?{...s,x:wx-offX,y:wy-offY}:s));
+      }
+    }
+    else if(dr.type==="selRect"){
+      const [wx,wy]=toWorld(sx,sy);
+      const rect={x1:dr.wx,y1:dr.wy,x2:wx,y2:wy};
+      setSelRect(rect);
+      // Highlight intersecting shapes
+      const rx1=Math.min(rect.x1,rect.x2),ry1=Math.min(rect.y1,rect.y2);
+      const rx2=Math.max(rect.x1,rect.x2),ry2=Math.max(rect.y1,rect.y2);
+      const hit=new Set(shapesR.current.filter(s=>s.type!=="frame"&&s.x<rx2&&s.x+s.w>rx1&&s.y<ry2&&s.y+s.h>ry1).map(s=>s.id));
+      setMultiSel(hit);
+    }
+    else if(dr.type==="resize"){
+      const {id,dir,sx:dsx,sy:dsy,ix,iy,iw,ih}=dr;
+      const ddx=(sx-dsx)/vpR.current.s, ddy=(sy-dsy)/vpR.current.s;
+      const MIN=80;
+      setShapes(p=>p.map(s=>{
+        if(s.id!==id) return s;
+        let {x:nx,y:ny,w:nw,h:nh}={x:ix,y:iy,w:iw,h:ih};
+        if(dir.includes("e")) nw=Math.max(MIN,iw+ddx);
+        if(dir.includes("s")) nh=Math.max(MIN,ih+ddy);
+        if(dir.includes("w")){nw=Math.max(MIN,iw-ddx);nx=ix+iw-nw;}
+        if(dir.includes("n")){nh=Math.max(MIN,ih-ddy);ny=iy+ih-nh;}
+        return {...s,x:nx,y:ny,w:nw,h:nh};
+      }));
+    }
   };
-  const onMouseUp = () => { dragR.current=null; };
+  const onMouseUp = () => {
+    const dr=dragR.current;
+    if(dr?.type==="selRect") setSelRect(null);
+    dragR.current=null;
+  };
 
   // ── Keyboard ──────────────────────────────────────────────────
   useEffect(()=>{
@@ -795,17 +864,40 @@ export default function App() {
   // ── Wizard preview ────────────────────────────────────────────
   const wizardPreview = wizard ? parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader) : null;
 
-  // ── Render: connection ─────────────────────────────────────────
+  // ── Render: connection (adaptive routing) ─────────────────────
   const renderConn = (conn) => {
     const from=shapes.find(s=>s.id===conn.from), to=shapes.find(s=>s.id===conn.to);
     if (!from||!to) return null;
-    const [fx,fy]=ctr(from),[tx,ty]=ctr(to),dx=tx-fx,dy=ty-fy,len=Math.sqrt(dx*dx+dy*dy)||1;
-    const so=Math.max(from.w,from.h)/2+4, eo=Math.max(to.w,to.h)/2+10;
-    const sx=fx+(dx/len)*so,sy=fy+(dy/len)*so,ex=tx-(dx/len)*eo,ey=ty-(dy/len)*eo;
-    const mx=(sx+ex)/2,my=(sy+ey)/2,cv=Math.min(40,len*0.15);
-    const cpx=mx+(-dy/len)*cv, cpy=my+(dx/len)*cv;
-    const lx=0.25*sx+0.5*cpx+0.25*ex, ly=0.25*sy+0.5*cpy+0.25*ey;
-    const d=`M ${sx} ${sy} Q ${cpx} ${cpy} ${ex} ${ey}`;
+    const [fx,fy]=ctr(from), [tx,ty]=ctr(to);
+    const dx=tx-fx, dy=ty-fy;
+    const adx=Math.abs(dx), ady=Math.abs(dy);
+    const dist=Math.sqrt(dx*dx+dy*dy)||1;
+    const hl=Math.min(dist*0.45, 140);
+
+    // Choose exit/entry edges based on dominant direction
+    let sx,sy,ex,ey,c1x,c1y,c2x,c2y;
+    if (adx >= ady) {
+      // Horizontal dominant
+      if (dx>0) { sx=from.x+from.w; sy=fy; ex=to.x;       ey=ty; }
+      else       { sx=from.x;       sy=fy; ex=to.x+to.w;   ey=ty; }
+      c1x=sx+(dx>0?hl:-hl); c1y=sy;
+      c2x=ex+(dx>0?-hl:hl); c2y=ey;
+    } else {
+      // Vertical dominant
+      if (dy>0) { sx=fx; sy=from.y+from.h; ex=tx; ey=to.y;       }
+      else       { sx=fx; sy=from.y;        ex=tx; ey=to.y+to.h;   }
+      c1x=sx; c1y=sy+(dy>0?hl:-hl);
+      c2x=ex; c2y=ey+(dy>0?-hl:hl);
+    }
+
+    // Trim end point back so arrowhead sits on the edge
+    const edx=ex-c2x, edy=ey-c2y, elen=Math.sqrt(edx*edx+edy*edy)||1;
+    const aex=ex-(edx/elen)*10, aey=ey-(edy/elen)*10;
+
+    const d=`M ${sx} ${sy} C ${c1x} ${c1y} ${c2x} ${c2y} ${aex} ${aey}`;
+    // Label at cubic bezier midpoint (t=0.5)
+    const lx=0.125*sx+0.375*c1x+0.375*c2x+0.125*aex;
+    const ly=0.125*sy+0.375*c1y+0.375*c2y+0.125*aey;
     const labelText=conn.label?trunc(conn.label,12):null;
     return (
       <g key={conn.id}>
@@ -1129,14 +1221,15 @@ export default function App() {
 
   // ── Render: regular shape ─────────────────────────────────────
   const renderShape = (shape) => {
+    if (shape.type==="frame")     return null; // rendered separately in lower layer
     if (shape.type==="csv")       return renderCSVNode(shape);
     if (shape.type==="simPanel")  return renderSimPanel(shape);
     if (shape.type==="cineminha") return renderCinemaNode(shape);
     const {id,type,x,y,w,h,label,color}=shape;
-    const isSel=sel===id, isFrom=fromId===id;
+    const isSel=sel===id, isFrom=fromId===id, isMulti=multiSel.has(id)&&!isSel;
     const hasErr=!!flowErrors[id];
-    const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#94a3b8";
-    const sw=isSel||isFrom?2:hasErr?2.5:1.5;
+    const stroke=isFrom?"#f59e0b":(isSel||isMulti)?"#3b82f6":hasErr?"#dc2626":"#94a3b8";
+    const sw=(isSel||isFrom||isMulti)?2:hasErr?2.5:1.5;
     const fill=color||"#fff";
     const flt=hasErr?"drop-shadow(0 0 6px rgba(220,38,38,.5))":
                isSel?"drop-shadow(0 0 0 2px rgba(59,130,246,.25)) drop-shadow(0 2px 8px rgba(59,130,246,.18))":
@@ -1260,6 +1353,59 @@ export default function App() {
     );
   };
 
+  // ── Render: Frame (visual grouping container) ─────────────────
+  const RESIZE_DIRS = ["nw","n","ne","e","se","s","sw","w"];
+  const resizeCursor = (dir) => ({nw:"nw-resize",n:"n-resize",ne:"ne-resize",e:"e-resize",se:"se-resize",s:"s-resize",sw:"sw-resize",w:"w-resize"}[dir]||"default");
+
+  const onFrameResizeDown = (e, id, dir) => {
+    e.stopPropagation(); if (e.button!==0) return;
+    movedR.current=false;
+    const shape=shapesR.current.find(s=>s.id===id); if (!shape) return;
+    const [sx,sy]=svgPt(e.clientX,e.clientY);
+    dragR.current={type:"resize",id,dir,sx,sy,ix:shape.x,iy:shape.y,iw:shape.w,ih:shape.h};
+  };
+
+  const renderFrame = (shape) => {
+    const {id,x,y,w,h,label,color}=shape;
+    const isSel=sel===id;
+    const isMulti=multiSel.has(id);
+    const stroke=isSel||isMulti?"#3b82f6":"#94a3b8";
+    const sw=isSel||isMulti?2:1.5;
+    const fill=color||"rgba(219,234,254,0.25)";
+    const TITLE_H=28;
+    const resizeHandles=[
+      [x,y,"nw"],[x+w/2,y,"n"],[x+w,y,"ne"],
+      [x+w,y+h/2,"e"],[x+w,y+h,"se"],[x+w/2,y+h,"s"],
+      [x,y+h,"sw"],[x,y+h/2,"w"],
+    ];
+    return (
+      <g key={id} data-sid={id}>
+        {/* Body */}
+        <rect data-sid={id} x={x} y={y} width={w} height={h} rx={10}
+          fill={fill} stroke={stroke} strokeWidth={sw} strokeDasharray={isSel?"none":"8 4"}
+          onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
+          style={{cursor:tool==="select"?"grab":"default"}}/>
+        {/* Title strip */}
+        <rect x={x} y={y} width={w} height={TITLE_H} rx={10}
+          fill="rgba(148,163,184,0.18)" style={{pointerEvents:"none"}}/>
+        <rect x={x} y={y+TITLE_H-6} width={w} height={6}
+          fill="rgba(148,163,184,0.18)" style={{pointerEvents:"none"}}/>
+        {/* Title text */}
+        <text x={x+12} y={y+18} fontSize={12} fontWeight="600" fill="#475569"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+          {label||"Frame"}
+        </text>
+        {/* Resize handles (only when selected) */}
+        {isSel && resizeHandles.map(([hx,hy,dir])=>(
+          <rect key={dir} x={hx-5} y={hy-5} width={10} height={10} rx={3}
+            fill="#3b82f6" stroke="#fff" strokeWidth={1.5}
+            style={{cursor:resizeCursor(dir)}}
+            onMouseDown={e=>onFrameResizeDown(e,id,dir)}/>
+        ))}
+      </g>
+    );
+  };
+
   // ── Edit & helpers ────────────────────────────────────────────
   const editShape=edit?shapes.find(s=>s.id===edit.id):null;
   const commitEdit=()=>{if(!edit)return;setShapes(p=>p.map(s=>s.id===edit.id?{...s,label:edit.val}:s));setEdit(null);};
@@ -1368,8 +1514,18 @@ export default function App() {
           </defs>
           <rect width="100%" height="100%" fill="url(#pg)"/>
           <g transform={`translate(${vp.x},${vp.y}) scale(${vp.s})`}>
+            {/* Frames render below everything else */}
+            {shapes.filter(s=>s.type==="frame").map(renderFrame)}
             {conns.map(renderConn)}
             {shapes.map(renderShape)}
+            {/* Selection rectangle */}
+            {selRect&&(()=>{
+              const rx=Math.min(selRect.x1,selRect.x2), ry=Math.min(selRect.y1,selRect.y2);
+              const rw=Math.abs(selRect.x2-selRect.x1), rh=Math.abs(selRect.y2-selRect.y1);
+              return <rect x={rx} y={ry} width={rw} height={rh} rx={4}
+                fill="rgba(59,130,246,0.08)" stroke="#3b82f6" strokeWidth={1.5}
+                strokeDasharray="5 3" style={{pointerEvents:"none"}}/>;
+            })()}
           </g>
         </svg>
 
@@ -1399,11 +1555,14 @@ export default function App() {
 
       {/* ═══════════════ RIGHT PANEL ═══════════════ */}
       <div style={{width:272,flexShrink:0,background:"#fff",borderLeft:"1px solid #e2e8f0",display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        {/* Header */}
-        <div style={{padding:"16px 18px 14px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",gap:8}}>
+        {/* Header — fixed */}
+        <div style={{padding:"16px 18px 14px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
           <div style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",boxShadow:"0 0 0 3px #dbeafe"}}/>
           <span style={{fontSize:13,fontWeight:600,color:"#1e293b",letterSpacing:.1}}>Painel</span>
         </div>
+
+        {/* Scrollable content area */}
+        <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column"}}>
 
         {/* Importar CSV button */}
         <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
@@ -1472,19 +1631,48 @@ export default function App() {
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
             <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Variáveis de Decisão</p>
             <p style={{fontSize:10.5,color:"#cbd5e1",marginBottom:8,lineHeight:1.5}}>Arraste para o canvas → losango, ou sobre um ⊞ Cineminha → matriz cruzada</p>
-            {decisionVars.map(({col,csvId})=>(
-              <div key={`${csvId}-${col}`}
-                onMouseDown={(e)=>startPanelDrag(e,col,csvId)}
-                style={{display:"flex",alignItems:"center",gap:6,padding:"7px 10px",borderRadius:8,
-                  border:"1.5px solid #fde68a",background:"#fef9c3",marginBottom:4,
-                  cursor:"grab",userSelect:"none",fontSize:12,fontWeight:500,color:"#92400e",transition:"all .12s"}}
-                onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
-                onMouseLeave={e=>{e.currentTarget.style.background="#fef9c3";e.currentTarget.style.borderColor="#fde68a";}}>
-                <span>◇</span>
-                <span style={{flex:1}}>{col}</span>
-                <span style={{fontSize:14,opacity:.5}}>⠿</span>
-              </div>
-            ))}
+            {/* Search box */}
+            <div style={{position:"relative",marginBottom:8}}>
+              <span style={{position:"absolute",left:9,top:"50%",transform:"translateY(-50%)",fontSize:13,pointerEvents:"none",color:"#94a3b8"}}>🔍</span>
+              <input
+                type="text"
+                value={varSearch}
+                onChange={e=>setVarSearch(e.target.value)}
+                placeholder="Buscar variável..."
+                style={{width:"100%",padding:"6px 10px 6px 30px",borderRadius:8,border:"1.5px solid #e2e8f0",
+                  background:"#f8fafc",fontSize:12,color:"#1e293b",fontFamily:"inherit",outline:"none",
+                  boxSizing:"border-box",transition:"border-color .15s"}}
+                onFocus={e=>e.target.style.borderColor="#3b82f6"}
+                onBlur={e=>e.target.style.borderColor="#e2e8f0"}
+              />
+              {varSearch&&(
+                <button onClick={()=>setVarSearch("")}
+                  style={{position:"absolute",right:7,top:"50%",transform:"translateY(-50%)",
+                    background:"none",border:"none",cursor:"pointer",fontSize:13,color:"#94a3b8",lineHeight:1,padding:0}}>✕</button>
+              )}
+            </div>
+            {(()=>{
+              const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase();
+              const q = norm(varSearch);
+              const filtered = q ? decisionVars.filter(({col})=>norm(col).includes(q)) : decisionVars;
+              return filtered.length>0 ? filtered.map(({col,csvId})=>(
+                <div key={`${csvId}-${col}`}
+                  onMouseDown={(e)=>startPanelDrag(e,col,csvId)}
+                  style={{display:"flex",alignItems:"center",gap:6,padding:"7px 10px",borderRadius:8,
+                    border:"1.5px solid #fde68a",background:"#fef9c3",marginBottom:4,
+                    cursor:"grab",userSelect:"none",fontSize:12,fontWeight:500,color:"#92400e",transition:"all .12s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
+                  onMouseLeave={e=>{e.currentTarget.style.background="#fef9c3";e.currentTarget.style.borderColor="#fde68a";}}>
+                  <span>◇</span>
+                  <span style={{flex:1}}>{col}</span>
+                  <span style={{fontSize:14,opacity:.5}}>⠿</span>
+                </div>
+              )) : (
+                <div style={{padding:"8px 4px",fontSize:11.5,color:"#94a3b8",textAlign:"center"}}>
+                  Nenhuma variável encontrada
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -1546,6 +1734,8 @@ export default function App() {
             </p>
           </div>
         )}
+
+        </div>{/* end scrollable area */}
       </div>
 
       {/* ═══════════════ GHOST ELEMENT (panel drag) ═══════════════ */}
