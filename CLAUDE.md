@@ -1,22 +1,32 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~1650 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~2050 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
 ## O que é
-Whiteboard interativo + simulador de regras de crédito. O usuário carrega um CSV sumarizado, classifica colunas, arrasta variáveis de decisão para o canvas como losangos ou matrizes cruzadas (Cineminha) e monta um fluxo de política de crédito.
+Whiteboard interativo + simulador de regras de crédito. O usuário carrega um CSV sumarizado, classifica colunas, arrasta variáveis de decisão para o canvas como losangos ou matrizes cruzadas (Cineminha) e monta um fluxo de política de crédito. O painel de simulação exibe taxa de aprovação e indicadores de inadimplência em tempo real.
 
 ## Estrutura de dados (src/App.jsx)
 
 ### Estado principal
 - `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`, `cineminha`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
-- `csvStore`: `{[csvId]: {name, headers, rows, columnTypes: {[colName]: 'id'|'decision'|'qty'}}}`
+- `csvStore`: `{[csvId]: {name, headers, rows, columnTypes: {[colName]: 'id'|'decision'|'qty'|'qtdAltas'|'inadReal'|'inadInferida'}}}`
 - `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
+
+### Tipos de coluna (`COL_TYPES`)
+| value          | icon | label              | uso                                              |
+|----------------|------|--------------------|--------------------------------------------------|
+| `id`           | 🔑   | ID                 | Identificador do registro                        |
+| `decision`     | 🔀   | Filtro             | Variável de decisão arrastável ao canvas         |
+| `qty`          | 📊   | Vol. Propostas     | Volume total de propostas do agrupamento         |
+| `qtdAltas`     | 📈   | Qtd Altas/Vendas   | Volume convertido em vendas/ativações            |
+| `inadReal`     | ⚠️   | Inad. Real         | Inadimplência histórica observada                |
+| `inadInferida` | 🎯   | Inad. Inferida     | Inadimplência estimada para aprovados            |
 
 ### Shape: `cineminha`
 ```js
@@ -43,21 +53,25 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
+- `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real e Inad. Inferida
 
 ### Helpers globais (fora do componente)
 - `sortDomain(values)`: ordena domínio — numérico crescente ou A-Z (locale pt-BR)
 - `computeCinemaSize(rowDomain, colDomain)`: calcula `{w, h}` do nó a partir dos domínios (caps: 540×420)
+- `fmtQty(n)`: formata número como inteiro, `k` ou `M`
+- `fmtPct(v)`: formata ratio como `"XX.XX%"` ou `"N/A"` quando `v === null`
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
 
 ## Fluxo do simulador
 1. Importar CSV → Passo 1 (delimitador) → Passo 2 (classificar colunas)
-2. Variáveis de decisão aparecem como chips arrastáveis no painel direito
+2. Colunas **Filtro** aparecem como chips arrastáveis no painel direito
 3. Arrastar chip para área vazia do canvas → losango com ports automáticos (até 10 valores)
 4. Arrastar chip sobre um ⊞ Cineminha → modal "Linha ou Coluna?" → matriz cruzada
 5. Conectar ports a outros nós ou a ✅ Aprovado / ❌ Reprovado
 6. Duplo-clique em seta → editar label
+7. Painel de simulação atualiza Taxa de Aprovação, Inad. Real e Inad. Inferida em tempo real
 
 ## Constantes do Cineminha
 ```js
@@ -73,7 +87,25 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
 - `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
+- Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
+- Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
+  - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
+  - `inadInferida = ∑ inadInferida / approvedQty` (null se approvedQty = 0)
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
+## Wizard de importação (Passo 2)
+- Modal alarga para 780px no passo 2 para acomodar 6 colunas de tipo
+- Layout em CSS `grid` com `gridTemplateColumns: "1fr repeat(6, 68px)"` — alinhamento perfeito entre header e linhas
+- Header sticky; lista de colunas com scroll interno (`maxHeight: 340px`)
+- Header exibe ícone + label curto (`shortLabel`) de cada tipo
+
+## Painel de Simulação (`simPanel`)
+- Tamanho padrão: `w: 260, h: 280`
+- Exibe três indicadores:
+  1. **Taxa de Aprovação** — número grande + barra de progresso + contadores ✅/❌
+  2. **Inad. Real** — `∑ Inad.Real / ∑ Altas aprovadas`; cor vermelha > 5%, laranja ≤ 5%, cinza = N/A
+  3. **Inad. Inferida** — `∑ Inad.Inferida / Vol. Aprovado`; mesma escala de cor
+- Sidebar direita espelha os três indicadores com recalculo reativo
+
 ## Branch de desenvolvimento
-`claude/add-decision-matrix-p49MR` — PR #7
+`claude/add-delinquency-indicators-LP1ht`
