@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2540 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~2600 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -57,6 +57,9 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
 - `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real e Inad. Inferida
+
+### Componentes globais (fora do componente principal)
+- `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
 
 ### Helpers globais (fora do componente)
 - `sortDomain(values)`: ordena domínio — numérico crescente ou A-Z (locale pt-BR)
@@ -157,9 +160,32 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 `applyOptimResult(shapeId, proposedCells)` — sobrescreve `cells` do Cineminha via `setShapes` e fecha o modal. Não-destrutivo: nenhuma alteração no canvas até o clique em "Aplicar".
 
 ### Roadmap futuro (não implementado)
+
 - Flag `ordinal` por coluna de decisão (wizard passo 2) + restrição de corte monotônico no algoritmo Pareto (escada Young diagram) para variáveis como ratings R1–R20
 - Sliders adicionais: margem, rentabilidade
 - Fronteira Pareto multi-dimensional
 
+## Indicador de Versão/Build (`BuildBadge`)
+
+### Localização
+Header do painel direito — ao lado do título "Painel".
+
+### Constantes injetadas pelo Vite (`vite.config.js`)
+| Constante | Fonte | Exemplo |
+|---|---|---|
+| `__BUILD_NUMBER__` | `git rev-list --count HEAD` | `"48"` |
+| `__BUILD_TIME__` | `new Date().toISOString()` no momento do build | `"2026-05-11T12:07:37Z"` |
+| `__BUILD_HASH__` | `git rev-parse --short HEAD` | `"5f5124f"` |
+| `__BUILD_BRANCH__` | `git rev-parse --abbrev-ref HEAD` | `"main"` |
+| `__BUILD_AUTHOR__` | `git log -1 --format="%an"` | `"arthurfontana"` |
+
+- Em `dev` (`vite`), as constantes não são definidas — o componente usa `"dev"` e `new Date()` como fallback.
+- O número incrementa automaticamente a cada novo commit + build, sem manutenção manual.
+
+### Comportamento visual
+- Badge cinza padrão: `#48 · 11/05 12:07`
+- Badge verde quando build < 5 min (sinaliza deploy recente)
+- Tooltip hover: número, data/hora completa, hash, branch, autor
+
 ## Branch de desenvolvimento
-`claude/recommendation-engine-design-oxwV6`
+`claude/add-version-indicator-Tcb42`
