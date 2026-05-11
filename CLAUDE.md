@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2050 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~2900 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -60,6 +60,29 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `computeCinemaSize(rowDomain, colDomain)`: calcula `{w, h}` do nó a partir dos domínios (caps: 540×420)
 - `fmtQty(n)`: formata número como inteiro, `k` ou `M`
 - `fmtPct(v)`: formata ratio como `"XX.XX%"` ou `"N/A"` quando `v === null`
+- `computeCellMetrics(shape, csvStore)`: agrega métricas por célula `{qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}`
+- `buildParetoFrontier(cellMetrics)`: constrói fronteira Pareto ordenada por `inadInferida` crescente; cada ponto representa um estado possível da política
+- `extractScenarios(frontier)`: retorna 4 pontos nomeados — `conservador` (primeiro), `balanceado` (meio entre conservador e elbow), `melhorEficiencia` (elbow = máxima distância da reta), `expansao` (último/máximo volume)
+
+### Estado: `optimModal`
+```js
+null | {
+  shapeId,           // id do Cineminha sendo otimizado
+  cellMetrics,       // { [cellKey]: { qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida } }
+  frontier,          // array de pontos Pareto ordenados por inadInferida crescente
+  scenarios,         // { conservador, balanceado, melhorEficiencia, expansao }
+  activeCard,        // 'conservador'|'balanceado'|'melhorEficiencia'|'expansao'|'personalizado'
+  proposedCells,     // estado sendo editado no modal (inicia = shape.cells atual)
+  sliderApprovalIdx, // índice na frontier (snap discreto — cada passo = 1 casela)
+  sliderInadReal,    // teto de inad. real (ceiling continuous)
+  sliderInadInf,     // teto de inad. inferida (ceiling continuous)
+  maxInadReal,       // máximo observado nas células
+  maxInadInf,        // máximo observado nas células
+  matrixZoom,        // escala da matriz no modal (0.4–4)
+  matrixPanX,        // deslocamento X do pan
+  matrixPanY,        // deslocamento Y do pan
+}
+```
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
@@ -107,5 +130,36 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
   3. **Inad. Inferida** — `∑ Inad.Inferida / Vol. Aprovado`; mesma escala de cor
 - Sidebar direita espelha os três indicadores com recalculo reativo
 
+## Modal "Otimizar Decisão" (`optimModal`)
+
+Abre ao selecionar um Cineminha e clicar em **⚙ Otimizar Decisão**.
+
+### Layout
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Header: título + botão fechar                               │
+├─────────────────────────────────────────────────────────────┤
+│ 5 cards horizontais clicáveis (faixa superior)              │
+│  🛡 Conservador │ ⚖ Balanceado │ ✦ Melhor Efic. │ 🚀 Expansão │ 🎛 Personalizado │
+├──────────────┬──────────────────────────────────────────────┤
+│ Painel esq.  │ Área central: Matriz com zoom/pan            │
+│  Sliders     │  scroll = zoom (0.4×–4×)                     │
+│  · Aprovação │  arrastar = pan (via document listeners)     │
+│  · Inad.Real │  clique na célula = alternar elegibilidade   │
+│  · Inad.Inf. │  botões +/−/⌂ para controle de zoom         │
+│  Stats atual │                                              │
+├─────────────────────────────────────────────────────────────┤
+│ Footer: Cancelar  ·  resumo de aprovação  ·  Aplicar        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Comportamento
+- **Estado inicial**: `proposedCells` copiado do `shape.cells` atual; card "Personalizado" ativo
+- **Slider de Aprovação**: índice discreto na frontier (`min=0, max=frontier.length-1, step=1`); cada passo abre/fecha exatamente uma casela real ordenada por `inadInferida`
+- **Sliders de Inad.**: teto contínuo — encontra o melhor ponto da frontier onde `inad ≤ val`
+- **Card "Personalizado"**: recalculado dinamicamente a partir de `proposedCells` a cada render
+- **Clicar em card**: aplica `pt.cells` ao `proposedCells` e sincroniza sliders
+- **Botão Aplicar**: chama `applyOptimResult(shapeId, proposedCells)` — atualiza `shape.cells` e fecha modal
+
 ## Branch de desenvolvimento
-`claude/add-delinquency-indicators-LP1ht`
+`claude/enhance-cineminha-decision-TCsdu`
