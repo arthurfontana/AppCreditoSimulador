@@ -895,6 +895,57 @@ export default function App() {
     dragR.current=null;
   };
 
+  // ── History (Undo / Redo) ────────────────────────────────────
+  const pushHistory = useCallback(() => {
+    const snap = { shapes: shapesR.current, conns: connsR.current };
+    setUndoStack(prev => [...prev.slice(-49), snap]);
+    setRedoStack([]);
+  }, []); // eslint-disable-line
+
+  const undo = useCallback(() => {
+    const stack = undoStackR.current;
+    if (stack.length === 0) return;
+    const snap = stack[stack.length - 1];
+    const cur = { shapes: shapesR.current, conns: connsR.current };
+    setRedoStack(prev => [...prev.slice(-49), cur]);
+    setUndoStack(prev => prev.slice(0, -1));
+    setShapes(snap.shapes);
+    setConns(snap.conns);
+    setSel(null); setMultiSel(new Set());
+  }, []); // eslint-disable-line
+
+  const redo = useCallback(() => {
+    const stack = redoStackR.current;
+    if (stack.length === 0) return;
+    const snap = stack[stack.length - 1];
+    const cur = { shapes: shapesR.current, conns: connsR.current };
+    setUndoStack(prev => [...prev.slice(-49), cur]);
+    setRedoStack(prev => prev.slice(0, -1));
+    setShapes(snap.shapes);
+    setConns(snap.conns);
+    setSel(null); setMultiSel(new Set());
+  }, []); // eslint-disable-line
+
+  const deleteSelected = useCallback(() => {
+    const ids = multiSelR.current.size > 0 ? [...multiSelR.current] : (selR.current ? [selR.current] : []);
+    if (ids.length === 0) return;
+    pushHistory();
+    const allRemove = new Set(ids);
+    const shapes_ = shapesR.current;
+    const conns_  = connsR.current;
+    for (const id of ids) {
+      const shape = shapes_.find(s=>s.id===id);
+      if (shape?.type==="decision"||shape?.type==="cineminha") {
+        conns_.filter(c=>c.from===id).forEach(c=>{
+          if (shapes_.find(s=>s.id===c.to&&s.type==="port")) allRemove.add(c.to);
+        });
+      }
+    }
+    setShapes(p=>p.filter(s=>!allRemove.has(s.id)));
+    setConns(p=>p.filter(c=>!allRemove.has(c.from)&&!allRemove.has(c.to)));
+    setSel(null); setMultiSel(new Set()); setPalette(false);
+  }, []); // eslint-disable-line
+
   // ── Keyboard ──────────────────────────────────────────────────
   useEffect(()=>{
     const h=(e)=>{
@@ -931,37 +982,6 @@ export default function App() {
   },[undo, redo, deleteSelected]);
 
   const zoomCenter=(f)=>{const r=getBR();doZoom(r.width/2,r.height/2,f);};
-
-  // ── History (Undo / Redo) ────────────────────────────────────
-  const pushHistory = useCallback(() => {
-    const snap = { shapes: shapesR.current, conns: connsR.current };
-    setUndoStack(prev => [...prev.slice(-49), snap]);
-    setRedoStack([]);
-  }, []); // eslint-disable-line
-
-  const undo = useCallback(() => {
-    const stack = undoStackR.current;
-    if (stack.length === 0) return;
-    const snap = stack[stack.length - 1];
-    const cur = { shapes: shapesR.current, conns: connsR.current };
-    setRedoStack(prev => [...prev.slice(-49), cur]);
-    setUndoStack(prev => prev.slice(0, -1));
-    setShapes(snap.shapes);
-    setConns(snap.conns);
-    setSel(null); setMultiSel(new Set());
-  }, []); // eslint-disable-line
-
-  const redo = useCallback(() => {
-    const stack = redoStackR.current;
-    if (stack.length === 0) return;
-    const snap = stack[stack.length - 1];
-    const cur = { shapes: shapesR.current, conns: connsR.current };
-    setUndoStack(prev => [...prev.slice(-49), cur]);
-    setRedoStack(prev => prev.slice(0, -1));
-    setShapes(snap.shapes);
-    setConns(snap.conns);
-    setSel(null); setMultiSel(new Set());
-  }, []); // eslint-disable-line
 
   // ── CSV import ────────────────────────────────────────────────
   const onFileChange = (e) => {
@@ -1117,27 +1137,6 @@ export default function App() {
     setConns(p=>p.filter(c=>!removeIds.includes(c.from)&&!removeIds.includes(c.to)));
     setSel(null); setPalette(false);
   };
-
-  // ── deleteSelected — batch delete of all currently selected shapes ──
-  const deleteSelected = useCallback(() => {
-    const ids = multiSelR.current.size > 0 ? [...multiSelR.current] : (selR.current ? [selR.current] : []);
-    if (ids.length === 0) return;
-    pushHistory();
-    const allRemove = new Set(ids);
-    const shapes_ = shapesR.current;
-    const conns_  = connsR.current;
-    for (const id of ids) {
-      const shape = shapes_.find(s=>s.id===id);
-      if (shape?.type==="decision"||shape?.type==="cineminha") {
-        conns_.filter(c=>c.from===id).forEach(c=>{
-          if (shapes_.find(s=>s.id===c.to&&s.type==="port")) allRemove.add(c.to);
-        });
-      }
-    }
-    setShapes(p=>p.filter(s=>!allRemove.has(s.id)));
-    setConns(p=>p.filter(c=>!allRemove.has(c.from)&&!allRemove.has(c.to)));
-    setSel(null); setMultiSel(new Set()); setPalette(false);
-  }, []); // eslint-disable-line
 
   // ── deleteCsvDataset ──────────────────────────────────────
   const deleteCsvDataset = (csvId) => {
