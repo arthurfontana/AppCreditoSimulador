@@ -50,6 +50,58 @@ const DELIMITERS = [
   { value:"\t", label:"Tabulação"      },
 ];
 
+const VAR_TYPES = [
+  { value:"ordinal",     label:"Ordinal",    icon:"📶" },
+  { value:"categorical", label:"Categórica", icon:"🏷️" },
+];
+
+// Heuristics: infer whether a column is likely ordinal or categorical
+function suggestVarType(colName, values) {
+  const name = (colName || "").toLowerCase();
+  const sample = values.slice(0, 200).map(v => String(v ?? "").trim()).filter(Boolean);
+  if (!sample.length) return "categorical";
+
+  // Name-based clues for ordinal
+  const ordinalNamePat = /score|rating|rank|faixa|bucket|classe|tier|nivel|grau|nota|range|band|r\d|class|categoria\s*\d|grupo\s*\d/i;
+  const nameHintsOrdinal = ordinalNamePat.test(colName);
+
+  // All numeric?
+  const allNum = sample.every(v => !isNaN(parseFloat(v)) && isFinite(Number(v)));
+  if (allNum) return "ordinal";
+
+  // Pattern like R1, R2 … R20 / AA, AB, AC / Score_01 etc.
+  const seqPat = /^([a-zA-Z]{1,3})[\s\-_]?(\d{1,4})$/;
+  const seqMatches = sample.filter(v => seqPat.test(v));
+  if (seqMatches.length > sample.length * 0.7) return "ordinal";
+
+  // Bucket patterns: "0-10", "10-20", ">50", "≤100"
+  const bucketPat = /^\d[\d\s]*[-–]\d|^[<>≤≥]\s*\d/;
+  const bucketMatches = sample.filter(v => bucketPat.test(v));
+  if (bucketMatches.length > sample.length * 0.6) return "ordinal";
+
+  // All values start with same alpha prefix followed by a number
+  const prefixNum = /^([a-zA-Z]{1,4})\d+$/;
+  const prefixMatches = sample.filter(v => prefixNum.test(v));
+  if (prefixMatches.length > sample.length * 0.7) {
+    const prefixes = new Set(prefixMatches.map(v => v.match(prefixNum)[1]));
+    if (prefixes.size <= 3) return "ordinal";
+  }
+
+  // Name-based clue after data checks
+  if (nameHintsOrdinal) return "ordinal";
+
+  // Low cardinality with natural ordering detected by locale sort stability
+  const distinct = [...new Set(sample)];
+  const sorted = sortDomain(distinct);
+  if (distinct.length >= 3 && distinct.length <= 20) {
+    // Check if all values look like they have a natural order (sortDomain produced numeric-ish sequence)
+    const numericLabels = sorted.every(v => !isNaN(parseFloat(v)) && isFinite(Number(v)));
+    if (numericLabels) return "ordinal";
+  }
+
+  return "categorical";
+}
+
 // ── CSV helpers ──────────────────────────────────────────────────────────────
 function detectDelimiter(text) {
   const lines = text.split(/\r?\n/).slice(0, 12).filter(l => l.trim());
@@ -801,7 +853,7 @@ export default function App() {
     reader.onload=(ev)=>{
       const text=ev.target.result;
       const {delimiter,confident}=detectDelimiter(text);
-      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{}});
+      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},editCsvId:null});
     };
     reader.readAsText(file);
     e.target.value="";
@@ -809,15 +861,28 @@ export default function App() {
 
   const onImportConfirm = () => {
     if (!wizard) return;
-    const {rawText,filename,delimiter,hasHeader,columnTypes}=wizard;
+    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,editCsvId}=wizard;
     const {headers,rows}=parseCSV(rawText,delimiter,hasHeader);
+
+    // ── Edit mode: update existing dataset, no new canvas nodes ──
+    if (editCsvId) {
+      const prev = csvStoreR.current[editCsvId];
+      if (!prev) { setWizard(null); return; }
+      setCsvStore(store => ({
+        ...store,
+        [editCsvId]: { ...prev, columnTypes: columnTypes||{}, varTypes: varTypes||{} }
+      }));
+      setWizard(null);
+      return;
+    }
+
     const csvId=uid();
 
     // Build normalized name → original header map for reconciliation
     const normMap = {};
     for (const h of headers) normMap[normalizeColName(h)] = h;
 
-    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers,rows,columnTypes:columnTypes||{}}}));
+    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers,rows,columnTypes:columnTypes||{},varTypes:varTypes||{}}}));
 
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
@@ -891,6 +956,33 @@ export default function App() {
     });
 
     setSel(nodeId); setWizard(null); setImportWarn(null);
+  };
+
+  // ── onEditDataset: reopen wizard step 2 for an existing dataset ──
+  const onEditDataset = (csvId) => {
+    const csv = csvStoreR.current[csvId];
+    if (!csv) return;
+    // Pre-populate suggestions for columns that have no varType yet
+    const varTypes = { ...(csv.varTypes || {}) };
+    for (const h of csv.headers) {
+      if (!varTypes[h]) {
+        const ci = csv.headers.indexOf(h);
+        const vals = csv.rows.map(r => r[ci] ?? '').filter(Boolean);
+        varTypes[h] = suggestVarType(h, vals);
+      }
+    }
+    setWizard({
+      rawText: null,
+      filename: csv.name,
+      delimiter: ",",
+      detected: ",",
+      confident: true,
+      hasHeader: true,
+      step: 2,
+      columnTypes: { ...(csv.columnTypes || {}) },
+      varTypes,
+      editCsvId: csvId,
+    });
   };
 
   // ── deleteShape (com cascade de ports filhos) ─────────────────
@@ -1128,7 +1220,11 @@ export default function App() {
   },[]); // eslint-disable-line
 
   // ── Wizard preview ────────────────────────────────────────────
-  const wizardPreview = wizard ? parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader) : null;
+  const wizardPreview = wizard
+    ? (wizard.editCsvId
+        ? (() => { const csv = csvStore[wizard.editCsvId]; return csv ? {headers: csv.headers, rows: csv.rows} : null; })()
+        : parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader))
+    : null;
 
   // ── Analytics color scale ─────────────────────────────────────
   const edgeColorScale = useMemo(() => {
@@ -2151,12 +2247,20 @@ export default function App() {
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
             <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Arquivos carregados</p>
             {Object.entries(csvStore).map(([cid,csv])=>(
-              <div key={cid} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 8px",borderRadius:8,background:"#f8fafc",marginBottom:4}}>
+              <div key={cid} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 8px",borderRadius:8,background:"#f8fafc",marginBottom:4}}>
                 <span>📊</span>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:12,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{csv.name}</div>
                   <div style={{fontSize:10.5,color:"#94a3b8"}}>{csv.rows.length} linhas · {csv.headers.length} colunas</div>
                 </div>
+                <button
+                  title="Editar configurações do dataset"
+                  onClick={()=>onEditDataset(cid)}
+                  style={{width:22,height:22,borderRadius:6,border:"1px solid #bfdbfe",background:"#eff6ff",color:"#2563eb",cursor:"pointer",fontSize:11,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,lineHeight:1,padding:0,transition:"all .12s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.background="#dbeafe";e.currentTarget.style.borderColor="#93c5fd";}}
+                  onMouseLeave={e=>{e.currentTarget.style.background="#eff6ff";e.currentTarget.style.borderColor="#bfdbfe";}}>
+                  ✏️
+                </button>
                 <button
                   title="Remover dataset"
                   onClick={()=>deleteCsvDataset(cid)}
@@ -2416,20 +2520,22 @@ export default function App() {
       {/* ═══════════════ IMPORT WIZARD MODAL ═══════════════ */}
       {wizard && (
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?780:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?900:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
 
             {/* Wizard header */}
             <div style={{padding:"22px 28px 18px",borderBottom:"1px solid #f1f5f9"}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                 <div>
-                  <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:3}}>Importar CSV</h2>
+                  <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:3}}>{wizard.editCsvId ? "Editar Dataset" : "Importar CSV"}</h2>
                   <p style={{fontSize:12.5,color:"#64748b"}}>{wizard.filename}</p>
-                  {/* Progress indicator */}
-                  <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
-                    <div style={{width:24,height:4,borderRadius:2,background:"#3b82f6"}}/>
-                    <div style={{width:24,height:4,borderRadius:2,background:wizard.step>=2?"#3b82f6":"#e2e8f0"}}/>
-                    <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {wizard.step} de 2</span>
-                  </div>
+                  {/* Progress indicator — hidden in edit mode */}
+                  {!wizard.editCsvId && (
+                    <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
+                      <div style={{width:24,height:4,borderRadius:2,background:"#3b82f6"}}/>
+                      <div style={{width:24,height:4,borderRadius:2,background:wizard.step>=2?"#3b82f6":"#e2e8f0"}}/>
+                      <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {wizard.step} de 2</span>
+                    </div>
+                  )}
                 </div>
                 <button onClick={()=>setWizard(null)} style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
               </div>
@@ -2496,7 +2602,7 @@ export default function App() {
                   {/* Fixed-layout table for perfect alignment */}
                   <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
                     {/* Header — sticky */}
-                    <div style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 68px)",alignItems:"center",padding:"8px 14px",background:"#f8fafc",borderBottom:"2px solid #e2e8f0",position:"sticky",top:0,zIndex:1}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 60px) 100px",alignItems:"center",padding:"8px 14px",background:"#f8fafc",borderBottom:"2px solid #e2e8f0",position:"sticky",top:0,zIndex:1}}>
                       <span style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Coluna</span>
                       {COL_TYPES.map(ct=>(
                         <div key={ct.value} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
@@ -2504,13 +2610,18 @@ export default function App() {
                           <span style={{fontSize:9.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.3,textAlign:"center",lineHeight:1.2}}>{ct.shortLabel}</span>
                         </div>
                       ))}
+                      <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                        <span style={{fontSize:13}}>📶</span>
+                        <span style={{fontSize:9.5,fontWeight:700,color:"#7c3aed",textTransform:"uppercase",letterSpacing:.3,textAlign:"center",lineHeight:1.2}}>Tipo Var.</span>
+                      </div>
                     </div>
                     {/* Scrollable rows */}
                     <div style={{maxHeight:340,overflowY:"auto",overflowX:"hidden"}}>
                       {(wizardPreview?.headers||[]).map((colName,i)=>{
                         const selected = wizard.columnTypes[colName];
+                        const varType = (wizard.varTypes||{})[colName] || "categorical";
                         return (
-                          <div key={i} style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 68px)",alignItems:"center",padding:"9px 14px",borderBottom:i<(wizardPreview.headers.length-1)?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 60px) 100px",alignItems:"center",padding:"9px 14px",borderBottom:i<(wizardPreview.headers.length-1)?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
                             <span style={{fontSize:13,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",paddingRight:8}} title={colName}>{colName}</span>
                             {COL_TYPES.map(ct=>{
                               const isSelected = selected === ct.value;
@@ -2530,13 +2641,24 @@ export default function App() {
                                 </label>
                               );
                             })}
+                            {/* Variable type selector */}
+                            <div style={{display:"flex",justifyContent:"center"}}>
+                              <select
+                                value={varType}
+                                onChange={e=>setWizard(w=>({...w,varTypes:{...(w.varTypes||{}),[colName]:e.target.value}}))}
+                                style={{fontSize:11,padding:"3px 6px",borderRadius:6,border:`1.5px solid ${varType==="ordinal"?"#7c3aed":"#e2e8f0"}`,background:varType==="ordinal"?"#f5f3ff":"#f8fafc",color:varType==="ordinal"?"#7c3aed":"#64748b",fontFamily:"inherit",cursor:"pointer",outline:"none",fontWeight:600,appearance:"none",WebkitAppearance:"none",width:88,textAlign:"center"}}>
+                                {VAR_TYPES.map(vt=>(
+                                  <option key={vt.value} value={vt.value}>{vt.icon} {vt.label}</option>
+                                ))}
+                              </select>
+                            </div>
                           </div>
                         );
                       })}
                     </div>
                   </div>
                   <p style={{fontSize:11,color:"#94a3b8",marginTop:10,lineHeight:1.6}}>
-                    Colunas <strong>Filtro</strong> ficam disponíveis no canvas · <strong>Vol. Propostas</strong>, <strong>Qtd Altas</strong> e indicadores de inadimplência alimentam o painel analítico.
+                    Colunas <strong>Filtro</strong> ficam disponíveis no canvas · <strong>Vol. Propostas</strong>, <strong>Qtd Altas</strong> e indicadores de inadimplência alimentam o painel analítico. · <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco; <strong>Categórica</strong> = sem ordem definida.
                   </p>
                 </>
               )}
@@ -2545,7 +2667,7 @@ export default function App() {
             {/* Wizard footer */}
             <div style={{padding:"16px 28px",borderTop:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
               <div>
-                {wizard.step===2&&(
+                {wizard.step===2&&!wizard.editCsvId&&(
                   <button onClick={()=>setWizard(w=>({...w,step:1}))}
                     style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
                     ← Voltar
@@ -2555,7 +2677,18 @@ export default function App() {
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setWizard(null)} style={{padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>Cancelar</button>
                 {wizard.step===1 ? (
-                  <button onClick={()=>setWizard(w=>({...w,step:2}))}
+                  <button onClick={()=>{
+                    if (!wizardPreview) return;
+                    const {headers, rows} = wizardPreview;
+                    // Auto-suggest varTypes for each column (don't overwrite existing)
+                    const suggestions = {};
+                    for (const h of headers) {
+                      const ci = headers.indexOf(h);
+                      const vals = rows.map(r => r[ci] ?? '').filter(Boolean);
+                      suggestions[h] = suggestVarType(h, vals);
+                    }
+                    setWizard(w => ({...w, step:2, varTypes: {...suggestions, ...(w.varTypes||{})}}));
+                  }}
                     disabled={!wizardPreview||wizardPreview.headers.length===0}
                     style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
                     Próximo →
@@ -2564,7 +2697,7 @@ export default function App() {
                   <button onClick={onImportConfirm}
                     disabled={!wizardPreview||wizardPreview.headers.length===0}
                     style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
-                    Importar →
+                    {wizard.editCsvId ? "Salvar →" : "Importar →"}
                   </button>
                 )}
               </div>
