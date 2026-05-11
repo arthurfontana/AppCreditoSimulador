@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2050 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~2540 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -17,6 +17,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
+- `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -50,6 +51,8 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `toggleCinemaCell(shapeId, cellKey)`: alterna elegibilidade de uma célula
 - `deleteShape(id)`: deleta shape + cascade (ports filhos de nós `decision` e `cineminha`)
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
+- `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
+- `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
@@ -60,6 +63,9 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `computeCinemaSize(rowDomain, colDomain)`: calcula `{w, h}` do nó a partir dos domínios (caps: 540×420)
 - `fmtQty(n)`: formata número como inteiro, `k` ou `M`
 - `fmtPct(v)`: formata ratio como `"XX.XX%"` ou `"N/A"` quando `v === null`
+- `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}`
+- `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`
+- `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
@@ -107,5 +113,53 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
   3. **Inad. Inferida** — `∑ Inad.Inferida / Vol. Aprovado`; mesma escala de cor
 - Sidebar direita espelha os três indicadores com recalculo reativo
 
+## Motor de Recomendação — Cineminha (`optimModal`)
+
+### Ativação
+Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar Decisão** (mesmo padrão visual da toolbar de alinhamento).
+
+### Estado `optimModal`
+```js
+{
+  shapeId,          // id do cineminha sendo otimizado
+  cellMetrics,      // {[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}
+  frontier,         // array de pontos Pareto ordenado por approvalRate crescente
+  scenarios,        // {conservador, medio, maximo} — pontos extraídos da fronteira
+  activeCard,       // 'conservador' | 'medio' | 'maximo' | 'personalizado'
+  proposedCells,    // {[cellKey]: boolean} — estado em edição (não aplicado ao canvas)
+  sliderApproval,   // ratio 0–1 (driver primário)
+  sliderInadReal,   // ratio 0–1 (restrição de teto)
+  sliderInadInf,    // ratio 0–1 (restrição de teto)
+  maxInadReal,      // valor máximo observado nas células (para range do slider)
+  maxInadInf,       // valor máximo observado nas células (para range do slider)
+}
+```
+
+### Algoritmo Pareto (fase 1 — sem restrição de monotonicidade)
+1. `computeCellMetrics`: para cada `(rowVal, colVal)` do domínio, filtra linhas do CSV e agrega `qty`, `qtdAltas`, `inadRRaw` (soma de inadReal absolutas), `inadIRaw` (soma de inadInferida absolutas); computa taxas finais ponderadas
+2. `buildParetoFrontier`: sort por `inadInferida` crescente (nulls ao final); varre acumulando `approvedQty / totalQty` e inad ponderadas — produz fronteira greedy ótima para variáveis categóricas
+3. `extractScenarios`: conservador = primeiro ponto (menor inad), máximo = último (maior aprovação), médio = joelho da curva via distância perpendicular máxima à reta entre conservador e máximo
+
+### Sliders interligados
+- **Aprovação** (driver): encontra o ponto da fronteira com `|approvalRate - target|` mínimo; atualiza inad sliders como reflexo
+- **Inad. Real / Inad. Inferida** (restrições): encontra maior `approvalRate` na fronteira onde `inad ≤ valor`; recalcula aprovação e o outro slider
+
+### Cinco cards
+| Card | Comportamento |
+|------|--------------|
+| 🛡 Conservador | pré-computado; clique aplica ao estado e sincroniza sliders |
+| ⚖ Melhor Eficiência | pré-computado (joelho) |
+| 🚀 Máxima Aprovação | pré-computado |
+| 🎛 Personalizado | ativo quando usuário move slider ou clica célula manualmente |
+| 📊 Política Completa | roda `validateFlow` + `runSimulation` com `proposedCells` em modo override; mostra "Fluxo incompleto" se `validateFlow` retornar erros |
+
+### Aplicar
+`applyOptimResult(shapeId, proposedCells)` — sobrescreve `cells` do Cineminha via `setShapes` e fecha o modal. Não-destrutivo: nenhuma alteração no canvas até o clique em "Aplicar".
+
+### Roadmap futuro (não implementado)
+- Flag `ordinal` por coluna de decisão (wizard passo 2) + restrição de corte monotônico no algoritmo Pareto (escada Young diagram) para variáveis como ratings R1–R20
+- Sliders adicionais: margem, rentabilidade
+- Fronteira Pareto multi-dimensional
+
 ## Branch de desenvolvimento
-`claude/add-delinquency-indicators-LP1ht`
+`claude/recommendation-engine-design-oxwV6`
