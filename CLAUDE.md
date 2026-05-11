@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2600 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~2800 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -14,10 +14,13 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`, `cineminha`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
 - `csvStore`: `{[csvId]: {name, headers, rows, columnTypes: {[colName]: 'id'|'decision'|'qty'|'qtdAltas'|'inadReal'|'inadInferida'}}}`
-- `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes}`
+- `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes, editCsvId}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
+- `multiSel`: `Set<id>` — conjunto de shapes selecionados em grupo (multi-seleção)
+- `undoStack`: `{shapes, conns}[]` — pilha de estados anteriores (máx. 50)
+- `redoStack`: `{shapes, conns}[]` — pilha de estados para refazer (máx. 50)
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -43,13 +46,18 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ```
 - Criado automaticamente com dois ports filhos: `"Elegível"` (verde) e `"Não Elegível"` (vermelho)
 - Chave de célula 1D-linha: `"${rowVal}|*"` / 1D-coluna: `"*|${colVal}"`
+- Minimizado: `w:170, h:44` (escrito explicitamente para que connectors recalculem posição)
 
 ### Funções-chave
 - `createDecisionNode(col, csvId, wx, wy)`: cria losango de decisão + ports automáticos com setas rotuladas (valores distintos da coluna)
 - `createCinemaNode(wx, wy)`: cria nó Cineminha vazio + ports "Elegível" e "Não Elegível"
 - `assignCinemaVar(shapeId, col, csvId, axis)`: atribui variável ao eixo `'row'` ou `'col'`, recomputa domínio e reconstrói `cells`
 - `toggleCinemaCell(shapeId, cellKey)`: alterna elegibilidade de uma célula
-- `deleteShape(id)`: deleta shape + cascade (ports filhos de nós `decision` e `cineminha`)
+- `deleteShape(id)`: deleta shape + cascade (ports filhos de nós `decision` e `cineminha`) + pushHistory
+- `deleteSelected()`: deleta todos os shapes em `multiSel` (ou `sel`) em lote como única ação de undo
+- `pushHistory()`: captura snapshot `{shapes, conns}` atual → undoStack, limpa redoStack
+- `undo()`: restaura último snapshot do undoStack; empurra estado atual para redoStack
+- `redo()`: re-aplica último snapshot do redoStack; empurra estado atual para undoStack
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
@@ -71,7 +79,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
 
 ### Padrão de refs
-Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
+Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, `selR`, `undoStackR`, `redoStackR`, etc.) para uso em event listeners sem closure stale.
 
 ## Fluxo do simulador
 1. Importar CSV → Passo 1 (delimitador) → Passo 2 (classificar colunas)
@@ -81,6 +89,35 @@ Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc
 5. Conectar ports a outros nós ou a ✅ Aprovado / ❌ Reprovado
 6. Duplo-clique em seta → editar label
 7. Painel de simulação atualiza Taxa de Aprovação, Inad. Real e Inad. Inferida em tempo real
+
+## Interações do canvas
+
+### Seleção múltipla
+- **Arrastar** com ferramenta ↖ Selecionar → rectangle select → `multiSel`
+- **Ctrl+Click** sobre shape → toggle item em `multiSel` sem limpar a seleção atual
+- Com `multiSel.size > 1` → toolbar de alinhamento aparece acima do canvas
+
+### Undo / Redo
+- **Ctrl+Z** desfaz / **Ctrl+Y** refaz
+- Botões ↩ Desfazer e ↪ Refazer na toolbar principal (desabilitados quando pilha vazia)
+- Pilhas de até 50 entradas; cada entrada = snapshot `{shapes, conns}`
+- Ações rastreadas: criar/deletar shapes e conexões, mover, redimensionar, editar label, cor, minimizar/maximizar, toggleCinemaCell, assignCinemaVar, applyOptimResult, import/edit dataset, alinhamento
+
+### Exclusão em lote
+- Com `multiSel` preenchido: tecla **Delete** ou botão 🗑 da toolbar apagam todos os shapes selecionados (+ cascade ports) como ação única de undo
+- Botão mostra contagem: `Deletar (3)` quando >1 selecionado
+
+## Toolbar de alinhamento (multiSel.size > 1)
+| Ação | Descrição |
+|------|-----------|
+| Esq ← | Alinha borda esquerda ao mínimo X |
+| Dir → | Alinha borda direita ao máximo X+W |
+| Topo ↑ | Alinha borda superior ao mínimo Y |
+| Base ↓ | Alinha borda inferior ao máximo Y+H |
+| Centro ↔ | Centraliza pelo eixo X (horizontal) |
+| Centro ↕ | Centraliza pelo eixo Y (vertical) |
+| Dist. H | Distribui espaçamento horizontal igual |
+| Dist. V | Distribui espaçamento vertical igual |
 
 ## Constantes do Cineminha
 ```js
@@ -107,6 +144,7 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 - Layout em CSS `grid` com `gridTemplateColumns: "1fr repeat(6, 68px)"` — alinhamento perfeito entre header e linhas
 - Header sticky; lista de colunas com scroll interno (`maxHeight: 340px`)
 - Header exibe ícone + label curto (`shortLabel`) de cada tipo
+- **Modo edição** (`editCsvId` preenchido): abre direto no passo 2 sem `rawText`; o guard `if (editCsvId)` precisa vir **antes** de `parseCSV(rawText,…)` pois `rawText` é `null` neste modo
 
 ## Painel de Simulação (`simPanel`)
 - Tamanho padrão: `w: 260, h: 280`
@@ -188,4 +226,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-version-indicator-Tcb42`
+`claude/board-undo-redo-ux-nd6BC`
