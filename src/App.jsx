@@ -572,18 +572,8 @@ function SimIndicators({ simResult, csvStore }) {
 
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [shapes, setShapes] = useState([
-    {id:"s1",type:"rect",   x:50, y:150,w:SW,h:SH,label:"Início",    color:"#dcfce7"},
-    {id:"s2",type:"diamond",x:300,y:150,w:SW,h:SH,label:"Decisão?",  color:"#fef3c7"},
-    {id:"s3",type:"circle", x:550,y:85, w:SW,h:SH,label:"Processo A",color:"#dbeafe"},
-    {id:"s4",type:"rect",   x:550,y:240,w:SW,h:SH,label:"Processo B",color:"#fce7f3"},
-    {id:"s5",type:"circle", x:800,y:162,w:SW,h:SH,label:"Fim",       color:"#e0e7ff"},
-  ]);
-  const [conns,   setConns]   = useState([
-    {id:"c1",from:"s1",to:"s2"},{id:"c2",from:"s2",to:"s3"},
-    {id:"c3",from:"s2",to:"s4"},{id:"c4",from:"s3",to:"s5"},
-    {id:"c5",from:"s4",to:"s5"},
-  ]);
+  const [shapes, setShapes] = useState([]);
+  const [conns,   setConns]   = useState([]);
   const [tool,       setTool]       = useState("hand");
   const [sel,        setSel]        = useState(null);
   const [fromId,     setFromId]     = useState(null);
@@ -606,6 +596,9 @@ export default function App() {
   const [varSearch,  setVarSearch]  = useState("");     // filtro de busca no painel
   const [multiSel,   setMultiSel]   = useState(new Set()); // ids selecionados em grupo
   const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
+  // Undo / Redo stacks — each entry is { shapes, conns }
+  const [undoStack,  setUndoStack]  = useState([]);
+  const [redoStack,  setRedoStack]  = useState([]);
   // Feature: analytics
   const [hoveredConn,       setHoveredConn]       = useState(null);
   const [hoveredConnPos,    setHoveredConnPos]    = useState(null); // {x,y} screen coords
@@ -643,6 +636,9 @@ export default function App() {
   const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
   const multiSelR     = useRef(multiSel);   useEffect(()=>{multiSelR.current=multiSel},   [multiSel]);
   const selRectR      = useRef(selRect);    useEffect(()=>{selRectR.current=selRect},      [selRect]);
+  const selR          = useRef(sel);        useEffect(()=>{selR.current=sel},              [sel]);
+  const undoStackR    = useRef(undoStack);  useEffect(()=>{undoStackR.current=undoStack},  [undoStack]);
+  const redoStackR    = useRef(redoStack);  useEffect(()=>{redoStackR.current=redoStack},  [redoStack]);
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
@@ -767,11 +763,13 @@ export default function App() {
       createCinemaNode(wx,wy); return;
     }
     if (tool==="frame") {
+      pushHistory();
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy),id=uid();
       setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);
       setSel(id); return;
     }
     if (tool!=="hand"&&tool!=="select"&&tool!=="connect") {
+      pushHistory();
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy),id=uid();
       const isTerminal=tool==="approved"||tool==="rejected";
       const nw=isTerminal?120:SW, nh=isTerminal?44:SH;
@@ -795,14 +793,20 @@ export default function App() {
       }
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
       const ms=multiSelR.current;
+      if (e.ctrlKey||e.metaKey) {
+        // CTRL+click: toggle in multiSel, handle via onShapeClick
+        dragR.current=null;
+        return;
+      }
+      const preSnap={shapes:shapesR.current,conns:connsR.current};
       if (ms.size>1&&ms.has(id)) {
         // drag entire multi-selection — snapshot positions
         const snaps={};
         shapesR.current.forEach(s=>{if(ms.has(s.id)) snaps[s.id]={x:s.x,y:s.y};});
-        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,wx0:wx,wy0:wy,snaps};
+        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,wx0:wx,wy0:wy,snaps,preSnap};
       } else {
         setSel(id); setMultiSel(new Set()); setPalette(false);
-        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,snaps:{}};
+        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,snaps:{},preSnap};
       }
     }
   };
@@ -815,12 +819,20 @@ export default function App() {
       else if(fromId!==id){
         const fromShape=shapes.find(sh=>sh.id===fromId);
         if (fromShape?.type!=="simPanel") {
-          if(!conns.some(c=>c.from===fromId&&c.to===id)) setConns(p=>[...p,{id:uid(),from:fromId,to:id}]);
+          if(!conns.some(c=>c.from===fromId&&c.to===id)){pushHistory();setConns(p=>[...p,{id:uid(),from:fromId,to:id}]);}
         }
         setFromId(null);
       }
     }
-    else if(tool==="select") setSel(id);
+    else if(tool==="select") {
+      if (e.ctrlKey||e.metaKey) {
+        // CTRL+click: toggle item in multi-selection
+        setMultiSel(prev=>{const n=new Set(prev);if(n.has(id))n.delete(id);else n.add(id);return n;});
+        setSel(null);
+      } else {
+        setSel(id);
+      }
+    }
   };
   const onShapeDbl = (e, id) => {
     e.stopPropagation();
@@ -873,6 +885,11 @@ export default function App() {
   };
   const onMouseUp = () => {
     const dr=dragR.current;
+    // Push pre-drag snapshot to undo stack when a real move/resize completed
+    if ((dr?.type==="shape"||dr?.type==="resize")&&movedR.current&&dr.preSnap) {
+      setUndoStack(prev=>[...prev.slice(-49),dr.preSnap]);
+      setRedoStack([]);
+    }
     if(dr?.type==="selRect") setSelRect(null);
     if(dr?.type==="midpan"&&prevToolR.current!=null) setTool(prevToolR.current);
     dragR.current=null;
@@ -899,15 +916,52 @@ export default function App() {
           return;
         }
       }
-      if ((e.key==="Delete"||e.key==="Backspace")&&sel){
-        deleteShape(sel);
+      // Undo / Redo
+      if (e.ctrlKey||e.metaKey) {
+        if (e.key==="z"||e.key==="Z") { e.preventDefault(); undo(); return; }
+        if (e.key==="y"||e.key==="Y") { e.preventDefault(); redo(); return; }
+      }
+      if (e.key==="Delete"||e.key==="Backspace") {
+        const ms=multiSelR.current;
+        if (ms.size>0||selR.current) deleteSelected();
       }
       if (e.key==="Escape"){setFromId(null);setSel(null);}
     };
     window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h);
-  },[sel]);
+  },[undo, redo, deleteSelected]);
 
   const zoomCenter=(f)=>{const r=getBR();doZoom(r.width/2,r.height/2,f);};
+
+  // ── History (Undo / Redo) ────────────────────────────────────
+  const pushHistory = useCallback(() => {
+    const snap = { shapes: shapesR.current, conns: connsR.current };
+    setUndoStack(prev => [...prev.slice(-49), snap]);
+    setRedoStack([]);
+  }, []); // eslint-disable-line
+
+  const undo = useCallback(() => {
+    const stack = undoStackR.current;
+    if (stack.length === 0) return;
+    const snap = stack[stack.length - 1];
+    const cur = { shapes: shapesR.current, conns: connsR.current };
+    setRedoStack(prev => [...prev.slice(-49), cur]);
+    setUndoStack(prev => prev.slice(0, -1));
+    setShapes(snap.shapes);
+    setConns(snap.conns);
+    setSel(null); setMultiSel(new Set());
+  }, []); // eslint-disable-line
+
+  const redo = useCallback(() => {
+    const stack = redoStackR.current;
+    if (stack.length === 0) return;
+    const snap = stack[stack.length - 1];
+    const cur = { shapes: shapesR.current, conns: connsR.current };
+    setUndoStack(prev => [...prev.slice(-49), cur]);
+    setRedoStack(prev => prev.slice(0, -1));
+    setShapes(snap.shapes);
+    setConns(snap.conns);
+    setSel(null); setMultiSel(new Set());
+  }, []); // eslint-disable-line
 
   // ── CSV import ────────────────────────────────────────────────
   const onFileChange = (e) => {
@@ -925,20 +979,23 @@ export default function App() {
   const onImportConfirm = () => {
     if (!wizard) return;
     const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,editCsvId}=wizard;
-    const {headers,rows}=parseCSV(rawText,delimiter,hasHeader);
 
     // ── Edit mode: update existing dataset, no new canvas nodes ──
     if (editCsvId) {
       const prev = csvStoreR.current[editCsvId];
       if (!prev) { setWizard(null); return; }
+      pushHistory();
       setCsvStore(store => ({
         ...store,
-        [editCsvId]: { ...prev, columnTypes: columnTypes||{}, varTypes: varTypes||{} }
+        [editCsvId]: { ...prev, name: filename||prev.name, columnTypes: columnTypes||{}, varTypes: varTypes||{} }
       }));
       setWizard(null);
       return;
     }
 
+    const {headers,rows}=parseCSV(rawText,delimiter,hasHeader);
+
+    pushHistory();
     const csvId=uid();
 
     // Build normalized name → original header map for reconciliation
@@ -1050,6 +1107,7 @@ export default function App() {
 
   // ── deleteShape (com cascade de ports filhos) ─────────────────
   const deleteShape = (id) => {
+    pushHistory();
     const shape = shapesR.current.find(s=>s.id===id);
     const portIds = (shape?.type==="decision" || shape?.type==="cineminha")
       ? connsR.current.filter(c=>c.from===id).map(c=>c.to).filter(toId=>shapesR.current.find(s=>s.id===toId&&s.type==="port"))
@@ -1060,8 +1118,30 @@ export default function App() {
     setSel(null); setPalette(false);
   };
 
+  // ── deleteSelected — batch delete of all currently selected shapes ──
+  const deleteSelected = useCallback(() => {
+    const ids = multiSelR.current.size > 0 ? [...multiSelR.current] : (selR.current ? [selR.current] : []);
+    if (ids.length === 0) return;
+    pushHistory();
+    const allRemove = new Set(ids);
+    const shapes_ = shapesR.current;
+    const conns_  = connsR.current;
+    for (const id of ids) {
+      const shape = shapes_.find(s=>s.id===id);
+      if (shape?.type==="decision"||shape?.type==="cineminha") {
+        conns_.filter(c=>c.from===id).forEach(c=>{
+          if (shapes_.find(s=>s.id===c.to&&s.type==="port")) allRemove.add(c.to);
+        });
+      }
+    }
+    setShapes(p=>p.filter(s=>!allRemove.has(s.id)));
+    setConns(p=>p.filter(c=>!allRemove.has(c.from)&&!allRemove.has(c.to)));
+    setSel(null); setMultiSel(new Set()); setPalette(false);
+  }, []); // eslint-disable-line
+
   // ── deleteCsvDataset ──────────────────────────────────────
   const deleteCsvDataset = (csvId) => {
+    pushHistory();
     setCsvStore(prev => { const next = {...prev}; delete next[csvId]; return next; });
     // Remove the CSV canvas node for this dataset
     setShapes(prev => prev.filter(s => !(s.type === "csv" && s.csvId === csvId)));
@@ -1128,6 +1208,7 @@ export default function App() {
       return [];
     });
     // Restore state
+    pushHistory();
     setShapes(data.shapes);
     setConns(data.conns);
     setCsvStore(importedCsvStore);
@@ -1160,6 +1241,7 @@ export default function App() {
 
   // ── createDecisionNode ────────────────────────────────────────
   const createDecisionNode = (variableCol, csvId, wx, wy) => {
+    pushHistory();
     const csv = csvStoreR.current[csvId];
     if (!csv) return;
     const colIdx = csv.headers.indexOf(variableCol);
@@ -1187,6 +1269,7 @@ export default function App() {
 
   // ── toggleCinemaCell ──────────────────────────────────────────
   const toggleCinemaCell = useCallback((shapeId, cellKey) => {
+    pushHistory();
     setShapes(prev => prev.map(s => {
       if (s.id !== shapeId) return s;
       const cur = (s.cells ?? {})[cellKey];
@@ -1196,6 +1279,7 @@ export default function App() {
 
   // ── createCinemaNode ──────────────────────────────────────────
   const createCinemaNode = useCallback((wx, wy) => {
+    pushHistory();
     const id = uid();
     const W = 170, H = 100;
     const cinemaShape = {
@@ -1218,6 +1302,7 @@ export default function App() {
 
   // ── assignCinemaVar ───────────────────────────────────────────
   const assignCinemaVar = useCallback((shapeId, col, csvId, axis) => {
+    pushHistory();
     const csv = csvStoreR.current[csvId];
     if (!csv) return;
     const colIdx = csv.headers.indexOf(col);
@@ -1375,7 +1460,7 @@ export default function App() {
           onMouseEnter={e=>{setHoveredConn(conn.id);setHoveredConnPos({x:e.clientX+12,y:e.clientY-20});}}
           onMouseMove={e=>{setHoveredConnPos({x:e.clientX+12,y:e.clientY-20});}}
           onMouseLeave={()=>{setHoveredConn(null);setHoveredConnPos(null);}}
-          onClick={e=>{e.stopPropagation();connClickTimer.current=setTimeout(()=>{setConns(p=>p.filter(c=>c.id!==conn.id));},220);}}
+          onClick={e=>{e.stopPropagation();connClickTimer.current=setTimeout(()=>{pushHistory();setConns(p=>p.filter(c=>c.id!==conn.id));},220);}}
           onDoubleClick={e=>{e.stopPropagation();clearTimeout(connClickTimer.current);setEditConn({id:conn.id,val:conn.label||""});}}/>
         <path d={d} fill="none" stroke={strokeColor} strokeWidth={strokeW} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
         {labelText&&(
@@ -1430,7 +1515,7 @@ export default function App() {
             {csv?`${csv.rows.length} linhas · ${csv.headers.length} colunas`:"CSV"}
           </text>
           {/* Maximize btn */}
-          <g onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,w:CSV_W,h:CSV_H}:s));}} style={{cursor:"pointer"}}>
+          <g onClick={e=>{e.stopPropagation();pushHistory();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,w:CSV_W,h:CSV_H}:s));}} style={{cursor:"pointer"}}>
             <rect x={x+CSV_MINI_W-30} y={y+8} width={22} height={22} rx={6} fill="#f1f5f9"/>
             <text x={x+CSV_MINI_W-19} y={y+23} fontSize={13} textAnchor="middle" fill="#475569">⤢</text>
           </g>
@@ -1470,7 +1555,7 @@ export default function App() {
         )}
 
         {/* Minimize btn */}
-        <g onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:true,w:CSV_MINI_W,h:CSV_MINI_H}:s));setActiveCell(null);}} style={{cursor:"pointer"}}>
+        <g onClick={e=>{e.stopPropagation();pushHistory();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:true,w:CSV_MINI_W,h:CSV_MINI_H}:s));setActiveCell(null);}} style={{cursor:"pointer"}}>
           <rect x={x+w-32} y={y+8} width={24} height={22} rx={6} fill="#f1f5f9"/>
           <text x={x+w-20} y={y+23} fontSize={14} textAnchor="middle" fill="#475569">⊟</text>
         </g>
@@ -1552,7 +1637,8 @@ export default function App() {
     movedR.current=false;
     const shape=shapesR.current.find(s=>s.id===id); if (!shape) return;
     const [sx,sy]=svgPt(e.clientX,e.clientY);
-    dragR.current={type:"resize",id,dir,sx,sy,ix:shape.x,iy:shape.y,iw:shape.w,ih:shape.h};
+    const preSnap={shapes:shapesR.current,conns:connsR.current};
+    dragR.current={type:"resize",id,dir,sx,sy,ix:shape.x,iy:shape.y,iw:shape.w,ih:shape.h,preSnap};
   };
 
   // ── Render: Cineminha (Cross Decision Matrix) ─────────────────
@@ -1578,7 +1664,7 @@ export default function App() {
           style={{cursor:cur, filter:flt}}>
           <rect x={x} y={y} width={MW} height={MH} rx={10} fill="#6366f1" stroke={stroke} strokeWidth={sw}/>
           <text x={x+12} y={y+27} fontSize={13} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",14)}</text>
-          <g onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,...computeCinemaSize(s.rowDomain||[],s.colDomain||[])}:s));}} style={{cursor:"pointer"}}>
+          <g onClick={e=>{e.stopPropagation();pushHistory();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,...computeCinemaSize(s.rowDomain||[],s.colDomain||[])}:s));}} style={{cursor:"pointer"}}>
             <rect x={x+MW-28} y={y+8} width={22} height={22} rx={6} fill="rgba(255,255,255,.2)"/>
             <text x={x+MW-17} y={y+23} fontSize={13} textAnchor="middle" fill="#fff">⤢</text>
           </g>
@@ -1718,7 +1804,7 @@ export default function App() {
           onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
           style={{cursor:"grab"}}/>
         {/* Minimize btn — rendered above overlay */}
-        <g onMouseDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:true}:s));}} style={{cursor:"pointer"}}>
+        <g onMouseDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:true,w:170,h:44}:s));}} style={{cursor:"pointer"}}>
           <rect x={x+w-30} y={y+7} width={24} height={24} rx={6} fill="rgba(255,255,255,.2)"/>
           <text x={x+w-18} y={y+23} fontSize={15} textAnchor="middle" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>−</text>
         </g>
@@ -1969,7 +2055,7 @@ export default function App() {
 
   // ── Edit & helpers ────────────────────────────────────────────
   const editShape=edit?shapes.find(s=>s.id===edit.id):null;
-  const commitEdit=()=>{if(!edit)return;setShapes(p=>p.map(s=>s.id===edit.id?{...s,label:edit.val}:s));setEdit(null);};
+  const commitEdit=()=>{if(!edit)return;pushHistory();setShapes(p=>p.map(s=>s.id===edit.id?{...s,label:edit.val}:s));setEdit(null);};
   const selShape=sel?shapes.find(s=>s.id===sel):null;
   const canvasCursor=tool==="hand"?"grab":tool==="select"?"default":"crosshair";
 
@@ -2015,6 +2101,7 @@ export default function App() {
   };
 
   const applyOptimResult = (shapeId, proposedCells) => {
+    pushHistory();
     setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, cells: proposedCells } : s));
     setOptimModal(null);
   };
@@ -2051,19 +2138,34 @@ export default function App() {
             </button>
           ))}
           <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
+          {/* Undo / Redo */}
+          <button className="wbt" onClick={undo} disabled={undoStack.length===0} title="Desfazer (Ctrl+Z)"
+            style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
+              background:"transparent",color:undoStack.length>0?"#475569":"#cbd5e1",
+              cursor:undoStack.length>0?"pointer":"default",fontSize:12.5,fontFamily:"inherit",flexShrink:0}}>
+            ↩ <span className="wbl">Desfazer</span>
+          </button>
+          <button className="wbt" onClick={redo} disabled={redoStack.length===0} title="Refazer (Ctrl+Y)"
+            style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
+              background:"transparent",color:redoStack.length>0?"#475569":"#cbd5e1",
+              cursor:redoStack.length>0?"pointer":"default",fontSize:12.5,fontFamily:"inherit",flexShrink:0}}>
+            ↪ <span className="wbl">Refazer</span>
+          </button>
+          <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
           {selShape&&selShape.type!=="csv"&&(
             <button className="wbt" onClick={()=>setPalette(v=>!v)} title="Cor"
               style={{width:28,height:28,borderRadius:8,flexShrink:0,
                 border:`2px solid ${palette?"#3b82f6":"#e2e8f0"}`,
                 background:selShape.color||"#fff",cursor:"pointer",transition:"border-color .15s"}}/>
           )}
-          <button className="wbt" onClick={()=>{if(!sel)return;deleteShape(sel);}}
-            disabled={!sel}
-            style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
-              background:sel?"#fff1f2":"transparent",color:sel?"#e11d48":"#cbd5e1",
-              cursor:sel?"pointer":"default",fontSize:12.5,fontWeight:500,fontFamily:"inherit",flexShrink:0}}>
-            🗑 <span className="wbl">Deletar</span>
-          </button>
+          {(sel||multiSel.size>0)&&(
+            <button className="wbt" onClick={deleteSelected}
+              style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
+                background:"#fff1f2",color:"#e11d48",
+                cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",flexShrink:0}}>
+              🗑 <span className="wbl">{multiSel.size>1?`Deletar (${multiSel.size})`:"Deletar"}</span>
+            </button>
+          )}
         </div>
 
         {/* Alignment toolbar — shows when multiSel.size > 1 */}
@@ -2071,12 +2173,21 @@ export default function App() {
           const applyAlign=(dir)=>{
             const sel2=shapes.filter(s=>multiSel.has(s.id));
             if(sel2.length<2) return;
+            pushHistory();
             setShapes(prev=>prev.map(s=>{
               if(!multiSel.has(s.id)) return s;
-              if(dir==="left")  return {...s,x:Math.min(...sel2.map(q=>q.x))};
-              if(dir==="right") return {...s,x:Math.max(...sel2.map(q=>q.x+q.w))-s.w};
-              if(dir==="top")   return {...s,y:Math.min(...sel2.map(q=>q.y))};
-              if(dir==="bottom")return {...s,y:Math.max(...sel2.map(q=>q.y+q.h))-s.h};
+              if(dir==="left")    return {...s,x:Math.min(...sel2.map(q=>q.x))};
+              if(dir==="right")   return {...s,x:Math.max(...sel2.map(q=>q.x+q.w))-s.w};
+              if(dir==="top")     return {...s,y:Math.min(...sel2.map(q=>q.y))};
+              if(dir==="bottom")  return {...s,y:Math.max(...sel2.map(q=>q.y+q.h))-s.h};
+              if(dir==="centerH") {
+                const midX=(Math.min(...sel2.map(q=>q.x))+Math.max(...sel2.map(q=>q.x+q.w)))/2;
+                return {...s,x:midX-s.w/2};
+              }
+              if(dir==="centerV") {
+                const midY=(Math.min(...sel2.map(q=>q.y))+Math.max(...sel2.map(q=>q.y+q.h)))/2;
+                return {...s,y:midY-s.h/2};
+              }
               if(dir==="distH"){
                 const sorted=[...sel2].sort((a,b)=>(a.x+a.w/2)-(b.x+b.w/2));
                 const totalW=sorted.reduce((a,q)=>a+q.w,0);
@@ -2103,9 +2214,9 @@ export default function App() {
           const btnStyle={padding:"5px 10px",borderRadius:7,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",whiteSpace:"nowrap"};
           return (
             <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-              display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-              border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
-              {[["left","Alinhar Esq"],["right","Alinhar Dir"],["top","Topo"],["bottom","Base"],["distH","Dist. Horiz"],["distV","Dist. Vert"]].map(([d,l])=>(
+              display:"flex",flexWrap:"wrap",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+              border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)",maxWidth:"calc(100% - 24px)",justifyContent:"center"}}>
+              {[["left","Esq ←"],["right","Dir →"],["top","Topo ↑"],["bottom","Base ↓"],["centerH","Centro ↔"],["centerV","Centro ↕"],["distH","Dist. H"],["distV","Dist. V"]].map(([d,l])=>(
                 <button key={d} style={btnStyle} onClick={()=>applyAlign(d)}>{l}</button>
               ))}
             </div>
@@ -2132,7 +2243,7 @@ export default function App() {
             display:"flex",gap:6,padding:"10px 14px",background:"#fff",border:"1px solid #e2e8f0",
             borderRadius:12,boxShadow:"0 8px 24px rgba(0,0,0,.1)"}}>
             {COLORS.map(c=>(
-              <div key={c} onClick={()=>{setShapes(p=>p.map(s=>s.id===sel?{...s,color:c}:s));setPalette(false);}}
+              <div key={c} onClick={()=>{pushHistory();setShapes(p=>p.map(s=>s.id===sel?{...s,color:c}:s));setPalette(false);}}
                 style={{width:26,height:26,borderRadius:7,background:c,cursor:"pointer",transition:"transform .12s",
                   border:selShape.color===c?"2.5px solid #3b82f6":"1.5px solid #e2e8f0"}}/>
             ))}
@@ -2222,8 +2333,8 @@ export default function App() {
           const mx=(fx+tx)/2*vp.s+vp.x, my=(fy+ty)/2*vp.s+vp.y;
           return <input autoFocus value={editConn.val}
             onChange={e=>setEditConn(p=>({...p,val:e.target.value}))}
-            onBlur={()=>{setConns(p=>p.map(c=>c.id===editConn.id?{...c,label:editConn.val}:c));setEditConn(null);}}
-            onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape"){setConns(p=>p.map(c=>c.id===editConn.id?{...c,label:editConn.val}:c));setEditConn(null);}}}
+            onBlur={()=>{pushHistory();setConns(p=>p.map(c=>c.id===editConn.id?{...c,label:editConn.val}:c));setEditConn(null);}}
+            onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape"){pushHistory();setConns(p=>p.map(c=>c.id===editConn.id?{...c,label:editConn.val}:c));setEditConn(null);}}}
             style={{position:"absolute",left:mx,top:my,transform:"translate(-50%,-50%)",
               width:90,background:"#fff",border:"1.5px solid #3b82f6",borderRadius:6,
               outline:"none",textAlign:"center",fontSize:11,
@@ -2395,6 +2506,7 @@ export default function App() {
             <button
               onClick={()=>{
                 if (shapes.some(s=>s.type==="simPanel")) return;
+                pushHistory();
                 const svgEl=svgRef.current;
                 const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
                 setShapes(p=>[...p,{id:uid(),type:"simPanel",x:cx-130,y:cy-95,w:260,h:280,label:"Simulação",color:"#fff"}]);
