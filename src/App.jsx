@@ -1,5 +1,68 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 
+// ── Build metadata (injected by Vite at build time) ──────────────────────────
+const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
+const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   : new Date().toISOString();
+const BUILD_HASH   = typeof __BUILD_HASH__   !== "undefined" ? __BUILD_HASH__   : "local";
+const BUILD_BRANCH = typeof __BUILD_BRANCH__ !== "undefined" ? __BUILD_BRANCH__ : "local";
+const BUILD_AUTHOR = typeof __BUILD_AUTHOR__ !== "undefined" ? __BUILD_AUTHOR__ : "";
+
+function formatBuildTime(iso) {
+  try {
+    const d = new Date(iso);
+    const day   = String(d.getDate()).padStart(2, "0");
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const year  = d.getFullYear();
+    const hh    = String(d.getHours()).padStart(2, "0");
+    const mm    = String(d.getMinutes()).padStart(2, "0");
+    return { short: `${day}/${month} ${hh}:${mm}`, full: `${day}/${month}/${year} ${hh}:${mm}:${String(d.getSeconds()).padStart(2,"0")}` };
+  } catch { return { short: "—", full: "—" }; }
+}
+
+function BuildBadge() {
+  const [tip, setTip] = useState(false);
+  const { short, full } = formatBuildTime(BUILD_TIME);
+  const isRecent = Date.now() - new Date(BUILD_TIME).getTime() < 5 * 60 * 1000;
+
+  return (
+    <div style={{position:"relative",display:"inline-flex",alignItems:"center"}}
+      onMouseEnter={()=>setTip(true)} onMouseLeave={()=>setTip(false)}>
+      <span style={{
+        fontSize:9.5,fontWeight:600,color:"#94a3b8",letterSpacing:.3,
+        background:"#f1f5f9",borderRadius:6,padding:"2px 7px",cursor:"default",
+        border:"1px solid #e2e8f0",whiteSpace:"nowrap",userSelect:"none",
+        transition:"all .15s",
+        ...(isRecent ? {color:"#16a34a",background:"#f0fdf4",borderColor:"#bbf7d0"} : {}),
+      }}>
+        #{BUILD_NUMBER} · {short}
+      </span>
+      {tip && (
+        <div style={{
+          position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:9999,
+          background:"#1e293b",color:"#f8fafc",borderRadius:8,
+          padding:"10px 13px",fontSize:11,lineHeight:1.8,whiteSpace:"nowrap",
+          boxShadow:"0 8px 24px rgba(0,0,0,.25)",pointerEvents:"none",
+        }}>
+          <div style={{fontWeight:700,fontSize:11.5,marginBottom:4,borderBottom:"1px solid #334155",paddingBottom:4}}>
+            🏷 Build #{BUILD_NUMBER}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"1px 10px"}}>
+            <span style={{color:"#94a3b8"}}>Deploy</span><span>{full}</span>
+            <span style={{color:"#94a3b8"}}>Commit</span><span style={{fontFamily:"monospace"}}>{BUILD_HASH}</span>
+            <span style={{color:"#94a3b8"}}>Branch</span><span style={{fontFamily:"monospace"}}>{BUILD_BRANCH}</span>
+            {BUILD_AUTHOR && <><span style={{color:"#94a3b8"}}>Autor</span><span>{BUILD_AUTHOR}</span></>}
+          </div>
+          {isRecent && (
+            <div style={{marginTop:6,paddingTop:5,borderTop:"1px solid #334155",color:"#4ade80",fontSize:10.5,fontWeight:600}}>
+              ✓ Atualizado recentemente
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 let _id = 1;
 const uid = () => `e${_id++}`;
 
@@ -2196,9 +2259,10 @@ export default function App() {
       {/* ═══════════════ RIGHT PANEL ═══════════════ */}
       <div style={{width:272,flexShrink:0,background:"#fff",borderLeft:"1px solid #e2e8f0",display:"flex",flexDirection:"column",overflow:"hidden"}}>
         {/* Header — fixed */}
-        <div style={{padding:"16px 18px 14px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-          <div style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",boxShadow:"0 0 0 3px #dbeafe"}}/>
-          <span style={{fontSize:13,fontWeight:600,color:"#1e293b",letterSpacing:.1}}>Painel</span>
+        <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <div style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",boxShadow:"0 0 0 3px #dbeafe",flexShrink:0}}/>
+          <span style={{fontSize:13,fontWeight:600,color:"#1e293b",letterSpacing:.1,flex:1}}>Painel</span>
+          <BuildBadge />
         </div>
 
         {/* Scrollable content area */}
