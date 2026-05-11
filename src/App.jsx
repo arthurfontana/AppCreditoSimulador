@@ -377,13 +377,14 @@ function buildParetoFrontier(cellMetrics) {
 
 function extractScenarios(frontier) {
   const pts = frontier.filter(p => p.approvalRate > 0);
-  if (pts.length === 0) return { conservador: null, medio: null, maximo: null };
+  if (pts.length === 0) return { conservador: null, balanceado: null, melhorEficiencia: null, expansao: null };
   const conservador = pts[0];
-  const maximo      = pts[pts.length - 1];
-  let medio = pts[Math.floor(pts.length / 2)];
+  const expansao    = pts[pts.length - 1];
+  // Melhor Eficiência: elbow point (max distance from conservador–expansao line)
+  let melhorEficiencia = pts[Math.floor(pts.length / 2)];
   if (pts.length >= 3) {
     const x0 = conservador.approvalRate, y0 = conservador.inadInferida ?? 0;
-    const x1 = maximo.approvalRate,      y1 = maximo.inadInferida      ?? 0;
+    const x1 = expansao.approvalRate,    y1 = expansao.inadInferida    ?? 0;
     const dx = x1 - x0, dy = y1 - y0, len = Math.sqrt(dx * dx + dy * dy);
     let maxD = -1;
     for (let i = 1; i < pts.length - 1; i++) {
@@ -391,10 +392,13 @@ function extractScenarios(frontier) {
       const d = len > 0
         ? Math.abs(dy * px - dx * py + x1 * y0 - y1 * x0) / len
         : Math.abs(px - x0) + Math.abs(py - y0);
-      if (d > maxD) { maxD = d; medio = pts[i]; }
+      if (d > maxD) { maxD = d; melhorEficiencia = pts[i]; }
     }
   }
-  return { conservador, medio, maximo };
+  // Balanceado: midpoint between conservador and melhorEficiencia
+  const efIdx = pts.indexOf(melhorEficiencia);
+  const balanceado = pts[Math.max(0, Math.floor(efIdx / 2))];
+  return { conservador, balanceado, melhorEficiencia, expansao };
 }
 
 // ── SimIndicators — right panel simulation card ───────────────────────────────
@@ -1824,18 +1828,30 @@ export default function App() {
     const cellMetrics = computeCellMetrics(shape, csvStore);
     const frontier    = buildParetoFrontier(cellMetrics);
     const scenarios   = extractScenarios(frontier);
-    const initial     = scenarios.conservador || (frontier.length > 1 ? frontier[frontier.length - 1] : null);
     const maxInadReal = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadReal ?? 0));
     const maxInadInf  = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadInferida ?? 0));
+    // Start from current shape state (Personalizado reflects what the user already built)
+    const initCells = { ...(shape.cells || {}) };
+    const totalQty  = Object.values(cellMetrics).reduce((s, m) => s + m.qty, 0);
+    const initApprQty = Object.entries(initCells)
+      .filter(([, v]) => v !== false).reduce((s, [k]) => s + (cellMetrics[k]?.qty || 0), 0);
+    const initRate = totalQty > 0 ? initApprQty / totalQty : 0;
+    // Find frontier index closest to current approval rate
+    let initIdx = 0, bestD = Infinity;
+    frontier.forEach((pt, i) => {
+      const d = Math.abs(pt.approvalRate - initRate);
+      if (d < bestD) { bestD = d; initIdx = i; }
+    });
     setOptimModal({
       shapeId, cellMetrics, frontier, scenarios,
-      activeCard:    initial ? 'conservador' : 'personalizado',
-      proposedCells: initial ? { ...initial.cells } : { ...(shape.cells || {}) },
-      sliderApproval: initial ? initial.approvalRate : 0,
-      sliderInadReal: initial?.inadReal     ?? 0,
-      sliderInadInf:  initial?.inadInferida ?? 0,
+      activeCard:    'personalizado',
+      proposedCells: initCells,
+      sliderApprovalIdx: initIdx,
+      sliderInadReal: maxInadReal || 0.2,
+      sliderInadInf:  maxInadInf  || 0.2,
       maxInadReal: maxInadReal || 0.2,
       maxInadInf:  maxInadInf  || 0.2,
+      matrixZoom: 1, matrixPanX: 0, matrixPanY: 0,
     });
   };
 
@@ -2560,33 +2576,42 @@ export default function App() {
       {/* ═══════════════ OPTIMIZATION MODAL ═══════════════ */}
       {optimModal&&(()=>{
         const { shapeId, cellMetrics, frontier, scenarios, activeCard,
-                proposedCells, sliderApproval, sliderInadReal, sliderInadInf,
-                maxInadReal, maxInadInf } = optimModal;
+                proposedCells, sliderApprovalIdx, sliderInadReal, sliderInadInf,
+                maxInadReal, maxInadInf, matrixZoom, matrixPanX, matrixPanY } = optimModal;
         const shape = shapes.find(s => s.id === shapeId);
         if (!shape) return null;
 
         const rDom   = shape.rowDomain?.length > 0 ? shape.rowDomain : ['*'];
         const cDom   = shape.colDomain?.length > 0 ? shape.colDomain : ['*'];
         const show2D = shape.rowVar && shape.colVar;
-
         const totalQty = Object.values(cellMetrics).reduce((s, m) => s + m.qty, 0);
 
-        const handleApprovalSlider = (val) => {
-          let best = null, bestDist = Infinity;
-          for (const pt of frontier) {
-            const d = Math.abs(pt.approvalRate - val);
-            if (d < bestDist) { bestDist = d; best = pt; }
-          }
-          if (!best) return;
+        // Compute personalizado metrics dynamically from proposedCells
+        const eligKeys  = Object.entries(proposedCells).filter(([,v])=>v!==false).map(([k])=>k);
+        const pApprQty  = eligKeys.reduce((s,k)=>s+(cellMetrics[k]?.qty||0),0);
+        const pAltas    = eligKeys.reduce((s,k)=>s+(cellMetrics[k]?.qtdAltas||0),0);
+        const pInadRRaw = eligKeys.reduce((s,k)=>s+(cellMetrics[k]?.inadRRaw||0),0);
+        const pInadIRaw = eligKeys.reduce((s,k)=>s+(cellMetrics[k]?.inadIRaw||0),0);
+        const personalizado = {
+          approvalRate: totalQty>0 ? pApprQty/totalQty : 0,
+          inadReal:     pAltas>0   ? pInadRRaw/pAltas  : null,
+          inadInferida: pApprQty>0 ? pInadIRaw/pApprQty: null,
+          approvedQty:  pApprQty,
+        };
+
+        // Slider: approval maps to frontier index (snap to valid states only)
+        const maxFIdx = Math.max(0, frontier.length - 1);
+        const handleApprovalSlider = (idx) => {
+          const pt = frontier[idx];
+          if (!pt) return;
           setOptimModal(m => ({ ...m,
-            proposedCells:  { ...best.cells },
-            sliderApproval: best.approvalRate,
-            sliderInadReal: best.inadReal     ?? 0,
-            sliderInadInf:  best.inadInferida ?? 0,
+            proposedCells:     { ...pt.cells },
+            sliderApprovalIdx: idx,
             activeCard: 'personalizado',
           }));
         };
 
+        // Inad sliders: ceiling — find best frontier point respecting the ceiling
         const handleInadSlider = (val, type) => {
           let best = null;
           for (const pt of frontier) {
@@ -2596,11 +2621,11 @@ export default function App() {
             }
           }
           if (!best) return;
+          // Find frontier index of best
+          const idx = frontier.indexOf(best);
           setOptimModal(m => ({ ...m,
-            proposedCells:  { ...best.cells },
-            sliderApproval: best.approvalRate,
-            sliderInadReal: best.inadReal     ?? 0,
-            sliderInadInf:  best.inadInferida ?? 0,
+            proposedCells:     { ...best.cells },
+            sliderApprovalIdx: idx >= 0 ? idx : m.sliderApprovalIdx,
             [type === 'real' ? 'sliderInadReal' : 'sliderInadInf']: val,
             activeCard: 'personalizado',
           }));
@@ -2608,85 +2633,279 @@ export default function App() {
 
         const selectCard = (card, pt) => {
           if (!pt) return;
+          const idx = frontier.indexOf(pt);
           setOptimModal(m => ({ ...m,
-            activeCard:     card,
-            proposedCells:  { ...pt.cells },
-            sliderApproval: pt.approvalRate,
-            sliderInadReal: pt.inadReal     ?? 0,
-            sliderInadInf:  pt.inadInferida ?? 0,
+            activeCard:        card,
+            proposedCells:     { ...pt.cells },
+            sliderApprovalIdx: idx >= 0 ? idx : m.sliderApprovalIdx,
+            sliderInadReal:    pt.inadReal     ?? maxInadReal,
+            sliderInadInf:     pt.inadInferida ?? maxInadInf,
           }));
         };
 
-        const modShapes    = shapes.map(s => s.id === shapeId ? { ...s, cells: proposedCells } : s);
-        const policyErrors = validateFlow(modShapes, conns);
-        const policyOk     = Object.keys(policyErrors).length === 0;
-        const policySim    = policyOk ? runSimulation(modShapes, conns, csvStore) : null;
+        // Toggle cell manually (sets personalizado)
+        const toggleCell = (cellKey, isCurrentlyElig) => {
+          const nc = { ...proposedCells, [cellKey]: !isCurrentlyElig };
+          // Find nearest frontier index
+          const newApprQty = Object.entries(nc)
+            .filter(([,v])=>v!==false).reduce((s,[k])=>s+(cellMetrics[k]?.qty||0),0);
+          const newRate = totalQty > 0 ? newApprQty/totalQty : 0;
+          let nearIdx = 0, bestD = Infinity;
+          frontier.forEach((pt, i) => {
+            const d = Math.abs(pt.approvalRate - newRate);
+            if (d < bestD) { bestD = d; nearIdx = i; }
+          });
+          setOptimModal(m => ({ ...m,
+            proposedCells:     nc,
+            sliderApprovalIdx: nearIdx,
+            activeCard: 'personalizado',
+          }));
+        };
+
+        // Matrix zoom/pan handlers
+        const handleMatrixWheel = (e) => {
+          e.preventDefault();
+          const factor = e.deltaY < 0 ? 1.2 : 1/1.2;
+          setOptimModal(m => ({...m, matrixZoom: Math.max(0.4, Math.min(4, m.matrixZoom * factor))}));
+        };
+        const startMatrixPan = (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          const sx = e.clientX, sy = e.clientY;
+          const initX = matrixPanX, initY = matrixPanY;
+          const onMove = (ev) => setOptimModal(m => ({...m,
+            matrixPanX: initX + ev.clientX - sx,
+            matrixPanY: initY + ev.clientY - sy,
+          }));
+          const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup',   onUp);
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup',   onUp);
+        };
 
         const scen = scenarios;
-        const cardBase = (id) => ({
-          width:"100%", padding:"12px 14px", borderRadius:12, textAlign:"left",
-          fontFamily:"inherit", transition:"all .15s", cursor:"pointer",
-          border:`2px solid ${activeCard===id?"#6366f1":"#e2e8f0"}`,
-          background: activeCard===id?"#eef2ff":"#f8fafc",
-        });
+        const CARD_DEFS = [
+          { id:'conservador',     pt:scen.conservador,    icon:'🛡', label:'Conservador',    sub:'Menor risco',      iconBg:'#dcfce7', textColor:'#15803d' },
+          { id:'balanceado',      pt:scen.balanceado,     icon:'⚖', label:'Balanceado',     sub:'Prudente',         iconBg:'#fef9c3', textColor:'#a16207' },
+          { id:'melhorEficiencia',pt:scen.melhorEficiencia,icon:'✦',label:'Melhor Eficiência',sub:'Ótimo equilíbrio',iconBg:'#fef3c7', textColor:'#92400e' },
+          { id:'expansao',        pt:scen.expansao,       icon:'🚀', label:'Expansão',        sub:'Maior volume',     iconBg:'#dbeafe', textColor:'#1d4ed8' },
+          { id:'personalizado',   pt:personalizado,       icon:'🎛', label:'Personalizado',  sub:'Estado atual',     iconBg:'#f3e8ff', textColor:'#7c3aed' },
+        ];
 
-        const MetricGroup = ({label, val, color}) => (
-          <div>
-            <div style={{fontSize:10,color:"#94a3b8",marginBottom:1}}>{label}</div>
-            <div style={{fontSize:14,fontWeight:700,color:color||"#1e293b"}}>{fmtPct(val)}</div>
+        const MetricBadge = ({label, val, color}) => (
+          <div style={{textAlign:'center'}}>
+            <div style={{fontSize:9.5,color:'#94a3b8',marginBottom:2}}>{label}</div>
+            <div style={{fontSize:13,fontWeight:700,color:color||'#1e293b'}}>{fmtPct(val)}</div>
           </div>
         );
+
+        // For approval rate on cards (0–1 ratio)
+        const approvalColor = (r) => r >= 0.7 ? '#16a34a' : r >= 0.4 ? '#d97706' : '#dc2626';
 
         return (
           <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.55)",backdropFilter:"blur(4px)",
             zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:980,maxHeight:"90vh",
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:1100,maxHeight:"92vh",
               boxShadow:"0 32px 100px rgba(0,0,0,.25)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
 
               {/* ── Header ── */}
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                padding:"18px 28px",borderBottom:"1px solid #e2e8f0",flexShrink:0}}>
-                <div style={{display:"flex",alignItems:"center",gap:12}}>
-                  <div style={{width:40,height:40,borderRadius:11,background:"#eef2ff",
-                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⚙</div>
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:36,height:36,borderRadius:10,background:"#eef2ff",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>⚙</div>
                   <div>
-                    <h2 style={{fontSize:16,fontWeight:700,color:"#1e293b",marginBottom:1}}>Otimizar Decisão</h2>
-                    <p style={{fontSize:12,color:"#64748b"}}>⊞ {shape.label||"Cineminha"}</p>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Otimizar Decisão</h2>
+                    <p style={{fontSize:11,color:"#64748b"}}>⊞ {shape.label||"Cineminha"}</p>
                   </div>
                 </div>
                 <button onClick={()=>setOptimModal(null)}
-                  style={{width:34,height:34,borderRadius:9,border:"1px solid #e2e8f0",background:"#f8fafc",
-                    cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
                     justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              {/* ── Top scenario card strip ── */}
+              <div style={{display:"flex",gap:10,padding:"12px 24px",borderBottom:"1px solid #f1f5f9",
+                flexShrink:0,overflowX:"auto"}}>
+                {CARD_DEFS.map(({id, pt, icon, label, sub, iconBg, textColor}) => {
+                  const isActive = activeCard === id;
+                  const isPersonalizado = id === 'personalizado';
+                  return (
+                    <button key={id}
+                      onClick={() => id === 'personalizado' ? null : selectCard(id, pt)}
+                      style={{flex:'1 1 160px',minWidth:140,padding:'10px 12px',borderRadius:12,
+                        textAlign:'left',fontFamily:'inherit',transition:'all .15s',
+                        cursor: (isPersonalizado||!pt) ? 'default' : 'pointer',
+                        border:`2px solid ${isActive?textColor:'#e2e8f0'}`,
+                        background: isActive ? iconBg : '#f8fafc',
+                        opacity: (!isPersonalizado && !pt) ? 0.5 : 1,
+                      }}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                        <div style={{width:24,height:24,borderRadius:7,background:iconBg,
+                          display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,flexShrink:0,
+                          border:`1px solid ${isActive?textColor:'transparent'}`}}>{icon}</div>
+                        <div>
+                          <div style={{fontSize:11.5,fontWeight:700,color:textColor,lineHeight:1.2}}>{label}</div>
+                          <div style={{fontSize:9.5,color:'#94a3b8'}}>{sub}</div>
+                        </div>
+                        {isActive&&(
+                          <span style={{marginLeft:'auto',fontSize:8,background:textColor,color:'#fff',
+                            borderRadius:99,padding:'2px 6px',fontWeight:700,flexShrink:0}}>ativo</span>
+                        )}
+                      </div>
+                      {pt ? (
+                        <div style={{display:'flex',gap:8,justifyContent:'space-between'}}>
+                          <MetricBadge label="Aprovação" val={pt.approvalRate} color={approvalColor(pt.approvalRate)}/>
+                          <MetricBadge label="Inad. Real" val={pt.inadReal} color={pt.inadReal===null?'#94a3b8':pt.inadReal>0.05?'#dc2626':'#d97706'}/>
+                          <MetricBadge label="Inad. Inf." val={pt.inadInferida} color={pt.inadInferida===null?'#94a3b8':pt.inadInferida>0.05?'#dc2626':'#d97706'}/>
+                        </div>
+                      ) : <span style={{fontSize:10,color:'#94a3b8'}}>Dados insuficientes</span>}
+                    </button>
+                  );
+                })}
               </div>
 
               {/* ── Body ── */}
               <div style={{display:"flex",flex:1,overflow:"hidden",minHeight:0}}>
 
-                {/* Left — matrix + sliders */}
-                <div style={{width:520,flexShrink:0,display:"flex",flexDirection:"column",
-                  borderRight:"1px solid #f1f5f9",padding:"20px 24px",gap:18,overflowY:"auto"}}>
+                {/* Left panel — sliders */}
+                <div style={{width:230,flexShrink:0,borderRight:"1px solid #f1f5f9",
+                  padding:"16px 18px",display:"flex",flexDirection:"column",gap:14,overflowY:"auto"}}>
 
-                  {/* Matrix preview */}
+                  <div style={{fontSize:10.5,fontWeight:700,color:"#64748b",
+                    textTransform:"uppercase",letterSpacing:".06em"}}>Simulação</div>
+
+                  {/* Approval slider — snaps to frontier states */}
                   <div>
-                    <div style={{fontSize:11,fontWeight:600,color:"#64748b",marginBottom:8,
-                      textTransform:"uppercase",letterSpacing:".05em"}}>Matriz de Decisão</div>
-                    <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"auto",maxHeight:260}}>
-                      <table style={{borderCollapse:"collapse",fontSize:11,width:"max-content",minWidth:"100%",
-                        fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                      <span style={{fontSize:11.5,fontWeight:600,color:"#1e293b"}}>Taxa de Aprovação</span>
+                      <span style={{fontSize:13,fontWeight:700,color:"#6366f1"}}>
+                        {`${Math.round(personalizado.approvalRate*100)}%`}
+                      </span>
+                    </div>
+                    <input type="range"
+                      min={0} max={maxFIdx} step={1}
+                      value={sliderApprovalIdx}
+                      onChange={e=>handleApprovalSlider(parseInt(e.target.value))}
+                      style={{width:"100%",accentColor:"#6366f1",cursor:"pointer"}}/>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:"#94a3b8",marginTop:2}}>
+                      <span>0%</span>
+                      <span>{frontier.length > 0 ? `${Math.round((frontier[maxFIdx]?.approvalRate||0)*100)}%` : '100%'}</span>
+                    </div>
+                    <div style={{fontSize:10,color:"#94a3b8",marginTop:3}}>
+                      {frontier.length > 1 ? `${frontier.length-1} cenários válidos` : 'Sem dados'}
+                    </div>
+                  </div>
+
+                  <div style={{height:1,background:"#f1f5f9"}}/>
+
+                  {/* Inad Real ceiling slider */}
+                  <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                      <span style={{fontSize:11.5,fontWeight:600,color:"#1e293b"}}>⚠ Teto Inad. Real</span>
+                      <span style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>{fmtPct(sliderInadReal)}</span>
+                    </div>
+                    <input type="range"
+                      min={0} max={maxInadReal} step={maxInadReal/200||0.001}
+                      value={sliderInadReal}
+                      onChange={e=>handleInadSlider(parseFloat(e.target.value),'real')}
+                      style={{width:"100%",accentColor:"#f59e0b",cursor:"pointer"}}/>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:"#94a3b8",marginTop:2}}>
+                      <span>0%</span><span>{fmtPct(maxInadReal)}</span>
+                    </div>
+                  </div>
+
+                  {/* Inad Inferida ceiling slider */}
+                  <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                      <span style={{fontSize:11.5,fontWeight:600,color:"#1e293b"}}>🎯 Teto Inad. Inf.</span>
+                      <span style={{fontSize:13,fontWeight:700,color:"#8b5cf6"}}>{fmtPct(sliderInadInf)}</span>
+                    </div>
+                    <input type="range"
+                      min={0} max={maxInadInf} step={maxInadInf/200||0.001}
+                      value={sliderInadInf}
+                      onChange={e=>handleInadSlider(parseFloat(e.target.value),'inferida')}
+                      style={{width:"100%",accentColor:"#8b5cf6",cursor:"pointer"}}/>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:"#94a3b8",marginTop:2}}>
+                      <span>0%</span><span>{fmtPct(maxInadInf)}</span>
+                    </div>
+                  </div>
+
+                  <div style={{height:1,background:"#f1f5f9"}}/>
+
+                  {/* Quick stats for current proposed state */}
+                  <div style={{background:"#f8fafc",borderRadius:10,padding:"10px 12px",border:"1px solid #e2e8f0"}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#64748b",marginBottom:8,textTransform:"uppercase",letterSpacing:".05em"}}>
+                      Estado Atual
+                    </div>
+                    {[
+                      {label:"Aprovação", val:`${Math.round(personalizado.approvalRate*100)}%`, color:approvalColor(personalizado.approvalRate)},
+                      {label:"Inad. Real", val:fmtPct(personalizado.inadReal), color:personalizado.inadReal===null?'#94a3b8':personalizado.inadReal>0.05?'#dc2626':'#d97706'},
+                      {label:"Inad. Inf.", val:fmtPct(personalizado.inadInferida), color:personalizado.inadInferida===null?'#94a3b8':personalizado.inadInferida>0.05?'#dc2626':'#d97706'},
+                    ].map(({label,val,color})=>(
+                      <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                        <span style={{fontSize:11,color:"#64748b"}}>{label}</span>
+                        <span style={{fontSize:12,fontWeight:700,color}}>{val}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Center — matrix (main focus) with zoom/pan */}
+                <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",position:"relative"}}>
+                  <div style={{padding:"10px 16px 6px",borderBottom:"1px solid #f1f5f9",flexShrink:0,
+                    display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <span style={{fontSize:10.5,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em"}}>
+                      Matriz de Decisão
+                    </span>
+                    <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                      <span style={{fontSize:10,color:"#94a3b8",marginRight:4}}>{Math.round(matrixZoom*100)}%</span>
+                      {[["−",()=>setOptimModal(m=>({...m,matrixZoom:Math.max(0.4,m.matrixZoom/1.2)}))],
+                        ["⌂",()=>setOptimModal(m=>({...m,matrixZoom:1,matrixPanX:0,matrixPanY:0}))],
+                        ["+",()=>setOptimModal(m=>({...m,matrixZoom:Math.min(4,m.matrixZoom*1.2)}))],
+                      ].map(([icon,fn])=>(
+                        <button key={icon} onClick={fn}
+                          style={{width:26,height:26,borderRadius:7,border:"1px solid #e2e8f0",background:"#fff",
+                            cursor:"pointer",fontSize:13,color:"#64748b",display:"flex",alignItems:"center",
+                            justifyContent:"center",fontFamily:"inherit"}}>
+                          {icon}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Scrollable/zoomable/pannable matrix area */}
+                  <div style={{flex:1,overflow:"hidden",position:"relative",background:"#f8fafc",
+                    cursor:"grab"}}
+                    onWheel={handleMatrixWheel}
+                    onMouseDown={startMatrixPan}>
+                    <div style={{
+                      transform:`translate(${matrixPanX}px,${matrixPanY}px) scale(${matrixZoom})`,
+                      transformOrigin:"top left",
+                      display:"inline-block",
+                      padding:"20px",
+                      userSelect:"none",
+                    }}>
+                      <table style={{borderCollapse:"collapse",fontSize:12,
+                        fontFamily:"'DM Sans',system-ui,sans-serif",background:"#fff",
+                        borderRadius:10,overflow:"hidden",boxShadow:"0 1px 6px rgba(0,0,0,.06)"}}>
                         {show2D&&(
                           <thead>
                             <tr>
-                              <th style={{width:84,background:"#f8fafc",border:"1px solid #e2e8f0",
-                                padding:"4px 6px",fontSize:10,color:"#94a3b8",fontWeight:600,
-                                position:"sticky",top:0,left:0,zIndex:3,whiteSpace:"nowrap"}}>
-                                {trunc(shape.rowVar.col,7)} \ {trunc(shape.colVar.col,7)}
+                              <th style={{width:90,background:"#f1f5f9",border:"1px solid #e2e8f0",
+                                padding:"6px 8px",fontSize:11,color:"#94a3b8",fontWeight:600,
+                                whiteSpace:"nowrap",minWidth:90}}>
+                                {trunc(shape.rowVar.col,8)} \ {trunc(shape.colVar.col,8)}
                               </th>
                               {cDom.map(cv=>(
-                                <th key={cv} style={{width:70,background:"#f8fafc",border:"1px solid #e2e8f0",
-                                  padding:"4px 4px",fontSize:10,color:"#475569",fontWeight:600,
-                                  textAlign:"center",position:"sticky",top:0,zIndex:2,
-                                  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:70}}>
+                                <th key={cv} style={{width:CINEMA_CELL_W,background:"#f1f5f9",
+                                  border:"1px solid #e2e8f0",padding:"6px 4px",fontSize:11,
+                                  color:"#475569",fontWeight:600,textAlign:"center",
+                                  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",
+                                  maxWidth:CINEMA_CELL_W}}>
                                   {cv}
                                 </th>
                               ))}
@@ -2696,38 +2915,33 @@ export default function App() {
                         <tbody>
                           {rDom.map(rv=>(
                             <tr key={rv}>
-                              <td style={{background:"#f8fafc",border:"1px solid #e2e8f0",
-                                padding:"4px 8px",fontSize:11,fontWeight:600,color:"#475569",
-                                position:"sticky",left:0,zIndex:1,whiteSpace:"nowrap"}}>
+                              <td style={{background:"#f1f5f9",border:"1px solid #e2e8f0",
+                                padding:"6px 10px",fontSize:12,fontWeight:600,color:"#475569",
+                                whiteSpace:"nowrap",minWidth:90}}>
                                 {show2D ? rv : (shape.rowVar?.col||shape.colVar?.col||'')}
                               </td>
                               {cDom.map(cv=>{
-                                const cellKey=`${rv}|${cv}`;
-                                const isElig = proposedCells[cellKey]!==false;
+                                const cellKey = `${rv}|${cv}`;
+                                const isElig  = proposedCells[cellKey] !== false;
                                 const m = cellMetrics[cellKey];
                                 return (
                                   <td key={cv}
-                                    onClick={()=>{
-                                      const nc={...proposedCells,[cellKey]:!isElig};
-                                      const aq=Object.entries(nc)
-                                        .filter(([,v])=>v!==false)
-                                        .reduce((s,[k])=>s+(cellMetrics[k]?.qty||0),0);
-                                      setOptimModal(mm=>({...mm,
-                                        proposedCells:nc,
-                                        activeCard:'personalizado',
-                                        sliderApproval: totalQty>0 ? aq/totalQty : 0,
-                                      }));
-                                    }}
-                                    style={{width:70,border:"1px solid #e2e8f0",
+                                    onClick={(e)=>{e.stopPropagation();toggleCell(cellKey,isElig);}}
+                                    style={{width:CINEMA_CELL_W,border:"1px solid #e2e8f0",
                                       background:isElig?"#dcfce7":"#fee2e2",
-                                      textAlign:"center",padding:"3px 2px",cursor:"pointer",
-                                      transition:"background .12s"}}>
-                                    <div style={{fontSize:13,fontWeight:700,
+                                      textAlign:"center",padding:"5px 3px",cursor:"pointer",
+                                      transition:"background .1s"}}>
+                                    <div style={{fontSize:15,fontWeight:700,
                                       color:isElig?"#15803d":"#dc2626",lineHeight:1}}>
                                       {isElig?"✓":"✗"}
                                     </div>
                                     {m&&m.qty>0&&(
-                                      <div style={{fontSize:9,color:"#64748b",marginTop:1}}>{fmtQty(m.qty)}</div>
+                                      <div style={{fontSize:9.5,color:"#64748b",marginTop:2}}>{fmtQty(m.qty)}</div>
+                                    )}
+                                    {m&&m.inadInferida!=null&&(
+                                      <div style={{fontSize:8.5,color:m.inadInferida>0.05?"#dc2626":"#94a3b8",marginTop:1}}>
+                                        {fmtPct(m.inadInferida)}
+                                      </div>
                                     )}
                                   </td>
                                 );
@@ -2737,160 +2951,35 @@ export default function App() {
                         </tbody>
                       </table>
                     </div>
-                  </div>
-
-                  {/* Sliders */}
-                  <div style={{display:"flex",flexDirection:"column",gap:16}}>
-                    <div style={{fontSize:11,fontWeight:600,color:"#64748b",
-                      textTransform:"uppercase",letterSpacing:".05em"}}>Simulação Manual</div>
-
-                    {[
-                      { label:"Taxa de Aprovação", val:sliderApproval,
-                        fmt: v=>`${Math.round(v*100)}%`,
-                        min:0, max:1, step:0.005, color:"#6366f1",
-                        onChange: v=>handleApprovalSlider(v) },
-                      { label:"⚠ Teto Inad. Real", val:sliderInadReal, fmt:fmtPct,
-                        min:0, max:maxInadReal, step:maxInadReal/200||0.001, color:"#f59e0b",
-                        onChange: v=>handleInadSlider(v,'real') },
-                      { label:"🎯 Teto Inad. Inferida", val:sliderInadInf, fmt:fmtPct,
-                        min:0, max:maxInadInf, step:maxInadInf/200||0.001, color:"#8b5cf6",
-                        onChange: v=>handleInadSlider(v,'inferida') },
-                    ].map(({label,val,fmt,min,max,step,color,onChange})=>(
-                      <div key={label}>
-                        <div style={{display:"flex",justifyContent:"space-between",
-                          alignItems:"center",marginBottom:5}}>
-                          <span style={{fontSize:12,fontWeight:600,color:"#1e293b"}}>{label}</span>
-                          <span style={{fontSize:13,fontWeight:700,color}}>{fmt(val)}</span>
-                        </div>
-                        <input type="range" min={min} max={max} step={step} value={val}
-                          onChange={e=>onChange(parseFloat(e.target.value))}
-                          style={{width:"100%",accentColor:color,cursor:"pointer"}}/>
-                        <div style={{display:"flex",justifyContent:"space-between",
-                          fontSize:10,color:"#94a3b8",marginTop:2}}>
-                          <span>{fmt(min)}</span><span>{fmt(max)}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Right — scenario cards */}
-                <div style={{flex:1,display:"flex",flexDirection:"column",
-                  padding:"20px 24px",gap:8,overflowY:"auto"}}>
-                  <div style={{fontSize:11,fontWeight:600,color:"#64748b",marginBottom:4,
-                    textTransform:"uppercase",letterSpacing:".05em"}}>Cenários</div>
-
-                  {/* Conservador */}
-                  <button onClick={()=>selectCard('conservador',scen.conservador)} style={cardBase('conservador')}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
-                      <div style={{width:28,height:28,borderRadius:8,background:"#dcfce7",
-                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>🛡</div>
-                      <span style={{fontSize:13,fontWeight:700,color:"#15803d"}}>Conservador</span>
-                      <span style={{fontSize:10,color:"#64748b",marginLeft:"auto"}}>Menor inadimplência</span>
+                    {/* Pan hint */}
+                    <div style={{position:"absolute",bottom:8,left:"50%",transform:"translateX(-50%)",
+                      fontSize:9.5,color:"#94a3b8",background:"rgba(255,255,255,.8)",
+                      borderRadius:99,padding:"3px 10px",pointerEvents:"none",whiteSpace:"nowrap"}}>
+                      Scroll = zoom · Arrastar = mover · Clique na célula = alternar
                     </div>
-                    {scen.conservador ? (
-                      <div style={{display:"flex",gap:20}}>
-                        <MetricGroup label="Aprovação"  val={scen.conservador.approvalRate} color="#1e293b"/>
-                        <MetricGroup label="Inad. Inf." val={scen.conservador.inadInferida} color="#dc2626"/>
-                        <MetricGroup label="Inad. Real" val={scen.conservador.inadReal}     color="#f59e0b"/>
-                      </div>
-                    ) : <span style={{fontSize:11,color:"#94a3b8"}}>Dados insuficientes</span>}
-                  </button>
-
-                  {/* Médio */}
-                  <button onClick={()=>selectCard('medio',scen.medio)} style={cardBase('medio')}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
-                      <div style={{width:28,height:28,borderRadius:8,background:"#fef3c7",
-                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>⚖</div>
-                      <span style={{fontSize:13,fontWeight:700,color:"#92400e"}}>Melhor Eficiência</span>
-                      <span style={{fontSize:10,color:"#64748b",marginLeft:"auto"}}>Equilíbrio ótimo</span>
-                    </div>
-                    {scen.medio ? (
-                      <div style={{display:"flex",gap:20}}>
-                        <MetricGroup label="Aprovação"  val={scen.medio.approvalRate} color="#1e293b"/>
-                        <MetricGroup label="Inad. Inf." val={scen.medio.inadInferida} color="#dc2626"/>
-                        <MetricGroup label="Inad. Real" val={scen.medio.inadReal}     color="#f59e0b"/>
-                      </div>
-                    ) : <span style={{fontSize:11,color:"#94a3b8"}}>Dados insuficientes</span>}
-                  </button>
-
-                  {/* Máximo */}
-                  <button onClick={()=>selectCard('maximo',scen.maximo)} style={cardBase('maximo')}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
-                      <div style={{width:28,height:28,borderRadius:8,background:"#dbeafe",
-                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>🚀</div>
-                      <span style={{fontSize:13,fontWeight:700,color:"#1d4ed8"}}>Máxima Aprovação</span>
-                      <span style={{fontSize:10,color:"#64748b",marginLeft:"auto"}}>Maior volume</span>
-                    </div>
-                    {scen.maximo ? (
-                      <div style={{display:"flex",gap:20}}>
-                        <MetricGroup label="Aprovação"  val={scen.maximo.approvalRate} color="#1e293b"/>
-                        <MetricGroup label="Inad. Inf." val={scen.maximo.inadInferida} color="#dc2626"/>
-                        <MetricGroup label="Inad. Real" val={scen.maximo.inadReal}     color="#f59e0b"/>
-                      </div>
-                    ) : <span style={{fontSize:11,color:"#94a3b8"}}>Dados insuficientes</span>}
-                  </button>
-
-                  {/* Personalizado */}
-                  <div style={{...cardBase('personalizado'),cursor:"default"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
-                      <div style={{width:28,height:28,borderRadius:8,background:"#f3e8ff",
-                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>🎛</div>
-                      <span style={{fontSize:13,fontWeight:700,color:"#7c3aed"}}>Personalizado</span>
-                      {activeCard==='personalizado'&&(
-                        <span style={{marginLeft:"auto",fontSize:9,background:"#7c3aed",color:"#fff",
-                          borderRadius:99,padding:"2px 8px",fontWeight:700}}>ativo</span>
-                      )}
-                    </div>
-                    <div style={{display:"flex",gap:20}}>
-                      <MetricGroup label="Aprovação"  val={sliderApproval} color="#1e293b"/>
-                      <MetricGroup label="Inad. Inf." val={sliderInadInf}  color="#dc2626"/>
-                      <MetricGroup label="Inad. Real" val={sliderInadReal} color="#f59e0b"/>
-                    </div>
-                  </div>
-
-                  {/* Política Completa */}
-                  <div style={{padding:"12px 14px",borderRadius:12,border:"1px solid #bae6fd",
-                    background:"#f0f9ff",marginTop:4}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
-                      <div style={{width:28,height:28,borderRadius:8,background:"#e0f2fe",
-                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>📊</div>
-                      <span style={{fontSize:13,fontWeight:700,color:"#0369a1"}}>Política Completa</span>
-                      <span style={{fontSize:10,color:"#64748b",marginLeft:"auto"}}>Impacto no fluxo todo</span>
-                    </div>
-                    {!policyOk ? (
-                      <span style={{fontSize:11,color:"#94a3b8",fontStyle:"italic"}}>
-                        Fluxo incompleto — conecte todos os caminhos
-                      </span>
-                    ) : policySim&&policySim.totalQty>0 ? (
-                      <div style={{display:"flex",gap:20}}>
-                        <MetricGroup label="Aprovação"  val={policySim.approvalRate/100} color="#1e293b"/>
-                        <MetricGroup label="Inad. Real" val={policySim.inadReal}
-                          color={policySim.inadReal===null?"#94a3b8":policySim.inadReal>0.05?"#dc2626":"#f59e0b"}/>
-                        <MetricGroup label="Inad. Inf." val={policySim.inadInferida}
-                          color={policySim.inadInferida===null?"#94a3b8":policySim.inadInferida>0.05?"#dc2626":"#f59e0b"}/>
-                      </div>
-                    ) : (
-                      <span style={{fontSize:11,color:"#94a3b8",fontStyle:"italic"}}>Sem dados simulados</span>
-                    )}
                   </div>
                 </div>
               </div>
 
               {/* ── Footer ── */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                padding:"14px 28px",borderTop:"1px solid #e2e8f0",flexShrink:0}}>
+                padding:"12px 24px",borderTop:"1px solid #e2e8f0",flexShrink:0,background:"#fafafa"}}>
                 <button onClick={()=>setOptimModal(null)}
-                  style={{padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                  style={{padding:"8px 18px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
                     color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
                   Cancelar
                 </button>
-                <button onClick={()=>applyOptimResult(shapeId,proposedCells)}
-                  style={{padding:"10px 24px",borderRadius:9,border:"none",background:"#6366f1",color:"#fff",
-                    cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",
-                    display:"flex",alignItems:"center",gap:6}}>
-                  ✓ Aplicar ao Cineminha
-                </button>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <span style={{fontSize:11,color:"#94a3b8"}}>
+                    {`${Math.round(personalizado.approvalRate*100)}% aprovação · ${fmtQty(personalizado.approvedQty)} proposta${personalizado.approvedQty!==1?'s':''}`}
+                  </span>
+                  <button onClick={()=>applyOptimResult(shapeId,proposedCells)}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:"#6366f1",color:"#fff",
+                      cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",
+                      display:"flex",alignItems:"center",gap:6}}>
+                    ✓ Aplicar ao Cineminha
+                  </button>
+                </div>
               </div>
             </div>
           </div>
