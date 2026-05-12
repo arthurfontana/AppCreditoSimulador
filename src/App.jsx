@@ -303,6 +303,17 @@ function computeLensPopulation(rules, csvStore) {
   return { count, total };
 }
 
+// ── Engine de População Impactada (Feature 4) ─────────────────────────────────
+// Retorna {[csvId]: boolean[]} — índice por rowIdx, true = FLAG_POPULACAO_ALVO
+function computeLensAffectedRows(lensShape, csvStore) {
+  const rules = lensShape.rules || [];
+  const result = {};
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    result[csvId] = csv.rows.map(row => rowMatchesLensRules(row, csv.headers, rules));
+  }
+  return result;
+}
+
 // ── Flow engine ──────────────────────────────────────────────────────────────
 function buildFlowGraph(shapes, conns) {
   const out = {}, inc = {};
@@ -484,6 +495,141 @@ function runSimulation(shapes, conns, csvStore) {
     inadReal, inadInferida,
     edgeStats,
   };
+}
+
+// ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ────────────────────
+// Requer: lensPopulations com ao menos um Lens, e coluna __DECISAO_ORIGINAL no CSV (asIsConfig).
+// Retorna null se não há contexto de simulação marginal, ou
+// {[csvId]: {rowDecisions:[{rowIdx,decisaoOriginal,decisaoSimulada,flagImpactado,componenteOrigem,flagMutavel}], summaryStats}}
+function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
+  if (!lensPopulations || Object.keys(lensPopulations).length === 0) return null;
+
+  const {out} = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  const edgeLookup = {};
+  for (const c of conns) {
+    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
+    edgeLookup[c.from][`${c.to}::${c.label??''}`] = c.id;
+  }
+
+  function traverseRow(row, headers, startId) {
+    let cur = startId; const visited = new Set(); const path = [];
+    while (cur) {
+      if (visited.has(cur)) return {result:null, path};
+      visited.add(cur);
+      const node = shapesMap[cur]; if (!node) return {result:null, path};
+      if (TERM.has(node.type)) return {result:node.type, path};
+      if (node.type === 'decision') {
+        const colIdx = headers.indexOf(node.variableCol);
+        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) return {result:null, path};
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const rowI = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const colI = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rowVal = node.rowVar && rowI >= 0 ? (row[rowI] ?? '').trim() : '';
+        const colVal = node.colVar && colI >= 0 ? (row[colI] ?? '').trim() : '';
+        if (!node.rowVar && !node.colVar) return {result:null, path};
+        const rKey = node.rowVar ? rowVal : '*';
+        const cKey = node.colVar ? colVal : '*';
+        const isEligible = (node.cells ?? {})[`${rKey}|${cKey}`] !== false;
+        const match = (out[cur] || []).find(e => e.label === (isEligible ? 'Elegível' : 'Não Elegível'));
+        if (!match) return {result:null, path};
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        const passes = rowMatchesLensRules(row, headers, node.rules || []);
+        if (!passes) return {result:null, path};
+        const edges = out[cur] || []; if (edges.length === 0) return {result:null, path};
+        const match = edges[0];
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || []; if (edges.length === 0) return {result:null, path};
+        const match = edges[0];
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
+        cur = match.to;
+      } else return {result:null, path};
+    }
+    return {result:null, path};
+  }
+
+  const overlay = {};
+  let hasAnyDecisaoCol = false;
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    if (dOrigIdx < 0) continue;
+    hasAnyDecisaoCol = true;
+
+    const types = csv.columnTypes || {};
+    const qtyCol = Object.entries(types).find(([,t]) => t === 'qty')?.[0];
+    const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision') return d.csvId === csvId;
+      if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+
+    const summaryStats = { totalQty: 0, mutableQty: 0, impactedQty: 0, rToA: 0, aToR: 0 };
+
+    const rowDecisions = csv.rows.map((row, rowIdx) => {
+      const decisaoOriginal = row[dOrigIdx] ?? '';
+      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 1) : 1;
+
+      // FLAG_MUTAVEL: registro pertence à população alvo de algum Lens
+      const isMutable = Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
+
+      summaryStats.totalQty += qty;
+      if (isMutable) summaryStats.mutableQty += qty;
+
+      if (!isMutable || csvRoots.length === 0) {
+        return { rowIdx, decisaoOriginal, decisaoSimulada: decisaoOriginal, flagImpactado: false, componenteOrigem: null, flagMutavel: false };
+      }
+
+      const {result: boardResult, path} = traverseRow(row, csv.headers, csvRoots[0].id);
+      let decisaoSimulada = decisaoOriginal;
+      let componenteOrigem = null;
+
+      if (boardResult === 'approved') {
+        decisaoSimulada = 'APROVADO';
+        const lastConn = conns.find(c => c.id === path[path.length - 1]);
+        componenteOrigem = lastConn ? (shapesMap[lastConn.to]?.label || 'Aprovado') : 'Aprovado';
+      } else if (boardResult === 'rejected') {
+        decisaoSimulada = 'REPROVADO';
+        const lastConn = conns.find(c => c.id === path[path.length - 1]);
+        componenteOrigem = lastConn ? (shapesMap[lastConn.to]?.label || 'Reprovado') : 'Reprovado';
+      }
+
+      const flagImpactado = decisaoOriginal !== '' && decisaoSimulada !== decisaoOriginal;
+      if (flagImpactado) {
+        summaryStats.impactedQty += qty;
+        if (decisaoOriginal === 'REPROVADO' && decisaoSimulada === 'APROVADO') summaryStats.rToA += qty;
+        if (decisaoOriginal === 'APROVADO'  && decisaoSimulada === 'REPROVADO') summaryStats.aToR += qty;
+      }
+
+      return { rowIdx, decisaoOriginal, decisaoSimulada, flagImpactado, componenteOrigem, flagMutavel: true };
+    });
+
+    overlay[csvId] = { rowDecisions, summaryStats };
+  }
+
+  return hasAnyDecisaoCol ? overlay : null;
 }
 
 // ── Optimization engine helpers ──────────────────────────────────────────────
@@ -719,6 +865,27 @@ export default function App() {
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
   const simResult  = useMemo(() => runSimulation(shapes, conns, csvStore), [shapes, conns, csvStore]);
+
+  // ── Engine de População Impactada (Feature 4) ─────────────────
+  // lensPopulations: {[lensId]: {[csvId]: boolean[]}} — FLAG_POPULACAO_ALVO por linha
+  const lensPopulations = useMemo(() => {
+    const result = {};
+    for (const shape of shapes) {
+      if (shape.type !== 'decision_lens') continue;
+      result[shape.id] = computeLensAffectedRows(shape, csvStore);
+    }
+    return result;
+  }, [shapes, csvStore]);
+
+  const lensPopulationsR = useRef(lensPopulations);
+  useEffect(() => { lensPopulationsR.current = lensPopulations; }, [lensPopulations]);
+
+  // ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ──────
+  // simulationOverlay: null | {[csvId]: {rowDecisions, summaryStats}}
+  const simulationOverlay = useMemo(
+    () => computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations),
+    [shapes, conns, csvStore, lensPopulations]
+  );
 
   // ── Geometry ──────────────────────────────────────────────────
   const getBR   = () => svgRef.current.getBoundingClientRect();
@@ -1964,6 +2131,23 @@ export default function App() {
     const isSel = sel === id;
     const isMulti = multiSel.has(id) && !isSel;
     const ruleCount = (rules || []).length;
+    // Compute population stats for this lens (Feature 4)
+    const popMap = lensPopulations[id];
+    let popQty = 0, popTotal = 0;
+    if (popMap) {
+      for (const [csvId, flags] of Object.entries(popMap)) {
+        const csv = csvStore[csvId];
+        if (!csv) continue;
+        const types = csv.columnTypes || {};
+        const qtyCol = Object.entries(types).find(([,t]) => t === 'qty')?.[0];
+        const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+        flags.forEach((inPop, ri) => {
+          const q = qtyIdx >= 0 ? (parseFloat(csv.rows[ri]?.[qtyIdx]) || 1) : 1;
+          popTotal += q;
+          if (inPop) popQty += q;
+        });
+      }
+    }
     const stroke = isSel || isMulti ? "#3b82f6" : "#0891b2";
     const sw = isSel || isMulti ? 2 : 1.5;
     const filter = isSel
@@ -1996,16 +2180,25 @@ export default function App() {
             style={{pointerEvents:"none",userSelect:"none"}}>Sem filtros — clique Configurar</text>
         ) : (
           <>
-            <text x={x+w/2} y={y+50} textAnchor="middle" fontSize={13} fontWeight="700" fill="#0e7490"
+            <text x={x+w/2} y={y+46} textAnchor="middle" fontSize={12} fontWeight="700" fill="#0e7490"
               fontFamily="'DM Sans',system-ui,sans-serif"
               style={{pointerEvents:"none",userSelect:"none"}}>
               {`${ruleCount} filtro${ruleCount !== 1 ? "s" : ""} ativo${ruleCount !== 1 ? "s" : ""}`}
             </text>
-            <text x={x+w/2} y={y+66} textAnchor="middle" fontSize={10} fill="#64748b"
-              fontFamily="'DM Sans',system-ui,sans-serif"
-              style={{pointerEvents:"none",userSelect:"none"}}>
-              Clique Configurar para editar
-            </text>
+            {popTotal > 0 && (
+              <text x={x+w/2} y={y+61} textAnchor="middle" fontSize={10} fontWeight="600" fill="#0891b2"
+                fontFamily="'DM Sans',system-ui,sans-serif"
+                style={{pointerEvents:"none",userSelect:"none"}}>
+                {`👥 ${fmtQty(popQty)} / ${fmtQty(popTotal)} impactados`}
+              </text>
+            )}
+            {popTotal === 0 && (
+              <text x={x+w/2} y={y+61} textAnchor="middle" fontSize={10} fill="#64748b"
+                fontFamily="'DM Sans',system-ui,sans-serif"
+                style={{pointerEvents:"none",userSelect:"none"}}>
+                Clique Configurar para editar
+              </text>
+            )}
           </>
         )}
         {/* Selection handles */}
@@ -2190,6 +2383,61 @@ export default function App() {
         </text>
         <text x={x+24} y={sep1+80} fontSize={9} fill="#cbd5e1"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Inferida / Vol. Aprovado</text>
+        {/* Impacto Marginal (Feature 5) — exibido apenas quando há overlay */}
+        {(() => {
+          if (!simulationOverlay) return null;
+          const stats = Object.values(simulationOverlay).reduce(
+            (acc, {summaryStats: s}) => ({
+              totalQty: acc.totalQty + s.totalQty,
+              mutableQty: acc.mutableQty + s.mutableQty,
+              impactedQty: acc.impactedQty + s.impactedQty,
+              rToA: acc.rToA + s.rToA,
+              aToR: acc.aToR + s.aToR,
+            }),
+            { totalQty: 0, mutableQty: 0, impactedQty: 0, rToA: 0, aToR: 0 }
+          );
+          const sep2 = sep1 + 100;
+          return (
+            <>
+              <line x1={x+16} y1={sep2} x2={x+w-16} y2={sep2} stroke="#f1f5f9" strokeWidth={1}/>
+              <text x={x+w/2} y={sep2+13} textAnchor="middle" fontSize={10} fontWeight="700" fill="#7c3aed"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+                🔬 Impacto Marginal
+              </text>
+              <rect x={x+12} y={sep2+18} width={w-24} height={30} rx={8} fill="#faf5ff" stroke="#e9d5ff" strokeWidth={1}/>
+              <text x={x+24} y={sep2+30} fontSize={9} fill="#94a3b8"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+                👥 Pop. Alvo
+              </text>
+              <text x={x+w-24} y={sep2+30} textAnchor="end" fontSize={11} fontWeight="700" fill="#7c3aed"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+                {fmtQty(stats.mutableQty)} / {fmtQty(stats.totalQty)}
+              </text>
+              <text x={x+24} y={sep2+43} fontSize={9} fill="#94a3b8"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+                Alterados
+              </text>
+              <text x={x+w-24} y={sep2+43} textAnchor="end" fontSize={11} fontWeight="700" fill={stats.impactedQty > 0 ? "#7c3aed" : "#94a3b8"}
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+                {fmtQty(stats.impactedQty)}
+              </text>
+              <rect x={x+12} y={sep2+52} width={(w-28)/2} height={24} rx={6} fill="#f0fdf4" stroke="#bbf7d0" strokeWidth={1}/>
+              <text x={x+16} y={sep2+62} fontSize={8.5} fill="#16a34a"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>R→A</text>
+              <text x={x+16+(w-28)/2-6} y={sep2+62} textAnchor="end" fontSize={10} fontWeight="700" fill="#16a34a"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+                +{fmtQty(stats.rToA)}
+              </text>
+              <rect x={x+12+(w-28)/2+4} y={sep2+52} width={(w-28)/2} height={24} rx={6} fill="#fef2f2" stroke="#fecaca" strokeWidth={1}/>
+              <text x={x+16+(w-28)/2+4} y={sep2+62} fontSize={8.5} fill="#dc2626"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>A→R</text>
+              <text x={x+w-16} y={sep2+62} textAnchor="end" fontSize={10} fontWeight="700" fill="#dc2626"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+                -{fmtQty(stats.aToR)}
+              </text>
+            </>
+          );
+        })()}
       </g>
     );
   };
