@@ -85,16 +85,30 @@ const CINEMA_MAX_H    = 420;
 
 const COLORS = ["#ffffff","#dbeafe","#fef3c7","#dcfce7","#fce7f3","#e0e7ff","#ffedd5","#fef9c3"];
 const TOOLS  = [
-  { id:"hand",      icon:"✋",  label:"Mover"      },
-  { id:"select",    icon:"↖",   label:"Selecionar" },
-  { id:"frame",     icon:"⬚",   label:"Frame"      },
-  { id:"rect",      icon:"▭",   label:"Retângulo"  },
-  { id:"circle",    icon:"◯",   label:"Círculo"    },
-  { id:"diamond",   icon:"◇",   label:"Losango"    },
-  { id:"cineminha", icon:"⊞",   label:"Cineminha"  },
-  { id:"connect",   icon:"⟶",   label:"Conectar"   },
-  { id:"approved",  icon:"✅",  label:"Aprovado"   },
-  { id:"rejected",  icon:"❌",  label:"Reprovado"  },
+  { id:"hand",          icon:"✋",  label:"Mover"          },
+  { id:"select",        icon:"↖",   label:"Selecionar"     },
+  { id:"frame",         icon:"⬚",   label:"Frame"          },
+  { id:"rect",          icon:"▭",   label:"Retângulo"      },
+  { id:"circle",        icon:"◯",   label:"Círculo"        },
+  { id:"diamond",       icon:"◇",   label:"Losango"        },
+  { id:"cineminha",     icon:"⊞",   label:"Cineminha"      },
+  { id:"decision_lens", icon:"🔎",  label:"Decision Lens"  },
+  { id:"connect",       icon:"⟶",   label:"Conectar"       },
+  { id:"approved",      icon:"✅",  label:"Aprovado"       },
+  { id:"rejected",      icon:"❌",  label:"Reprovado"      },
+];
+
+// ── Decision Lens constants ───────────────────────────────────────────────────
+const LENS_W = 182, LENS_H = 86;
+const LENS_OPERATORS = [
+  { value:"equal",    label:"Igual a"             },
+  { value:"notEqual", label:"Diferente de"         },
+  { value:"in",       label:"Está em uma lista"    },
+  { value:"notIn",    label:"Não está em uma lista"},
+  { value:"lt",       label:"Menor que"            },
+  { value:"lte",      label:"Menor ou igual a"     },
+  { value:"gt",       label:"Maior que"            },
+  { value:"gte",      label:"Maior ou igual a"     },
 ];
 
 const COL_TYPES = [
@@ -240,6 +254,55 @@ function inadColor(t) { // t in [0,1]
   return lerpColor("#fde68a","#fca5a5",(t-0.5)*2);
 }
 
+// ── Decision Lens helpers ────────────────────────────────────────────────────
+function matchLensRule(cellVal, operator, ruleVal) {
+  const cv = String(cellVal ?? "").trim();
+  const rv = String(ruleVal ?? "").trim();
+  const cvN = parseFloat(cv), rvN = parseFloat(rv);
+  const numOk = !isNaN(cvN) && !isNaN(rvN);
+  switch (operator) {
+    case "equal":    return cv.toLowerCase() === rv.toLowerCase();
+    case "notEqual": return cv.toLowerCase() !== rv.toLowerCase();
+    case "in":       return rv.split(",").map(s=>s.trim().toLowerCase()).includes(cv.toLowerCase());
+    case "notIn":    return !rv.split(",").map(s=>s.trim().toLowerCase()).includes(cv.toLowerCase());
+    case "lt":       return numOk ? cvN < rvN : cv < rv;
+    case "lte":      return numOk ? cvN <= rvN : cv <= rv;
+    case "gt":       return numOk ? cvN > rvN : cv > rv;
+    case "gte":      return numOk ? cvN >= rvN : cv >= rv;
+    default: return true;
+  }
+}
+
+function rowMatchesLensRules(row, headers, rules) {
+  if (!rules || rules.length === 0) return true;
+  let result = null;
+  for (let i = 0; i < rules.length; i++) {
+    const rule = rules[i];
+    const colIdx = headers.indexOf(rule.col);
+    const cellVal = colIdx >= 0 ? (row[colIdx] ?? "") : "";
+    const matches = matchLensRule(cellVal, rule.operator, rule.value ?? "");
+    if (result === null) { result = matches; }
+    else if (rule.logic === "OR") { result = result || matches; }
+    else { result = result && matches; }
+  }
+  return result ?? true;
+}
+
+function computeLensPopulation(rules, csvStore) {
+  let count = 0, total = 0;
+  for (const csv of Object.values(csvStore)) {
+    const types = csv.columnTypes || {};
+    const qtyCol = Object.entries(types).find(([,t])=>t==='qty')?.[0];
+    const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+    for (const row of csv.rows) {
+      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 1) : 1;
+      total += qty;
+      if (rowMatchesLensRules(row, csv.headers, rules)) count += qty;
+    }
+  }
+  return { count, total };
+}
+
 // ── Flow engine ──────────────────────────────────────────────────────────────
 function buildFlowGraph(shapes, conns) {
   const out = {}, inc = {};
@@ -253,7 +316,7 @@ function buildFlowGraph(shapes, conns) {
 
 function validateFlow(shapes, conns) {
   const errors = {};
-  const FLOW = new Set(['decision','port','approved','rejected','cineminha']);
+  const FLOW = new Set(['decision','port','approved','rejected','cineminha','decision_lens']);
   const TERM = new Set(['approved','rejected']);
   const flowShapes = shapes.filter(s => FLOW.has(s.type));
   if (flowShapes.length === 0) return errors;
@@ -272,7 +335,7 @@ function validateFlow(shapes, conns) {
     if (!ok && !errors[nodeId]) errors[nodeId] = 'Possui caminhos sem finalização';
     return ok;
   }
-  shapes.filter(s => s.type === 'decision' || s.type === 'cineminha').forEach(d => dfs(d.id, new Set()));
+  shapes.filter(s => s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens').forEach(d => dfs(d.id, new Set()));
   return errors;
 }
 
@@ -283,7 +346,7 @@ function runSimulation(shapes, conns, csvStore) {
   const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
   const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
   const rootNodes = shapes.filter(s =>
-    (s.type === 'decision' || s.type === 'cineminha') && !decWithPortInc.has(s.id)
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
   );
   if (rootNodes.length === 0) return {totalQty:0, approvedQty:0, rejectedQty:0, approvalRate:0, edgeStats:{}};
 
@@ -331,6 +394,15 @@ function runSimulation(shapes, conns, csvStore) {
         const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
         if (cid) path.push(cid);
         cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        const rules = node.rules || [];
+        const passes = rowMatchesLensRules(row, headers, rules);
+        if (!passes) return {result:null, path};
+        const edges = out[cur] || []; if (edges.length === 0) return {result:null, path};
+        const match = edges[0];
+        const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
+        if (cid) path.push(cid);
+        cur = match.to;
       } else if (node.type === 'port') {
         const edges = out[cur] || []; if (edges.length === 0) return {result:null, path};
         const match = edges[0];
@@ -357,6 +429,7 @@ function runSimulation(shapes, conns, csvStore) {
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true; // applies to all csvStore entries
       return false;
     });
     if (csvRoots.length === 0) continue;
@@ -610,6 +683,8 @@ export default function App() {
   const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
   // Optimization modal
   const [optimModal, setOptimModal] = useState(null);   // null | optim obj
+  // Decision Lens modal
+  const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   const tooltipTimer = useRef(null);
 
   // ── Refs ──────────────────────────────────────────────────────
@@ -639,6 +714,7 @@ export default function App() {
   const selR          = useRef(sel);        useEffect(()=>{selR.current=sel},              [sel]);
   const undoStackR    = useRef(undoStack);  useEffect(()=>{undoStackR.current=undoStack},  [undoStack]);
   const redoStackR    = useRef(redoStack);  useEffect(()=>{redoStackR.current=redoStack},  [redoStack]);
+  const lensModalR    = useRef(lensModal);  useEffect(()=>{lensModalR.current=lensModal},  [lensModal]);
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
@@ -714,7 +790,7 @@ export default function App() {
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
-      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
+      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
     }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
@@ -761,6 +837,10 @@ export default function App() {
     if (tool==="cineminha") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
       createCinemaNode(wx,wy); return;
+    }
+    if (tool==="decision_lens") {
+      const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
+      createLensNode(wx,wy); return;
     }
     if (tool==="frame") {
       pushHistory();
@@ -1318,6 +1398,38 @@ export default function App() {
     setSel(id);
   }, []); // eslint-disable-line
 
+  // ── createLensNode ────────────────────────────────────────────
+  const createLensNode = useCallback((wx, wy) => {
+    pushHistory();
+    const id = uid();
+    const lensShape = {
+      id, type:"decision_lens",
+      x: wx - LENS_W / 2, y: wy - LENS_H / 2,
+      w: LENS_W, h: LENS_H,
+      label: "Decision Lens",
+      rules: [],
+      color: "#fff",
+    };
+    setShapes(prev => [...prev, lensShape]);
+    setSel(id);
+  }, []); // eslint-disable-line
+
+  // ── openLensModal ─────────────────────────────────────────────
+  const openLensModal = useCallback((shapeId) => {
+    const shape = shapesR.current.find(s => s.id === shapeId);
+    if (!shape) return;
+    const rules = (shape.rules || []).map(r => ({...r}));
+    const population = computeLensPopulation(rules, csvStoreR.current);
+    setLensModal({ shapeId, rules, population });
+  }, []); // eslint-disable-line
+
+  // ── applyLensRules ────────────────────────────────────────────
+  const applyLensRules = useCallback((shapeId, rules) => {
+    pushHistory();
+    setShapes(prev => prev.map(s => s.id === shapeId ? {...s, rules} : s));
+    setLensModal(null);
+  }, []); // eslint-disable-line
+
   // ── assignCinemaVar ───────────────────────────────────────────
   const assignCinemaVar = useCallback((shapeId, col, csvId, axis) => {
     pushHistory();
@@ -1846,12 +1958,76 @@ export default function App() {
     );
   };
 
+  // ── Render: Decision Lens node ────────────────────────────────
+  const renderDecisionLensNode = (shape) => {
+    const {id, x, y, w, h, rules} = shape;
+    const isSel = sel === id;
+    const isMulti = multiSel.has(id) && !isSel;
+    const ruleCount = (rules || []).length;
+    const stroke = isSel || isMulti ? "#3b82f6" : "#0891b2";
+    const sw = isSel || isMulti ? 2 : 1.5;
+    const filter = isSel
+      ? "drop-shadow(0 0 0 2px rgba(59,130,246,.25)) drop-shadow(0 2px 8px rgba(59,130,246,.18))"
+      : "drop-shadow(0 1px 6px rgba(8,145,178,.18))";
+    const cur = tool === "connect" ? "crosshair" : tool === "select" ? "grab" : "default";
+    return (
+      <g key={id} data-sid={id}
+        onMouseDown={e => onShapeDown(e, id)}
+        onClick={e => onShapeClick(e, id)}
+        onDoubleClick={e => onShapeDbl(e, id)}
+        style={{cursor: cur, filter}}>
+        {/* Outer border */}
+        <rect data-sid={id} x={x} y={y} width={w} height={h} rx={12}
+          fill="#ecfeff" stroke={stroke} strokeWidth={sw}/>
+        {/* Header band */}
+        <rect x={x} y={y} width={w} height={28} rx={12} fill="#0891b2"/>
+        <rect x={x} y={y+16} width={w} height={12} fill="#0891b2"/>
+        {/* Header icons + title */}
+        <text x={x+10} y={y+19} fontSize={12} fill="#fff"
+          fontFamily="'DM Sans',system-ui,sans-serif"
+          style={{pointerEvents:"none",userSelect:"none"}}>🛢 🔎</text>
+        <text x={x+w/2+10} y={y+19} textAnchor="middle" fontSize={11} fontWeight="700" fill="#fff"
+          fontFamily="'DM Sans',system-ui,sans-serif"
+          style={{pointerEvents:"none",userSelect:"none"}}>Decision Lens</text>
+        {/* Body */}
+        {ruleCount === 0 ? (
+          <text x={x+w/2} y={y+57} textAnchor="middle" fontSize={10.5} fill="#94a3b8"
+            fontFamily="'DM Sans',system-ui,sans-serif"
+            style={{pointerEvents:"none",userSelect:"none"}}>Sem filtros — clique Configurar</text>
+        ) : (
+          <>
+            <text x={x+w/2} y={y+50} textAnchor="middle" fontSize={13} fontWeight="700" fill="#0e7490"
+              fontFamily="'DM Sans',system-ui,sans-serif"
+              style={{pointerEvents:"none",userSelect:"none"}}>
+              {`${ruleCount} filtro${ruleCount !== 1 ? "s" : ""} ativo${ruleCount !== 1 ? "s" : ""}`}
+            </text>
+            <text x={x+w/2} y={y+66} textAnchor="middle" fontSize={10} fill="#64748b"
+              fontFamily="'DM Sans',system-ui,sans-serif"
+              style={{pointerEvents:"none",userSelect:"none"}}>
+              Clique Configurar para editar
+            </text>
+          </>
+        )}
+        {/* Selection handles */}
+        {(isSel || isMulti) && [
+          [x,y],[x+w/2,y],[x+w,y],
+          [x+w,y+h/2],[x+w,y+h],[x+w/2,y+h],[x,y+h],[x,y+h/2]
+        ].map(([hx,hy],i)=>(
+          <rect key={i} x={hx-4} y={hy-4} width={8} height={8} rx={2}
+            fill="#3b82f6" stroke="#fff" strokeWidth={1.5}
+            style={{pointerEvents:"none"}}/>
+        ))}
+      </g>
+    );
+  };
+
   // ── Render: regular shape ─────────────────────────────────────
   const renderShape = (shape) => {
-    if (shape.type==="frame")     return null; // rendered separately in lower layer
-    if (shape.type==="csv")       return renderCSVNode(shape);
-    if (shape.type==="simPanel")  return renderSimPanel(shape);
-    if (shape.type==="cineminha") return renderCinemaNode(shape);
+    if (shape.type==="frame")         return null; // rendered separately in lower layer
+    if (shape.type==="csv")           return renderCSVNode(shape);
+    if (shape.type==="simPanel")      return renderSimPanel(shape);
+    if (shape.type==="cineminha")     return renderCinemaNode(shape);
+    if (shape.type==="decision_lens") return renderDecisionLensNode(shape);
     const {id,type,x,y,w,h,label,color}=shape;
     const isSel=sel===id, isFrom=fromId===id, isMulti=multiSel.has(id)&&!isSel;
     const hasErr=!!flowErrors[id];
@@ -2255,6 +2431,20 @@ export default function App() {
           </div>
         )}
 
+        {/* Decision Lens toolbar — shows when a single decision_lens is selected */}
+        {selShape?.type==='decision_lens'&&multiSel.size<=1&&(
+          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
+            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+            border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
+            <button onClick={()=>openLensModal(sel)}
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #a5f3fc",background:"#ecfeff",
+                color:"#0891b2",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              🔎 Configurar
+            </button>
+          </div>
+        )}
+
         {/* Color palette */}
         {palette&&selShape&&(
           <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:400,
@@ -2517,6 +2707,30 @@ export default function App() {
           </div>
         )}
 
+        {/* Decision Lens button */}
+        {Object.keys(csvStore).length > 0 && (
+          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
+            <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Segmentação</p>
+            <button
+              onClick={()=>{
+                pushHistory();
+                const svgEl=svgRef.current;
+                const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
+                const id=uid();
+                setShapes(p=>[...p,{id,type:"decision_lens",x:cx-LENS_W/2,y:cy-LENS_H/2,w:LENS_W,h:LENS_H,label:"Decision Lens",rules:[],color:"#fff"}]);
+                setSel(id);
+              }}
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"10px 14px",borderRadius:10,
+                border:"1.5px solid #a5f3fc",background:"#ecfeff",
+                color:"#0891b2",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#cffafe";e.currentTarget.style.borderColor="#06b6d4";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#ecfeff";e.currentTarget.style.borderColor="#a5f3fc";}}>
+              <span style={{fontSize:16}}>🛢</span> Adicionar Decision Lens
+            </button>
+            <p style={{fontSize:10.5,color:"#cbd5e1",marginTop:6,lineHeight:1.4}}>Ou use a ferramenta 🔎 na barra lateral</p>
+          </div>
+        )}
+
         {/* Simulation panel button — always shown so user can add the panel even without data */}
         {true && (
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
@@ -2602,6 +2816,248 @@ export default function App() {
       )}
 
       {/* ═══════════════ AXIS SELECTION MODAL (Cineminha) ═══════════ */}
+      {/* ═══════════════ DECISION LENS MODAL ═══════════════ */}
+      {lensModal&&(()=>{
+        const { shapeId, rules, population } = lensModal;
+        const allHeaders = Object.values(csvStore).flatMap(csv =>
+          csv.headers.map(h => ({ col: h, csvId: Object.entries(csvStore).find(([,c])=>c===csv)?.[0] }))
+        ).filter((v,i,arr) => arr.findIndex(x=>x.col===v.col)===i);
+
+        const setRules = (newRules) => {
+          const pop = computeLensPopulation(newRules, csvStore);
+          setLensModal(prev => prev ? { ...prev, rules: newRules, population: pop } : prev);
+        };
+
+        const addRule = (col, csvId) => {
+          const newRule = { id: uid(), col, csvId, operator: "equal", value: "", logic: rules.length > 0 ? "AND" : null };
+          setRules([...rules, newRule]);
+        };
+
+        const removeRule = (ruleId) => {
+          const updated = rules.filter(r => r.id !== ruleId).map((r,i)=>i===0?{...r,logic:null}:r);
+          setRules(updated);
+        };
+
+        const updateRule = (ruleId, patch) => {
+          setRules(rules.map(r => r.id === ruleId ? {...r, ...patch} : r));
+        };
+
+        const getDistinctVals = (col) => {
+          const vals = new Set();
+          for (const csv of Object.values(csvStore)) {
+            const idx = csv.headers.indexOf(col);
+            if (idx < 0) continue;
+            for (const row of csv.rows.slice(0, 500)) {
+              const v = String(row[idx] ?? "").trim();
+              if (v) vals.add(v);
+            }
+          }
+          return sortDomain([...vals]).slice(0, 50);
+        };
+
+        const pct = population.total > 0 ? (population.count / population.total * 100).toFixed(1) : "0.0";
+        const needsMultiVal = (op) => op === "in" || op === "notIn";
+
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.5)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:860,maxHeight:"90vh",boxShadow:"0 24px 80px rgba(0,0,0,.22)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",gap:14,padding:"20px 28px 16px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+                <div style={{width:44,height:44,borderRadius:12,background:"#ecfeff",border:"2px solid #a5f3fc",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>🛢</div>
+                <div style={{flex:1}}>
+                  <h2 style={{fontSize:16,fontWeight:700,color:"#1e293b",marginBottom:2}}>Configurar Decision Lens</h2>
+                  <p style={{fontSize:12.5,color:"#64748b"}}>Defina a população alvo para simulação marginal</p>
+                </div>
+                {/* Population counter */}
+                <div style={{textAlign:"right",padding:"8px 14px",borderRadius:12,background:"#ecfeff",border:"1.5px solid #a5f3fc",minWidth:140}}>
+                  <div style={{fontSize:18,fontWeight:800,color:"#0891b2",lineHeight:1}}>{fmtQty(population.count)}</div>
+                  <div style={{fontSize:11,color:"#0e7490",fontWeight:600,marginTop:2}}>{pct}% da base</div>
+                  <div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>registros selecionados</div>
+                </div>
+                <button onClick={()=>setLensModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:17,color:"#94a3b8",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontFamily:"inherit",lineHeight:1}}>
+                  ✕
+                </button>
+              </div>
+
+              {/* Body — two columns */}
+              <div style={{display:"flex",flex:1,overflow:"hidden",minHeight:0}}>
+                {/* Left — Variables */}
+                <div style={{width:220,flexShrink:0,borderRight:"1px solid #f1f5f9",display:"flex",flexDirection:"column",background:"#fafafa"}}>
+                  <div style={{padding:"14px 16px 8px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+                    <p style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.6,marginBottom:0}}>Variáveis disponíveis</p>
+                  </div>
+                  <div style={{flex:1,overflowY:"auto",padding:"8px 10px"}}>
+                    {allHeaders.length === 0 ? (
+                      <div style={{padding:"20px 8px",textAlign:"center",fontSize:12,color:"#cbd5e1"}}>
+                        Nenhum CSV carregado
+                      </div>
+                    ) : allHeaders.map(({col, csvId}) => (
+                      <div key={col}
+                        onClick={() => addRule(col, csvId)}
+                        style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,
+                          marginBottom:3,cursor:"pointer",fontSize:12.5,fontWeight:500,color:"#1e293b",
+                          background:"#fff",border:"1px solid #e2e8f0",transition:"all .12s"}}
+                        onMouseEnter={e=>{e.currentTarget.style.borderColor="#0891b2";e.currentTarget.style.background="#ecfeff";}}
+                        onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fff";}}>
+                        <span style={{fontSize:13,color:"#0891b2"}}>+</span>
+                        <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{col}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Right — Rules */}
+                <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+                  <div style={{padding:"14px 20px 8px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+                    <p style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.6,marginBottom:0}}>
+                      Regras aplicadas {rules.length > 0 && <span style={{color:"#0891b2"}}>({rules.length})</span>}
+                    </p>
+                  </div>
+                  <div style={{flex:1,overflowY:"auto",padding:"12px 20px"}}>
+                    {rules.length === 0 ? (
+                      <div style={{textAlign:"center",padding:"40px 20px",color:"#cbd5e1"}}>
+                        <div style={{fontSize:32,marginBottom:12}}>🔎</div>
+                        <p style={{fontSize:13,fontWeight:500,color:"#94a3b8",marginBottom:4}}>Nenhum filtro ainda</p>
+                        <p style={{fontSize:12,color:"#cbd5e1"}}>Clique em uma variável à esquerda para adicionar um filtro</p>
+                      </div>
+                    ) : rules.map((rule, idx) => {
+                      const distinctVals = getDistinctVals(rule.col);
+                      const isMultiVal = needsMultiVal(rule.operator);
+                      return (
+                        <div key={rule.id}>
+                          {/* AND/OR connector */}
+                          {idx > 0 && (
+                            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,marginLeft:8}}>
+                              {["AND","OR"].map(logic => (
+                                <button key={logic} onClick={() => updateRule(rule.id, {logic})}
+                                  style={{padding:"2px 12px",borderRadius:20,border:"1.5px solid",fontSize:11,fontWeight:700,
+                                    cursor:"pointer",fontFamily:"inherit",transition:"all .12s",
+                                    borderColor: rule.logic===logic ? "#0891b2" : "#e2e8f0",
+                                    background: rule.logic===logic ? "#ecfeff" : "#fff",
+                                    color: rule.logic===logic ? "#0891b2" : "#94a3b8"}}>
+                                  {logic}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {/* Rule card */}
+                          <div style={{display:"flex",alignItems:"flex-start",gap:10,padding:"12px 14px",borderRadius:12,
+                            border:"1.5px solid #e2e8f0",background:"#f8fafc",marginBottom:8}}>
+                            {/* Variable chip */}
+                            <div style={{display:"flex",flexDirection:"column",gap:6,flex:1,minWidth:0}}>
+                              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                <span style={{fontSize:11.5,fontWeight:700,color:"#0e7490",background:"#ecfeff",
+                                  padding:"2px 10px",borderRadius:20,border:"1px solid #a5f3fc",whiteSpace:"nowrap",
+                                  overflow:"hidden",textOverflow:"ellipsis",maxWidth:140}}>
+                                  {rule.col}
+                                </span>
+                              </div>
+                              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-start"}}>
+                                {/* Operator */}
+                                <select value={rule.operator} onChange={e=>updateRule(rule.id,{operator:e.target.value})}
+                                  style={{padding:"5px 8px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                                    fontSize:12,color:"#1e293b",fontFamily:"inherit",cursor:"pointer",outline:"none",
+                                    flexShrink:0}}>
+                                  {LENS_OPERATORS.map(op=>(
+                                    <option key={op.value} value={op.value}>{op.label}</option>
+                                  ))}
+                                </select>
+                                {/* Value input */}
+                                {isMultiVal ? (
+                                  <div style={{flex:1,minWidth:120}}>
+                                    <input type="text" value={rule.value || ""}
+                                      onChange={e=>updateRule(rule.id,{value:e.target.value})}
+                                      placeholder="val1, val2, val3..."
+                                      style={{width:"100%",padding:"5px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+                                        background:"#fff",fontSize:12,color:"#1e293b",fontFamily:"inherit",outline:"none",
+                                        boxSizing:"border-box"}}
+                                      onFocus={e=>e.target.style.borderColor="#0891b2"}
+                                      onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                                    {distinctVals.length > 0 && (
+                                      <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:5}}>
+                                        {distinctVals.slice(0,12).map(v => {
+                                          const cur = (rule.value||"").split(",").map(s=>s.trim()).filter(Boolean);
+                                          const active = cur.includes(v);
+                                          return (
+                                            <span key={v} onClick={()=>{
+                                              const next = active ? cur.filter(x=>x!==v) : [...cur,v];
+                                              updateRule(rule.id,{value:next.join(", ")});
+                                            }} style={{padding:"2px 8px",borderRadius:12,fontSize:10.5,cursor:"pointer",
+                                              border:"1px solid",transition:"all .1s",userSelect:"none",
+                                              borderColor:active?"#0891b2":"#e2e8f0",
+                                              background:active?"#ecfeff":"#fff",
+                                              color:active?"#0891b2":"#64748b"}}>
+                                              {v}
+                                            </span>
+                                          );
+                                        })}
+                                        {distinctVals.length > 12 && <span style={{fontSize:10,color:"#94a3b8",alignSelf:"center"}}>+{distinctVals.length-12} mais</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div style={{flex:1,minWidth:100}}>
+                                    <input type="text" value={rule.value || ""}
+                                      onChange={e=>updateRule(rule.id,{value:e.target.value})}
+                                      placeholder="valor..."
+                                      list={`lens-dl-${rule.id}`}
+                                      style={{width:"100%",padding:"5px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+                                        background:"#fff",fontSize:12,color:"#1e293b",fontFamily:"inherit",outline:"none",
+                                        boxSizing:"border-box"}}
+                                      onFocus={e=>e.target.style.borderColor="#0891b2"}
+                                      onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                                    {distinctVals.length > 0 && (
+                                      <datalist id={`lens-dl-${rule.id}`}>
+                                        {distinctVals.map(v=><option key={v} value={v}/>)}
+                                      </datalist>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            {/* Remove button */}
+                            <button onClick={()=>removeRule(rule.id)}
+                              style={{width:26,height:26,borderRadius:7,border:"1px solid #fecaca",background:"#fff1f2",
+                                color:"#e11d48",cursor:"pointer",fontSize:13,fontFamily:"inherit",flexShrink:0,
+                                display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,marginTop:2}}>
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                padding:"12px 24px",borderTop:"1px solid #e2e8f0",flexShrink:0,background:"#fafafa"}}>
+                <button onClick={()=>setLensModal(null)}
+                  style={{padding:"8px 18px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                    color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                  Cancelar
+                </button>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <span style={{fontSize:11.5,color:"#94a3b8"}}>
+                    {population.count > 0
+                      ? `${fmtQty(population.count)} registros · ${pct}% da base`
+                      : rules.length === 0 ? "Toda a base será usada" : "Nenhum registro corresponde"}
+                  </span>
+                  <button onClick={()=>applyLensRules(shapeId, rules)}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:"#0891b2",color:"#fff",
+                      cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",
+                      display:"flex",alignItems:"center",gap:6}}>
+                    ✓ Salvar Lens
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {axisModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:400,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:20}}>
