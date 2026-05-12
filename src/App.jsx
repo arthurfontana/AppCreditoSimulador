@@ -2819,8 +2819,10 @@ export default function App() {
       {/* ═══════════════ DECISION LENS MODAL ═══════════════ */}
       {lensModal&&(()=>{
         const { shapeId, rules, population } = lensModal;
-        const allHeaders = Object.values(csvStore).flatMap(csv =>
-          csv.headers.map(h => ({ col: h, csvId: Object.entries(csvStore).find(([,c])=>c===csv)?.[0] }))
+
+        // Build all available columns (deduplicated by column name)
+        const allHeaders = Object.entries(csvStore).flatMap(([csvId, csv]) =>
+          csv.headers.map(h => ({ col: h, csvId }))
         ).filter((v,i,arr) => arr.findIndex(x=>x.col===v.col)===i);
 
         const setRules = (newRules) => {
@@ -2829,7 +2831,17 @@ export default function App() {
         };
 
         const addRule = (col, csvId) => {
-          const newRule = { id: uid(), col, csvId, operator: "equal", value: "", logic: rules.length > 0 ? "AND" : null };
+          // Default operator based on column type
+          const colType = (() => {
+            for (const csv of Object.values(csvStore)) {
+              const types = csv.columnTypes || {};
+              if (types[col]) return types[col];
+            }
+            return null;
+          })();
+          const isNumericType = ["qty","qtdAltas","inadReal","inadInferida"].includes(colType);
+          const defaultOp = isNumericType ? "gte" : "equal";
+          const newRule = { id: uid(), col, csvId, operator: defaultOp, value: "", logic: rules.length > 0 ? "AND" : null };
           setRules([...rules, newRule]);
         };
 
@@ -2838,38 +2850,92 @@ export default function App() {
           setRules(updated);
         };
 
-        const updateRule = (ruleId, patch) => {
-          setRules(rules.map(r => r.id === ruleId ? {...r, ...patch} : r));
+        const duplicateRule = (ruleId) => {
+          const idx = rules.findIndex(r => r.id === ruleId);
+          if (idx < 0) return;
+          const src = rules[idx];
+          const copy = { ...src, id: uid(), logic: "AND" };
+          const next = [...rules];
+          next.splice(idx + 1, 0, copy);
+          setRules(next);
         };
 
-        const getDistinctVals = (col) => {
+        const updateRule = (ruleId, patch) => {
+          // If operator changes between single/multi mode, reset value
+          const rule = rules.find(r => r.id === ruleId);
+          const wasMulti = rule && (rule.operator === "in" || rule.operator === "notIn");
+          const willBeMulti = patch.operator && (patch.operator === "in" || patch.operator === "notIn");
+          const resetVal = patch.operator && wasMulti !== willBeMulti ? { value: "" } : {};
+          setRules(rules.map(r => r.id === ruleId ? {...r, ...patch, ...resetVal} : r));
+        };
+
+        // Detect if column is numeric: check columnTypes first, then sample values
+        const isNumericCol = (col) => {
+          for (const csv of Object.values(csvStore)) {
+            const types = csv.columnTypes || {};
+            if (["qty","qtdAltas","inadReal","inadInferida"].includes(types[col])) return true;
+          }
+          // Auto-detect: if >70% of sampled non-empty values parse as numbers
+          let numCount = 0, total = 0;
+          for (const csv of Object.values(csvStore)) {
+            const idx = csv.headers.indexOf(col);
+            if (idx < 0) continue;
+            for (const row of csv.rows.slice(0, 200)) {
+              const v = String(row[idx] ?? "").trim();
+              if (!v) continue;
+              total++;
+              if (!isNaN(parseFloat(v)) && isFinite(v)) numCount++;
+            }
+          }
+          return total > 0 && numCount / total > 0.7;
+        };
+
+        const getOperatorsForCol = (col) => {
+          const numeric = isNumericCol(col);
+          return LENS_OPERATORS.filter(op => {
+            if (numeric) return !["in","notIn"].includes(op.value);
+            return !["lt","lte","gt","gte"].includes(op.value);
+          });
+        };
+
+        const getDistinctVals = (col, search = "") => {
           const vals = new Set();
           for (const csv of Object.values(csvStore)) {
             const idx = csv.headers.indexOf(col);
             if (idx < 0) continue;
-            for (const row of csv.rows.slice(0, 500)) {
+            for (const row of csv.rows.slice(0, 2000)) {
               const v = String(row[idx] ?? "").trim();
               if (v) vals.add(v);
             }
           }
-          return sortDomain([...vals]).slice(0, 50);
+          let sorted = sortDomain([...vals]);
+          if (search) sorted = sorted.filter(v => v.toLowerCase().includes(search.toLowerCase()));
+          return sorted.slice(0, 50);
         };
 
         const pct = population.total > 0 ? (population.count / population.total * 100).toFixed(1) : "0.0";
         const needsMultiVal = (op) => op === "in" || op === "notIn";
+        const hasInvalidRules = rules.some(r => !String(r.value ?? "").trim());
+
+        // Variable search state lives in lensModal
+        const varSearch = lensModal.varSearch || "";
+        const setVarSearch = (v) => setLensModal(prev => prev ? {...prev, varSearch: v} : prev);
+        const filteredHeaders = varSearch
+          ? allHeaders.filter(({col}) => col.toLowerCase().includes(varSearch.toLowerCase()))
+          : allHeaders;
 
         return (
           <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.5)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:860,maxHeight:"90vh",boxShadow:"0 24px 80px rgba(0,0,0,.22)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:900,maxHeight:"90vh",boxShadow:"0 24px 80px rgba(0,0,0,.22)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
               {/* Header */}
               <div style={{display:"flex",alignItems:"center",gap:14,padding:"20px 28px 16px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
                 <div style={{width:44,height:44,borderRadius:12,background:"#ecfeff",border:"2px solid #a5f3fc",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>🛢</div>
                 <div style={{flex:1}}>
-                  <h2 style={{fontSize:16,fontWeight:700,color:"#1e293b",marginBottom:2}}>Configurar Decision Lens</h2>
-                  <p style={{fontSize:12.5,color:"#64748b"}}>Defina a população alvo para simulação marginal</p>
+                  <h2 style={{fontSize:16,fontWeight:700,color:"#1e293b",marginBottom:2}}>Builder de Filtros — Decision Lens</h2>
+                  <p style={{fontSize:12.5,color:"#64748b"}}>Construa filtros compostos para definir a população alvo</p>
                 </div>
                 {/* Population counter */}
-                <div style={{textAlign:"right",padding:"8px 14px",borderRadius:12,background:"#ecfeff",border:"1.5px solid #a5f3fc",minWidth:140}}>
+                <div style={{textAlign:"right",padding:"8px 14px",borderRadius:12,background:"#ecfeff",border:"1.5px solid #a5f3fc",minWidth:150}}>
                   <div style={{fontSize:18,fontWeight:800,color:"#0891b2",lineHeight:1}}>{fmtQty(population.count)}</div>
                   <div style={{fontSize:11,color:"#0e7490",fontWeight:600,marginTop:2}}>{pct}% da base</div>
                   <div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>registros selecionados</div>
@@ -2883,100 +2949,145 @@ export default function App() {
               {/* Body — two columns */}
               <div style={{display:"flex",flex:1,overflow:"hidden",minHeight:0}}>
                 {/* Left — Variables */}
-                <div style={{width:220,flexShrink:0,borderRight:"1px solid #f1f5f9",display:"flex",flexDirection:"column",background:"#fafafa"}}>
-                  <div style={{padding:"14px 16px 8px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
-                    <p style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.6,marginBottom:0}}>Variáveis disponíveis</p>
+                <div style={{width:230,flexShrink:0,borderRight:"1px solid #f1f5f9",display:"flex",flexDirection:"column",background:"#fafafa"}}>
+                  <div style={{padding:"12px 12px 8px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+                    <p style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Variáveis disponíveis</p>
+                    <input
+                      type="text"
+                      value={varSearch}
+                      onChange={e=>setVarSearch(e.target.value)}
+                      placeholder="Buscar variável..."
+                      style={{width:"100%",padding:"6px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+                        background:"#fff",fontSize:12,color:"#1e293b",fontFamily:"inherit",outline:"none",
+                        boxSizing:"border-box"}}
+                      onFocus={e=>e.target.style.borderColor="#0891b2"}
+                      onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
                   </div>
                   <div style={{flex:1,overflowY:"auto",padding:"8px 10px"}}>
                     {allHeaders.length === 0 ? (
                       <div style={{padding:"20px 8px",textAlign:"center",fontSize:12,color:"#cbd5e1"}}>
                         Nenhum CSV carregado
                       </div>
-                    ) : allHeaders.map(({col, csvId}) => (
-                      <div key={col}
-                        onClick={() => addRule(col, csvId)}
-                        style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,
-                          marginBottom:3,cursor:"pointer",fontSize:12.5,fontWeight:500,color:"#1e293b",
-                          background:"#fff",border:"1px solid #e2e8f0",transition:"all .12s"}}
-                        onMouseEnter={e=>{e.currentTarget.style.borderColor="#0891b2";e.currentTarget.style.background="#ecfeff";}}
-                        onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fff";}}>
-                        <span style={{fontSize:13,color:"#0891b2"}}>+</span>
-                        <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{col}</span>
+                    ) : filteredHeaders.length === 0 ? (
+                      <div style={{padding:"16px 8px",textAlign:"center",fontSize:12,color:"#cbd5e1"}}>
+                        Nenhuma variável encontrada
                       </div>
-                    ))}
+                    ) : filteredHeaders.map(({col, csvId}) => {
+                      const numeric = isNumericCol(col);
+                      return (
+                        <div key={col}
+                          onClick={() => addRule(col, csvId)}
+                          title={numeric ? "Variável numérica" : "Variável categórica"}
+                          style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:8,
+                            marginBottom:3,cursor:"pointer",fontSize:12.5,fontWeight:500,color:"#1e293b",
+                            background:"#fff",border:"1px solid #e2e8f0",transition:"all .12s"}}
+                          onMouseEnter={e=>{e.currentTarget.style.borderColor="#0891b2";e.currentTarget.style.background="#ecfeff";}}
+                          onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fff";}}>
+                          <span style={{fontSize:10,color:numeric?"#d97706":"#7c3aed",background:numeric?"#fef3c7":"#f3e8ff",
+                            padding:"1px 5px",borderRadius:4,fontWeight:700,flexShrink:0,letterSpacing:.3}}>
+                            {numeric ? "NUM" : "CAT"}
+                          </span>
+                          <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{col}</span>
+                          <span style={{fontSize:13,color:"#0891b2",flexShrink:0}}>+</span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
-                {/* Right — Rules */}
+                {/* Right — Rules workspace */}
                 <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-                  <div style={{padding:"14px 20px 8px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
-                    <p style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.6,marginBottom:0}}>
-                      Regras aplicadas {rules.length > 0 && <span style={{color:"#0891b2"}}>({rules.length})</span>}
+                  <div style={{padding:"12px 20px 8px",borderBottom:"1px solid #f1f5f9",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <p style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.6,margin:0}}>
+                      Regras {rules.length > 0 && <span style={{color:"#0891b2"}}>({rules.length})</span>}
                     </p>
+                    {rules.length > 0 && (
+                      <button onClick={()=>setRules([])}
+                        style={{fontSize:11,color:"#e11d48",background:"none",border:"none",cursor:"pointer",
+                          fontFamily:"inherit",fontWeight:500,padding:"2px 6px",borderRadius:5}}>
+                        Limpar tudo
+                      </button>
+                    )}
                   </div>
                   <div style={{flex:1,overflowY:"auto",padding:"12px 20px"}}>
                     {rules.length === 0 ? (
-                      <div style={{textAlign:"center",padding:"40px 20px",color:"#cbd5e1"}}>
-                        <div style={{fontSize:32,marginBottom:12}}>🔎</div>
-                        <p style={{fontSize:13,fontWeight:500,color:"#94a3b8",marginBottom:4}}>Nenhum filtro ainda</p>
-                        <p style={{fontSize:12,color:"#cbd5e1"}}>Clique em uma variável à esquerda para adicionar um filtro</p>
+                      <div style={{textAlign:"center",padding:"48px 20px",color:"#cbd5e1"}}>
+                        <div style={{fontSize:36,marginBottom:12}}>🔎</div>
+                        <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",marginBottom:4}}>Nenhum filtro ainda</p>
+                        <p style={{fontSize:12,color:"#cbd5e1",lineHeight:1.5}}>Clique em uma variável à esquerda<br/>para adicionar uma regra de filtro</p>
                       </div>
                     ) : rules.map((rule, idx) => {
-                      const distinctVals = getDistinctVals(rule.col);
+                      const distinctVals = getDistinctVals(rule.col, "");
                       const isMultiVal = needsMultiVal(rule.operator);
+                      const isEmpty = !String(rule.value ?? "").trim();
+                      const availableOps = getOperatorsForCol(rule.col);
+                      // Ensure current operator is valid for this column type
+                      const validOp = availableOps.find(o => o.value === rule.operator)
+                        ? rule.operator
+                        : availableOps[0]?.value ?? rule.operator;
+
                       return (
                         <div key={rule.id}>
                           {/* AND/OR connector */}
                           {idx > 0 && (
-                            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,marginLeft:8}}>
+                            <div style={{display:"flex",alignItems:"center",gap:6,margin:"4px 0 6px",paddingLeft:4}}>
+                              <div style={{flex:1,height:1,background:"#f1f5f9"}}/>
                               {["AND","OR"].map(logic => (
                                 <button key={logic} onClick={() => updateRule(rule.id, {logic})}
-                                  style={{padding:"2px 12px",borderRadius:20,border:"1.5px solid",fontSize:11,fontWeight:700,
-                                    cursor:"pointer",fontFamily:"inherit",transition:"all .12s",
+                                  style={{padding:"3px 14px",borderRadius:20,border:"1.5px solid",fontSize:11,fontWeight:700,
+                                    cursor:"pointer",fontFamily:"inherit",transition:"all .12s",lineHeight:1.4,
                                     borderColor: rule.logic===logic ? "#0891b2" : "#e2e8f0",
                                     background: rule.logic===logic ? "#ecfeff" : "#fff",
                                     color: rule.logic===logic ? "#0891b2" : "#94a3b8"}}>
                                   {logic}
                                 </button>
                               ))}
+                              <div style={{flex:1,height:1,background:"#f1f5f9"}}/>
                             </div>
                           )}
                           {/* Rule card */}
-                          <div style={{display:"flex",alignItems:"flex-start",gap:10,padding:"12px 14px",borderRadius:12,
-                            border:"1.5px solid #e2e8f0",background:"#f8fafc",marginBottom:8}}>
-                            {/* Variable chip */}
-                            <div style={{display:"flex",flexDirection:"column",gap:6,flex:1,minWidth:0}}>
-                              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"11px 13px",borderRadius:12,
+                            border:`1.5px solid ${isEmpty ? "#fca5a5" : "#e2e8f0"}`,
+                            background: isEmpty ? "#fff5f5" : "#f8fafc",
+                            marginBottom:6,transition:"border-color .15s,background .15s"}}
+                            onMouseEnter={e=>{if(!isEmpty){e.currentTarget.style.borderColor="#a5f3fc";e.currentTarget.style.background="#f0fdfe";}}}
+                            onMouseLeave={e=>{if(!isEmpty){e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#f8fafc";}}}>
+                            <div style={{display:"flex",flexDirection:"column",gap:5,flex:1,minWidth:0}}>
+                              {/* Column label */}
+                              <div style={{display:"flex",alignItems:"center",gap:6}}>
                                 <span style={{fontSize:11.5,fontWeight:700,color:"#0e7490",background:"#ecfeff",
                                   padding:"2px 10px",borderRadius:20,border:"1px solid #a5f3fc",whiteSpace:"nowrap",
-                                  overflow:"hidden",textOverflow:"ellipsis",maxWidth:140}}>
+                                  overflow:"hidden",textOverflow:"ellipsis",maxWidth:200}}>
                                   {rule.col}
                                 </span>
+                                {isEmpty && (
+                                  <span style={{fontSize:10.5,color:"#dc2626",fontWeight:600}}>Valor obrigatório</span>
+                                )}
                               </div>
-                              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-start"}}>
-                                {/* Operator */}
-                                <select value={rule.operator} onChange={e=>updateRule(rule.id,{operator:e.target.value})}
+                              {/* Operator + Value row */}
+                              <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"flex-start"}}>
+                                <select value={validOp} onChange={e=>updateRule(rule.id,{operator:e.target.value})}
                                   style={{padding:"5px 8px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
                                     fontSize:12,color:"#1e293b",fontFamily:"inherit",cursor:"pointer",outline:"none",
-                                    flexShrink:0}}>
-                                  {LENS_OPERATORS.map(op=>(
+                                    flexShrink:0,maxWidth:180}}>
+                                  {availableOps.map(op=>(
                                     <option key={op.value} value={op.value}>{op.label}</option>
                                   ))}
                                 </select>
-                                {/* Value input */}
                                 {isMultiVal ? (
-                                  <div style={{flex:1,minWidth:120}}>
+                                  <div style={{flex:1,minWidth:130}}>
                                     <input type="text" value={rule.value || ""}
                                       onChange={e=>updateRule(rule.id,{value:e.target.value})}
-                                      placeholder="val1, val2, val3..."
-                                      style={{width:"100%",padding:"5px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+                                      placeholder="val1, val2, val3…"
+                                      style={{width:"100%",padding:"5px 10px",borderRadius:8,
+                                        border:`1px solid ${isEmpty?"#fca5a5":"#e2e8f0"}`,
                                         background:"#fff",fontSize:12,color:"#1e293b",fontFamily:"inherit",outline:"none",
                                         boxSizing:"border-box"}}
                                       onFocus={e=>e.target.style.borderColor="#0891b2"}
-                                      onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                                      onBlur={e=>e.target.style.borderColor=isEmpty?"#fca5a5":"#e2e8f0"}/>
                                     {distinctVals.length > 0 && (
                                       <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:5}}>
-                                        {distinctVals.slice(0,12).map(v => {
+                                        {distinctVals.slice(0,15).map(v => {
                                           const cur = (rule.value||"").split(",").map(s=>s.trim()).filter(Boolean);
                                           const active = cur.includes(v);
                                           return (
@@ -2992,7 +3103,9 @@ export default function App() {
                                             </span>
                                           );
                                         })}
-                                        {distinctVals.length > 12 && <span style={{fontSize:10,color:"#94a3b8",alignSelf:"center"}}>+{distinctVals.length-12} mais</span>}
+                                        {distinctVals.length > 15 && (
+                                          <span style={{fontSize:10,color:"#94a3b8",alignSelf:"center"}}>+{distinctVals.length-15} mais</span>
+                                        )}
                                       </div>
                                     )}
                                   </div>
@@ -3002,11 +3115,12 @@ export default function App() {
                                       onChange={e=>updateRule(rule.id,{value:e.target.value})}
                                       placeholder="valor..."
                                       list={`lens-dl-${rule.id}`}
-                                      style={{width:"100%",padding:"5px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+                                      style={{width:"100%",padding:"5px 10px",borderRadius:8,
+                                        border:`1px solid ${isEmpty?"#fca5a5":"#e2e8f0"}`,
                                         background:"#fff",fontSize:12,color:"#1e293b",fontFamily:"inherit",outline:"none",
                                         boxSizing:"border-box"}}
                                       onFocus={e=>e.target.style.borderColor="#0891b2"}
-                                      onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                                      onBlur={e=>e.target.style.borderColor=isEmpty?"#fca5a5":"#e2e8f0"}/>
                                     {distinctVals.length > 0 && (
                                       <datalist id={`lens-dl-${rule.id}`}>
                                         {distinctVals.map(v=><option key={v} value={v}/>)}
@@ -3016,13 +3130,21 @@ export default function App() {
                                 )}
                               </div>
                             </div>
-                            {/* Remove button */}
-                            <button onClick={()=>removeRule(rule.id)}
-                              style={{width:26,height:26,borderRadius:7,border:"1px solid #fecaca",background:"#fff1f2",
-                                color:"#e11d48",cursor:"pointer",fontSize:13,fontFamily:"inherit",flexShrink:0,
-                                display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,marginTop:2}}>
-                              ✕
-                            </button>
+                            {/* Rule actions */}
+                            <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0,marginTop:1}}>
+                              <button onClick={()=>duplicateRule(rule.id)} title="Duplicar regra"
+                                style={{width:26,height:26,borderRadius:7,border:"1px solid #e2e8f0",background:"#fff",
+                                  color:"#64748b",cursor:"pointer",fontSize:12,fontFamily:"inherit",
+                                  display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>
+                                ⧉
+                              </button>
+                              <button onClick={()=>removeRule(rule.id)} title="Remover regra"
+                                style={{width:26,height:26,borderRadius:7,border:"1px solid #fecaca",background:"#fff1f2",
+                                  color:"#e11d48",cursor:"pointer",fontSize:13,fontFamily:"inherit",
+                                  display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>
+                                ✕
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -3040,15 +3162,25 @@ export default function App() {
                   Cancelar
                 </button>
                 <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  {hasInvalidRules && (
+                    <span style={{fontSize:11.5,color:"#dc2626",fontWeight:500}}>
+                      ⚠ Existem regras com valor vazio
+                    </span>
+                  )}
                   <span style={{fontSize:11.5,color:"#94a3b8"}}>
-                    {population.count > 0
-                      ? `${fmtQty(population.count)} registros · ${pct}% da base`
-                      : rules.length === 0 ? "Toda a base será usada" : "Nenhum registro corresponde"}
+                    {rules.length === 0
+                      ? "Toda a base será usada"
+                      : population.count > 0
+                        ? `${fmtQty(population.count)} registros · ${pct}% da base`
+                        : "Nenhum registro corresponde"}
                   </span>
                   <button onClick={()=>applyLensRules(shapeId, rules)}
-                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:"#0891b2",color:"#fff",
-                      cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",
-                      display:"flex",alignItems:"center",gap:6}}>
+                    disabled={hasInvalidRules}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",
+                      background: hasInvalidRules ? "#94a3b8" : "#0891b2",
+                      color:"#fff",cursor: hasInvalidRules ? "not-allowed" : "pointer",
+                      fontSize:13,fontWeight:700,fontFamily:"inherit",
+                      display:"flex",alignItems:"center",gap:6,transition:"background .15s"}}>
                     ✓ Salvar Lens
                   </button>
                 </div>
