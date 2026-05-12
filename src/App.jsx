@@ -990,7 +990,7 @@ export default function App() {
     reader.onload=(ev)=>{
       const text=ev.target.result;
       const {delimiter,confident}=detectDelimiter(text);
-      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},editCsvId:null});
+      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null});
     };
     reader.readAsText(file);
     e.target.value="";
@@ -998,7 +998,7 @@ export default function App() {
 
   const onImportConfirm = () => {
     if (!wizard) return;
-    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,editCsvId}=wizard;
+    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId}=wizard;
 
     // ── Edit mode: update existing dataset, no new canvas nodes ──
     if (editCsvId) {
@@ -1007,7 +1007,7 @@ export default function App() {
       pushHistory();
       setCsvStore(store => ({
         ...store,
-        [editCsvId]: { ...prev, name: filename||prev.name, columnTypes: columnTypes||{}, varTypes: varTypes||{} }
+        [editCsvId]: { ...prev, name: filename||prev.name, columnTypes: columnTypes||{}, varTypes: varTypes||{}, asIsConfig: asIsVar ? { col: asIsVar, mapping: asIsMapping||{} } : (prev.asIsConfig||null) }
       }));
       setWizard(null);
       return;
@@ -1022,7 +1022,24 @@ export default function App() {
     const normMap = {};
     for (const h of headers) normMap[normalizeColName(h)] = h;
 
-    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers,rows,columnTypes:columnTypes||{},varTypes:varTypes||{}}}));
+    // Derive DECISAO_ORIGINAL column if asIsVar is configured
+    let finalHeaders = headers;
+    let finalRows = rows;
+    if (asIsVar && headers.includes(asIsVar)) {
+      const asIsIdx = headers.indexOf(asIsVar);
+      const DORIGINAL_COL = '__DECISAO_ORIGINAL';
+      // Strip existing derived column if re-importing
+      const existingIdx = headers.indexOf(DORIGINAL_COL);
+      const baseHeaders = existingIdx >= 0 ? headers.filter((_,i)=>i!==existingIdx) : headers;
+      const baseRows = existingIdx >= 0 ? rows.map(r=>r.filter((_,i)=>i!==existingIdx)) : rows;
+      finalHeaders = [...baseHeaders, DORIGINAL_COL];
+      finalRows = baseRows.map(r => {
+        const val = String(r[asIsIdx] ?? '');
+        const mapped = (asIsMapping||{})[val] || '';
+        return [...r, mapped];
+      });
+    }
+    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,rows:finalRows,columnTypes:columnTypes||{},varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null}}));
 
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
@@ -1121,6 +1138,8 @@ export default function App() {
       step: 2,
       columnTypes: { ...(csv.columnTypes || {}) },
       varTypes,
+      asIsVar: csv.asIsConfig?.col || null,
+      asIsMapping: csv.asIsConfig?.mapping || {},
       editCsvId: csvId,
     });
   };
@@ -2695,7 +2714,7 @@ export default function App() {
       {/* ═══════════════ IMPORT WIZARD MODAL ═══════════════ */}
       {wizard && (
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?900:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?900:wizard.step===3?680:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
 
             {/* Wizard header */}
             <div style={{padding:"22px 28px 18px",borderBottom:"1px solid #f1f5f9"}}>
@@ -2708,7 +2727,8 @@ export default function App() {
                     <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
                       <div style={{width:24,height:4,borderRadius:2,background:"#3b82f6"}}/>
                       <div style={{width:24,height:4,borderRadius:2,background:wizard.step>=2?"#3b82f6":"#e2e8f0"}}/>
-                      <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {wizard.step} de 2</span>
+                      <div style={{width:24,height:4,borderRadius:2,background:wizard.step>=3?"#3b82f6":"#e2e8f0"}}/>
+                      <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {wizard.step} de 3</span>
                     </div>
                   )}
                 </div>
@@ -2719,7 +2739,7 @@ export default function App() {
             <div style={{padding:"20px 28px",overflowY:"auto",flex:1}}>
               {wizard.step===1 ? (
                 <>
-                  {/* Delimiter detection */}
+                  {/* Delimiter detection (step 1) */}
                   <div style={{marginBottom:20}}>
                     <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>
                       Delimitador
@@ -2768,7 +2788,7 @@ export default function App() {
                     {wizardPreview && <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>{wizardPreview.rows.length} linhas · {wizardPreview.headers.length} colunas encontradas</p>}
                   </div>
                 </>
-              ) : (
+              ) : wizard.step===2 ? (
                 <>
                   {/* Step 2: Column classification */}
                   <p style={{fontSize:13,color:"#475569",marginBottom:16,lineHeight:1.6}}>
@@ -2836,18 +2856,119 @@ export default function App() {
                     Colunas <strong>Filtro</strong> ficam disponíveis no canvas · <strong>Vol. Propostas</strong>, <strong>Qtd Altas</strong> e indicadores de inadimplência alimentam o painel analítico. · <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco; <strong>Categórica</strong> = sem ordem definida.
                   </p>
                 </>
-              )}
+              ) : wizard.step===3 ? (()=>{
+                // Candidate columns: exclude pure-metric cols (qty/qtdAltas/inadReal/inadInferida)
+                const METRIC_TYPES = new Set(['qty','qtdAltas','inadReal','inadInferida']);
+                const allHeaders = wizardPreview?.headers || (wizard.editCsvId ? csvStore[wizard.editCsvId]?.headers?.filter(h=>h!=='__DECISAO_ORIGINAL') : []) || [];
+                const candidateCols = allHeaders.filter(h => !METRIC_TYPES.has(wizard.columnTypes[h]));
+                // Distinct values for selected column
+                const rows4preview = wizardPreview?.rows || (wizard.editCsvId ? csvStore[wizard.editCsvId]?.rows : []) || [];
+                const asIsColIdx = wizard.asIsVar ? allHeaders.indexOf(wizard.asIsVar) : -1;
+                const distinctVals = asIsColIdx >= 0
+                  ? [...new Set(rows4preview.map(r => String(r[asIsColIdx]??'')).filter(v=>v!==''))].sort()
+                  : [];
+                // Validation state
+                const mapping = wizard.asIsMapping || {};
+                const hasAprovado = distinctVals.some(v => mapping[v]==='APROVADO');
+                const hasReprovado = distinctVals.some(v => mapping[v]==='REPROVADO');
+                const allMapped = distinctVals.length > 0 && distinctVals.every(v => mapping[v]==='APROVADO'||mapping[v]==='REPROVADO'||mapping[v]==='IGNORAR');
+                const isValid = wizard.asIsVar && hasAprovado && hasReprovado && allMapped;
+                return (
+                  <>
+                    <div style={{marginBottom:8}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+                        <div style={{width:32,height:32,borderRadius:8,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🏷️</div>
+                        <div>
+                          <div style={{fontSize:14,fontWeight:700,color:"#1e293b"}}>Variável de Decisão AS IS</div>
+                          <div style={{fontSize:12,color:"#64748b"}}>Informe qual coluna representa a decisão histórica real da operação</div>
+                        </div>
+                      </div>
+
+                      {/* Column selector */}
+                      <div style={{marginBottom:20}}>
+                        <label style={{fontSize:12.5,fontWeight:600,color:"#374151",display:"block",marginBottom:6}}>Variável de decisão AS IS</label>
+                        <select
+                          value={wizard.asIsVar||''}
+                          onChange={e=>setWizard(w=>({...w,asIsVar:e.target.value||null,asIsMapping:{}}))}
+                          style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #cbd5e1",fontSize:13,fontFamily:"inherit",color:wizard.asIsVar?"#1e293b":"#94a3b8",background:"#fff",outline:"none",cursor:"pointer"}}>
+                          <option value="">Selecionar variável...</option>
+                          {candidateCols.map(c=>(
+                            <option key={c} value={c}>{c}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Value mapping */}
+                      {wizard.asIsVar && (
+                        <div>
+                          <label style={{fontSize:12.5,fontWeight:600,color:"#374151",display:"block",marginBottom:6}}>
+                            Valores encontrados em <strong style={{color:"#1d4ed8"}}>{wizard.asIsVar}</strong>
+                            <span style={{fontSize:11,fontWeight:400,color:"#94a3b8",marginLeft:8}}>{distinctVals.length} valor(es) distinto(s)</span>
+                          </label>
+                          {distinctVals.length===0 ? (
+                            <div style={{padding:"12px 16px",borderRadius:9,background:"#fef3c7",border:"1px solid #fde68a",fontSize:12.5,color:"#92400e"}}>Nenhum valor encontrado nesta coluna.</div>
+                          ) : (
+                            <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
+                              <div style={{display:"grid",gridTemplateColumns:"1fr 180px",padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>
+                                <span style={{fontSize:11,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Valor na base</span>
+                                <span style={{fontSize:11,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Significado</span>
+                              </div>
+                              <div style={{maxHeight:240,overflowY:"auto"}}>
+                                {distinctVals.map((val,i)=>{
+                                  const mapped = mapping[val]||'';
+                                  const color = mapped==='APROVADO'?'#16a34a':mapped==='REPROVADO'?'#dc2626':mapped==='IGNORAR'?'#94a3b8':'#64748b';
+                                  return (
+                                    <div key={val} style={{display:"grid",gridTemplateColumns:"1fr 180px",alignItems:"center",padding:"8px 14px",borderBottom:i<distinctVals.length-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                                      <span style={{fontSize:13,fontWeight:500,color:"#1e293b",fontFamily:"monospace",background:"#f1f5f9",display:"inline-block",padding:"2px 8px",borderRadius:4}}>{val}</span>
+                                      <select
+                                        value={mapped}
+                                        onChange={e=>setWizard(w=>({...w,asIsMapping:{...(w.asIsMapping||{}),[val]:e.target.value}}))}
+                                        style={{padding:"5px 10px",borderRadius:7,border:`1.5px solid ${mapped?color+"66":"#e2e8f0"}`,fontSize:12.5,fontFamily:"inherit",color,background:mapped==='APROVADO'?"#f0fdf4":mapped==='REPROVADO'?"#fff1f2":mapped==='IGNORAR'?"#f8fafc":"#fff",fontWeight:mapped?600:400,outline:"none",cursor:"pointer"}}>
+                                        <option value="">Selecionar...</option>
+                                        <option value="APROVADO">✅ Aprovado</option>
+                                        <option value="REPROVADO">❌ Reprovado</option>
+                                        <option value="IGNORAR">— Ignorar</option>
+                                      </select>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                          {/* Validation feedback */}
+                          {wizard.asIsVar && distinctVals.length > 0 && (
+                            <div style={{marginTop:10,display:"flex",gap:12,flexWrap:"wrap"}}>
+                              <span style={{fontSize:11.5,display:"flex",alignItems:"center",gap:4,color:hasAprovado?"#16a34a":"#94a3b8"}}>
+                                {hasAprovado?"✅":"○"} Aprovado mapeado
+                              </span>
+                              <span style={{fontSize:11.5,display:"flex",alignItems:"center",gap:4,color:hasReprovado?"#dc2626":"#94a3b8"}}>
+                                {hasReprovado?"❌":"○"} Reprovado mapeado
+                              </span>
+                              <span style={{fontSize:11.5,display:"flex",alignItems:"center",gap:4,color:allMapped?"#2563eb":"#94a3b8"}}>
+                                {allMapped?"🔵":"○"} Todos os valores mapeados
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <p style={{fontSize:11,color:"#94a3b8",marginTop:12,lineHeight:1.6}}>
+                      A variável AS IS estabelece a <strong>baseline operacional histórica</strong>. Será criada internamente a coluna <strong>__DECISAO_ORIGINAL</strong> com os valores normalizados (APROVADO / REPROVADO).
+                    </p>
+                  </>
+                );
+              })() : null}
             </div>
 
             {/* Wizard footer */}
             <div style={{padding:"16px 28px",borderTop:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
               <div>
-                {wizard.step===2&&!wizard.editCsvId&&(
-                  <button onClick={()=>setWizard(w=>({...w,step:1}))}
+                {(wizard.step===2&&!wizard.editCsvId)||(wizard.step===3)?(
+                  <button onClick={()=>setWizard(w=>({...w,step:w.step-1}))}
                     style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
                     ← Voltar
                   </button>
-                )}
+                ):null}
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setWizard(null)} style={{padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>Cancelar</button>
@@ -2868,10 +2989,16 @@ export default function App() {
                     style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
                     Próximo →
                   </button>
+                ) : wizard.step===2 ? (
+                  <button onClick={()=>setWizard(w=>({...w,step:3}))}
+                    disabled={!wizardPreview&&!wizard.editCsvId}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview&&!wizard.editCsvId)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview&&!wizard.editCsvId)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
+                    Próximo →
+                  </button>
                 ) : (
                   <button onClick={onImportConfirm}
-                    disabled={!wizardPreview||wizardPreview.headers.length===0}
-                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
+                    disabled={!wizardPreview&&!wizard.editCsvId}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview&&!wizard.editCsvId)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview&&!wizard.editCsvId)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
                     {wizard.editCsvId ? "Salvar →" : "Importar →"}
                   </button>
                 )}
