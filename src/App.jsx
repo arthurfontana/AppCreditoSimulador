@@ -820,140 +820,181 @@ function extractScenarios(frontier) {
 
 // ── SimIndicators — right panel simulation card ───────────────────────────────
 function SimIndicators({ simResult, csvStore, incrementalResult }) {
-  // Feature 7: quando há incrementalResult, usamos simulated como valor principal
   const inc = incrementalResult;
   const hasInc = !!inc;
-
   const displayResult = hasInc ? inc.simulated : simResult;
   const hasData = displayResult.totalQty > 0;
 
   const rate = hasData ? displayResult.approvalRate : null;
-  const rateColor = rate === null ? "#cbd5e1" : rate >= 70 ? "#16a34a" : rate >= 40 ? "#d97706" : "#dc2626";
-
   const irV = displayResult.inadReal;
-  const irColor = irV === null ? "#94a3b8" : irV > 0.05 ? "#dc2626" : "#d97706";
-  const irBg = irV === null ? "#fafafa" : irV > 0.05 ? "#fff1f2" : "#fffbeb";
-  const irBorder = irV === null ? "#f1f5f9" : irV > 0.05 ? "#fecaca" : "#fde68a";
-
   const iiV = displayResult.inadInferida;
-  const iiColor = iiV === null ? "#94a3b8" : iiV > 0.05 ? "#dc2626" : "#d97706";
-  const iiBg = iiV === null ? "#fafafa" : iiV > 0.05 ? "#fff1f2" : "#fffbeb";
-  const iiBorder = iiV === null ? "#f1f5f9" : iiV > 0.05 ? "#fecaca" : "#fde68a";
 
-  // Delta helpers (Feature 7)
-  const fmtDeltaPp = (delta) => {
-    if (delta === null || delta === undefined || isNaN(delta)) return null;
-    const abs = Math.abs(delta * 100);
-    const sign = delta >= 0 ? "+" : "−";
-    return `${sign}${abs.toFixed(2)} p.p`;
+  // Semantic color system — direction-aware
+  const rateColor = rate === null ? "#94a3b8" : rate >= 70 ? "#22c55e" : rate >= 40 ? "#f59e0b" : "#ef4444";
+  const inadColor = (v) => v === null ? "#64748b" : v > 0.05 ? "#ef4444" : v > 0.02 ? "#f59e0b" : "#22c55e";
+  const deltaClr = (d, positiveHigh = true) => {
+    if (d === null || d === undefined || isNaN(d)) return "#64748b";
+    return positiveHigh ? (d > 0 ? "#4ade80" : d < 0 ? "#f87171" : "#64748b")
+                        : (d < 0 ? "#4ade80" : d > 0 ? "#f87171" : "#64748b");
   };
-  const fmtDeltaPct = (simV, blV) => {
-    if (simV === null || blV === null) return null;
-    const delta = simV - blV;
-    const abs = Math.abs(delta * 100);
-    const sign = delta >= 0 ? "+" : "−";
-    return `${sign}${abs.toFixed(2)} p.p`;
+  const fmtDelta = (d, scale = 100) => {
+    if (d === null || isNaN(d)) return null;
+    return `${d >= 0 ? '+' : '−'}${Math.abs(d * scale).toFixed(2)} p.p`;
   };
-  const deltaColor = (delta) => delta > 0 ? "#16a34a" : delta < 0 ? "#dc2626" : "#94a3b8";
 
-  const rateDeltaStr = hasInc ? fmtDeltaPp((inc.simulated.approvalRate - inc.baseline.approvalRate) / 100) : null;
-  const irDeltaStr   = hasInc ? fmtDeltaPct(inc.simulated.inadReal,     inc.baseline.inadReal)     : null;
-  const iiDeltaStr   = hasInc ? fmtDeltaPct(inc.simulated.inadInferida, inc.baseline.inadInferida) : null;
-  const rateDelta    = hasInc ? (inc.simulated.approvalRate - inc.baseline.approvalRate) / 100 : 0;
-  const irDelta      = hasInc && inc.simulated.inadReal !== null && inc.baseline.inadReal !== null
-    ? inc.simulated.inadReal - inc.baseline.inadReal : null;
-  const iiDelta      = hasInc && inc.simulated.inadInferida !== null && inc.baseline.inadInferida !== null
-    ? inc.simulated.inadInferida - inc.baseline.inadInferida : null;
+  const rateDelta = hasInc && inc.baseline.totalQty > 0 ? inc.simulated.approvalRate - inc.baseline.approvalRate : null;
+  const irDelta = hasInc && irV !== null && inc.baseline.inadReal !== null ? irV - inc.baseline.inadReal : null;
+  const iiDelta = hasInc && iiV !== null && inc.baseline.inadInferida !== null ? iiV - inc.baseline.inadInferida : null;
+
+  // Hero KPI
+  const heroVal = hasInc && rateDelta !== null ? (fmtDelta(rateDelta / 100) ?? '—') : (rate !== null ? `${rate.toFixed(1)}%` : '—');
+  const heroLabel = hasInc && rateDelta !== null ? 'VARIAÇÃO NA APROVAÇÃO' : 'TAXA DE APROVAÇÃO';
+  const heroColor = hasInc && rateDelta !== null ? deltaClr(rateDelta, true) : rateColor;
+  const heroIsGood = hasInc && rateDelta !== null ? rateDelta > 0 : rate !== null && rate >= 50;
+
+  // Risk/Growth balance: 0 = pure risk, 1 = pure growth
+  const balance = !hasData ? 0.5 : (() => {
+    const a = Math.min(1, (rate ?? 50) / 100);
+    const i = irV !== null ? Math.max(0, 1 - irV / 0.12) : 0.5;
+    return a * 0.6 + i * 0.4;
+  })();
+  const balanceColor = balance > 0.6 ? "#22c55e" : balance < 0.4 ? "#ef4444" : "#f59e0b";
+  const balanceLabel = balance > 0.65 ? "Perfil expansivo" : balance < 0.35 ? "Perfil conservador" : "Perfil balanceado";
+
+  // Context badges
+  const badges = [];
+  if (hasInc) {
+    if (rateDelta !== null) {
+      const txt = fmtDelta(rateDelta / 100);
+      if (txt) badges.push({ text: `Δ Aprov. ${txt}`, bg: rateDelta > 0 ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)', color: rateDelta > 0 ? '#4ade80' : '#f87171' });
+    }
+    if (irDelta !== null && Math.abs(irDelta) > 0.0005) {
+      const txt = fmtDelta(irDelta);
+      if (txt) badges.push({ text: `Inad. ${txt}`, bg: irDelta < 0 ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)', color: irDelta < 0 ? '#4ade80' : '#f87171' });
+    }
+  }
+  if (hasData && irV !== null) {
+    const rl = irV > 0.05 ? 'Alto Risco' : irV > 0.02 ? 'Risco Moderado' : 'Baixo Risco';
+    const rlColor = irV > 0.05 ? '#f87171' : irV > 0.02 ? '#fbbf24' : '#4ade80';
+    badges.push({ text: rl, bg: rlColor + '22', color: rlColor });
+  }
+
+  const MCard = ({ label, value, delta, positiveHigh = true, sub }) => (
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 9, padding: '8px 10px', flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 9, color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 17, fontWeight: 800, color: '#e2e8f0', lineHeight: 1, fontFamily: "'DM Sans',system-ui,sans-serif" }}>{value}</div>
+      {delta !== null && delta !== undefined && (
+        <div style={{ fontSize: 9.5, fontWeight: 700, color: deltaClr(delta, positiveHigh), marginTop: 3 }}>
+          {fmtDelta(delta)}
+        </div>
+      )}
+      {sub && <div style={{ fontSize: 8, color: '#475569', marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
 
   return (
-    <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6}}>
-      {/* Feature 7: Aprovação com delta */}
-      <div style={{borderRadius:10,background:hasData?"#f0fdf4":"#f8fafc",border:"1.5px solid "+(hasData?"#bbf7d0":"#f1f5f9"),overflow:"hidden"}}>
-        <div style={{padding:"10px 12px 8px"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:hasData?4:0}}>
-            <span style={{fontSize:11,color:"#64748b",fontWeight:600,paddingTop:4}}>Taxa de Aprovação</span>
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:20,fontWeight:800,color:rateColor,lineHeight:1.1}}>{hasData ? rate.toFixed(1)+"%" : "N/A"}</div>
-              {hasInc && rateDeltaStr && (
-                <div style={{fontSize:11,fontWeight:700,color:deltaColor(rateDelta),lineHeight:1.2}}>{rateDeltaStr}</div>
-              )}
-              {hasInc && inc.baseline.totalQty > 0 && (
-                <div style={{fontSize:9.5,color:"#94a3b8",lineHeight:1.2}}>Baseline: {inc.baseline.approvalRate.toFixed(1)}%</div>
-              )}
-            </div>
+    <div style={{
+      marginTop: 10,
+      background: 'linear-gradient(160deg, #0f172a 0%, #1a1040 100%)',
+      borderRadius: 14,
+      overflow: 'hidden',
+      boxShadow: '0 4px 28px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.07)',
+      fontFamily: "'DM Sans',system-ui,sans-serif",
+    }}>
+      {/* Header */}
+      <div style={{ padding: '11px 13px 9px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: badges.length ? 8 : 0 }}>
+          <span style={{ fontSize: 10, fontWeight: 800, color: '#818cf8', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Business Impact</span>
+          <span style={{ fontSize: 9, color: '#334155', fontWeight: 500 }}>
+            {hasData ? `${fmtQty(displayResult.totalQty)} reg.` : 'sem dados'}
+          </span>
+        </div>
+        {badges.length > 0 && (
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {badges.map((b, i) => (
+              <span key={i} style={{ fontSize: 8.5, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: b.bg, color: b.color, letterSpacing: '0.03em' }}>{b.text}</span>
+            ))}
           </div>
-          {hasData && (
-            <div>
-              <div style={{height:6,borderRadius:3,background:"#e2e8f0",overflow:"hidden",marginBottom:5,position:"relative"}}>
-                <div style={{height:"100%",width:rate+"%",borderRadius:3,background:rateColor}}/>
-                {hasInc && inc.baseline.totalQty > 0 && (
-                  <div style={{position:"absolute",top:0,height:"100%",left:inc.baseline.approvalRate+"%",width:2,background:"rgba(0,0,0,0.25)",borderRadius:1}}/>
-                )}
-              </div>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:10.5,color:"#64748b"}}>
-                <span>Aprov: {fmtQty(displayResult.approvedQty)}</span>
-                <span>Repr: {fmtQty(displayResult.rejectedQty)}</span>
-              </div>
-              <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>Total: {fmtQty(displayResult.totalQty)}</div>
-            </div>
-          )}
-          {!hasData && <div style={{fontSize:10.5,color:"#cbd5e1"}}>{Object.keys(csvStore).length===0?"Sem dados":"Monte o fluxo"}</div>}
+        )}
+      </div>
+
+      {/* Hero KPI */}
+      <div style={{ padding: '16px 14px 12px', textAlign: 'center', position: 'relative', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+        {heroIsGood && hasData && (
+          <div style={{ position: 'absolute', inset: 0, background: `radial-gradient(ellipse at 50% 0%, ${heroColor}20 0%, transparent 70%)`, pointerEvents: 'none' }}/>
+        )}
+        <div style={{ fontSize: 42, fontWeight: 900, color: hasData ? heroColor : '#1e293b', lineHeight: 1, letterSpacing: '-0.02em', fontFamily: "'DM Sans',system-ui,sans-serif" }}>
+          {heroVal}
+        </div>
+        <div style={{ fontSize: 9.5, color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginTop: 5, textTransform: 'uppercase' }}>{heroLabel}</div>
+        {hasInc && inc.baseline.totalQty > 0 && (
+          <div style={{ fontSize: 9, color: '#334155', marginTop: 5 }}>
+            {inc.baseline.approvalRate.toFixed(1)}% → {(displayResult.approvalRate ?? 0).toFixed(1)}%
+          </div>
+        )}
+      </div>
+
+      {/* Approval bar */}
+      {hasData && (
+        <div style={{ padding: '7px 13px 0' }}>
+          <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden', position: 'relative' }}>
+            <div style={{ height: '100%', width: `${rate ?? 0}%`, borderRadius: 2, background: `linear-gradient(90deg, ${rateColor}99, ${rateColor})`, transition: 'width 0.4s ease' }}/>
+            {hasInc && inc.baseline.totalQty > 0 && (
+              <div style={{ position: 'absolute', top: 0, height: '100%', left: `${inc.baseline.approvalRate}%`, width: 2, background: 'rgba(255,255,255,0.35)', borderRadius: 1 }}/>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Metric Grid */}
+      <div style={{ padding: '9px 11px 9px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <MCard label="Aprovação" value={rate !== null ? `${rate.toFixed(1)}%` : '—'} delta={rateDelta !== null ? rateDelta / 100 : null} positiveHigh={true} sub={hasData ? `✓ ${fmtQty(displayResult.approvedQty)} · ✗ ${fmtQty(displayResult.rejectedQty)}` : null}/>
+          <MCard label="Inad. Real" value={irV !== null ? fmtPct(irV) : '—'} delta={irDelta} positiveHigh={false} sub="∑ Inad / ∑ Altas"/>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <MCard label="Inad. Inferida" value={iiV !== null ? fmtPct(iiV) : '—'} delta={iiDelta} positiveHigh={false} sub="∑ Inad.I / Aprov."/>
+          <MCard label="Vol. Aprovado" value={hasData ? fmtQty(displayResult.approvedQty) : '—'} delta={null} positiveHigh={true} sub={hasData ? `${(rate ?? 0).toFixed(1)}% da base` : null}/>
         </div>
       </div>
 
-      {/* Feature 7: Inad. Real com delta */}
-      <div style={{borderRadius:10,background:irBg,border:"1.5px solid "+irBorder,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div>
-          <div style={{fontSize:11,color:"#64748b",fontWeight:600}}>Inad. Real</div>
-          <div style={{fontSize:9.5,color:"#94a3b8"}}>Inad.Real / Altas aprov.</div>
+      {/* Risk/Growth Balance Bar */}
+      <div style={{ padding: '7px 13px 11px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+          <span style={{ fontSize: 8, color: '#ef4444', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>◄ Risco</span>
+          <span style={{ fontSize: 8, color: '#334155', fontWeight: 600 }}>Equilíbrio Estratégico</span>
+          <span style={{ fontSize: 8, color: '#22c55e', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Crescimento ►</span>
         </div>
-        <div style={{textAlign:"right"}}>
-          <div style={{fontSize:16,fontWeight:800,color:irColor}}>{hasData ? fmtPct(irV) : "N/A"}</div>
-          {hasInc && irDeltaStr && <div style={{fontSize:10,fontWeight:700,color:deltaColor(irDelta)}}>{irDeltaStr}</div>}
-          {hasInc && inc.baseline.inadReal !== null && <div style={{fontSize:9,color:"#94a3b8"}}>Baseline: {fmtPct(inc.baseline.inadReal)}</div>}
+        <div style={{ position: 'relative', height: 8, borderRadius: 4, background: 'linear-gradient(90deg, #7f1d1d44, #1e293b 42%, #1e293b 58%, #14532d44)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{
+            position: 'absolute', top: '50%', left: `${Math.round(balance * 100)}%`,
+            transform: 'translate(-50%, -50%)', width: 14, height: 14, borderRadius: '50%',
+            background: hasData ? balanceColor : '#1e293b',
+            border: '2px solid rgba(255,255,255,0.25)',
+            boxShadow: hasData ? `0 0 10px ${balanceColor}66` : 'none',
+            transition: 'left 0.4s ease',
+          }}/>
         </div>
+        {hasData && <div style={{ textAlign: 'center', marginTop: 5, fontSize: 8.5, color: balanceColor, fontWeight: 600 }}>{balanceLabel}</div>}
       </div>
 
-      {/* Feature 7: Inad. Inferida com delta */}
-      <div style={{borderRadius:10,background:iiBg,border:"1.5px solid "+iiBorder,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div>
-          <div style={{fontSize:11,color:"#64748b",fontWeight:600}}>Inad. Inferida</div>
-          <div style={{fontSize:9.5,color:"#94a3b8"}}>Inad.Inf / Vol. aprov.</div>
-        </div>
-        <div style={{textAlign:"right"}}>
-          <div style={{fontSize:16,fontWeight:800,color:iiColor}}>{hasData ? fmtPct(iiV) : "N/A"}</div>
-          {hasInc && iiDeltaStr && <div style={{fontSize:10,fontWeight:700,color:deltaColor(iiDelta)}}>{iiDeltaStr}</div>}
-          {hasInc && inc.baseline.inadInferida !== null && <div style={{fontSize:9,color:"#94a3b8"}}>Baseline: {fmtPct(inc.baseline.inadInferida)}</div>}
-        </div>
-      </div>
-
-      {/* Feature 8: Indicadores da População Impactada */}
+      {/* Efeito da Mudança */}
       {hasInc && inc.impacted.qty > 0 && (
-        <div style={{borderRadius:10,background:"#faf5ff",border:"1.5px solid #e9d5ff",padding:"8px 12px"}}>
-          <div style={{fontSize:11,color:"#7c3aed",fontWeight:700,marginBottom:6}}>🔬 População Impactada</div>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-            <span style={{fontSize:10.5,color:"#64748b"}}>Volume alterado</span>
-            <span style={{fontSize:11,fontWeight:700,color:"#7c3aed"}}>{fmtQty(inc.impacted.qty)}</span>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-            <span style={{fontSize:10.5,color:"#64748b"}}>% da base</span>
-            <span style={{fontSize:11,fontWeight:700,color:"#7c3aed"}}>{inc.impacted.pct.toFixed(1)}%</span>
-          </div>
-          <div style={{display:"flex",gap:6}}>
-            <div style={{flex:1,background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
-              <div style={{fontSize:8.5,color:"#16a34a",fontWeight:600}}>R → A</div>
-              <div style={{fontSize:12,fontWeight:800,color:"#16a34a"}}>+{fmtQty(inc.impacted.rToA)}</div>
+        <div style={{ padding: '9px 11px 12px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 9, color: '#a78bfa', fontWeight: 800, marginBottom: 7, textTransform: 'uppercase', letterSpacing: '0.08em' }}>⚡ Efeito da Mudança</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <div style={{ background: 'rgba(74,222,128,0.07)', border: '1px solid rgba(74,222,128,0.2)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
+              <div style={{ fontSize: 7.5, color: '#4ade80', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Novos Aprovados</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: '#4ade80' }}>+{fmtQty(inc.impacted.rToA)}</div>
             </div>
-            <div style={{flex:1,background:"#fff1f2",border:"1px solid #fecaca",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
-              <div style={{fontSize:8.5,color:"#dc2626",fontWeight:600}}>A → R</div>
-              <div style={{fontSize:12,fontWeight:800,color:"#dc2626"}}>−{fmtQty(inc.impacted.aToR)}</div>
+            <div style={{ background: 'rgba(248,113,113,0.07)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
+              <div style={{ fontSize: 7.5, color: '#f87171', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Novos Reprovados</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: '#f87171' }}>−{fmtQty(inc.impacted.aToR)}</div>
             </div>
           </div>
-          {inc.impacted.approvalDelta !== 0 && (
-            <div style={{marginTop:6,fontSize:10,color:"#94a3b8",textAlign:"center"}}>
-              Ganho incremental: <span style={{fontWeight:700,color:deltaColor(inc.impacted.approvalDelta/100)}}>{fmtDeltaPp(inc.impacted.approvalDelta/100)}</span>
-            </div>
-          )}
+          <div style={{ marginTop: 7, textAlign: 'center', fontSize: 8.5, color: '#475569' }}>
+            {fmtQty(inc.impacted.qty)} registros impactados · {inc.impacted.pct.toFixed(1)}% da base
+          </div>
         </div>
       )}
     </div>
@@ -1473,7 +1514,7 @@ export default function App() {
     setShapes(p=>{
       const csvNode={id:nodeId,type:"csv",x:cx-CSV_W/2,y:cy-CSV_H/2,w:CSV_W,h:CSV_H,label:filename,csvId,minimized:false};
       const hasPanel=p.some(s=>s.type==="simPanel");
-      const panelNodes=hasPanel?[]:[{id:uid(),type:"simPanel",x:cx+CSV_W/2+50,y:cy-80,w:260,h:280,label:"Simulação",color:"#fff"}];
+      const panelNodes=hasPanel?[]:[{id:uid(),type:"simPanel",x:cx+CSV_W/2+50,y:cy-120,w:300,h:440,label:"Simulação",color:"#fff"}];
 
       // Reconcile orphan decision nodes: nodes whose csvId no longer has a matching store entry
       // We pass the full updated store (prev + new entry) via closure is not possible here,
@@ -2495,187 +2536,162 @@ export default function App() {
   const renderSimPanel = (shape) => {
     const {id,x,y,w,h}=shape;
     const isSel=sel===id;
+    const HDR_H = 44;
 
-    // Feature 6/7: usar incrementalResult quando disponível
     const inc = incrementalResult;
     const hasInc = !!inc;
     const displayResult = hasInc ? inc.simulated : simResult;
-
-    const rate = displayResult.approvalRate ?? 0;
-    const rateColor = rate>=70?"#16a34a":rate>=40?"#d97706":"#dc2626";
-    const barW = Math.max(0,(w-32)*rate/100);
     const hasData = displayResult.totalQty > 0;
-    const inadRealColor = displayResult.inadReal  === null ? "#94a3b8" : displayResult.inadReal  > 0.05 ? "#dc2626" : "#d97706";
-    const inadInfColor  = displayResult.inadInferida === null ? "#94a3b8" : displayResult.inadInferida > 0.05 ? "#dc2626" : "#d97706";
 
-    // Delta helpers
-    const fmtDeltaPp = (delta) => {
-      if (delta === null || delta === undefined || isNaN(delta)) return null;
-      const sign = delta >= 0 ? "+" : "−"; return `${sign}${Math.abs(delta).toFixed(2)} p.p`;
+    const rate = hasData ? displayResult.approvalRate : null;
+    const irV = displayResult.inadReal;
+    const iiV = displayResult.inadInferida;
+
+    // Semantic colors
+    const rateColor = rate === null ? "#94a3b8" : rate >= 70 ? "#22c55e" : rate >= 40 ? "#f59e0b" : "#ef4444";
+    const inadColor = (v) => v === null ? "#64748b" : v > 0.05 ? "#ef4444" : v > 0.02 ? "#f59e0b" : "#22c55e";
+    const deltaClr = (d, positiveHigh = true) => {
+      if (d === null || isNaN(d)) return "#64748b";
+      return positiveHigh ? (d > 0 ? "#4ade80" : d < 0 ? "#f87171" : "#64748b")
+                          : (d < 0 ? "#4ade80" : d > 0 ? "#f87171" : "#64748b");
     };
-    const deltaClr = (d) => d > 0 ? "#16a34a" : d < 0 ? "#dc2626" : "#94a3b8";
-    const rateDeltaPp  = hasInc ? (inc.simulated.approvalRate - inc.baseline.approvalRate) : null;
-    const irDeltaStr   = hasInc && inc.simulated.inadReal  !== null && inc.baseline.inadReal  !== null
-      ? fmtDeltaPp((inc.simulated.inadReal  - inc.baseline.inadReal)  * 100) : null;
-    const iiDeltaStr   = hasInc && inc.simulated.inadInferida !== null && inc.baseline.inadInferida !== null
-      ? fmtDeltaPp((inc.simulated.inadInferida - inc.baseline.inadInferida) * 100) : null;
-    const irDeltaV     = hasInc && inc.simulated.inadReal  !== null && inc.baseline.inadReal  !== null
-      ? inc.simulated.inadReal  - inc.baseline.inadReal  : null;
-    const iiDeltaV     = hasInc && inc.simulated.inadInferida !== null && inc.baseline.inadInferida !== null
-      ? inc.simulated.inadInferida - inc.baseline.inadInferida : null;
+    const fmtD = (d, scale = 100) => {
+      if (d === null || isNaN(d)) return null;
+      return `${d >= 0 ? '+' : '−'}${Math.abs(d * scale).toFixed(2)}pp`;
+    };
 
-    // Layout y positions — expand when incremental active
-    const hdr = y+46;
-    const rateY = y+90; const rateLabel = y+106;
-    const rateDeltaY = hasInc ? y+120 : null;
-    const rateBaseY  = hasInc ? y+132 : null;
-    const barY       = hasInc ? y+144 : y+120;
-    const statsY     = barY + 28; const totalY = statsY + 17;
-    const sep1       = totalY + 16;
-    // inad boxes grow by 12px when showing delta+baseline
-    const ind1H = hasInc ? 50 : 38;
-    const ind2H = hasInc ? 50 : 38;
+    const rateDelta = hasInc && inc.baseline.totalQty > 0 ? inc.simulated.approvalRate - inc.baseline.approvalRate : null;
+    const irDelta = hasInc && irV !== null && inc.baseline.inadReal !== null ? irV - inc.baseline.inadReal : null;
+    const iiDelta = hasInc && iiV !== null && inc.baseline.inadInferida !== null ? iiV - inc.baseline.inadInferida : null;
+
+    const heroVal = hasInc && rateDelta !== null ? (fmtD(rateDelta / 100) ?? '—') : (rate !== null ? `${rate.toFixed(1)}%` : '—');
+    const heroLabel = hasInc && rateDelta !== null ? 'VARIAÇÃO NA APROVAÇÃO' : 'TAXA DE APROVAÇÃO';
+    const heroColor = hasInc && rateDelta !== null ? deltaClr(rateDelta, true) : rateColor;
+
+    const balance = !hasData ? 0.5 : (() => {
+      const a = Math.min(1, (rate ?? 50) / 100);
+      const i = irV !== null ? Math.max(0, 1 - irV / 0.12) : 0.5;
+      return a * 0.6 + i * 0.4;
+    })();
+    const balColor = balance > 0.6 ? "#22c55e" : balance < 0.4 ? "#ef4444" : "#f59e0b";
 
     return (
       <g key={id} data-sid={id}
         onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)}
         style={{cursor:tool==="select"?"grab":"default",
-          filter:isSel?"drop-shadow(0 0 0 2px rgba(99,102,241,.3)) drop-shadow(0 4px 20px rgba(99,102,241,.2))":"drop-shadow(0 4px 20px rgba(0,0,0,.13))"}}>
-        {/* Frame */}
-        <rect x={x} y={y} width={w} height={h} rx={14} fill="#fff" stroke={isSel?"#6366f1":"#c7d2fe"} strokeWidth={isSel?2:1.5}/>
-        {/* Header bar */}
-        <rect x={x} y={y} width={w} height={hdr-y} rx={14} fill="#6366f1"/>
-        <rect x={x} y={y+32} width={w} height={14} fill="#6366f1"/>
-        <text x={x+14} y={y+29} fontSize={13} fontWeight="700" fill="#fff"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>📊 Painel de Simulação</text>
-        {/* Approval rate — Feature 7: valor simulado */}
-        <text x={x+w/2} y={rateY} textAnchor="middle" fontSize={38} fontWeight="800" fill={hasData?rateColor:"#cbd5e1"}
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData?`${rate.toFixed(1)}%`:"—"}
-        </text>
-        <text x={x+w/2} y={rateLabel} textAnchor="middle" fontSize={11} fill="#94a3b8"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>Taxa de Aprovação</text>
-        {/* Feature 7: delta + baseline */}
-        {hasInc && rateDeltaPp !== null && (
-          <text x={x+w/2} y={rateDeltaY} textAnchor="middle" fontSize={12} fontWeight="700" fill={deltaClr(rateDeltaPp)}
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-            {fmtDeltaPp(rateDeltaPp)}
-          </text>
-        )}
-        {hasInc && inc.baseline.totalQty > 0 && (
-          <text x={x+w/2} y={rateBaseY} textAnchor="middle" fontSize={9.5} fill="#94a3b8"
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-            Baseline: {inc.baseline.approvalRate.toFixed(1)}%
-          </text>
-        )}
-        <rect x={x+16} y={barY} width={w-32} height={7} rx={3.5} fill="#f1f5f9"/>
-        {hasData&&<rect x={x+16} y={barY} width={barW} height={7} rx={3.5} fill={rateColor}/>}
-        {/* Baseline marker on bar */}
-        {hasInc && inc.baseline.totalQty > 0 && (
-          <rect x={x+16+Math.max(0,(w-32)*inc.baseline.approvalRate/100)-1} y={barY-1} width={2} height={9} rx={1} fill="rgba(0,0,0,0.3)"/>
-        )}
-        <text x={x+w/2-52} y={statsY} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#16a34a":"#cbd5e1"}
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          ✅ {hasData?fmtQty(displayResult.approvedQty):"0"}
-        </text>
-        <text x={x+w/2} y={statsY} textAnchor="middle" fontSize={11} fill="#cbd5e1"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>/</text>
-        <text x={x+w/2+52} y={statsY} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#dc2626":"#cbd5e1"}
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          ❌ {hasData?fmtQty(displayResult.rejectedQty):"0"}
-        </text>
-        <text x={x+w/2} y={totalY} textAnchor="middle" fontSize={10} fill="#94a3b8"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData?`Total: ${fmtQty(displayResult.totalQty)} registros`:"Sem dados carregados"}
-        </text>
-        {/* Divider */}
-        <line x1={x+16} y1={sep1} x2={x+w-16} y2={sep1} stroke="#f1f5f9" strokeWidth={1}/>
-        {/* Inad. Real — Feature 7: com delta + baseline */}
-        <rect x={x+12} y={sep1+8} width={w-24} height={ind1H} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
-        <text x={x+24} y={sep1+22} fontSize={10} fill="#94a3b8"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⚠️ Inadimplência Real</text>
-        <text x={x+w-24} y={sep1+22} textAnchor="end" fontSize={12} fontWeight="700" fill={inadRealColor}
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData ? fmtPct(displayResult.inadReal) : "—"}
-        </text>
-        {hasInc && irDeltaStr && (
-          <text x={x+w-24} y={sep1+34} textAnchor="end" fontSize={9.5} fontWeight="700" fill={deltaClr(irDeltaV)}
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{irDeltaStr}</text>
-        )}
-        {hasInc && inc.baseline.inadReal !== null && (
-          <text x={x+24} y={sep1+(hasInc?46:36)} fontSize={9} fill="#cbd5e1"
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-            Baseline: {fmtPct(inc.baseline.inadReal)}
-          </text>
-        )}
-        {!hasInc && (
-          <text x={x+24} y={sep1+36} fontSize={9} fill="#cbd5e1"
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Real / ∑ Altas aprovadas</text>
-        )}
-        {/* Inad. Inferida — Feature 7: com delta + baseline */}
-        <rect x={x+12} y={sep1+ind1H+16} width={w-24} height={ind2H} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
-        <text x={x+24} y={sep1+ind1H+30} fontSize={10} fill="#94a3b8"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>🎯 Inadimplência Inferida</text>
-        <text x={x+w-24} y={sep1+ind1H+30} textAnchor="end" fontSize={12} fontWeight="700" fill={inadInfColor}
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData ? fmtPct(displayResult.inadInferida) : "—"}
-        </text>
-        {hasInc && iiDeltaStr && (
-          <text x={x+w-24} y={sep1+ind1H+42} textAnchor="end" fontSize={9.5} fontWeight="700" fill={deltaClr(iiDeltaV)}
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{iiDeltaStr}</text>
-        )}
-        {hasInc && inc.baseline.inadInferida !== null && (
-          <text x={x+24} y={sep1+ind1H+(hasInc?60:44)} fontSize={9} fill="#cbd5e1"
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-            Baseline: {fmtPct(inc.baseline.inadInferida)}
-          </text>
-        )}
-        {!hasInc && (
-          <text x={x+24} y={sep1+ind1H+44} fontSize={9} fill="#cbd5e1"
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Inferida / Vol. Aprovado</text>
-        )}
-        {/* Feature 8: População Impactada — substitui "Impacto Marginal" anterior */}
-        {(() => {
-          if (!incrementalResult) return null;
-          const imp = incrementalResult.impacted;
-          const sep2 = sep1 + ind1H + ind2H + 32;
-          return (
-            <>
-              <line x1={x+16} y1={sep2} x2={x+w-16} y2={sep2} stroke="#f1f5f9" strokeWidth={1}/>
-              <text x={x+w/2} y={sep2+13} textAnchor="middle" fontSize={10} fontWeight="700" fill="#7c3aed"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                🔬 População Impactada
-              </text>
-              <rect x={x+12} y={sep2+18} width={w-24} height={32} rx={8} fill="#faf5ff" stroke="#e9d5ff" strokeWidth={1}/>
-              <text x={x+24} y={sep2+31} fontSize={9} fill="#94a3b8"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>👥 Alterados</text>
-              <text x={x+w-24} y={sep2+31} textAnchor="end" fontSize={11} fontWeight="700" fill={imp.qty>0?"#7c3aed":"#94a3b8"}
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                {fmtQty(imp.qty)}
-              </text>
-              <text x={x+24} y={sep2+44} fontSize={9} fill="#94a3b8"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>% da base</text>
-              <text x={x+w-24} y={sep2+44} textAnchor="end" fontSize={9.5} fontWeight="600" fill="#7c3aed"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                {imp.pct.toFixed(1)}%
-              </text>
-              <rect x={x+12} y={sep2+56} width={(w-28)/2} height={24} rx={6} fill="#f0fdf4" stroke="#bbf7d0" strokeWidth={1}/>
-              <text x={x+16} y={sep2+66} fontSize={8.5} fill="#16a34a"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>R→A</text>
-              <text x={x+16+(w-28)/2-6} y={sep2+66} textAnchor="end" fontSize={10} fontWeight="700" fill="#16a34a"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                +{fmtQty(imp.rToA)}
-              </text>
-              <rect x={x+12+(w-28)/2+4} y={sep2+56} width={(w-28)/2} height={24} rx={6} fill="#fef2f2" stroke="#fecaca" strokeWidth={1}/>
-              <text x={x+16+(w-28)/2+4} y={sep2+66} fontSize={8.5} fill="#dc2626"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>A→R</text>
-              <text x={x+w-16} y={sep2+66} textAnchor="end" fontSize={10} fontWeight="700" fill="#dc2626"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                -{fmtQty(imp.aToR)}
-              </text>
-            </>
-          );
-        })()}
+          filter:isSel?"drop-shadow(0 0 6px rgba(129,140,248,.6)) drop-shadow(0 4px 24px rgba(99,102,241,.25))":"drop-shadow(0 6px 28px rgba(0,0,0,.45))"}}>
+        {/* Background */}
+        <rect x={x} y={y} width={w} height={h} rx={14} fill="#0f172a" stroke={isSel?"#818cf8":"#1e1b4b"} strokeWidth={isSel?2:1.5}/>
+        {/* Header gradient */}
+        <defs>
+          <linearGradient id={`hg-${id}`} x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor="#1e1b4b"/>
+            <stop offset="100%" stopColor="#1a1040"/>
+          </linearGradient>
+        </defs>
+        <rect x={x} y={y} width={w} height={HDR_H} rx={14} fill={`url(#hg-${id})`}/>
+        <rect x={x} y={y+HDR_H-14} width={w} height={14} fill={`url(#hg-${id})`}/>
+        <text x={x+13} y={y+27} fontSize={10} fontWeight="800" fill="#818cf8" letterSpacing="1.5"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none",textTransform:"uppercase"}}>BUSINESS IMPACT</text>
+        {hasData && <text x={x+w-13} y={y+27} textAnchor="end" fontSize={9} fill="#334155"
+          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{fmtQty(displayResult.totalQty)} reg.</text>}
+        {/* Hero KPI via foreignObject */}
+        <foreignObject x={x} y={y+HDR_H} width={w} height={h-HDR_H}>
+          <div xmlns="http://www.w3.org/1999/xhtml"
+            style={{width:"100%",height:"100%",overflow:"hidden",fontFamily:"'DM Sans',system-ui,sans-serif",
+              background:"linear-gradient(160deg,#0f172a 0%,#1a1040 100%)",
+              borderBottomLeftRadius:13,borderBottomRightRadius:13,display:"flex",flexDirection:"column"}}
+            onMouseDown={e=>e.stopPropagation()}>
+
+            {/* Hero */}
+            <div style={{padding:"14px 14px 10px",textAlign:"center",borderBottom:"1px solid rgba(255,255,255,0.05)",position:"relative",flexShrink:0}}>
+              <div style={{fontSize:36,fontWeight:900,color:hasData?heroColor:"#1e293b",lineHeight:1,letterSpacing:"-0.02em"}}>{heroVal}</div>
+              <div style={{fontSize:8.5,color:"#475569",fontWeight:700,letterSpacing:"0.1em",marginTop:5,textTransform:"uppercase"}}>{heroLabel}</div>
+              {hasInc && inc.baseline.totalQty > 0 && (
+                <div style={{fontSize:9,color:"#334155",marginTop:4}}>{inc.baseline.approvalRate.toFixed(1)}% → {(rate ?? 0).toFixed(1)}%</div>
+              )}
+            </div>
+
+            {/* Progress bar */}
+            {hasData && (
+              <div style={{padding:"6px 12px 0",flexShrink:0}}>
+                <div style={{height:4,borderRadius:2,background:"rgba(255,255,255,0.06)",overflow:"hidden",position:"relative"}}>
+                  <div style={{height:"100%",width:`${rate??0}%`,borderRadius:2,background:`linear-gradient(90deg,${rateColor}88,${rateColor})`,transition:"width .4s ease"}}/>
+                  {hasInc && inc.baseline.totalQty > 0 && (
+                    <div style={{position:"absolute",top:0,height:"100%",left:`${inc.baseline.approvalRate}%`,width:2,background:"rgba(255,255,255,0.3)",borderRadius:1}}/>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Metric grid */}
+            <div style={{padding:"8px 10px 6px",display:"flex",flexDirection:"column",gap:5,flexShrink:0}}>
+              {/* Row 1 */}
+              <div style={{display:"flex",gap:5}}>
+                {[
+                  {label:"Aprovação", val:rate!==null?`${rate.toFixed(1)}%`:"—", delta:rateDelta!==null?rateDelta/100:null, ph:true, sub:hasData?`✓${fmtQty(displayResult.approvedQty)} ✗${fmtQty(displayResult.rejectedQty)}`:null},
+                  {label:"Inad. Real", val:irV!==null?fmtPct(irV):"—", delta:irDelta, ph:false, sub:"∑Inad/∑Altas"},
+                ].map((m,i)=>(
+                  <div key={i} style={{flex:1,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:"6px 8px"}}>
+                    <div style={{fontSize:7.5,color:"#64748b",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:2}}>{m.label}</div>
+                    <div style={{fontSize:15,fontWeight:800,color:m.label==="Aprovação"?rateColor:inadColor(irV),lineHeight:1}}>{m.val}</div>
+                    {m.delta!==null&&m.delta!==undefined&&<div style={{fontSize:8.5,fontWeight:700,color:deltaClr(m.delta,m.ph),marginTop:2}}>{fmtD(m.delta)}</div>}
+                    {m.sub&&<div style={{fontSize:7.5,color:"#334155",marginTop:1}}>{m.sub}</div>}
+                  </div>
+                ))}
+              </div>
+              {/* Row 2 */}
+              <div style={{display:"flex",gap:5}}>
+                {[
+                  {label:"Inad. Inferida", val:iiV!==null?fmtPct(iiV):"—", delta:iiDelta, ph:false, col:inadColor(iiV), sub:"∑Inad.I/Aprov."},
+                  {label:"Vol. Aprovado", val:hasData?fmtQty(displayResult.approvedQty):"—", delta:null, ph:true, col:"#e2e8f0", sub:hasData?`${(rate??0).toFixed(1)}% da base`:null},
+                ].map((m,i)=>(
+                  <div key={i} style={{flex:1,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:"6px 8px"}}>
+                    <div style={{fontSize:7.5,color:"#64748b",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:2}}>{m.label}</div>
+                    <div style={{fontSize:15,fontWeight:800,color:m.col,lineHeight:1}}>{m.val}</div>
+                    {m.delta!==null&&m.delta!==undefined&&<div style={{fontSize:8.5,fontWeight:700,color:deltaClr(m.delta,m.ph),marginTop:2}}>{fmtD(m.delta)}</div>}
+                    {m.sub&&<div style={{fontSize:7.5,color:"#334155",marginTop:1}}>{m.sub}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Risk/Growth balance bar */}
+            <div style={{padding:"4px 12px 8px",borderTop:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                <span style={{fontSize:7.5,color:"#ef4444",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em"}}>◄ Risco</span>
+                <span style={{fontSize:7.5,color:"#334155"}}>Equilíbrio</span>
+                <span style={{fontSize:7.5,color:"#22c55e",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em"}}>Crescimento ►</span>
+              </div>
+              <div style={{position:"relative",height:7,borderRadius:4,background:"linear-gradient(90deg,#7f1d1d44,#1e293b 42%,#1e293b 58%,#14532d44)",border:"1px solid rgba(255,255,255,0.05)"}}>
+                <div style={{position:"absolute",top:"50%",left:`${Math.round(balance*100)}%`,transform:"translate(-50%,-50%)",width:12,height:12,borderRadius:"50%",background:hasData?balColor:"#1e293b",border:"2px solid rgba(255,255,255,0.2)",boxShadow:hasData?`0 0 8px ${balColor}66`:"none",transition:"left .4s ease"}}/>
+              </div>
+              {hasData&&<div style={{textAlign:"center",marginTop:4,fontSize:8,color:balColor,fontWeight:600}}>
+                {balance>0.65?"Perfil expansivo":balance<0.35?"Perfil conservador":"Perfil balanceado"}
+              </div>}
+            </div>
+
+            {/* Efeito da Mudança */}
+            {hasInc && inc.impacted.qty > 0 && (
+              <div style={{padding:"7px 10px 10px",borderTop:"1px solid rgba(255,255,255,0.05)",flexShrink:0}}>
+                <div style={{fontSize:8,color:"#a78bfa",fontWeight:800,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.08em"}}>⚡ Efeito da Mudança</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+                  <div style={{background:"rgba(74,222,128,0.07)",border:"1px solid rgba(74,222,128,0.18)",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:"#4ade80",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:2}}>Novos Aprov.</div>
+                    <div style={{fontSize:14,fontWeight:800,color:"#4ade80"}}>+{fmtQty(inc.impacted.rToA)}</div>
+                  </div>
+                  <div style={{background:"rgba(248,113,113,0.07)",border:"1px solid rgba(248,113,113,0.18)",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:"#f87171",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:2}}>Novos Repr.</div>
+                    <div style={{fontSize:14,fontWeight:800,color:"#f87171"}}>−{fmtQty(inc.impacted.aToR)}</div>
+                  </div>
+                </div>
+                <div style={{marginTop:5,textAlign:"center",fontSize:8,color:"#475569"}}>
+                  {fmtQty(inc.impacted.qty)} impactados · {inc.impacted.pct.toFixed(1)}% da base
+                </div>
+              </div>
+            )}
+          </div>
+        </foreignObject>
       </g>
     );
   };
@@ -3227,7 +3243,7 @@ export default function App() {
                 pushHistory();
                 const svgEl=svgRef.current;
                 const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
-                setShapes(p=>[...p,{id:uid(),type:"simPanel",x:cx-130,y:cy-95,w:260,h:280,label:"Simulação",color:"#fff"}]);
+                setShapes(p=>[...p,{id:uid(),type:"simPanel",x:cx-150,y:cy-220,w:300,h:440,label:"Simulação",color:"#fff"}]);
               }}
               disabled={shapes.some(s=>s.type==="simPanel")}
               style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"10px 14px",borderRadius:10,
