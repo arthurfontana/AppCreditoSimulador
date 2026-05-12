@@ -632,6 +632,89 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
   return hasAnyDecisaoCol ? overlay : null;
 }
 
+// ── Feature 6: Reprocessamento Incremental de Indicadores ───────────────────
+// Recalcula KPIs considerando: original para não-impactados, simulada para impactados.
+// Retorna {baseline, simulated, impacted} ou null se overlay ausente.
+function computeIncrementalResult(overlay, csvStore) {
+  if (!overlay) return null;
+
+  const bl  = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, inadRRaw:0, inadIRaw:0 };
+  const sim = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, inadRRaw:0, inadIRaw:0 };
+  const imp = { qty:0, rToA:0, aToR:0, qtdAltasSimSum:0, inadRSimRaw:0, inadISimRaw:0 };
+
+  for (const [csvId, { rowDecisions }] of Object.entries(overlay)) {
+    const csv = csvStore[csvId];
+    if (!csv) continue;
+    const types = csv.columnTypes || {};
+    const getIdx = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col != null ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx   = getIdx('qty');
+    const altasIdx = getIdx('qtdAltas');
+    const inadRIdx = getIdx('inadReal');
+    const inadIIdx = getIdx('inadInferida');
+
+    for (const rd of rowDecisions) {
+      const row = csv.rows[rd.rowIdx];
+      if (!row) continue;
+      const qty   = qtyIdx   >= 0 ? (parseFloat(row[qtyIdx])   || 1) : 1;
+      const altas = altasIdx >= 0 ? (parseFloat(row[altasIdx]) || 0) : 0;
+      const inadR = inadRIdx >= 0 ? (parseFloat(row[inadRIdx]) || 0) : 0;
+      const inadI = inadIIdx >= 0 ? (parseFloat(row[inadIIdx]) || 0) : 0;
+
+      // Baseline (decisao original)
+      bl.totalQty += qty;
+      if (rd.decisaoOriginal === 'APROVADO') {
+        bl.approvedQty += qty; bl.qtdAltasSum += altas; bl.inadRRaw += inadR; bl.inadIRaw += inadI;
+      } else if (rd.decisaoOriginal === 'REPROVADO') {
+        bl.rejectedQty += qty;
+      }
+
+      // Simulado híbrido: original p/ não-impactados, simulada p/ impactados
+      sim.totalQty += qty;
+      if (rd.decisaoSimulada === 'APROVADO') {
+        sim.approvedQty += qty; sim.qtdAltasSum += altas; sim.inadRRaw += inadR; sim.inadIRaw += inadI;
+      } else if (rd.decisaoSimulada === 'REPROVADO') {
+        sim.rejectedQty += qty;
+      }
+
+      // Métricas da população impactada
+      if (rd.flagImpactado) {
+        imp.qty += qty;
+        if (rd.decisaoOriginal === 'REPROVADO' && rd.decisaoSimulada === 'APROVADO') {
+          imp.rToA += qty; imp.qtdAltasSimSum += altas; imp.inadRSimRaw += inadR; imp.inadISimRaw += inadI;
+        } else if (rd.decisaoOriginal === 'APROVADO' && rd.decisaoSimulada === 'REPROVADO') {
+          imp.aToR += qty;
+        }
+      }
+    }
+  }
+
+  const blRate  = bl.totalQty  > 0 ? (bl.approvedQty  / bl.totalQty)  * 100 : 0;
+  const simRate = sim.totalQty > 0 ? (sim.approvedQty / sim.totalQty) * 100 : 0;
+  return {
+    baseline: {
+      approvedQty: bl.approvedQty, rejectedQty: bl.rejectedQty, totalQty: bl.totalQty,
+      approvalRate: blRate,
+      inadReal:     bl.qtdAltasSum  > 0 ? bl.inadRRaw  / bl.qtdAltasSum  : null,
+      inadInferida: bl.approvedQty  > 0 ? bl.inadIRaw  / bl.approvedQty  : null,
+    },
+    simulated: {
+      approvedQty: sim.approvedQty, rejectedQty: sim.rejectedQty, totalQty: sim.totalQty,
+      approvalRate: simRate,
+      inadReal:     sim.qtdAltasSum > 0 ? sim.inadRRaw / sim.qtdAltasSum : null,
+      inadInferida: sim.approvedQty > 0 ? sim.inadIRaw / sim.approvedQty : null,
+    },
+    impacted: {
+      qty: imp.qty, totalQty: bl.totalQty,
+      pct: bl.totalQty > 0 ? (imp.qty / bl.totalQty) * 100 : 0,
+      rToA: imp.rToA, aToR: imp.aToR,
+      approvalDelta: simRate - blRate,
+    },
+  };
+}
+
 // ── Optimization engine helpers ──────────────────────────────────────────────
 function computeCellMetrics(shape, csvStore) {
   if (!shape || shape.type !== 'cineminha') return {};
@@ -736,55 +819,143 @@ function extractScenarios(frontier) {
 }
 
 // ── SimIndicators — right panel simulation card ───────────────────────────────
-function SimIndicators({ simResult, csvStore }) {
-  const hasData = simResult.totalQty > 0;
-  const rate = hasData ? simResult.approvalRate : null;
+function SimIndicators({ simResult, csvStore, incrementalResult }) {
+  // Feature 7: quando há incrementalResult, usamos simulated como valor principal
+  const inc = incrementalResult;
+  const hasInc = !!inc;
+
+  const displayResult = hasInc ? inc.simulated : simResult;
+  const hasData = displayResult.totalQty > 0;
+
+  const rate = hasData ? displayResult.approvalRate : null;
   const rateColor = rate === null ? "#cbd5e1" : rate >= 70 ? "#16a34a" : rate >= 40 ? "#d97706" : "#dc2626";
-  const irV = simResult.inadReal;
+
+  const irV = displayResult.inadReal;
   const irColor = irV === null ? "#94a3b8" : irV > 0.05 ? "#dc2626" : "#d97706";
   const irBg = irV === null ? "#fafafa" : irV > 0.05 ? "#fff1f2" : "#fffbeb";
   const irBorder = irV === null ? "#f1f5f9" : irV > 0.05 ? "#fecaca" : "#fde68a";
-  const iiV = simResult.inadInferida;
+
+  const iiV = displayResult.inadInferida;
   const iiColor = iiV === null ? "#94a3b8" : iiV > 0.05 ? "#dc2626" : "#d97706";
   const iiBg = iiV === null ? "#fafafa" : iiV > 0.05 ? "#fff1f2" : "#fffbeb";
   const iiBorder = iiV === null ? "#f1f5f9" : iiV > 0.05 ? "#fecaca" : "#fde68a";
+
+  // Delta helpers (Feature 7)
+  const fmtDeltaPp = (delta) => {
+    if (delta === null || delta === undefined || isNaN(delta)) return null;
+    const abs = Math.abs(delta * 100);
+    const sign = delta >= 0 ? "+" : "−";
+    return `${sign}${abs.toFixed(2)} p.p`;
+  };
+  const fmtDeltaPct = (simV, blV) => {
+    if (simV === null || blV === null) return null;
+    const delta = simV - blV;
+    const abs = Math.abs(delta * 100);
+    const sign = delta >= 0 ? "+" : "−";
+    return `${sign}${abs.toFixed(2)} p.p`;
+  };
+  const deltaColor = (delta) => delta > 0 ? "#16a34a" : delta < 0 ? "#dc2626" : "#94a3b8";
+
+  const rateDeltaStr = hasInc ? fmtDeltaPp((inc.simulated.approvalRate - inc.baseline.approvalRate) / 100) : null;
+  const irDeltaStr   = hasInc ? fmtDeltaPct(inc.simulated.inadReal,     inc.baseline.inadReal)     : null;
+  const iiDeltaStr   = hasInc ? fmtDeltaPct(inc.simulated.inadInferida, inc.baseline.inadInferida) : null;
+  const rateDelta    = hasInc ? (inc.simulated.approvalRate - inc.baseline.approvalRate) / 100 : 0;
+  const irDelta      = hasInc && inc.simulated.inadReal !== null && inc.baseline.inadReal !== null
+    ? inc.simulated.inadReal - inc.baseline.inadReal : null;
+  const iiDelta      = hasInc && inc.simulated.inadInferida !== null && inc.baseline.inadInferida !== null
+    ? inc.simulated.inadInferida - inc.baseline.inadInferida : null;
+
   return (
     <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6}}>
+      {/* Feature 7: Aprovação com delta */}
       <div style={{borderRadius:10,background:hasData?"#f0fdf4":"#f8fafc",border:"1.5px solid "+(hasData?"#bbf7d0":"#f1f5f9"),overflow:"hidden"}}>
         <div style={{padding:"10px 12px 8px"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:hasData?6:0}}>
-            <span style={{fontSize:11,color:"#64748b",fontWeight:600}}>Taxa de Aprovacao</span>
-            <span style={{fontSize:20,fontWeight:800,color:rateColor}}>{hasData ? rate.toFixed(1)+"%" : "N/A"}</span>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:hasData?4:0}}>
+            <span style={{fontSize:11,color:"#64748b",fontWeight:600,paddingTop:4}}>Taxa de Aprovação</span>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:20,fontWeight:800,color:rateColor,lineHeight:1.1}}>{hasData ? rate.toFixed(1)+"%" : "N/A"}</div>
+              {hasInc && rateDeltaStr && (
+                <div style={{fontSize:11,fontWeight:700,color:deltaColor(rateDelta),lineHeight:1.2}}>{rateDeltaStr}</div>
+              )}
+              {hasInc && inc.baseline.totalQty > 0 && (
+                <div style={{fontSize:9.5,color:"#94a3b8",lineHeight:1.2}}>Baseline: {inc.baseline.approvalRate.toFixed(1)}%</div>
+              )}
+            </div>
           </div>
           {hasData && (
             <div>
-              <div style={{height:6,borderRadius:3,background:"#e2e8f0",overflow:"hidden",marginBottom:5}}>
+              <div style={{height:6,borderRadius:3,background:"#e2e8f0",overflow:"hidden",marginBottom:5,position:"relative"}}>
                 <div style={{height:"100%",width:rate+"%",borderRadius:3,background:rateColor}}/>
+                {hasInc && inc.baseline.totalQty > 0 && (
+                  <div style={{position:"absolute",top:0,height:"100%",left:inc.baseline.approvalRate+"%",width:2,background:"rgba(0,0,0,0.25)",borderRadius:1}}/>
+                )}
               </div>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:10.5,color:"#64748b"}}>
-                <span>Aprov: {fmtQty(simResult.approvedQty)}</span>
-                <span>Repr: {fmtQty(simResult.rejectedQty)}</span>
+                <span>Aprov: {fmtQty(displayResult.approvedQty)}</span>
+                <span>Repr: {fmtQty(displayResult.rejectedQty)}</span>
               </div>
-              <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>Total: {fmtQty(simResult.totalQty)}</div>
+              <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>Total: {fmtQty(displayResult.totalQty)}</div>
             </div>
           )}
           {!hasData && <div style={{fontSize:10.5,color:"#cbd5e1"}}>{Object.keys(csvStore).length===0?"Sem dados":"Monte o fluxo"}</div>}
         </div>
       </div>
+
+      {/* Feature 7: Inad. Real com delta */}
       <div style={{borderRadius:10,background:irBg,border:"1.5px solid "+irBorder,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
           <div style={{fontSize:11,color:"#64748b",fontWeight:600}}>Inad. Real</div>
           <div style={{fontSize:9.5,color:"#94a3b8"}}>Inad.Real / Altas aprov.</div>
         </div>
-        <div style={{fontSize:16,fontWeight:800,color:irColor}}>{hasData ? fmtPct(irV) : "N/A"}</div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:16,fontWeight:800,color:irColor}}>{hasData ? fmtPct(irV) : "N/A"}</div>
+          {hasInc && irDeltaStr && <div style={{fontSize:10,fontWeight:700,color:deltaColor(irDelta)}}>{irDeltaStr}</div>}
+          {hasInc && inc.baseline.inadReal !== null && <div style={{fontSize:9,color:"#94a3b8"}}>Baseline: {fmtPct(inc.baseline.inadReal)}</div>}
+        </div>
       </div>
+
+      {/* Feature 7: Inad. Inferida com delta */}
       <div style={{borderRadius:10,background:iiBg,border:"1.5px solid "+iiBorder,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
           <div style={{fontSize:11,color:"#64748b",fontWeight:600}}>Inad. Inferida</div>
           <div style={{fontSize:9.5,color:"#94a3b8"}}>Inad.Inf / Vol. aprov.</div>
         </div>
-        <div style={{fontSize:16,fontWeight:800,color:iiColor}}>{hasData ? fmtPct(iiV) : "N/A"}</div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:16,fontWeight:800,color:iiColor}}>{hasData ? fmtPct(iiV) : "N/A"}</div>
+          {hasInc && iiDeltaStr && <div style={{fontSize:10,fontWeight:700,color:deltaColor(iiDelta)}}>{iiDeltaStr}</div>}
+          {hasInc && inc.baseline.inadInferida !== null && <div style={{fontSize:9,color:"#94a3b8"}}>Baseline: {fmtPct(inc.baseline.inadInferida)}</div>}
+        </div>
       </div>
+
+      {/* Feature 8: Indicadores da População Impactada */}
+      {hasInc && inc.impacted.qty > 0 && (
+        <div style={{borderRadius:10,background:"#faf5ff",border:"1.5px solid #e9d5ff",padding:"8px 12px"}}>
+          <div style={{fontSize:11,color:"#7c3aed",fontWeight:700,marginBottom:6}}>🔬 População Impactada</div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontSize:10.5,color:"#64748b"}}>Volume alterado</span>
+            <span style={{fontSize:11,fontWeight:700,color:"#7c3aed"}}>{fmtQty(inc.impacted.qty)}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:10.5,color:"#64748b"}}>% da base</span>
+            <span style={{fontSize:11,fontWeight:700,color:"#7c3aed"}}>{inc.impacted.pct.toFixed(1)}%</span>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <div style={{flex:1,background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
+              <div style={{fontSize:8.5,color:"#16a34a",fontWeight:600}}>R → A</div>
+              <div style={{fontSize:12,fontWeight:800,color:"#16a34a"}}>+{fmtQty(inc.impacted.rToA)}</div>
+            </div>
+            <div style={{flex:1,background:"#fff1f2",border:"1px solid #fecaca",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
+              <div style={{fontSize:8.5,color:"#dc2626",fontWeight:600}}>A → R</div>
+              <div style={{fontSize:12,fontWeight:800,color:"#dc2626"}}>−{fmtQty(inc.impacted.aToR)}</div>
+            </div>
+          </div>
+          {inc.impacted.approvalDelta !== 0 && (
+            <div style={{marginTop:6,fontSize:10,color:"#94a3b8",textAlign:"center"}}>
+              Ganho incremental: <span style={{fontWeight:700,color:deltaColor(inc.impacted.approvalDelta/100)}}>{fmtDeltaPp(inc.impacted.approvalDelta/100)}</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -885,6 +1056,13 @@ export default function App() {
   const simulationOverlay = useMemo(
     () => computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations),
     [shapes, conns, csvStore, lensPopulations]
+  );
+
+  // ── Feature 6: Reprocessamento Incremental de Indicadores ──────
+  // incrementalResult: null | {baseline, simulated, impacted}
+  const incrementalResult = useMemo(
+    () => computeIncrementalResult(simulationOverlay, csvStore),
+    [simulationOverlay, csvStore]
   );
 
   // ── Geometry ──────────────────────────────────────────────────
@@ -2317,15 +2495,47 @@ export default function App() {
   const renderSimPanel = (shape) => {
     const {id,x,y,w,h}=shape;
     const isSel=sel===id;
-    const rate=simResult.approvalRate;
-    const rateColor=rate>=70?"#16a34a":rate>=40?"#d97706":"#dc2626";
-    const barW=Math.max(0,(w-32)*rate/100);
-    const hasData=simResult.totalQty>0;
-    const inadRealColor  = simResult.inadReal    === null ? "#94a3b8" : simResult.inadReal    > 0.05 ? "#dc2626" : "#d97706";
-    const inadInfColor   = simResult.inadInferida=== null ? "#94a3b8" : simResult.inadInferida> 0.05 ? "#dc2626" : "#d97706";
-    // Row y positions
-    const hdr = y+46, rateY = y+92, rateLabel = y+110, barY = y+120, statsY = y+148, totalY = y+165;
-    const sep1 = y+180, ind1Y = y+215, ind2Y = y+255;
+
+    // Feature 6/7: usar incrementalResult quando disponível
+    const inc = incrementalResult;
+    const hasInc = !!inc;
+    const displayResult = hasInc ? inc.simulated : simResult;
+
+    const rate = displayResult.approvalRate ?? 0;
+    const rateColor = rate>=70?"#16a34a":rate>=40?"#d97706":"#dc2626";
+    const barW = Math.max(0,(w-32)*rate/100);
+    const hasData = displayResult.totalQty > 0;
+    const inadRealColor = displayResult.inadReal  === null ? "#94a3b8" : displayResult.inadReal  > 0.05 ? "#dc2626" : "#d97706";
+    const inadInfColor  = displayResult.inadInferida === null ? "#94a3b8" : displayResult.inadInferida > 0.05 ? "#dc2626" : "#d97706";
+
+    // Delta helpers
+    const fmtDeltaPp = (delta) => {
+      if (delta === null || delta === undefined || isNaN(delta)) return null;
+      const sign = delta >= 0 ? "+" : "−"; return `${sign}${Math.abs(delta).toFixed(2)} p.p`;
+    };
+    const deltaClr = (d) => d > 0 ? "#16a34a" : d < 0 ? "#dc2626" : "#94a3b8";
+    const rateDeltaPp  = hasInc ? (inc.simulated.approvalRate - inc.baseline.approvalRate) : null;
+    const irDeltaStr   = hasInc && inc.simulated.inadReal  !== null && inc.baseline.inadReal  !== null
+      ? fmtDeltaPp((inc.simulated.inadReal  - inc.baseline.inadReal)  * 100) : null;
+    const iiDeltaStr   = hasInc && inc.simulated.inadInferida !== null && inc.baseline.inadInferida !== null
+      ? fmtDeltaPp((inc.simulated.inadInferida - inc.baseline.inadInferida) * 100) : null;
+    const irDeltaV     = hasInc && inc.simulated.inadReal  !== null && inc.baseline.inadReal  !== null
+      ? inc.simulated.inadReal  - inc.baseline.inadReal  : null;
+    const iiDeltaV     = hasInc && inc.simulated.inadInferida !== null && inc.baseline.inadInferida !== null
+      ? inc.simulated.inadInferida - inc.baseline.inadInferida : null;
+
+    // Layout y positions — expand when incremental active
+    const hdr = y+46;
+    const rateY = y+90; const rateLabel = y+106;
+    const rateDeltaY = hasInc ? y+120 : null;
+    const rateBaseY  = hasInc ? y+132 : null;
+    const barY       = hasInc ? y+144 : y+120;
+    const statsY     = barY + 28; const totalY = statsY + 17;
+    const sep1       = totalY + 16;
+    // inad boxes grow by 12px when showing delta+baseline
+    const ind1H = hasInc ? 50 : 38;
+    const ind2H = hasInc ? 50 : 38;
+
     return (
       <g key={id} data-sid={id}
         onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)}
@@ -2338,102 +2548,130 @@ export default function App() {
         <rect x={x} y={y+32} width={w} height={14} fill="#6366f1"/>
         <text x={x+14} y={y+29} fontSize={13} fontWeight="700" fill="#fff"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>📊 Painel de Simulação</text>
-        {/* Approval rate */}
+        {/* Approval rate — Feature 7: valor simulado */}
         <text x={x+w/2} y={rateY} textAnchor="middle" fontSize={38} fontWeight="800" fill={hasData?rateColor:"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
           {hasData?`${rate.toFixed(1)}%`:"—"}
         </text>
         <text x={x+w/2} y={rateLabel} textAnchor="middle" fontSize={11} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>Taxa de Aprovação</text>
+        {/* Feature 7: delta + baseline */}
+        {hasInc && rateDeltaPp !== null && (
+          <text x={x+w/2} y={rateDeltaY} textAnchor="middle" fontSize={12} fontWeight="700" fill={deltaClr(rateDeltaPp)}
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+            {fmtDeltaPp(rateDeltaPp)}
+          </text>
+        )}
+        {hasInc && inc.baseline.totalQty > 0 && (
+          <text x={x+w/2} y={rateBaseY} textAnchor="middle" fontSize={9.5} fill="#94a3b8"
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+            Baseline: {inc.baseline.approvalRate.toFixed(1)}%
+          </text>
+        )}
         <rect x={x+16} y={barY} width={w-32} height={7} rx={3.5} fill="#f1f5f9"/>
         {hasData&&<rect x={x+16} y={barY} width={barW} height={7} rx={3.5} fill={rateColor}/>}
+        {/* Baseline marker on bar */}
+        {hasInc && inc.baseline.totalQty > 0 && (
+          <rect x={x+16+Math.max(0,(w-32)*inc.baseline.approvalRate/100)-1} y={barY-1} width={2} height={9} rx={1} fill="rgba(0,0,0,0.3)"/>
+        )}
         <text x={x+w/2-52} y={statsY} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#16a34a":"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          ✅ {hasData?fmtQty(simResult.approvedQty):"0"}
+          ✅ {hasData?fmtQty(displayResult.approvedQty):"0"}
         </text>
         <text x={x+w/2} y={statsY} textAnchor="middle" fontSize={11} fill="#cbd5e1"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>/</text>
         <text x={x+w/2+52} y={statsY} textAnchor="middle" fontSize={11} fontWeight="600" fill={hasData?"#dc2626":"#cbd5e1"}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          ❌ {hasData?fmtQty(simResult.rejectedQty):"0"}
+          ❌ {hasData?fmtQty(displayResult.rejectedQty):"0"}
         </text>
         <text x={x+w/2} y={totalY} textAnchor="middle" fontSize={10} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData?`Total: ${fmtQty(simResult.totalQty)} registros`:"Sem dados carregados"}
+          {hasData?`Total: ${fmtQty(displayResult.totalQty)} registros`:"Sem dados carregados"}
         </text>
         {/* Divider */}
         <line x1={x+16} y1={sep1} x2={x+w-16} y2={sep1} stroke="#f1f5f9" strokeWidth={1}/>
-        {/* Inad. Real */}
-        <rect x={x+12} y={sep1+8} width={w-24} height={36} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
+        {/* Inad. Real — Feature 7: com delta + baseline */}
+        <rect x={x+12} y={sep1+8} width={w-24} height={ind1H} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
         <text x={x+24} y={sep1+22} fontSize={10} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⚠️ Inadimplência Real</text>
         <text x={x+w-24} y={sep1+22} textAnchor="end" fontSize={12} fontWeight="700" fill={inadRealColor}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData ? fmtPct(simResult.inadReal) : "—"}
+          {hasData ? fmtPct(displayResult.inadReal) : "—"}
         </text>
-        <text x={x+24} y={sep1+36} fontSize={9} fill="#cbd5e1"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Real / ∑ Altas aprovadas</text>
-        {/* Inad. Inferida */}
-        <rect x={x+12} y={sep1+52} width={w-24} height={36} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
-        <text x={x+24} y={sep1+66} fontSize={10} fill="#94a3b8"
+        {hasInc && irDeltaStr && (
+          <text x={x+w-24} y={sep1+34} textAnchor="end" fontSize={9.5} fontWeight="700" fill={deltaClr(irDeltaV)}
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{irDeltaStr}</text>
+        )}
+        {hasInc && inc.baseline.inadReal !== null && (
+          <text x={x+24} y={sep1+(hasInc?46:36)} fontSize={9} fill="#cbd5e1"
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+            Baseline: {fmtPct(inc.baseline.inadReal)}
+          </text>
+        )}
+        {!hasInc && (
+          <text x={x+24} y={sep1+36} fontSize={9} fill="#cbd5e1"
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Real / ∑ Altas aprovadas</text>
+        )}
+        {/* Inad. Inferida — Feature 7: com delta + baseline */}
+        <rect x={x+12} y={sep1+ind1H+16} width={w-24} height={ind2H} rx={8} fill="#fafafa" stroke="#f1f5f9" strokeWidth={1}/>
+        <text x={x+24} y={sep1+ind1H+30} fontSize={10} fill="#94a3b8"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>🎯 Inadimplência Inferida</text>
-        <text x={x+w-24} y={sep1+66} textAnchor="end" fontSize={12} fontWeight="700" fill={inadInfColor}
+        <text x={x+w-24} y={sep1+ind1H+30} textAnchor="end" fontSize={12} fontWeight="700" fill={inadInfColor}
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-          {hasData ? fmtPct(simResult.inadInferida) : "—"}
+          {hasData ? fmtPct(displayResult.inadInferida) : "—"}
         </text>
-        <text x={x+24} y={sep1+80} fontSize={9} fill="#cbd5e1"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Inferida / Vol. Aprovado</text>
-        {/* Impacto Marginal (Feature 5) — exibido apenas quando há overlay */}
+        {hasInc && iiDeltaStr && (
+          <text x={x+w-24} y={sep1+ind1H+42} textAnchor="end" fontSize={9.5} fontWeight="700" fill={deltaClr(iiDeltaV)}
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{iiDeltaStr}</text>
+        )}
+        {hasInc && inc.baseline.inadInferida !== null && (
+          <text x={x+24} y={sep1+ind1H+(hasInc?60:44)} fontSize={9} fill="#cbd5e1"
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+            Baseline: {fmtPct(inc.baseline.inadInferida)}
+          </text>
+        )}
+        {!hasInc && (
+          <text x={x+24} y={sep1+ind1H+44} fontSize={9} fill="#cbd5e1"
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>∑ Inad.Inferida / Vol. Aprovado</text>
+        )}
+        {/* Feature 8: População Impactada — substitui "Impacto Marginal" anterior */}
         {(() => {
-          if (!simulationOverlay) return null;
-          const stats = Object.values(simulationOverlay).reduce(
-            (acc, {summaryStats: s}) => ({
-              totalQty: acc.totalQty + s.totalQty,
-              mutableQty: acc.mutableQty + s.mutableQty,
-              impactedQty: acc.impactedQty + s.impactedQty,
-              rToA: acc.rToA + s.rToA,
-              aToR: acc.aToR + s.aToR,
-            }),
-            { totalQty: 0, mutableQty: 0, impactedQty: 0, rToA: 0, aToR: 0 }
-          );
-          const sep2 = sep1 + 100;
+          if (!incrementalResult) return null;
+          const imp = incrementalResult.impacted;
+          const sep2 = sep1 + ind1H + ind2H + 32;
           return (
             <>
               <line x1={x+16} y1={sep2} x2={x+w-16} y2={sep2} stroke="#f1f5f9" strokeWidth={1}/>
               <text x={x+w/2} y={sep2+13} textAnchor="middle" fontSize={10} fontWeight="700" fill="#7c3aed"
                 fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                🔬 Impacto Marginal
+                🔬 População Impactada
               </text>
-              <rect x={x+12} y={sep2+18} width={w-24} height={30} rx={8} fill="#faf5ff" stroke="#e9d5ff" strokeWidth={1}/>
-              <text x={x+24} y={sep2+30} fontSize={9} fill="#94a3b8"
+              <rect x={x+12} y={sep2+18} width={w-24} height={32} rx={8} fill="#faf5ff" stroke="#e9d5ff" strokeWidth={1}/>
+              <text x={x+24} y={sep2+31} fontSize={9} fill="#94a3b8"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>👥 Alterados</text>
+              <text x={x+w-24} y={sep2+31} textAnchor="end" fontSize={11} fontWeight="700" fill={imp.qty>0?"#7c3aed":"#94a3b8"}
                 fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                👥 Pop. Alvo
+                {fmtQty(imp.qty)}
               </text>
-              <text x={x+w-24} y={sep2+30} textAnchor="end" fontSize={11} fontWeight="700" fill="#7c3aed"
+              <text x={x+24} y={sep2+44} fontSize={9} fill="#94a3b8"
+                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>% da base</text>
+              <text x={x+w-24} y={sep2+44} textAnchor="end" fontSize={9.5} fontWeight="600" fill="#7c3aed"
                 fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                {fmtQty(stats.mutableQty)} / {fmtQty(stats.totalQty)}
+                {imp.pct.toFixed(1)}%
               </text>
-              <text x={x+24} y={sep2+43} fontSize={9} fill="#94a3b8"
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                Alterados
-              </text>
-              <text x={x+w-24} y={sep2+43} textAnchor="end" fontSize={11} fontWeight="700" fill={stats.impactedQty > 0 ? "#7c3aed" : "#94a3b8"}
-                fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                {fmtQty(stats.impactedQty)}
-              </text>
-              <rect x={x+12} y={sep2+52} width={(w-28)/2} height={24} rx={6} fill="#f0fdf4" stroke="#bbf7d0" strokeWidth={1}/>
-              <text x={x+16} y={sep2+62} fontSize={8.5} fill="#16a34a"
+              <rect x={x+12} y={sep2+56} width={(w-28)/2} height={24} rx={6} fill="#f0fdf4" stroke="#bbf7d0" strokeWidth={1}/>
+              <text x={x+16} y={sep2+66} fontSize={8.5} fill="#16a34a"
                 fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>R→A</text>
-              <text x={x+16+(w-28)/2-6} y={sep2+62} textAnchor="end" fontSize={10} fontWeight="700" fill="#16a34a"
+              <text x={x+16+(w-28)/2-6} y={sep2+66} textAnchor="end" fontSize={10} fontWeight="700" fill="#16a34a"
                 fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                +{fmtQty(stats.rToA)}
+                +{fmtQty(imp.rToA)}
               </text>
-              <rect x={x+12+(w-28)/2+4} y={sep2+52} width={(w-28)/2} height={24} rx={6} fill="#fef2f2" stroke="#fecaca" strokeWidth={1}/>
-              <text x={x+16+(w-28)/2+4} y={sep2+62} fontSize={8.5} fill="#dc2626"
+              <rect x={x+12+(w-28)/2+4} y={sep2+56} width={(w-28)/2} height={24} rx={6} fill="#fef2f2" stroke="#fecaca" strokeWidth={1}/>
+              <text x={x+16+(w-28)/2+4} y={sep2+66} fontSize={8.5} fill="#dc2626"
                 fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>A→R</text>
-              <text x={x+w-16} y={sep2+62} textAnchor="end" fontSize={10} fontWeight="700" fill="#dc2626"
+              <text x={x+w-16} y={sep2+66} textAnchor="end" fontSize={10} fontWeight="700" fill="#dc2626"
                 fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-                -{fmtQty(stats.aToR)}
+                -{fmtQty(imp.aToR)}
               </text>
             </>
           );
@@ -3003,7 +3241,7 @@ export default function App() {
               <span style={{fontSize:16}}>📊</span>
               {shapes.some(s=>s.type==="simPanel")?"Painel ativo no canvas":"Adicionar Painel"}
             </button>
-            <SimIndicators simResult={simResult} csvStore={csvStore} />
+            <SimIndicators simResult={simResult} csvStore={csvStore} incrementalResult={incrementalResult} />
           </div>
         )}
 
