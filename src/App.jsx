@@ -1043,6 +1043,8 @@ export default function App() {
   const [optimModal, setOptimModal] = useState(null);   // null | optim obj
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
+  // Business Impact floating widget
+  const [businessWidget, setBusinessWidget] = useState({ visible: false, x: 80, y: 80, w: 420, h: 520 });
   const tooltipTimer = useRef(null);
 
   // ── Refs ──────────────────────────────────────────────────────
@@ -1073,6 +1075,8 @@ export default function App() {
   const undoStackR    = useRef(undoStack);  useEffect(()=>{undoStackR.current=undoStack},  [undoStack]);
   const redoStackR    = useRef(redoStack);  useEffect(()=>{redoStackR.current=redoStack},  [redoStack]);
   const lensModalR    = useRef(lensModal);  useEffect(()=>{lensModalR.current=lensModal},  [lensModal]);
+  const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
+  const bwDragR = useRef(null);
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
@@ -1105,6 +1109,36 @@ export default function App() {
     () => computeIncrementalResult(simulationOverlay, csvStore),
     [simulationOverlay, csvStore]
   );
+
+  // ── Business Widget drag/resize ───────────────────────────────
+  const startBwDrag = (e, type, dir) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const bw = businessWidgetR.current;
+    bwDragR.current = { type, dir, startX: e.clientX, startY: e.clientY, startWx: bw.x, startWy: bw.y, startW: bw.w, startH: bw.h };
+    const onMove = (ev) => {
+      const dr = bwDragR.current; if (!dr) return;
+      const dx = ev.clientX - dr.startX, dy = ev.clientY - dr.startY;
+      if (dr.type === 'move') {
+        setBusinessWidget(p => ({ ...p, x: dr.startWx + dx, y: dr.startWy + dy }));
+      } else {
+        const d = dr.dir;
+        let nx = dr.startWx, ny = dr.startWy, nw = dr.startW, nh = dr.startH;
+        if (d.includes('e')) nw = Math.min(1400, Math.max(320, dr.startW + dx));
+        if (d.includes('s')) nh = Math.min(1200, Math.max(220, dr.startH + dy));
+        if (d.includes('w')) { nw = Math.min(1400, Math.max(320, dr.startW - dx)); nx = dr.startWx + dr.startW - nw; }
+        if (d.includes('n')) { nh = Math.min(1200, Math.max(220, dr.startH - dy)); ny = dr.startWy + dr.startH - nh; }
+        setBusinessWidget(p => ({ ...p, x: nx, y: ny, w: nw, h: nh }));
+      }
+    };
+    const onUp = () => {
+      bwDragR.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   // ── Geometry ──────────────────────────────────────────────────
   const getBR   = () => svgRef.current.getBoundingClientRect();
@@ -3033,6 +3067,223 @@ export default function App() {
           </div>
         )}
 
+        {/* ═══════════════ BUSINESS IMPACT FLOATING WIDGET ═══════════════ */}
+        {businessWidget.visible && (() => {
+          const { x: bwX, y: bwY, w: bwW, h: bwH } = businessWidget;
+          const BASE_W = 420;
+          const sf = Math.max(0.55, Math.min(2.5, bwW / BASE_W));
+          const small = bwW < 380;
+          const large = bwW >= 620;
+
+          const inc = incrementalResult;
+          const hasInc = !!inc;
+          const displayResult = hasInc ? inc.simulated : simResult;
+          const hasData = displayResult.totalQty > 0;
+          const rate = hasData ? displayResult.approvalRate : null;
+          const irV = displayResult.inadReal;
+          const iiV = displayResult.inadInferida;
+          const rateColor = rate === null ? "#94a3b8" : rate >= 70 ? "#22c55e" : rate >= 40 ? "#f59e0b" : "#ef4444";
+          const inadColor = (v) => v === null ? "#64748b" : v > 0.05 ? "#ef4444" : v > 0.02 ? "#f59e0b" : "#22c55e";
+          const deltaClr = (d, ph = true) => d === null || isNaN(d) ? "#64748b" : ph ? (d > 0 ? "#4ade80" : d < 0 ? "#f87171" : "#64748b") : (d < 0 ? "#4ade80" : d > 0 ? "#f87171" : "#64748b");
+          const fmtD = (d, scale = 100) => d === null || isNaN(d) ? null : `${d >= 0 ? '+' : '−'}${Math.abs(d * scale).toFixed(2)} p.p`;
+          const rateDelta = hasInc && inc.baseline.totalQty > 0 ? inc.simulated.approvalRate - inc.baseline.approvalRate : null;
+          const irDelta = hasInc && irV !== null && inc.baseline.inadReal !== null ? irV - inc.baseline.inadReal : null;
+          const iiDelta = hasInc && iiV !== null && inc.baseline.inadInferida !== null ? iiV - inc.baseline.inadInferida : null;
+          const heroVal = hasInc && rateDelta !== null ? (fmtD(rateDelta / 100) ?? '—') : (rate !== null ? `${rate.toFixed(1)}%` : '—');
+          const heroLabel = hasInc && rateDelta !== null ? 'VARIAÇÃO NA APROVAÇÃO' : 'TAXA DE APROVAÇÃO';
+          const heroColor = hasInc && rateDelta !== null ? deltaClr(rateDelta, true) : rateColor;
+          const heroIsGood = hasInc && rateDelta !== null ? rateDelta > 0 : rate !== null && rate >= 50;
+          const balance = !hasData ? 0.5 : (() => {
+            const a = Math.min(1, (rate ?? 50) / 100);
+            const i = irV !== null ? Math.max(0, 1 - irV / 0.12) : 0.5;
+            return a * 0.6 + i * 0.4;
+          })();
+          const balColor = balance > 0.6 ? "#22c55e" : balance < 0.4 ? "#ef4444" : "#f59e0b";
+          const balLabel = balance > 0.65 ? "Perfil expansivo" : balance < 0.35 ? "Perfil conservador" : "Perfil balanceado";
+
+          const badges = [];
+          if (hasInc && rateDelta !== null) {
+            const txt = fmtD(rateDelta / 100);
+            if (txt) badges.push({ text: `Δ Aprov. ${txt}`, bg: rateDelta > 0 ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)', color: rateDelta > 0 ? '#4ade80' : '#f87171' });
+          }
+          if (hasData && irV !== null) {
+            const rl = irV > 0.05 ? 'Alto Risco' : irV > 0.02 ? 'Risco Moderado' : 'Baixo Risco';
+            const rlColor = irV > 0.05 ? '#f87171' : irV > 0.02 ? '#fbbf24' : '#4ade80';
+            badges.push({ text: rl, bg: rlColor + '22', color: rlColor });
+          }
+
+          const s = (v) => v * sf;
+          const MCard = ({ label, value, delta, ph = true, sub, valColor }) => (
+            <div style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: s(9), padding: `${s(8)}px ${s(10)}px`, flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: s(9), color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: s(3) }}>{label}</div>
+              <div style={{ fontSize: s(17), fontWeight: 800, color: valColor || '#e2e8f0', lineHeight: 1 }}>{value}</div>
+              {delta !== null && delta !== undefined && <div style={{ fontSize: s(9.5), fontWeight: 700, color: deltaClr(delta, ph), marginTop: s(3) }}>{fmtD(delta)}</div>}
+              {sub && !small && <div style={{ fontSize: s(8), color: '#475569', marginTop: s(2) }}>{sub}</div>}
+            </div>
+          );
+
+          // Resize handle cursor map
+          const resCur = { n:'n-resize', s:'s-resize', e:'e-resize', w:'w-resize', ne:'ne-resize', nw:'nw-resize', se:'se-resize', sw:'sw-resize' };
+          const ResHandle = ({ dir, style: sty }) => (
+            <div onMouseDown={ev => startBwDrag(ev, 'resize', dir)} style={{ position: 'absolute', zIndex: 10, cursor: resCur[dir], ...sty }}/>
+          );
+          const HANDLE = 8;
+
+          return (
+            <div key="bw" style={{
+              position: 'absolute', left: bwX, top: bwY, width: bwW, height: bwH,
+              zIndex: 600, display: 'flex', flexDirection: 'column',
+              fontFamily: "'DM Sans',system-ui,sans-serif",
+              background: 'linear-gradient(160deg, #0f172a 0%, #1a1040 100%)',
+              borderRadius: s(16),
+              boxShadow: '0 8px 40px rgba(0,0,0,0.55), 0 2px 8px rgba(99,102,241,0.15), inset 0 1px 0 rgba(255,255,255,0.07)',
+              border: '1.5px solid rgba(129,140,248,0.25)',
+              overflow: 'hidden',
+              transition: 'box-shadow 0.15s',
+              userSelect: 'none',
+            }}>
+              {/* Resize handles */}
+              <ResHandle dir="n"  style={{ top: 0, left: HANDLE, right: HANDLE, height: HANDLE }} />
+              <ResHandle dir="s"  style={{ bottom: 0, left: HANDLE, right: HANDLE, height: HANDLE }} />
+              <ResHandle dir="w"  style={{ left: 0, top: HANDLE, bottom: HANDLE, width: HANDLE }} />
+              <ResHandle dir="e"  style={{ right: 0, top: HANDLE, bottom: HANDLE, width: HANDLE }} />
+              <ResHandle dir="nw" style={{ top: 0, left: 0, width: HANDLE*2, height: HANDLE*2 }} />
+              <ResHandle dir="ne" style={{ top: 0, right: 0, width: HANDLE*2, height: HANDLE*2 }} />
+              <ResHandle dir="sw" style={{ bottom: 0, left: 0, width: HANDLE*2, height: HANDLE*2 }} />
+              <ResHandle dir="se" style={{ bottom: 0, right: 0, width: HANDLE*2, height: HANDLE*2 }} />
+
+              {/* Drag header */}
+              <div onMouseDown={ev => startBwDrag(ev, 'move')}
+                style={{ padding: `${s(11)}px ${s(14)}px ${s(9)}px`, borderBottom: '1px solid rgba(255,255,255,0.07)', cursor: 'grab', flexShrink: 0, position: 'relative', zIndex: 5 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: badges.length && !small ? s(7) : 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: s(7) }}>
+                    <span style={{ fontSize: s(10), fontWeight: 800, color: '#818cf8', textTransform: 'uppercase', letterSpacing: '0.1em' }}>⬡ Business Impact</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: s(8) }}>
+                    {hasData && <span style={{ fontSize: s(9), color: '#334155', fontWeight: 500 }}>{fmtQty(displayResult.totalQty)} reg.</span>}
+                    <button onMouseDown={ev => ev.stopPropagation()} onClick={() => setBusinessWidget(p => ({ ...p, visible: false }))}
+                      style={{ width: s(20), height: s(20), borderRadius: '50%', border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.06)', color: '#64748b', cursor: 'pointer', fontSize: s(11), lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontFamily: 'inherit', transition: 'all .12s', flexShrink: 0 }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'rgba(248,113,113,0.2)'; e.currentTarget.style.color = '#f87171'; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = '#64748b'; }}>
+                      ✕
+                    </button>
+                  </div>
+                </div>
+                {badges.length > 0 && !small && (
+                  <div style={{ display: 'flex', gap: s(4), flexWrap: 'wrap' }}>
+                    {badges.map((b, i) => (
+                      <span key={i} style={{ fontSize: s(8.5), fontWeight: 700, padding: `${s(2)}px ${s(8)}px`, borderRadius: s(20), background: b.bg, color: b.color, letterSpacing: '0.03em' }}>{b.text}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Scrollable content */}
+              <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }} onMouseDown={ev => ev.stopPropagation()}>
+
+                {/* Hero KPI */}
+                <div style={{ padding: `${s(16)}px ${s(14)}px ${s(12)}px`, textAlign: 'center', position: 'relative', borderBottom: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
+                  {heroIsGood && hasData && (
+                    <div style={{ position: 'absolute', inset: 0, background: `radial-gradient(ellipse at 50% 0%, ${heroColor}20 0%, transparent 70%)`, pointerEvents: 'none' }} />
+                  )}
+                  <div style={{ fontSize: s(42), fontWeight: 900, color: hasData ? heroColor : '#1e293b', lineHeight: 1, letterSpacing: '-0.02em' }}>
+                    {heroVal}
+                  </div>
+                  <div style={{ fontSize: s(9.5), color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginTop: s(5), textTransform: 'uppercase' }}>{heroLabel}</div>
+                  {hasInc && inc.baseline.totalQty > 0 && !small && (
+                    <div style={{ fontSize: s(9), color: '#334155', marginTop: s(5) }}>
+                      {inc.baseline.approvalRate.toFixed(1)}% → {(displayResult.approvalRate ?? 0).toFixed(1)}%
+                    </div>
+                  )}
+                </div>
+
+                {/* Approval bar */}
+                {hasData && (
+                  <div style={{ padding: `${s(7)}px ${s(13)}px 0`, flexShrink: 0 }}>
+                    <div style={{ height: s(4), borderRadius: s(2), background: 'rgba(255,255,255,0.06)', overflow: 'hidden', position: 'relative' }}>
+                      <div style={{ height: '100%', width: `${rate ?? 0}%`, borderRadius: s(2), background: `linear-gradient(90deg, ${rateColor}99, ${rateColor})`, transition: 'width 0.4s ease' }} />
+                      {hasInc && inc.baseline.totalQty > 0 && (
+                        <div style={{ position: 'absolute', top: 0, height: '100%', left: `${inc.baseline.approvalRate}%`, width: 2, background: 'rgba(255,255,255,0.35)', borderRadius: 1 }} />
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Metric grid */}
+                {!small && (
+                  <div style={{ padding: `${s(9)}px ${s(11)}px ${s(9)}px`, display: 'flex', flexDirection: 'column', gap: s(6) }}>
+                    <div style={{ display: 'flex', gap: s(6) }}>
+                      <MCard label="Aprovação" value={rate !== null ? `${rate.toFixed(1)}%` : '—'} delta={rateDelta !== null ? rateDelta / 100 : null} ph={true} sub={hasData ? `✓ ${fmtQty(displayResult.approvedQty)} · ✗ ${fmtQty(displayResult.rejectedQty)}` : null} valColor={rateColor} />
+                      <MCard label="Inad. Real" value={irV !== null ? fmtPct(irV) : '—'} delta={irDelta} ph={false} sub="∑ Inad / ∑ Altas" valColor={inadColor(irV)} />
+                    </div>
+                    <div style={{ display: 'flex', gap: s(6) }}>
+                      <MCard label="Inad. Inferida" value={iiV !== null ? fmtPct(iiV) : '—'} delta={iiDelta} ph={false} sub="∑ Inad.I / Aprov." valColor={inadColor(iiV)} />
+                      <MCard label="Vol. Aprovado" value={hasData ? fmtQty(displayResult.approvedQty) : '—'} delta={null} ph={true} sub={hasData ? `${(rate ?? 0).toFixed(1)}% da base` : null} valColor="#e2e8f0" />
+                    </div>
+                  </div>
+                )}
+
+                {/* Risk/Growth balance bar */}
+                {!small && (
+                  <div style={{ padding: `${s(7)}px ${s(13)}px ${s(11)}px`, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: s(5) }}>
+                      <span style={{ fontSize: s(8), color: '#ef4444', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>◄ Risco</span>
+                      <span style={{ fontSize: s(8), color: '#334155', fontWeight: 600 }}>Equilíbrio Estratégico</span>
+                      <span style={{ fontSize: s(8), color: '#22c55e', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Crescimento ►</span>
+                    </div>
+                    <div style={{ position: 'relative', height: s(8), borderRadius: s(4), background: 'linear-gradient(90deg, #7f1d1d44, #1e293b 42%, #1e293b 58%, #14532d44)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div style={{ position: 'absolute', top: '50%', left: `${Math.round(balance * 100)}%`, transform: 'translate(-50%, -50%)', width: s(14), height: s(14), borderRadius: '50%', background: hasData ? balColor : '#1e293b', border: '2px solid rgba(255,255,255,0.25)', boxShadow: hasData ? `0 0 ${s(10)}px ${balColor}66` : 'none', transition: 'left 0.4s ease' }} />
+                    </div>
+                    {hasData && <div style={{ textAlign: 'center', marginTop: s(5), fontSize: s(8.5), color: balColor, fontWeight: 600 }}>{balLabel}</div>}
+                  </div>
+                )}
+
+                {/* Large mode extras */}
+                {large && hasData && (
+                  <div style={{ padding: `${s(8)}px ${s(13)}px ${s(12)}px`, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                    <div style={{ fontSize: s(9), color: '#a78bfa', fontWeight: 800, marginBottom: s(8), textTransform: 'uppercase', letterSpacing: '0.08em' }}>⚡ Análise de Portfolio</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: s(6) }}>
+                      {[
+                        { label: 'Total Base', val: fmtQty(displayResult.totalQty), color: '#94a3b8' },
+                        { label: 'Aprovados', val: fmtQty(displayResult.approvedQty), color: '#4ade80' },
+                        { label: 'Reprovados', val: fmtQty(displayResult.rejectedQty), color: '#f87171' },
+                      ].map((item, i) => (
+                        <div key={i} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: s(8), padding: `${s(8)}px ${s(10)}px`, textAlign: 'center' }}>
+                          <div style={{ fontSize: s(8), color: '#475569', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: s(3) }}>{item.label}</div>
+                          <div style={{ fontSize: s(18), fontWeight: 800, color: item.color }}>{item.val}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Efeito da Mudança */}
+                {hasInc && inc.impacted.qty > 0 && (
+                  <div style={{ padding: `${s(9)}px ${s(11)}px ${s(12)}px`, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ fontSize: s(9), color: '#a78bfa', fontWeight: 800, marginBottom: s(7), textTransform: 'uppercase', letterSpacing: '0.08em' }}>⚡ Efeito da Mudança</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: s(6) }}>
+                      <div style={{ background: 'rgba(74,222,128,0.07)', border: '1px solid rgba(74,222,128,0.2)', borderRadius: s(8), padding: `${s(6)}px ${s(10)}px`, textAlign: 'center' }}>
+                        <div style={{ fontSize: s(7.5), color: '#4ade80', fontWeight: 700, marginBottom: s(2), textTransform: 'uppercase', letterSpacing: '0.05em' }}>Novos Aprovados</div>
+                        <div style={{ fontSize: s(15), fontWeight: 800, color: '#4ade80' }}>+{fmtQty(inc.impacted.rToA)}</div>
+                      </div>
+                      <div style={{ background: 'rgba(248,113,113,0.07)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: s(8), padding: `${s(6)}px ${s(10)}px`, textAlign: 'center' }}>
+                        <div style={{ fontSize: s(7.5), color: '#f87171', fontWeight: 700, marginBottom: s(2), textTransform: 'uppercase', letterSpacing: '0.05em' }}>Novos Reprovados</div>
+                        <div style={{ fontSize: s(15), fontWeight: 800, color: '#f87171' }}>−{fmtQty(inc.impacted.aToR)}</div>
+                      </div>
+                    </div>
+                    {!small && (
+                      <div style={{ marginTop: s(7), textAlign: 'center', fontSize: s(8.5), color: '#475569' }}>
+                        {fmtQty(inc.impacted.qty)} registros impactados · {inc.impacted.pct.toFixed(1)}% da base
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Inline label editor — connections */}
         {editConn&&(()=>{
           const conn=conns.find(c=>c.id===editConn.id);
@@ -3257,7 +3508,32 @@ export default function App() {
               <span style={{fontSize:16}}>📊</span>
               {shapes.some(s=>s.type==="simPanel")?"Painel ativo no canvas":"Adicionar Painel"}
             </button>
-            <SimIndicators simResult={simResult} csvStore={csvStore} incrementalResult={incrementalResult} />
+            {/* Business Impact widget toggle */}
+            <div style={{marginTop:12,padding:"10px 12px",borderRadius:10,background:"linear-gradient(135deg,#0f172a,#1a1040)",border:"1px solid rgba(129,140,248,0.25)"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                <span style={{fontSize:10,fontWeight:800,color:"#818cf8",textTransform:"uppercase",letterSpacing:"0.1em"}}>Business Impact</span>
+                <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
+                  <input type="checkbox" checked={businessWidget.visible}
+                    onChange={e => setBusinessWidget(p => ({ ...p, visible: e.target.checked }))}
+                    style={{width:14,height:14,accentColor:"#818cf8",cursor:"pointer"}}/>
+                  <span style={{fontSize:11,color:"#94a3b8",fontWeight:500}}>Exibir no board</span>
+                </label>
+              </div>
+              <button
+                onClick={() => setBusinessWidget(p => ({ ...p, visible: true }))}
+                disabled={businessWidget.visible}
+                style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                  padding:"7px 12px",borderRadius:8,border:"1px solid",
+                  borderColor:businessWidget.visible?"rgba(129,140,248,0.2)":"rgba(129,140,248,0.5)",
+                  background:businessWidget.visible?"rgba(255,255,255,0.03)":"rgba(129,140,248,0.12)",
+                  color:businessWidget.visible?"#475569":"#a5b4fc",
+                  cursor:businessWidget.visible?"default":"pointer",fontSize:12,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
+                onMouseEnter={e=>{if(!businessWidget.visible){e.currentTarget.style.background="rgba(129,140,248,0.2)";e.currentTarget.style.borderColor="rgba(129,140,248,0.7)";}}}
+                onMouseLeave={e=>{if(!businessWidget.visible){e.currentTarget.style.background="rgba(129,140,248,0.12)";e.currentTarget.style.borderColor="rgba(129,140,248,0.5)";}}}>
+                <span style={{fontSize:14}}>{businessWidget.visible ? "✦" : "⬡"}</span>
+                {businessWidget.visible ? "Widget ativo no board" : "Abrir Widget"}
+              </button>
+            </div>
           </div>
         )}
 
