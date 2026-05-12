@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2600 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~4350 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -56,10 +56,11 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
-- `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real e Inad. Inferida
+- `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real, Inad. Inferida e (quando há simulação contrafactual ativa) delta incremental + seção de população impactada
 
 ### Componentes globais (fora do componente principal)
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
+- `SimIndicators`: cards de indicadores no sidebar — exibe estrutura tripla (simulado / delta / baseline) quando `incrementalResult` está disponível; caso contrário exibe resultado direto do `runSimulation`
 
 ### Helpers globais (fora do componente)
 - `sortDomain(values)`: ordena domínio — numérico crescente ou A-Z (locale pt-BR)
@@ -69,6 +70,8 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}`
 - `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`
 - `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
+- `computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations)`: para cada linha de cada CSV com `__DECISAO_ORIGINAL`, executa traversal do board apenas para registros da população-alvo dos Lens; retorna `{[csvId]: {rowDecisions, summaryStats}}` ou `null`
+- `computeIncrementalResult(overlay, csvStore)`: agrega KPIs híbridos a partir do overlay — registros não-impactados usam `DECISAO_ORIGINAL`, impactados usam `DECISAO_SIMULADA`; retorna `{baseline, simulated, impacted}` com aprovação, inadimplência real/inferida, volumes e métricas de população impactada
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
@@ -97,10 +100,62 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 - `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
 - `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
 - Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
-- Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
+- Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida, edgeStats }`
   - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
   - `inadInferida = ∑ inadInferida / approvedQty` (null se approvedQty = 0)
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
+
+## Engine Contrafactual Incremental (Features 6–8)
+
+### Cadeia reativa
+```
+shapes + conns + csvStore
+    ↓ computeLensAffectedRows
+lensPopulations  {[lensId]: {[csvId]: boolean[]}}
+    ↓ computeSimulatedDecisions
+simulationOverlay  {[csvId]: {rowDecisions, summaryStats}} | null
+    ↓ computeIncrementalResult
+incrementalResult  {baseline, simulated, impacted} | null
+```
+Todos os três são `useMemo` — recalculam automaticamente a cada mudança no board.
+
+### `simulationOverlay`
+Requer CSV com coluna `__DECISAO_ORIGINAL` (gerada no wizard quando `asIsVar` é configurada) e ao menos um `decision_lens` ativo. Para cada linha da população-alvo executa traversal do board; linhas fora da população retornam `decisaoSimulada = decisaoOriginal`.
+
+Campos de cada entrada em `rowDecisions`:
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `rowIdx` | number | índice na array `csv.rows` |
+| `decisaoOriginal` | `"APROVADO"\|"REPROVADO"\|""` | baseline histórico |
+| `decisaoSimulada` | `"APROVADO"\|"REPROVADO"\|""` | resultado do board simulado |
+| `flagImpactado` | boolean | `decisaoOriginal !== decisaoSimulada` |
+| `flagMutavel` | boolean | pertence à população-alvo de algum Lens |
+| `componenteOrigem` | string\|null | label do terminador que gerou a decisão simulada |
+
+### `incrementalResult`
+Estrutura retornada por `computeIncrementalResult`:
+```js
+{
+  baseline:  { approvedQty, rejectedQty, totalQty, approvalRate, inadReal, inadInferida },
+  simulated: { approvedQty, rejectedQty, totalQty, approvalRate, inadReal, inadInferida },
+  impacted:  { qty, totalQty, pct, rToA, aToR, approvalDelta },
+}
+```
+- `baseline`: KPIs calculados exclusivamente com `DECISAO_ORIGINAL`
+- `simulated`: KPIs híbridos — `DECISAO_ORIGINAL` para não-impactados, `DECISAO_SIMULADA` para impactados
+- `impacted.approvalDelta`: `simulated.approvalRate − baseline.approvalRate` (em pontos percentuais absolutos)
+
+### Exibição nos cards (Feature 7)
+Quando `incrementalResult` está ativo, `SimIndicators` e `renderSimPanel` exibem:
+- Linha 1 (principal): valor do cenário **simulado**
+- Linha 2 (delta): diferença em **p.p** com cor verde (melhora) ou vermelho (piora)
+- Linha 3 (terciária): `Baseline: XX.X%` em cinza
+- Barra de progresso: marcador vertical indica posição do baseline
+
+### Exibição de população impactada (Feature 8)
+Seção "🔬 População Impactada" exibida quando `inc.impacted.qty > 0`:
+- Volume alterado e % da base
+- Cards lado a lado: R→A (novos aprovados) e A→R (novos reprovados)
 
 ## Wizard de importação (Passo 2)
 - Modal alarga para 780px no passo 2 para acomodar 6 colunas de tipo
@@ -110,11 +165,13 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 
 ## Painel de Simulação (`simPanel`)
 - Tamanho padrão: `w: 260, h: 280`
-- Exibe três indicadores:
+- Exibe três indicadores base:
   1. **Taxa de Aprovação** — número grande + barra de progresso + contadores ✅/❌
   2. **Inad. Real** — `∑ Inad.Real / ∑ Altas aprovadas`; cor vermelha > 5%, laranja ≤ 5%, cinza = N/A
   3. **Inad. Inferida** — `∑ Inad.Inferida / Vol. Aprovado`; mesma escala de cor
-- Sidebar direita espelha os três indicadores com recalculo reativo
+- **Modo contrafactual** (quando `incrementalResult` está ativo): cada indicador exibe estrutura tripla — valor simulado (principal) + delta em p.p (secundário, verde/vermelho) + baseline histórico (terciário, cinza); marcador visual na barra de progresso indica posição da baseline
+- **Seção População Impactada** (Feature 8): exibida abaixo dos indicadores quando há simulação ativa — volume alterado, % da base, cards R→A e A→R
+- Sidebar direita espelha todos os indicadores via componente `SimIndicators` com o mesmo comportamento contrafactual
 
 ## Motor de Recomendação — Cineminha (`optimModal`)
 
@@ -188,4 +245,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-version-indicator-Tcb42`
+`claude/incremental-indicator-reprocessing-ejlW2`
