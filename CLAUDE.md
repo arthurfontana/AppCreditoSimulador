@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2600 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~3300 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -13,8 +13,8 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ### Estado principal
 - `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`, `cineminha`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
-- `csvStore`: `{[csvId]: {name, headers, rows, columnTypes: {[colName]: 'id'|'decision'|'qty'|'qtdAltas'|'inadReal'|'inadInferida'}}}`
-- `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes}`
+- `csvStore`: `{[csvId]: {name, headers, rows, columnTypes, varTypes, asIsConfig}}`
+- `wizard`: modal de importação em 3 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
@@ -43,6 +43,18 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ```
 - Criado automaticamente com dois ports filhos: `"Elegível"` (verde) e `"Não Elegível"` (vermelho)
 - Chave de célula 1D-linha: `"${rowVal}|*"` / 1D-coluna: `"*|${colVal}"`
+
+### csvStore: entrada por dataset
+```js
+{
+  name,          // nome do arquivo
+  headers,       // string[] — inclui '__DECISAO_ORIGINAL' se asIsConfig configurado
+  rows,          // string[][] — última coluna é '__DECISAO_ORIGINAL' se configurado
+  columnTypes,   // {[colName]: COL_TYPE}
+  varTypes,      // {[colName]: 'categorical'|'ordinal'}
+  asIsConfig,    // null | { col: string, mapping: {[value]: 'APROVADO'|'REPROVADO'|'IGNORAR'} }
+}
+```
 
 ### Funções-chave
 - `createDecisionNode(col, csvId, wx, wy)`: cria losango de decisão + ports automáticos com setas rotuladas (valores distintos da coluna)
@@ -74,7 +86,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
 
 ## Fluxo do simulador
-1. Importar CSV → Passo 1 (delimitador) → Passo 2 (classificar colunas)
+1. Importar CSV → Passo 1 (delimitador) → Passo 2 (classificar colunas) → Passo 3 (variável AS IS)
 2. Colunas **Filtro** aparecem como chips arrastáveis no painel direito
 3. Arrastar chip para área vazia do canvas → losango com ports automáticos (até 10 valores)
 4. Arrastar chip sobre um ⊞ Cineminha → modal "Linha ou Coluna?" → matriz cruzada
@@ -102,11 +114,44 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
   - `inadInferida = ∑ inadInferida / approvedQty` (null se approvedQty = 0)
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
-## Wizard de importação (Passo 2)
-- Modal alarga para 780px no passo 2 para acomodar 6 colunas de tipo
-- Layout em CSS `grid` com `gridTemplateColumns: "1fr repeat(6, 68px)"` — alinhamento perfeito entre header e linhas
+## Wizard de importação (3 passos)
+
+### Passo 1 — Delimitador
+- Modal 600px; detecção automática do delimitador com badge "detectado automaticamente" / "verifique abaixo"
+- Preview das 5 primeiras linhas
+
+### Passo 2 — Classificar colunas
+- Modal alarga para 900px para acomodar 6 colunas de tipo + coluna Tipo Var.
+- Layout em CSS `grid` com `gridTemplateColumns: "1fr repeat(6, 60px) 100px"`
 - Header sticky; lista de colunas com scroll interno (`maxHeight: 340px`)
-- Header exibe ícone + label curto (`shortLabel`) de cada tipo
+- Seletor de varType por coluna: `categorical` | `ordinal`
+
+### Passo 3 — Variável de Decisão AS IS
+- Modal 680px; etapa obrigatória para configurar a baseline histórica
+- **Seletor de coluna**: lista apenas colunas não-métricas (exclui `qty`, `qtdAltas`, `inadReal`, `inadInferida`)
+- **Mapping de valores**: ao selecionar a coluna, exibe todos os distinct values com dropdown `✅ Aprovado / ❌ Reprovado / — Ignorar`
+- **Validação em tempo real**: indicadores mostram se aprovado mapeado, reprovado mapeado, todos os valores atribuídos
+- **On confirm**: deriva coluna `__DECISAO_ORIGINAL` (última posição em `headers`/`rows`) com valores `APROVADO` / `REPROVADO` / `''`; salva `asIsConfig` no csvStore
+- **Edit mode**: restaura `asIsVar` e `asIsMapping` do `asIsConfig` salvo
+
+## Variável de Decisão AS IS — Conceito
+
+O simulador opera em modelo de **simulação incremental sobre comportamento observado**:
+- A base histórica (`asIsConfig`) representa a realidade operacional
+- `__DECISAO_ORIGINAL` é a coluna interna com a decisão normalizada de cada linha
+- Será usada futuramente por: Decision Lens, motor de simulação incremental, cálculo de delta, comparação contrafactual
+
+### Estrutura `asIsConfig`
+```js
+{
+  col: string,     // nome da coluna original no CSV (ex: "DECISAO_FINAL")
+  mapping: {       // valor encontrado → significado normalizado
+    "A": "APROVADO",
+    "R": "REPROVADO",
+    "P": "IGNORAR",
+  }
+}
+```
 
 ## Painel de Simulação (`simPanel`)
 - Tamanho padrão: `w: 260, h: 280`
@@ -164,6 +209,9 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 - Flag `ordinal` por coluna de decisão (wizard passo 2) + restrição de corte monotônico no algoritmo Pareto (escada Young diagram) para variáveis como ratings R1–R20
 - Sliders adicionais: margem, rentabilidade
 - Fronteira Pareto multi-dimensional
+- Decision Lens: comparação AS IS vs simulado usando `__DECISAO_ORIGINAL`
+- Motor de simulação incremental: sobrescrever apenas subconjunto da base histórica
+- Cálculo de delta e impacto marginal
 
 ## Indicador de Versão/Build (`BuildBadge`)
 
@@ -188,4 +236,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-version-indicator-Tcb42`
+`claude/add-decision-variable-fP4ZM`
