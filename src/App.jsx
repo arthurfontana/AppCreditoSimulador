@@ -89,13 +89,12 @@ const TOOLS  = [
   { id:"select",        icon:"↖",   label:"Selecionar"     },
   { id:"frame",         icon:"⬚",   label:"Frame"          },
   { id:"rect",          icon:"▭",   label:"Retângulo"      },
-  { id:"circle",        icon:"◯",   label:"Círculo"        },
-  { id:"diamond",       icon:"◇",   label:"Losango"        },
   { id:"cineminha",     icon:"⊞",   label:"Cineminha"      },
   { id:"decision_lens", icon:"🔎",  label:"Decision Lens"  },
   { id:"connect",       icon:"⟶",   label:"Conectar"       },
   { id:"approved",      icon:"✅",  label:"Aprovado"       },
   { id:"rejected",      icon:"❌",  label:"Reprovado"      },
+  { id:"as_is",         icon:"⟳",   label:"AS IS"          },
 ];
 
 // ── Decision Lens constants ───────────────────────────────────────────────────
@@ -327,8 +326,8 @@ function buildFlowGraph(shapes, conns) {
 
 function validateFlow(shapes, conns) {
   const errors = {};
-  const FLOW = new Set(['decision','port','approved','rejected','cineminha','decision_lens']);
-  const TERM = new Set(['approved','rejected']);
+  const FLOW = new Set(['decision','port','approved','rejected','as_is','cineminha','decision_lens']);
+  const TERM = new Set(['approved','rejected','as_is']);
   const flowShapes = shapes.filter(s => FLOW.has(s.type));
   if (flowShapes.length === 0) return errors;
   const {out} = buildFlowGraph(shapes, conns);
@@ -353,7 +352,7 @@ function validateFlow(shapes, conns) {
 function runSimulation(shapes, conns, csvStore) {
   const {out} = buildFlowGraph(shapes, conns);
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
-  const TERM = new Set(['approved','rejected']);
+  const TERM = new Set(['approved','rejected','as_is']);
   const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
   const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
   const rootNodes = shapes.filter(s =>
@@ -370,8 +369,8 @@ function runSimulation(shapes, conns, csvStore) {
   }
 
   // edgeStats accumulator
-  const edgeAcc = {}; // connId -> {qty,approvedQty,rejectedQty,inadRealSum,inadInferidaSum,qtdAltasSum}
-  const initEdge = (cid) => { if (!edgeAcc[cid]) edgeAcc[cid]={qty:0,approvedQty:0,rejectedQty:0,inadRealSum:0,inadInferidaSum:0,qtdAltasSum:0}; };
+  const edgeAcc = {}; // connId -> {qty,approvedQty,rejectedQty,asIsQty,inadRealSum,inadInferidaSum,qtdAltasSum}
+  const initEdge = (cid) => { if (!edgeAcc[cid]) edgeAcc[cid]={qty:0,approvedQty:0,rejectedQty:0,asIsQty:0,inadRealSum:0,inadInferidaSum:0,qtdAltasSum:0}; };
 
   function traverseRow(row, headers, startId, rowMeta) {
     let cur = startId; const visited = new Set();
@@ -425,7 +424,7 @@ function runSimulation(shapes, conns, csvStore) {
     return {result:null, path};
   }
 
-  let totalQty = 0, approvedQty = 0, rejectedQty = 0;
+  let totalQty = 0, approvedQty = 0, rejectedQty = 0, asIsQty = 0;
   let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0;
   for (const [csvId, csv] of Object.entries(csvStore)) {
     const types = csv.columnTypes || {};
@@ -437,6 +436,7 @@ function runSimulation(shapes, conns, csvStore) {
     const qtdAltasIdx    = colIdx('qtdAltas');
     const inadRealIdx    = colIdx('inadReal');
     const inadInferidaIdx= colIdx('inadInferida');
+    const dOrigIdx       = csv.headers.indexOf('__DECISAO_ORIGINAL');
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
@@ -452,7 +452,14 @@ function runSimulation(shapes, conns, csvStore) {
       const inadI = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
       totalQty += qty;
       const {result:res, path} = traverseRow(row, csv.headers, rootId, {qty, qtdAltas, inadR, inadI});
-      const isApproved = res === 'approved', isRejected = res === 'rejected';
+      let isApproved = res === 'approved', isRejected = res === 'rejected';
+      // AS IS: preserve original decision from __DECISAO_ORIGINAL column
+      if (res === 'as_is') {
+        const origDecision = dOrigIdx >= 0 ? String(row[dOrigIdx] ?? '').toUpperCase() : '';
+        if (origDecision === 'APROVADO') isApproved = true;
+        else if (origDecision === 'REPROVADO') isRejected = true;
+        else asIsQty += qty; // no original decision available — count separately
+      }
       if (isApproved) {
         approvedQty += qty;
         qtdAltasSum    += qtdAltas;
@@ -468,7 +475,11 @@ function runSimulation(shapes, conns, csvStore) {
           edgeAcc[cid].qtdAltasSum += qtdAltas;
           edgeAcc[cid].inadRealSum += inadR;
           edgeAcc[cid].inadInferidaSum += inadI;
-        } else if (isRejected) edgeAcc[cid].rejectedQty += qty;
+        } else if (isRejected) {
+          edgeAcc[cid].rejectedQty += qty;
+        } else if (res === 'as_is') {
+          edgeAcc[cid].asIsQty += qty;
+        }
       }
     }
   }
@@ -482,6 +493,7 @@ function runSimulation(shapes, conns, csvStore) {
       qty: acc.qty,
       approvedQty: acc.approvedQty,
       rejectedQty: acc.rejectedQty,
+      asIsQty: acc.asIsQty,
       qtdAltas: acc.qtdAltasSum,
       approvalRate: acc.qty > 0 ? acc.approvedQty / acc.qty : null,
       inadReal: acc.qtdAltasSum > 0 ? acc.inadRealSum / acc.qtdAltasSum : null,
@@ -490,7 +502,7 @@ function runSimulation(shapes, conns, csvStore) {
   }
 
   return {
-    totalQty, approvedQty, rejectedQty,
+    totalQty, approvedQty, rejectedQty, asIsQty,
     approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
     inadReal, inadInferida,
     edgeStats,
@@ -614,6 +626,10 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
         decisaoSimulada = 'REPROVADO';
         const lastConn = conns.find(c => c.id === path[path.length - 1]);
         componenteOrigem = lastConn ? (shapesMap[lastConn.to]?.label || 'Reprovado') : 'Reprovado';
+      } else if (boardResult === 'as_is') {
+        // AS IS: keep original decision unchanged, no override, no impact
+        decisaoSimulada = decisaoOriginal;
+        componenteOrigem = 'AS IS';
       }
 
       const flagImpactado = decisaoOriginal !== '' && decisaoSimulada !== decisaoOriginal;
@@ -949,7 +965,7 @@ function SimIndicators({ simResult, csvStore, incrementalResult }) {
       {/* Metric Grid */}
       <div style={{ padding: '9px 11px 9px', display: 'flex', flexDirection: 'column', gap: 6 }}>
         <div style={{ display: 'flex', gap: 6 }}>
-          <MCard label="Aprovação" value={rate !== null ? `${rate.toFixed(1)}%` : '—'} delta={rateDelta !== null ? rateDelta / 100 : null} positiveHigh={true} sub={hasData ? `✓ ${fmtQty(displayResult.approvedQty)} · ✗ ${fmtQty(displayResult.rejectedQty)}` : null}/>
+          <MCard label="Aprovação" value={rate !== null ? `${rate.toFixed(1)}%` : '—'} delta={rateDelta !== null ? rateDelta / 100 : null} positiveHigh={true} sub={hasData ? `✓ ${fmtQty(displayResult.approvedQty)} · ✗ ${fmtQty(displayResult.rejectedQty)}${simResult.asIsQty>0?` · ⟳${fmtQty(simResult.asIsQty)}`:""}` : null}/>
           <MCard label="Inad. Real" value={irV !== null ? fmtPct(irV) : '—'} delta={irDelta} positiveHigh={false} sub="∑ Inad / ∑ Altas"/>
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
@@ -1210,7 +1226,7 @@ export default function App() {
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
-      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
+      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected"||curTool==="as_is";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":curTool==="as_is"?"AS IS":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
     }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
@@ -1271,9 +1287,9 @@ export default function App() {
     if (tool!=="hand"&&tool!=="select"&&tool!=="connect") {
       pushHistory();
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy),id=uid();
-      const isTerminal=tool==="approved"||tool==="rejected";
+      const isTerminal=tool==="approved"||tool==="rejected"||tool==="as_is";
       const nw=isTerminal?120:SW, nh=isTerminal?44:SH;
-      const lbl=tool==="approved"?"Aprovado":tool==="rejected"?"Reprovado":"";
+      const lbl=tool==="approved"?"Aprovado":tool==="rejected"?"Reprovado":tool==="as_is"?"AS IS":"";
       setShapes(p=>[...p,{id,type:tool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);
       setSel(id);
     }
@@ -2563,6 +2579,18 @@ export default function App() {
         </g>
       );
     }
+    if (type==="as_is") {
+      return (
+        <g key={id} {...gp}>
+          <title>Mantém o comportamento original da base sem alterar o resultado da simulação.</title>
+          <rect data-sid={id} x={x} y={y} width={w} height={h} rx={22}
+            fill="#f3f4f6" stroke={isSel?"#3b82f6":"#9ca3af"} strokeWidth={sw}/>
+          <text x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
+            fontSize={12} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill="#4b5563"
+            style={{pointerEvents:"none",userSelect:"none"}}>⟳ {label||"AS IS"}</text>
+        </g>
+      );
+    }
     return null;
   };
 
@@ -2663,7 +2691,7 @@ export default function App() {
               {/* Row 1 */}
               <div style={{display:"flex",gap:5}}>
                 {[
-                  {label:"Aprovação", val:rate!==null?`${rate.toFixed(1)}%`:"—", delta:rateDelta!==null?rateDelta/100:null, ph:true, sub:hasData?`✓${fmtQty(displayResult.approvedQty)} ✗${fmtQty(displayResult.rejectedQty)}`:null},
+                  {label:"Aprovação", val:rate!==null?`${rate.toFixed(1)}%`:"—", delta:rateDelta!==null?rateDelta/100:null, ph:true, sub:hasData?`✓${fmtQty(displayResult.approvedQty)} ✗${fmtQty(displayResult.rejectedQty)}${simResult.asIsQty>0?` ⟳${fmtQty(simResult.asIsQty)}`:""}`:null},
                   {label:"Inad. Real", val:irV!==null?fmtPct(irV):"—", delta:irDelta, ph:false, sub:"∑Inad/∑Altas"},
                 ].map((m,i)=>(
                   <div key={i} style={{flex:1,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:"6px 8px"}}>
@@ -3213,7 +3241,7 @@ export default function App() {
                 {!small && (
                   <div style={{ padding: `${s(9)}px ${s(11)}px ${s(9)}px`, display: 'flex', flexDirection: 'column', gap: s(6) }}>
                     <div style={{ display: 'flex', gap: s(6) }}>
-                      <MCard label="Aprovação" value={rate !== null ? `${rate.toFixed(1)}%` : '—'} delta={rateDelta !== null ? rateDelta / 100 : null} ph={true} sub={hasData ? `✓ ${fmtQty(displayResult.approvedQty)} · ✗ ${fmtQty(displayResult.rejectedQty)}` : null} valColor={rateColor} />
+                      <MCard label="Aprovação" value={rate !== null ? `${rate.toFixed(1)}%` : '—'} delta={rateDelta !== null ? rateDelta / 100 : null} ph={true} sub={hasData ? `✓ ${fmtQty(displayResult.approvedQty)} · ✗ ${fmtQty(displayResult.rejectedQty)}${simResult.asIsQty>0?` · ⟳${fmtQty(simResult.asIsQty)}`:""}` : null} valColor={rateColor} />
                       <MCard label="Inad. Real" value={irV !== null ? fmtPct(irV) : '—'} delta={irDelta} ph={false} sub="∑ Inad / ∑ Altas" valColor={inadColor(irV)} />
                     </div>
                     <div style={{ display: 'flex', gap: s(6) }}>
@@ -3242,11 +3270,12 @@ export default function App() {
                 {large && hasData && (
                   <div style={{ padding: `${s(8)}px ${s(13)}px ${s(12)}px`, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
                     <div style={{ fontSize: s(9), color: '#a78bfa', fontWeight: 800, marginBottom: s(8), textTransform: 'uppercase', letterSpacing: '0.08em' }}>⚡ Análise de Portfolio</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: s(6) }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: simResult.asIsQty > 0 ? '1fr 1fr 1fr 1fr' : '1fr 1fr 1fr', gap: s(6) }}>
                       {[
                         { label: 'Total Base', val: fmtQty(displayResult.totalQty), color: '#94a3b8' },
                         { label: 'Aprovados', val: fmtQty(displayResult.approvedQty), color: '#4ade80' },
                         { label: 'Reprovados', val: fmtQty(displayResult.rejectedQty), color: '#f87171' },
+                        ...(simResult.asIsQty > 0 ? [{ label: 'AS IS', val: fmtQty(simResult.asIsQty), color: '#9ca3af' }] : []),
                       ].map((item, i) => (
                         <div key={i} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: s(8), padding: `${s(8)}px ${s(10)}px`, textAlign: 'center' }}>
                           <div style={{ fontSize: s(8), color: '#475569', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: s(3) }}>{item.label}</div>
@@ -3317,6 +3346,7 @@ export default function App() {
                 <span style={{color:"#94a3b8",fontSize:11}}>Vol. Propostas</span><span style={{fontWeight:600}}>{fmtQty(es.qty)}</span>
                 <span style={{color:"#94a3b8",fontSize:11}}>Vol. Aprovado</span><span style={{fontWeight:600,color:"#16a34a"}}>{fmtQty(es.approvedQty)}</span>
                 <span style={{color:"#94a3b8",fontSize:11}}>Vol. Reprovado</span><span style={{fontWeight:600,color:"#dc2626"}}>{fmtQty(es.rejectedQty)}</span>
+                {es.asIsQty>0&&<><span style={{color:"#94a3b8",fontSize:11}}>Vol. AS IS</span><span style={{fontWeight:600,color:"#9ca3af"}}>{fmtQty(es.asIsQty)}</span></>}
                 <span style={{color:"#94a3b8",fontSize:11}}>Taxa de Aprovação</span><span style={{fontWeight:700,color:es.approvalRate>=70?"#16a34a":es.approvalRate>=40?"#d97706":"#dc2626"}}>{fmtPct(es.approvalRate)}</span>
                 <span style={{color:"#94a3b8",fontSize:11}}>Inad. Real</span><span style={{fontWeight:600,color:es.inadReal===null?"#94a3b8":es.inadReal>0.05?"#dc2626":"#d97706"}}>{fmtPct(es.inadReal)}</span>
                 <span style={{color:"#94a3b8",fontSize:11}}>Inad. Inferida</span><span style={{fontWeight:600,color:es.inadInferida===null?"#94a3b8":es.inadInferida>0.05?"#dc2626":"#d97706"}}>{fmtPct(es.inadInferida)}</span>
