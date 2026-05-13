@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2600 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~4900 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -18,6 +18,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
+- `cinemaImportModal`: modal de importação de configuração do Cineminha — `null | {shapeId, config, step: 'confirm'|'mapping', rowMapping, colMapping, availableVars}`
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -53,6 +54,10 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
+- `exportCinema(shapeId)`: serializa configuração do Cineminha (rowVar.col, colVar.col, rowDomain, colDomain, cells) e faz download como JSON
+- `startCinemaImport(shapeId)`: armazena `shapeId` em ref e aciona o file input oculto de importação
+- `onCinemaFileChange(e)`: lê e valida o JSON importado, tenta auto-match de variáveis por nome, abre `cinemaImportModal`
+- `applyCinemaImport()`: aplica a configuração importada ao Cineminha — recomputa domínios do CSV atual, restaura elegibilidade das células que existem no domínio, ignora as demais com aviso
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
@@ -119,7 +124,7 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 ## Motor de Recomendação — Cineminha (`optimModal`)
 
 ### Ativação
-Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar Decisão** (mesmo padrão visual da toolbar de alinhamento).
+Selecionar um nó `cineminha` exibe toolbar contextual com três botões: **⚙ Otimizar Decisão**, **⬇ Exportar** e **⬆ Importar** (mesmo padrão visual da toolbar de alinhamento).
 
 ### Estado `optimModal`
 ```js
@@ -165,6 +170,26 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 - Sliders adicionais: margem, rentabilidade
 - Fronteira Pareto multi-dimensional
 
+## Exportação / Importação de Configuração do Cineminha
+
+### Exportar
+- Botão **⬇ Exportar** na toolbar contextual do Cineminha
+- Serializa apenas a configuração analítica do componente — sem CSV, sem fluxo
+- Payload: `{schemaVersion, componentType:"cineminha", rowVar:{col}?, colVar:{col}?, rowDomain, colDomain, cells}`
+- Download automático como `cineminha-config-YYYY-MM-DD.json`
+
+### Importar
+- Botão **⬆ Importar** na toolbar contextual; aciona file input oculto (`cinemaImportRef`)
+- Valida `componentType === "cineminha"` e presença de `schemaVersion`
+- **Passo `'confirm'`** (exibido se o Cineminha já possui variáveis): informa quais variáveis serão substituídas e avança para o mapeamento
+- **Passo `'mapping'`**: para cada variável no arquivo (`rowVar`, `colVar`), exibe dropdown com variáveis `decision` do dataset atual; auto-match por nome exato ou case-insensitive pré-preenche a sugestão
+- **Aplicar**: recomputa domínios do CSV atual (quando mapeado); restaura elegibilidade de células cujas chaves existem no novo domínio; ignora combinações inexistentes com aviso em `importWarn`
+- Suporta 1D (apenas linha ou apenas coluna) e 2D
+
+### Refs relacionados
+- `cinemaImportRef`: ref do `<input type="file">` oculto para seleção do arquivo
+- `cinemaImportTarget`: ref temporário que armazena o `shapeId` alvo antes de abrir o file picker
+
 ## Indicador de Versão/Build (`BuildBadge`)
 
 ### Localização
@@ -188,4 +213,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-version-indicator-Tcb42`
+`claude/cineminha-export-import-LZkWI`
