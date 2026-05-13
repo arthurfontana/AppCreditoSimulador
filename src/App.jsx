@@ -1059,6 +1059,8 @@ export default function App() {
   const [optimModal, setOptimModal] = useState(null);   // null | optim obj
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
+  // Cineminha export/import
+  const [cinemaImportModal, setCinemaImportModal] = useState(null); // null | {shapeId, config, step, rowMapping, colMapping, availableVars}
   // Business Impact floating widget
   const [businessWidget, setBusinessWidget] = useState({ visible: false, x: 80, y: 80, w: 420, h: 520 });
   const tooltipTimer = useRef(null);
@@ -1082,8 +1084,10 @@ export default function App() {
   const activeCellR = useRef(activeCell); useEffect(()=>{activeCellR.current=activeCell},[activeCell]);
   const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
-  const flowImportRef = useRef(null);
-  const prevToolR     = useRef(null);
+  const flowImportRef      = useRef(null);
+  const cinemaImportRef    = useRef(null);
+  const cinemaImportTarget = useRef(null);
+  const prevToolR          = useRef(null);
   const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
   const multiSelR     = useRef(multiSel);   useEffect(()=>{multiSelR.current=multiSel},   [multiSel]);
   const selRectR      = useRef(selRect);    useEffect(()=>{selRectR.current=selRect},      [selRect]);
@@ -1771,6 +1775,131 @@ export default function App() {
     };
     reader.readAsText(file);
     e.target.value = "";
+  };
+
+  // ── exportCinema ──────────────────────────────────────────────
+  const exportCinema = (shapeId) => {
+    const shape = shapesR.current.find(s => s.id === shapeId);
+    if (!shape || shape.type !== 'cineminha') return;
+    const payload = {
+      schemaVersion: "1.0",
+      componentType: "cineminha",
+      ...(shape.rowVar ? { rowVar: { col: shape.rowVar.col } } : {}),
+      ...(shape.colVar ? { colVar: { col: shape.colVar.col } } : {}),
+      rowDomain: shape.rowDomain || [],
+      colDomain: shape.colDomain || [],
+      cells: shape.cells || {},
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `cineminha-config-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ── startCinemaImport ─────────────────────────────────────────
+  const startCinemaImport = (shapeId) => {
+    cinemaImportTarget.current = shapeId;
+    cinemaImportRef.current?.click();
+  };
+
+  // ── onCinemaFileChange ────────────────────────────────────────
+  const onCinemaFileChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const shapeId = cinemaImportTarget.current;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const config = JSON.parse(ev.target.result);
+        if (config.componentType !== 'cineminha' || !config.schemaVersion) {
+          setImportError("Arquivo inválido: não é uma configuração de Cineminha exportada por este sistema.");
+          return;
+        }
+        const shape = shapesR.current.find(s => s.id === shapeId);
+        if (!shape) return;
+        // Collect available decision variables from all loaded CSVs
+        const availableVars = [];
+        for (const [csvId, csv] of Object.entries(csvStoreR.current)) {
+          for (const col of (csv.headers || [])) {
+            if ((csv.columnTypes?.[col] || '') === 'decision') {
+              availableVars.push({ col, csvId, csvName: csv.name });
+            }
+          }
+        }
+        // Auto-match by name (exact first, then case-insensitive)
+        const tryMatch = (colName) => {
+          if (!colName) return null;
+          return availableVars.find(v => v.col === colName)
+            || availableVars.find(v => v.col.toLowerCase() === colName.toLowerCase())
+            || null;
+        };
+        const rowMatch = config.rowVar ? tryMatch(config.rowVar.col) : null;
+        const colMatch = config.colVar ? tryMatch(config.colVar.col) : null;
+        const hasExistingConfig = !!(shape.rowVar || shape.colVar);
+        setCinemaImportModal({
+          shapeId,
+          config,
+          step: hasExistingConfig ? 'confirm' : 'mapping',
+          rowMapping: rowMatch,
+          colMapping: colMatch,
+          availableVars,
+        });
+      } catch {
+        setImportError("Arquivo inválido: não foi possível ler o JSON. Verifique se o arquivo não está corrompido.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  // ── applyCinemaImport ─────────────────────────────────────────
+  const applyCinemaImport = () => {
+    const { shapeId, config, rowMapping, colMapping } = cinemaImportModal;
+    pushHistory();
+    const rowVarFinal = config.rowVar && rowMapping ? { col: rowMapping.col, csvId: rowMapping.csvId } : null;
+    const colVarFinal = config.colVar && colMapping ? { col: colMapping.col, csvId: colMapping.csvId } : null;
+    let rowDomain = config.rowDomain || [];
+    let colDomain = config.colDomain || [];
+    if (rowVarFinal) {
+      const csv = csvStoreR.current[rowVarFinal.csvId];
+      if (csv) {
+        const colIdx = csv.headers.indexOf(rowVarFinal.col);
+        if (colIdx !== -1) {
+          const vals = [...new Set(csv.rows.map(r => r[colIdx]??'').filter(v => v !== ''))];
+          rowDomain = sortDomain(vals);
+        }
+      }
+    }
+    if (colVarFinal) {
+      const csv = csvStoreR.current[colVarFinal.csvId];
+      if (csv) {
+        const colIdx = csv.headers.indexOf(colVarFinal.col);
+        if (colIdx !== -1) {
+          const vals = [...new Set(csv.rows.map(r => r[colIdx]??'').filter(v => v !== ''))];
+          colDomain = sortDomain(vals);
+        }
+      }
+    }
+    const rDom = rowDomain.length > 0 ? rowDomain : ['*'];
+    const cDom = colDomain.length > 0 ? colDomain : ['*'];
+    const importedCells = config.cells || {};
+    const newCells = {};
+    for (const r of rDom) for (const c of cDom) {
+      const key = `${r}|${c}`;
+      newCells[key] = key in importedCells ? importedCells[key] : true;
+    }
+    const skipped = Object.keys(importedCells).filter(k => !(k in newCells)).length;
+    const { w, h } = computeCinemaSize(rowDomain, colDomain);
+    setShapes(prev => prev.map(s => s.id !== shapeId ? s : {
+      ...s, rowVar: rowVarFinal, colVar: colVarFinal, rowDomain, colDomain, cells: newCells, w, h,
+    }));
+    setCinemaImportModal(null);
+    if (skipped > 0) {
+      setImportWarn(`Importação do Cineminha concluída com avisos: ${skipped} combinação(ões) do arquivo não existem no dataset atual e foram ignoradas.`);
+    }
   };
 
   // ── createDecisionNode ────────────────────────────────────────
@@ -2992,6 +3121,18 @@ export default function App() {
                 whiteSpace:"nowrap",fontWeight:600}}>
               ⚙ Otimizar Decisão
             </button>
+            <button onClick={()=>exportCinema(sel)}
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #bbf7d0",background:"#f0fdf4",
+                color:"#16a34a",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              ⬇ Exportar
+            </button>
+            <button onClick={()=>startCinemaImport(sel)}
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fed7aa",background:"#fff7ed",
+                color:"#ea580c",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              ⬆ Importar
+            </button>
           </div>
         )}
 
@@ -3399,6 +3540,7 @@ export default function App() {
               <span style={{fontSize:16}}>⬆</span> Importar Fluxo
             </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
+            <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
           </div>
           {importWarn&&(
             <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#fffbeb",border:"1px solid #fde68a",fontSize:11,color:"#92400e",lineHeight:1.5,display:"flex",gap:6,alignItems:"flex-start"}}>
@@ -4055,6 +4197,137 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ═══════════════ CINEMINHA IMPORT MODAL ═══════════════ */}
+      {cinemaImportModal&&(()=>{
+        const {config, step, rowMapping, colMapping, availableVars} = cinemaImportModal;
+        const hasRow = !!config.rowVar;
+        const hasCol = !!config.colVar;
+        const btnStyle = (active) => ({
+          padding:"5px 14px",borderRadius:7,border:`1px solid ${active?"#6366f1":"#e2e8f0"}`,
+          background:active?"#eef2ff":"#fff",color:active?"#4f46e5":"#64748b",
+          cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:active?600:400,
+        });
+        const selectStyle = {
+          width:"100%",padding:"7px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+          fontSize:12.5,fontFamily:"inherit",color:"#1e293b",background:"#fff",cursor:"pointer",
+          outline:"none",
+        };
+        const canApply = (!hasRow || rowMapping) && (!hasCol || colMapping);
+
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:480,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:20}}>
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <div>
+                  <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:4}}>
+                    {step==='confirm' ? "Substituir Configuração?" : "Importar Configuração"}
+                  </h2>
+                  <p style={{fontSize:12.5,color:"#64748b"}}>
+                    {step==='confirm'
+                      ? "Este Cineminha já possui variáveis configuradas."
+                      : "Mapeie as variáveis do arquivo para o dataset atual."}
+                  </p>
+                </div>
+                <button onClick={()=>setCinemaImportModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+              </div>
+
+              {step==='confirm' && (
+                <div style={{padding:"14px 16px",borderRadius:12,background:"#fffbeb",border:"1px solid #fde68a",fontSize:12.5,color:"#78350f",lineHeight:1.6}}>
+                  <div style={{fontWeight:600,marginBottom:6}}>⚠ Configuração atual será substituída por:</div>
+                  {config.rowVar && <div>Linha: <strong>{config.rowVar.col}</strong></div>}
+                  {config.colVar && <div>Coluna: <strong>{config.colVar.col}</strong></div>}
+                  <div style={{marginTop:4}}>Domínio: {(config.rowDomain||[]).length} × {(config.colDomain||[]).length} células</div>
+                </div>
+              )}
+
+              {step==='mapping' && (
+                <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                  {hasRow && (
+                    <div>
+                      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:5}}>
+                        Variável de Linha
+                        <span style={{fontWeight:400,color:"#6b7280",marginLeft:6}}>
+                          (original: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:4}}>{config.rowVar.col}</code>)
+                        </span>
+                      </div>
+                      {availableVars.length > 0 ? (
+                        <select value={rowMapping ? `${rowMapping.csvId}::${rowMapping.col}` : ""}
+                          onChange={e => {
+                            const v = e.target.value;
+                            setCinemaImportModal(prev => ({...prev, rowMapping: v ? availableVars.find(x=>`${x.csvId}::${x.col}`===v)||null : null}));
+                          }}
+                          style={selectStyle}>
+                          <option value="">— Não mapear —</option>
+                          {availableVars.map(v=>(
+                            <option key={`${v.csvId}::${v.col}`} value={`${v.csvId}::${v.col}`}>
+                              {v.col} ({v.csvName})
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div style={{fontSize:12,color:"#94a3b8",fontStyle:"italic"}}>Nenhuma variável de decisão disponível no dataset.</div>
+                      )}
+                    </div>
+                  )}
+                  {hasCol && (
+                    <div>
+                      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:5}}>
+                        Variável de Coluna
+                        <span style={{fontWeight:400,color:"#6b7280",marginLeft:6}}>
+                          (original: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:4}}>{config.colVar.col}</code>)
+                        </span>
+                      </div>
+                      {availableVars.length > 0 ? (
+                        <select value={colMapping ? `${colMapping.csvId}::${colMapping.col}` : ""}
+                          onChange={e => {
+                            const v = e.target.value;
+                            setCinemaImportModal(prev => ({...prev, colMapping: v ? availableVars.find(x=>`${x.csvId}::${x.col}`===v)||null : null}));
+                          }}
+                          style={selectStyle}>
+                          <option value="">— Não mapear —</option>
+                          {availableVars.map(v=>(
+                            <option key={`${v.csvId}::${v.col}`} value={`${v.csvId}::${v.col}`}>
+                              {v.col} ({v.csvName})
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div style={{fontSize:12,color:"#94a3b8",fontStyle:"italic"}}>Nenhuma variável de decisão disponível no dataset.</div>
+                      )}
+                    </div>
+                  )}
+                  {!hasRow && !hasCol && (
+                    <div style={{fontSize:12.5,color:"#64748b",fontStyle:"italic"}}>
+                      A configuração não possui variáveis definidas. Apenas os estados de célula serão restaurados.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Actions */}
+              <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:4}}>
+                <button onClick={()=>setCinemaImportModal(null)} style={btnStyle(false)}>Cancelar</button>
+                {step==='confirm' && (
+                  <button onClick={()=>setCinemaImportModal(prev=>({...prev,step:'mapping'}))}
+                    style={{...btnStyle(true),background:"#fef3c7",borderColor:"#fcd34d",color:"#92400e"}}>
+                    Substituir →
+                  </button>
+                )}
+                {step==='mapping' && (
+                  <button onClick={applyCinemaImport}
+                    disabled={!canApply}
+                    style={{...btnStyle(true),opacity:canApply?1:0.5,cursor:canApply?"pointer":"not-allowed"}}>
+                    Aplicar
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═══════════════ EXPORT MODAL ═══════════════ */}
       {exportModal&&(
