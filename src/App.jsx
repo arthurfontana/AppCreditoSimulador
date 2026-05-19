@@ -1113,6 +1113,8 @@ export default function App() {
   // Cineminha library
   const [cinemaLibrary,      setCinemaLibrary]      = useState([]);   // array of saved cineminha items
   const [cinemaLibraryModal, setCinemaLibraryModal] = useState(null); // null | {mode:'browse'|'save', shapeId, search, filterType, saveMeta, overwriteId}
+  const [importTypeModal,    setImportTypeModal]    = useState(null); // null | {shapeId} — seleção de tipo de importação
+  const [libWizard,          setLibWizard]          = useState(null); // null | wizard de importação de biblioteca
   // Business Impact floating widget
   const [businessWidget, setBusinessWidget] = useState({ visible: false, x: 80, y: 80, w: 420, h: 520 });
   const tooltipTimer = useRef(null);
@@ -1138,6 +1140,7 @@ export default function App() {
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
   const flowImportRef      = useRef(null);
   const cinemaImportRef    = useRef(null);
+  const libFileInputRef    = useRef(null);
   const cinemaImportTarget = useRef(null);
   const prevToolR          = useRef(null);
   const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
@@ -1567,6 +1570,89 @@ export default function App() {
     };
     reader.readAsText(file);
     e.target.value="";
+  };
+
+  const onLibFileChange = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      const { delimiter, confident } = detectDelimiter(text);
+      setLibWizard({ rawText: text, filename: file.name, delimiter, detected: delimiter, confident, hasHeader: true, step: 1, columnRoles: {}, agrupadorOrder: [] });
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const onLibWizardConfirm = () => {
+    if (!libWizard) return;
+    const { headers, rows } = parseCSV(libWizard.rawText, libWizard.delimiter, libWizard.hasHeader);
+    const { columnRoles, agrupadorOrder } = libWizard;
+    const linhaCol = Object.entries(columnRoles).find(([,v]) => v === 'linha')?.[0] ?? null;
+    const colunaCol = Object.entries(columnRoles).find(([,v]) => v === 'coluna')?.[0] ?? null;
+    const resultadoCol = Object.entries(columnRoles).find(([,v]) => v === 'resultado')?.[0] ?? null;
+    const agrupadores = agrupadorOrder.filter(c => columnRoles[c] === 'agrupador');
+
+    const groups = new Map();
+    for (const row of rows) {
+      const obj = Object.fromEntries(headers.map((h, i) => [h, row[i] ?? '']));
+      const groupKey = agrupadores.length > 0 ? agrupadores.map(a => obj[a]).join(' | ') : '__all__';
+      if (!groups.has(groupKey)) {
+        const meta = {};
+        agrupadores.forEach(a => { meta[a] = obj[a]; });
+        groups.set(groupKey, { key: groupKey, meta, rowObjs: [] });
+      }
+      groups.get(groupKey).rowObjs.push(obj);
+    }
+
+    const INELIGIBLE_VALS = new Set(['NÃO ELEGÍVEL','NAO ELEGIVEL','INELEGIVEL','INELEGÍVEL','N','FALSE','0','NE','REPROVADO','R','NEGADO','RECUSADO']);
+    const newItems = [];
+    for (const group of groups.values()) {
+      const rowVals = linhaCol ? [...new Set(group.rowObjs.map(r => r[linhaCol]))] : [];
+      const colVals = colunaCol ? [...new Set(group.rowObjs.map(r => r[colunaCol]))] : [];
+      const rowDomain = sortDomain(rowVals);
+      const colDomain = sortDomain(colVals);
+      const cells = {};
+      for (const rowObj of group.rowObjs) {
+        const rv = linhaCol ? rowObj[linhaCol] : null;
+        const cv = colunaCol ? rowObj[colunaCol] : null;
+        if (!rv) continue;
+        const ck = cv ? `${rv}|${cv}` : `${rv}|*`;
+        if (resultadoCol) {
+          const norm = String(rowObj[resultadoCol] ?? '').toUpperCase().trim();
+          cells[ck] = !INELIGIBLE_VALS.has(norm);
+        } else {
+          cells[ck] = true;
+        }
+      }
+      const name = agrupadores.length > 0
+        ? agrupadores.map(a => group.meta[a]).filter(Boolean).join(' | ')
+        : 'Cineminha Importado';
+      newItems.push({
+        id: uid(),
+        savedAt: new Date().toISOString(),
+        name,
+        cinemaType: 'eligibility',
+        rowVar: linhaCol ? { col: linhaCol } : null,
+        colVar: colunaCol ? { col: colunaCol } : null,
+        rowDomain,
+        colDomain,
+        cells,
+        metadata: {
+          type: 'eligibility',
+          identifiers: group.meta,
+          dimensions: { rowVariable: linhaCol, columnVariable: colunaCol },
+          variables: {},
+          source: 'library_import_csv',
+          description: '',
+          tags: [],
+          version: 1,
+        },
+      });
+    }
+
+    setCinemaLibrary(prev => [...prev, ...newItems]);
+    setLibWizard(null);
   };
 
   const onImportConfirm = () => {
@@ -2245,6 +2331,10 @@ export default function App() {
     ? (wizard.editCsvId
         ? (() => { const csv = csvStore[wizard.editCsvId]; return csv ? {headers: csv.headers, rows: csv.rows} : null; })()
         : parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader))
+    : null;
+
+  const libWizardPreview = libWizard
+    ? parseCSV(libWizard.rawText, libWizard.delimiter, libWizard.hasHeader)
     : null;
 
   // ── Analytics color scale ─────────────────────────────────────
@@ -3344,7 +3434,7 @@ export default function App() {
                   whiteSpace:"nowrap",fontWeight:600}}>
                 ⬇ Exportar
               </button>
-              <button onClick={()=>startCinemaImport(sel)}
+              <button onClick={()=>setImportTypeModal({shapeId:sel})}
                 style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fed7aa",background:"#fff7ed",
                   color:"#ea580c",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                   whiteSpace:"nowrap",fontWeight:600}}>
@@ -3772,6 +3862,7 @@ export default function App() {
             </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
+            <input ref={libFileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onLibFileChange}/>
           </div>
           {importWarn&&(
             <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#fffbeb",border:"1px solid #fde68a",fontSize:11,color:"#92400e",lineHeight:1.5,display:"flex",gap:6,alignItems:"flex-start"}}>
@@ -4640,6 +4731,264 @@ export default function App() {
               style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
               Cancelar
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════ IMPORT TYPE MODAL ═══════════════ */}
+      {importTypeModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1500,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:480,boxShadow:"0 24px 80px rgba(0,0,0,.2)",overflow:"hidden"}}>
+            <div style={{padding:"22px 28px 18px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div>
+                <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:3}}>Importar Cineminha</h2>
+                <p style={{fontSize:12.5,color:"#64748b"}}>Escolha o tipo de importação</p>
+              </div>
+              <button onClick={()=>setImportTypeModal(null)}
+                style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+            </div>
+            <div style={{padding:"20px 28px 28px",display:"flex",gap:12}}>
+              <button
+                onClick={()=>{ const sid=importTypeModal.shapeId; setImportTypeModal(null); startCinemaImport(sid); }}
+                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"20px 16px",borderRadius:12,border:"1.5px solid #e2e8f0",background:"#fafafa",cursor:"pointer",fontFamily:"inherit",transition:"all .15s",textAlign:"center"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="#3b82f6";e.currentTarget.style.background="#eff6ff";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fafafa";}}>
+                <span style={{fontSize:32}}>📄</span>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,color:"#1e293b",marginBottom:4}}>JSON</div>
+                  <div style={{fontSize:12,color:"#64748b",lineHeight:1.5}}>Importar configuração exportada (.json)</div>
+                </div>
+              </button>
+              <button
+                onClick={()=>{ setImportTypeModal(null); libFileInputRef.current?.click(); }}
+                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"20px 16px",borderRadius:12,border:"1.5px solid #e2e8f0",background:"#fafafa",cursor:"pointer",fontFamily:"inherit",transition:"all .15s",textAlign:"center"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="#6366f1";e.currentTarget.style.background="#eef2ff";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fafafa";}}>
+                <span style={{fontSize:32}}>📊</span>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,color:"#1e293b",marginBottom:4}}>Biblioteca (CSV)</div>
+                  <div style={{fontSize:12,color:"#64748b",lineHeight:1.5}}>Importar política tabular e gerar múltiplos Cineminhas</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════ LIBRARY IMPORT WIZARD ═══════════════ */}
+      {libWizard && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1500,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:libWizard.step===2?880:640,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
+
+            {/* Header */}
+            <div style={{padding:"22px 28px 18px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <div>
+                  <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:3}}>Importar Biblioteca</h2>
+                  <p style={{fontSize:12.5,color:"#64748b"}}>{libWizard.filename}</p>
+                  <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
+                    <div style={{width:24,height:4,borderRadius:2,background:"#6366f1"}}/>
+                    <div style={{width:24,height:4,borderRadius:2,background:libWizard.step>=2?"#6366f1":"#e2e8f0"}}/>
+                    <div style={{width:24,height:4,borderRadius:2,background:libWizard.step>=3?"#6366f1":"#e2e8f0"}}/>
+                    <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {libWizard.step} de 3</span>
+                  </div>
+                </div>
+                <button onClick={()=>setLibWizard(null)} style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div style={{padding:"20px 28px",overflowY:"auto",flex:1}}>
+              {libWizard.step===1 ? (
+                <>
+                  <div style={{marginBottom:20}}>
+                    <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>
+                      Delimitador
+                      {libWizard.confident && <span style={{marginLeft:8,fontSize:11,color:"#16a34a",background:"#f0fdf4",border:"1px solid #bbf7d0",padding:"1px 8px",borderRadius:20}}>detectado automaticamente</span>}
+                      {!libWizard.confident && <span style={{marginLeft:8,fontSize:11,color:"#d97706",background:"#fffbeb",border:"1px solid #fde68a",padding:"1px 8px",borderRadius:20}}>verifique abaixo</span>}
+                    </p>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                      {DELIMITERS.map(d=>(
+                        <label key={d.value} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",borderRadius:9,border:`1.5px solid ${libWizard.delimiter===d.value?"#6366f1":"#e2e8f0"}`,background:libWizard.delimiter===d.value?"#eef2ff":"#fafafa",cursor:"pointer",fontSize:13,color:libWizard.delimiter===d.value?"#4338ca":"#475569",fontWeight:libWizard.delimiter===d.value?600:400,transition:"all .12s"}}>
+                          <input type="radio" name="lib-delim" value={d.value} checked={libWizard.delimiter===d.value} onChange={()=>setLibWizard(w=>({...w,delimiter:d.value}))} style={{accentColor:"#6366f1"}}/>
+                          {d.label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13,color:"#475569",marginBottom:16}}>
+                    <input type="checkbox" checked={libWizard.hasHeader} onChange={()=>setLibWizard(w=>({...w,hasHeader:!w.hasHeader}))} style={{width:15,height:15,accentColor:"#6366f1"}}/>
+                    Primeira linha é cabeçalho
+                  </label>
+                  <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>Prévia</p>
+                  <div style={{overflowX:"auto",borderRadius:8,border:"1px solid #e2e8f0"}}>
+                    {libWizardPreview && libWizardPreview.headers.length > 0 ? (
+                      <table style={{borderCollapse:"collapse",fontSize:12,width:"100%"}}>
+                        <thead>
+                          <tr>{libWizardPreview.headers.map((h,i)=>(<th key={i} style={{background:"#f8fafc",border:"1px solid #e2e8f0",padding:"6px 12px",color:"#475569",fontWeight:600,whiteSpace:"nowrap",minWidth:80}}>{h}</th>))}</tr>
+                        </thead>
+                        <tbody>
+                          {libWizardPreview.rows.slice(0,5).map((row,ri)=>(
+                            <tr key={ri}>{libWizardPreview.headers.map((_,ci)=>(<td key={ci} style={{border:"1px solid #f1f5f9",padding:"5px 12px",color:"#334155",whiteSpace:"nowrap"}}>{row[ci]??""}</td>))}</tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <div style={{padding:16,color:"#94a3b8",fontSize:12}}>Nenhum dado detectado. Verifique o delimitador.</div>
+                    )}
+                  </div>
+                  {libWizardPreview && <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>{libWizardPreview.rows.length} linhas · {libWizardPreview.headers.length} colunas encontradas</p>}
+                </>
+              ) : libWizard.step===2 ? (
+                <>
+                  <p style={{fontSize:13,color:"#475569",marginBottom:16,lineHeight:1.6}}>
+                    Configure como cada coluna será usada para gerar os Cineminhas.
+                  </p>
+                  <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden",marginBottom:16}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 190px",alignItems:"center",padding:"8px 14px",background:"#f8fafc",borderBottom:"2px solid #e2e8f0",position:"sticky",top:0,zIndex:1}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Coluna</span>
+                      <span style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5,textAlign:"center"}}>Papel</span>
+                    </div>
+                    <div style={{maxHeight:360,overflowY:"auto",overflowX:"hidden"}}>
+                      {(libWizardPreview?.headers||[]).map((colName,i)=>{
+                        const role = libWizard.columnRoles[colName] || '';
+                        const rc = role==='agrupador' ? {bg:"#fffbeb",fg:"#92400e",bc:"#fde68a"}
+                               : role==='linha'      ? {bg:"#f0fdf4",fg:"#15803d",bc:"#bbf7d0"}
+                               : role==='coluna'     ? {bg:"#eff6ff",fg:"#1d4ed8",bc:"#bfdbfe"}
+                               : role==='resultado'  ? {bg:"#fdf4ff",fg:"#7e22ce",bc:"#e9d5ff"}
+                               :                      {bg:"#f8fafc",fg:"#94a3b8",bc:"#e2e8f0"};
+                        return (
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 190px",alignItems:"center",padding:"9px 14px",borderBottom:i<(libWizardPreview.headers.length-1)?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              <span style={{fontSize:13,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={colName}>{colName}</span>
+                              {role==='agrupador' && (
+                                <div style={{display:"flex",alignItems:"center",gap:2,flexShrink:0}}>
+                                  <button onClick={()=>setLibWizard(w=>{const idx=w.agrupadorOrder.indexOf(colName);if(idx<=0)return w;const o=[...w.agrupadorOrder];[o[idx-1],o[idx]]=[o[idx],o[idx-1]];return {...w,agrupadorOrder:o};})}
+                                    style={{width:18,height:18,border:"1px solid #e2e8f0",borderRadius:3,background:"#f8fafc",cursor:"pointer",fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",padding:0,fontFamily:"inherit"}}>▲</button>
+                                  <button onClick={()=>setLibWizard(w=>{const idx=w.agrupadorOrder.indexOf(colName);if(idx<0||idx>=w.agrupadorOrder.length-1)return w;const o=[...w.agrupadorOrder];[o[idx],o[idx+1]]=[o[idx+1],o[idx]];return {...w,agrupadorOrder:o};})}
+                                    style={{width:18,height:18,border:"1px solid #e2e8f0",borderRadius:3,background:"#f8fafc",cursor:"pointer",fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",padding:0,fontFamily:"inherit"}}>▼</button>
+                                  <span style={{fontSize:10,color:"#92400e",fontWeight:700,marginLeft:2}}>#{libWizard.agrupadorOrder.indexOf(colName)+1}</span>
+                                </div>
+                              )}
+                            </div>
+                            <div style={{display:"flex",justifyContent:"center"}}>
+                              <select value={role}
+                                onChange={e=>{
+                                  const newRole=e.target.value;
+                                  const prev=libWizard.columnRoles[colName]||'';
+                                  setLibWizard(w=>{
+                                    const roles={...w.columnRoles,[colName]:newRole};
+                                    let order=[...w.agrupadorOrder];
+                                    if(prev==='agrupador'&&newRole!=='agrupador') order=order.filter(c=>c!==colName);
+                                    if(newRole==='agrupador'&&prev!=='agrupador') order=[...order,colName];
+                                    if(['linha','coluna','resultado'].includes(newRole)){
+                                      for(const k of Object.keys(roles)){if(k!==colName&&roles[k]===newRole)roles[k]='';}
+                                    }
+                                    return {...w,columnRoles:roles,agrupadorOrder:order};
+                                  });
+                                }}
+                                style={{fontSize:12,padding:"4px 8px",borderRadius:7,border:`1.5px solid ${rc.bc}`,background:rc.bg,color:rc.fg,fontFamily:"inherit",cursor:"pointer",outline:"none",fontWeight:600,width:170,appearance:"none",WebkitAppearance:"none",textAlign:"center"}}>
+                                <option value="">— Ignorar</option>
+                                <option value="agrupador">⚙ Agrupador</option>
+                                <option value="linha">→ Linha (eixo Y)</option>
+                                <option value="coluna">↓ Coluna (eixo X)</option>
+                                <option value="resultado">✓ Resultado</option>
+                              </select>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,fontSize:11.5,color:"#64748b",lineHeight:1.6,padding:"10px 12px",background:"#f8fafc",borderRadius:8,border:"1px solid #e2e8f0"}}>
+                    <div><strong style={{color:"#92400e"}}>⚙ Agrupador</strong> — segmenta em Cineminhas distintos</div>
+                    <div><strong style={{color:"#15803d"}}>→ Linha</strong> — variável no eixo Y da matriz</div>
+                    <div><strong style={{color:"#1d4ed8"}}>↓ Coluna</strong> — variável no eixo X (opcional)</div>
+                    <div><strong style={{color:"#7e22ce"}}>✓ Resultado</strong> — elegibilidade por célula (opcional)</div>
+                  </div>
+                </>
+              ) : libWizard.step===3 ? (()=>{
+                const { headers, rows } = libWizardPreview || { headers: [], rows: [] };
+                const { columnRoles, agrupadorOrder } = libWizard;
+                const linhaCol = Object.entries(columnRoles).find(([,v]) => v === 'linha')?.[0] ?? null;
+                const colunaCol = Object.entries(columnRoles).find(([,v]) => v === 'coluna')?.[0] ?? null;
+                const agrupadores = agrupadorOrder.filter(c => columnRoles[c] === 'agrupador');
+                const groups = new Map();
+                for (const row of rows) {
+                  const obj = Object.fromEntries(headers.map((h, i) => [h, row[i] ?? '']));
+                  const groupKey = agrupadores.length > 0 ? agrupadores.map(a => obj[a]).join(' | ') : '__all__';
+                  if (!groups.has(groupKey)) groups.set(groupKey, { key: groupKey, count: 0 });
+                  groups.get(groupKey).count++;
+                }
+                const groupList = [...groups.values()];
+                return (
+                  <>
+                    <div style={{padding:"14px 16px",borderRadius:12,background:"#f0fdf4",border:"1px solid #bbf7d0",marginBottom:16,display:"flex",alignItems:"center",gap:12}}>
+                      <span style={{fontSize:28,flexShrink:0}}>⊞</span>
+                      <div>
+                        <div style={{fontSize:15,fontWeight:700,color:"#15803d"}}>{groupList.length} Cineminha{groupList.length!==1?'s':''} {groupList.length!==1?'serão criados':'será criado'}</div>
+                        <div style={{fontSize:12,color:"#4b7c61",marginTop:2}}>
+                          {linhaCol && <span>Linha: <strong>{linhaCol}</strong></span>}
+                          {linhaCol && colunaCol && <span> · </span>}
+                          {colunaCol && <span>Coluna: <strong>{colunaCol}</strong></span>}
+                          {agrupadores.length>0 && <span> · Agrupadores: <strong>{agrupadores.join(', ')}</strong></span>}
+                        </div>
+                      </div>
+                    </div>
+                    {groupList.length>0 && (
+                      <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden",marginBottom:12}}>
+                        <div style={{padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>
+                          Grupos{groupList.length>10?` (mostrando 10 de ${groupList.length})`:''}
+                        </div>
+                        <div style={{maxHeight:280,overflowY:"auto"}}>
+                          {groupList.slice(0,10).map((g,i)=>(
+                            <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 14px",borderBottom:i<Math.min(groupList.length,10)-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                              <span style={{fontSize:13,fontWeight:500,color:"#1e293b"}}>{g.key==='__all__'?'(sem agrupador)':g.key}</span>
+                              <span style={{fontSize:11,color:"#94a3b8"}}>{g.count} linha{g.count!==1?'s':''}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <p style={{fontSize:11.5,color:"#94a3b8",lineHeight:1.7}}>
+                      Os Cineminhas gerados serão adicionados à <strong style={{color:"#475569"}}>Biblioteca</strong>. Use o botão <strong style={{color:"#4f46e5"}}>📚 Biblioteca</strong> em qualquer nó Cineminha para inserir no canvas.
+                    </p>
+                  </>
+                );
+              })() : null}
+            </div>
+
+            {/* Footer */}
+            <div style={{padding:"16px 28px",borderTop:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+              <div style={{display:"flex",gap:8}}>
+                {libWizard.step>1 && (
+                  <button onClick={()=>setLibWizard(w=>({...w,step:w.step-1}))}
+                    style={{padding:"9px 18px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                    ← Voltar
+                  </button>
+                )}
+                <button onClick={()=>setLibWizard(null)}
+                  style={{padding:"9px 18px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                  Cancelar
+                </button>
+              </div>
+              {libWizard.step<3 ? (()=>{
+                const canAdvance = libWizard.step===1
+                  ? (libWizardPreview && libWizardPreview.headers.length>0)
+                  : Object.values(libWizard.columnRoles).includes('linha');
+                return (
+                  <button disabled={!canAdvance} onClick={()=>setLibWizard(w=>({...w,step:w.step+1}))}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:canAdvance?"#6366f1":"#e2e8f0",color:canAdvance?"#fff":"#94a3b8",cursor:canAdvance?"pointer":"default",fontSize:13,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}>
+                    Avançar →
+                  </button>
+                );
+              })() : (
+                <button onClick={onLibWizardConfirm}
+                  style={{padding:"9px 22px",borderRadius:9,border:"none",background:"#6366f1",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",display:"flex",alignItems:"center",gap:6}}>
+                  ⊞ Gerar e Adicionar à Biblioteca
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
