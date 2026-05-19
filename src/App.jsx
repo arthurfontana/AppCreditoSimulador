@@ -429,7 +429,7 @@ function runSimulation(shapes, conns, csvStore) {
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
         const cellKey = `${rKey}|${cKey}`;
-        const isEligible = (node.cells ?? {})[cellKey] !== false;
+        const isEligible = isCellEligible(node.cells, cellKey);
         const typeCfg = getCinemaType(node.cinemaType);
         const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
         const match = (out[cur] || []).find(e => e.label === targetLabel);
@@ -587,7 +587,7 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
         if (!node.rowVar && !node.colVar) return {result:null, path};
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
-        const isEligible = (node.cells ?? {})[`${rKey}|${cKey}`] !== false;
+        const isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
         const typeCfg2 = getCinemaType(node.cinemaType);
         const match = (out[cur] || []).find(e => e.label === (isEligible ? typeCfg2.ports[0].label : typeCfg2.ports[1].label));
         if (!match) return {result:null, path};
@@ -765,6 +765,19 @@ function computeIncrementalResult(overlay, csvStore) {
   };
 }
 
+// ── Cell value helpers ───────────────────────────────────────────────────────
+// Reads a cell's numeric result value with backward-compat for legacy booleans.
+function getCellValue(cells, key) {
+  const v = (cells ?? {})[key];
+  if (v === false) return 0;
+  if (v === undefined || v === null || v === true) return 1;
+  return typeof v === 'number' ? v : 1;
+}
+
+function isCellEligible(cells, key) {
+  return getCellValue(cells, key) > 0;
+}
+
 // ── Optimization engine helpers ──────────────────────────────────────────────
 function computeCellMetrics(shape, csvStore) {
   if (!shape || shape.type !== 'cineminha') return {};
@@ -830,7 +843,7 @@ function buildParetoFrontier(cellMetrics) {
   for (const c of cells) {
     approvedQty += c.qty; altasSum += c.qtdAltas;
     inadRSum += c.inadRRaw; inadISum += c.inadIRaw;
-    approved[c.key] = true;
+    approved[c.key] = 1;
     frontier.push({
       cells: { ...approved },
       approvalRate: approvedQty / totalQty,
@@ -1655,7 +1668,7 @@ export default function App() {
           const newCells = {};
           for (const r of rDom) for (const c of cDom) {
             const key=`${r}|${c}`;
-            newCells[key] = (s.cells??{})[key] !== false ? true : false;
+            newCells[key] = getCellValue(s.cells, key);
           }
           updated.cells = newCells;
           const {w:nw,h:nh} = computeCinemaSize(updated.rowDomain, updated.colDomain);
@@ -1926,7 +1939,7 @@ export default function App() {
     const newCells = {};
     for (const r of rDom) for (const c of cDom) {
       const key = `${r}|${c}`;
-      newCells[key] = key in importedCells ? importedCells[key] : true;
+      newCells[key] = key in importedCells ? getCellValue(importedCells, key) : 1;
     }
     const skipped = Object.keys(importedCells).filter(k => !(k in newCells)).length;
     const { w, h } = computeCinemaSize(rowDomain, colDomain);
@@ -1974,8 +1987,18 @@ export default function App() {
     pushHistory();
     setShapes(prev => prev.map(s => {
       if (s.id !== shapeId) return s;
-      const cur = (s.cells ?? {})[cellKey];
-      return {...s, cells: {...(s.cells??{}), [cellKey]: cur === false ? true : false}};
+      const cur = getCellValue(s.cells, cellKey);
+      return {...s, cells: {...(s.cells??{}), [cellKey]: cur > 0 ? 0 : 1}};
+    }));
+  }, []);
+
+  // ── setCinemaCellValue ────────────────────────────────────────
+  const setCinemaCellValue = useCallback((shapeId, cellKey, value) => {
+    const n = Math.max(0, Math.floor(Number(value) || 0));
+    pushHistory();
+    setShapes(prev => prev.map(s => {
+      if (s.id !== shapeId) return s;
+      return {...s, cells: {...(s.cells??{}), [cellKey]: n}};
     }));
   }, []);
 
@@ -2074,7 +2097,7 @@ export default function App() {
       const newCells = {};
       for (const r of rDom) for (const c of cDom) {
         const key = `${r}|${c}`;
-        newCells[key] = (s.cells??{})[key] !== false ? true : false;
+        newCells[key] = getCellValue(s.cells, key);
       }
       const {w:nw, h:nh} = computeCinemaSize(newRowDomain, newColDomain);
       return {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
@@ -2533,7 +2556,11 @@ export default function App() {
                       const rKey = rowVar ? rv : '*';
                       const cKey = colVar ? cv : '*';
                       const cellKey = `${rKey}|${cKey}`;
-                      const eligible = (cells??{})[cellKey] !== false;
+                      const cellVal = getCellValue(cells, cellKey);
+                      const eligible = cellVal > 0;
+                      const cellBg = cellVal === 0 ? "#ef4444" : cellVal === 1 ? "#22c55e" : "#6366f1";
+                      const cellLabel = cellVal === 0 ? "✗" : cellVal === 1 ? "✓" : String(cellVal);
+                      const portLabel = eligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
                       return (
                         <td key={cv} style={{width:CINEMA_CELL_W,padding:2,border:"1px solid #f1f5f9",textAlign:"center",background:"#fff"}}>
                           {!rowVar&&colVar&&(
@@ -2543,15 +2570,20 @@ export default function App() {
                           )}
                           <button
                             onClick={()=>toggleCinemaCell(id, cellKey)}
-                            title={eligible?`${typeCfg.ports[0].label} (clique para alternar)`:`${typeCfg.ports[1].label} (clique para alternar)`}
+                            onContextMenu={e=>{
+                              e.preventDefault();
+                              const v = window.prompt(`Valor da célula (0 = ${typeCfg.ports[1].label}, ≥1 = ${typeCfg.ports[0].label}):`, String(cellVal));
+                              if (v !== null) setCinemaCellValue(id, cellKey, v);
+                            }}
+                            title={`${portLabel} — clique para alternar, botão direito para editar valor`}
                             style={{
                               width:"100%",height:CINEMA_CELL_H-6,border:"none",borderRadius:4,
-                              background:eligible?"#22c55e":"#ef4444",
+                              background:cellBg,
                               color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,
                               display:"flex",alignItems:"center",justifyContent:"center",
                               transition:"background .12s",
                             }}>
-                            {eligible?"✓":"✗"}
+                            {cellLabel}
                           </button>
                         </td>
                       );
@@ -3035,8 +3067,8 @@ export default function App() {
     // Start from current shape state (Personalizado reflects what the user already built)
     const initCells = { ...(shape.cells || {}) };
     const totalQty  = Object.values(cellMetrics).reduce((s, m) => s + m.qty, 0);
-    const initApprQty = Object.entries(initCells)
-      .filter(([, v]) => v !== false).reduce((s, [k]) => s + (cellMetrics[k]?.qty || 0), 0);
+    const initApprQty = Object.keys(initCells)
+      .filter(k => isCellEligible(initCells, k)).reduce((s, k) => s + (cellMetrics[k]?.qty || 0), 0);
     const initRate = totalQty > 0 ? initApprQty / totalQty : 0;
     // Find frontier index closest to current approval rate
     let initIdx = 0, bestD = Infinity;
@@ -4814,7 +4846,7 @@ export default function App() {
         const totalQty = Object.values(cellMetrics).reduce((s, m) => s + m.qty, 0);
 
         // Compute personalizado metrics dynamically from proposedCells
-        const eligKeys  = Object.entries(proposedCells).filter(([,v])=>v!==false).map(([k])=>k);
+        const eligKeys  = Object.keys(proposedCells).filter(k => isCellEligible(proposedCells, k));
         const pApprQty  = eligKeys.reduce((s,k)=>s+(cellMetrics[k]?.qty||0),0);
         const pAltas    = eligKeys.reduce((s,k)=>s+(cellMetrics[k]?.qtdAltas||0),0);
         const pInadRRaw = eligKeys.reduce((s,k)=>s+(cellMetrics[k]?.inadRRaw||0),0);
@@ -4872,10 +4904,10 @@ export default function App() {
 
         // Toggle cell manually (sets personalizado)
         const toggleCell = (cellKey, isCurrentlyElig) => {
-          const nc = { ...proposedCells, [cellKey]: !isCurrentlyElig };
+          const nc = { ...proposedCells, [cellKey]: isCurrentlyElig ? 0 : 1 };
           // Find nearest frontier index
-          const newApprQty = Object.entries(nc)
-            .filter(([,v])=>v!==false).reduce((s,[k])=>s+(cellMetrics[k]?.qty||0),0);
+          const newApprQty = Object.keys(nc)
+            .filter(k => isCellEligible(nc, k)).reduce((s,k)=>s+(cellMetrics[k]?.qty||0),0);
           const newRate = totalQty > 0 ? newApprQty/totalQty : 0;
           let nearIdx = 0, bestD = Infinity;
           frontier.forEach((pt, i) => {
@@ -5149,7 +5181,7 @@ export default function App() {
                               </td>
                               {cDom.map(cv=>{
                                 const cellKey = `${rv}|${cv}`;
-                                const isElig  = proposedCells[cellKey] !== false;
+                                const isElig  = isCellEligible(proposedCells, cellKey);
                                 const m = cellMetrics[cellKey];
                                 return (
                                   <td key={cv}
