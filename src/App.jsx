@@ -1110,6 +1110,9 @@ export default function App() {
   const [cinemaTypeModal, setCinemaTypeModal] = useState(null); // null | {wx, wy}
   // Cineminha export/import
   const [cinemaImportModal, setCinemaImportModal] = useState(null); // null | {shapeId, config, step, rowMapping, colMapping, availableVars}
+  // Cineminha library
+  const [cinemaLibrary,      setCinemaLibrary]      = useState([]);   // array of saved cineminha items
+  const [cinemaLibraryModal, setCinemaLibraryModal] = useState(null); // null | {mode:'browse'|'save', shapeId, search, filterType, saveMeta, overwriteId}
   // Business Impact floating widget
   const [businessWidget, setBusinessWidget] = useState({ visible: false, x: 80, y: 80, w: 420, h: 520 });
   const tooltipTimer = useRef(null);
@@ -1145,6 +1148,7 @@ export default function App() {
   const redoStackR    = useRef(redoStack);  useEffect(()=>{redoStackR.current=redoStack},  [redoStack]);
   const lensModalR    = useRef(lensModal);  useEffect(()=>{lensModalR.current=lensModal},  [lensModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
+  const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const bwDragR = useRef(null);
 
   // ── Simulation engine (reactive) ──────────────────────────────
@@ -1839,6 +1843,7 @@ export default function App() {
       rowDomain: shape.rowDomain || [],
       colDomain: shape.colDomain || [],
       cells: shape.cells || {},
+      metadata: shape.metadata ?? {},
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1954,6 +1959,93 @@ export default function App() {
     }
   };
 
+  // ── Cinema Library functions ──────────────────────────────────
+  const openCinemaLibrary = (shapeId, mode = 'browse') => {
+    const shape = shapeId ? shapesR.current.find(s => s.id === shapeId) : null;
+    const meta = shape?.metadata ?? {};
+    setCinemaLibraryModal({
+      mode,
+      shapeId: shapeId ?? null,
+      search: '',
+      filterType: null,
+      saveMeta: {
+        name: shape?.label ?? 'Cineminha',
+        description: meta.description ?? '',
+        tags: (meta.tags ?? []).join(', '),
+        identifiers: JSON.stringify(meta.identifiers ?? {}, null, 2),
+      },
+      overwriteId: null,
+    });
+  };
+
+  const saveToLibrary = () => {
+    const { shapeId, saveMeta, overwriteId } = cinemaLibraryModal;
+    const shape = shapesR.current.find(s => s.id === shapeId);
+    if (!shape) return;
+    let parsedIdentifiers = {};
+    try { parsedIdentifiers = JSON.parse(saveMeta.identifiers || '{}'); } catch { parsedIdentifiers = {}; }
+    const parsedTags = (saveMeta.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    const newMeta = {
+      type: shape.cinemaType ?? 'eligibility',
+      identifiers: parsedIdentifiers,
+      dimensions: { rowVariable: shape.rowVar?.col ?? null, columnVariable: shape.colVar?.col ?? null },
+      variables: {},
+      source: overwriteId ? 'manual' : 'manual',
+      description: saveMeta.description ?? '',
+      tags: parsedTags,
+      version: overwriteId ? ((cinemaLibraryR.current.find(it => it.id === overwriteId)?.metadata?.version ?? 0) + 1) : 1,
+    };
+    const item = {
+      id: overwriteId ?? uid(),
+      savedAt: new Date().toISOString(),
+      name: saveMeta.name || 'Cineminha',
+      cinemaType: shape.cinemaType ?? 'eligibility',
+      rowVar: shape.rowVar ? { col: shape.rowVar.col } : null,
+      colVar: shape.colVar ? { col: shape.colVar.col } : null,
+      rowDomain: shape.rowDomain || [],
+      colDomain: shape.colDomain || [],
+      cells: { ...(shape.cells || {}) },
+      metadata: newMeta,
+    };
+    setCinemaLibrary(prev => overwriteId ? prev.map(it => it.id === overwriteId ? item : it) : [...prev, item]);
+    setShapes(prev => prev.map(s => s.id !== shapeId ? s : {
+      ...s, label: saveMeta.name || s.label, metadata: { ...newMeta },
+    }));
+    setCinemaLibraryModal(null);
+  };
+
+  const loadFromLibrary = (item) => {
+    const cx = (-vpR.current.x + 500) / vpR.current.s;
+    const cy = (-vpR.current.y + 320) / vpR.current.s;
+    pushHistory();
+    const id = uid();
+    const cinemaType = item.cinemaType ?? 'eligibility';
+    const cfg = getCinemaType(cinemaType);
+    const rowDom = item.rowDomain || [];
+    const colDom = item.colDomain || [];
+    const { w: sw, h: sh } = computeCinemaSize(rowDom, colDom);
+    const W = Math.max(170, sw), H = Math.max(108, sh);
+    const cinemaShape = {
+      id, type: 'cineminha', x: cx - W / 2, y: cy - H / 2, w: W, h: H,
+      label: item.name || 'Cineminha', color: '#fff', cinemaType,
+      rowVar: null, colVar: null, rowDomain: rowDom, colDomain: colDom,
+      cells: { ...(item.cells || {}) },
+      metadata: { ...(item.metadata ?? {}), source: 'library_import' },
+    };
+    const PORT_W = 100, PORT_H = 32;
+    const eligId = uid(), notId = uid();
+    const eligPort = { id: eligId, type: 'port', x: cx + W / 2 + 36, y: cy - PORT_H - 6, w: PORT_W, h: PORT_H, label: cfg.ports[0].label, color: cfg.ports[0].color };
+    const notPort  = { id: notId,  type: 'port', x: cx + W / 2 + 36, y: cy + 6,          w: PORT_W, h: PORT_H, label: cfg.ports[1].label, color: cfg.ports[1].color };
+    setShapes(prev => [...prev, cinemaShape, eligPort, notPort]);
+    setConns(prev  => [...prev, { id: uid(), from: id, to: eligId, label: cfg.ports[0].label }, { id: uid(), from: id, to: notId, label: cfg.ports[1].label }]);
+    setSel(id);
+    setCinemaLibraryModal(null);
+  };
+
+  const deleteFromLibrary = (itemId) => {
+    setCinemaLibrary(prev => prev.filter(it => it.id !== itemId));
+  };
+
   // ── createDecisionNode ────────────────────────────────────────
   const createDecisionNode = (variableCol, csvId, wx, wy) => {
     pushHistory();
@@ -2012,6 +2104,10 @@ export default function App() {
       id, type:"cineminha", x:wx-W/2, y:wy-H/2, w:W, h:H,
       label:"Cineminha", color:"#fff", cinemaType,
       rowVar:null, colVar:null, rowDomain:[], colDomain:[], cells:{},
+      metadata: {
+        type: cinemaType, identifiers: {}, dimensions: { rowVariable: null, columnVariable: null },
+        variables: {}, source: 'manual', description: '', tags: [], version: 1,
+      },
     };
     const PORT_W = 100, PORT_H = 32;
     const eligId = uid(), notId = uid();
@@ -3253,6 +3349,19 @@ export default function App() {
                   color:"#ea580c",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                   whiteSpace:"nowrap",fontWeight:600}}>
                 ⬆ Importar
+              </button>
+              <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 2px"}}/>
+              <button onClick={()=>openCinemaLibrary(sel,'browse')}
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
+                  color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                📚 Biblioteca
+              </button>
+              <button onClick={()=>openCinemaLibrary(sel,'save')}
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #bbf7d0",background:"#f0fdf4",
+                  color:"#15803d",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                💾 Salvar
               </button>
             </div>
           );
@@ -5239,6 +5348,220 @@ export default function App() {
                     ✓ Aplicar ao Cineminha
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ CINEMA LIBRARY MODAL ═══════════════ */}
+      {cinemaLibraryModal&&(()=>{
+        const { mode, shapeId, search, filterType, saveMeta, overwriteId } = cinemaLibraryModal;
+        const upd = (patch) => setCinemaLibraryModal(prev => ({ ...prev, ...patch }));
+        const updMeta = (patch) => setCinemaLibraryModal(prev => ({ ...prev, saveMeta: { ...prev.saveMeta, ...patch } }));
+
+        const filteredItems = cinemaLibrary.filter(it => {
+          if (filterType && it.cinemaType !== filterType) return false;
+          if (!search.trim()) return true;
+          const q = search.toLowerCase();
+          return (
+            it.name.toLowerCase().includes(q) ||
+            (it.metadata?.description ?? '').toLowerCase().includes(q) ||
+            (it.metadata?.tags ?? []).some(t => t.toLowerCase().includes(q)) ||
+            Object.values(it.metadata?.identifiers ?? {}).some(v => String(v).toLowerCase().includes(q))
+          );
+        });
+
+        const isSaveMode = mode === 'save';
+        const title = isSaveMode ? 'Salvar na Biblioteca' : 'Biblioteca de Cineminhas';
+        const icon  = isSaveMode ? '💾' : '📚';
+
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.5)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:isSaveMode?520:700,maxHeight:"88vh",boxShadow:"0 24px 80px rgba(0,0,0,.22)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 28px 16px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <div style={{width:40,height:40,borderRadius:11,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{icon}</div>
+                  <div>
+                    <h3 style={{fontSize:16,fontWeight:700,color:"#1e293b",marginBottom:2}}>{title}</h3>
+                    <p style={{fontSize:12,color:"#94a3b8"}}>{isSaveMode ? "Preencha os metadados e salve o Cineminha atual" : `${cinemaLibrary.length} modelo${cinemaLibrary.length!==1?'s':''} salvo${cinemaLibrary.length!==1?'s':''}`}</p>
+                  </div>
+                </div>
+                <button onClick={()=>setCinemaLibraryModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",color:"#94a3b8",cursor:"pointer",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>×</button>
+              </div>
+
+              {isSaveMode ? (
+                /* ── Save mode ── */
+                <div style={{padding:"20px 28px",display:"flex",flexDirection:"column",gap:16,overflowY:"auto"}}>
+                  {/* Name */}
+                  <div>
+                    <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Nome *</label>
+                    <input value={saveMeta.name} onChange={e=>updMeta({name:e.target.value})}
+                      placeholder="Ex: Elegibilidade Varejo G1"
+                      style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",boxSizing:"border-box",outline:"none"}}/>
+                  </div>
+                  {/* Description */}
+                  <div>
+                    <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Descrição</label>
+                    <textarea value={saveMeta.description} onChange={e=>updMeta({description:e.target.value})}
+                      placeholder="Descreva o objetivo e contexto desta matriz…"
+                      rows={3}
+                      style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",boxSizing:"border-box",resize:"vertical",outline:"none"}}/>
+                  </div>
+                  {/* Tags */}
+                  <div>
+                    <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Tags <span style={{fontWeight:400,color:"#94a3b8"}}>(separadas por vírgula)</span></label>
+                    <input value={saveMeta.tags} onChange={e=>updMeta({tags:e.target.value})}
+                      placeholder="Ex: varejo, oferta, G1"
+                      style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",boxSizing:"border-box",outline:"none"}}/>
+                  </div>
+                  {/* Identifiers */}
+                  <div>
+                    <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Identificadores <span style={{fontWeight:400,color:"#94a3b8"}}>(JSON)</span></label>
+                    <textarea value={saveMeta.identifiers} onChange={e=>updMeta({identifiers:e.target.value})}
+                      rows={4}
+                      placeholder={'{\n  "cluster": "G1",\n  "politica": "Oferta"\n}'}
+                      style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:12,fontFamily:"monospace",boxSizing:"border-box",resize:"vertical",outline:"none"}}/>
+                  </div>
+                  {/* Overwrite selector */}
+                  {cinemaLibrary.length > 0 && (
+                    <div>
+                      <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Sobrescrever modelo existente <span style={{fontWeight:400,color:"#94a3b8"}}>(opcional)</span></label>
+                      <select value={overwriteId??''} onChange={e=>upd({overwriteId:e.target.value||null})}
+                        style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",background:"#fff",outline:"none"}}>
+                        <option value="">— Salvar como novo —</option>
+                        {cinemaLibrary.map(it=>(
+                          <option key={it.id} value={it.id}>{it.name} ({getCinemaType(it.cinemaType).label})</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* ── Browse mode ── */
+                <div style={{display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+                  {/* Search + filters */}
+                  <div style={{padding:"14px 28px 12px",borderBottom:"1px solid #f1f5f9",flexShrink:0,display:"flex",gap:10,alignItems:"center"}}>
+                    <input value={search} onChange={e=>upd({search:e.target.value})}
+                      placeholder="Buscar por nome, tag, descrição…"
+                      style={{flex:1,padding:"8px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+                    {Object.values(CINEMINHA_TYPES).map(t=>(
+                      <button key={t.id} onClick={()=>upd({filterType:filterType===t.id?null:t.id})}
+                        style={{padding:"6px 12px",borderRadius:7,fontSize:11.5,fontFamily:"inherit",cursor:"pointer",whiteSpace:"nowrap",fontWeight:600,
+                          border:`1.5px solid ${filterType===t.id?t.badgeFg:t.badgeBg}`,
+                          background:filterType===t.id?t.badgeBg:"#fff",
+                          color:filterType===t.id?t.badgeFg:"#94a3b8"}}>
+                        {t.icon} {t.label}
+                      </button>
+                    ))}
+                    {shapeId && (
+                      <button onClick={()=>upd({mode:'save',saveMeta:{name:shapesR.current.find(s=>s.id===shapeId)?.label??'Cineminha',description:(shapesR.current.find(s=>s.id===shapeId)?.metadata?.description??''),tags:(shapesR.current.find(s=>s.id===shapeId)?.metadata?.tags??[]).join(', '),identifiers:JSON.stringify(shapesR.current.find(s=>s.id===shapeId)?.metadata?.identifiers??{},null,2)},overwriteId:null})}
+                        style={{padding:"7px 14px",borderRadius:8,border:"1px solid #bbf7d0",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>
+                        💾 Salvar atual
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Item list */}
+                  <div style={{flex:1,overflowY:"auto",padding:"12px 28px"}}>
+                    {filteredItems.length === 0 ? (
+                      <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"48px 0",gap:12,color:"#94a3b8"}}>
+                        <div style={{fontSize:40}}>{cinemaLibrary.length===0?'📭':'🔍'}</div>
+                        <div style={{fontSize:14,fontWeight:600}}>{cinemaLibrary.length===0?'Biblioteca vazia':'Nenhum resultado'}</div>
+                        <div style={{fontSize:12,textAlign:"center",maxWidth:280}}>
+                          {cinemaLibrary.length===0
+                            ? 'Selecione um Cineminha no canvas e clique em "💾 Salvar" para adicionar à biblioteca.'
+                            : 'Tente ajustar a busca ou remover filtros.'}
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        {filteredItems.map(item => {
+                          const cfg = getCinemaType(item.cinemaType);
+                          const tags = item.metadata?.tags ?? [];
+                          const identifiers = item.metadata?.identifiers ?? {};
+                          const identKeys = Object.keys(identifiers);
+                          return (
+                            <div key={item.id} style={{border:"1.5px solid #e2e8f0",borderRadius:12,padding:"14px 16px",display:"flex",gap:14,alignItems:"flex-start",background:"#fafafa",transition:"border-color .15s"}}
+                              onMouseEnter={e=>e.currentTarget.style.borderColor=cfg.color}
+                              onMouseLeave={e=>e.currentTarget.style.borderColor="#e2e8f0"}>
+                              {/* Type badge */}
+                              <div style={{width:36,height:36,borderRadius:9,background:cfg.badgeBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{cfg.icon}</div>
+                              {/* Info */}
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                                  <span style={{fontSize:13.5,fontWeight:700,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}</span>
+                                  <span style={{fontSize:10.5,fontWeight:600,padding:"2px 7px",borderRadius:99,background:cfg.badgeBg,color:cfg.badgeFg,flexShrink:0}}>{cfg.label}</span>
+                                  {item.metadata?.version>1&&<span style={{fontSize:10,color:"#94a3b8",flexShrink:0}}>v{item.metadata.version}</span>}
+                                </div>
+                                {item.metadata?.description&&(
+                                  <div style={{fontSize:11.5,color:"#64748b",marginBottom:5,lineHeight:1.4}}>{item.metadata.description}</div>
+                                )}
+                                <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:identKeys.length?5:0}}>
+                                  {tags.map(t=>(
+                                    <span key={t} style={{fontSize:10,padding:"2px 7px",borderRadius:99,background:"#f1f5f9",color:"#64748b",border:"1px solid #e2e8f0"}}>{t}</span>
+                                  ))}
+                                </div>
+                                {identKeys.length>0&&(
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                                    {identKeys.map(k=>(
+                                      <span key={k} style={{fontSize:10,padding:"2px 7px",borderRadius:99,background:"#eff6ff",color:"#3b82f6",border:"1px solid #bfdbfe"}}>{k}: {String(identifiers[k])}</span>
+                                    ))}
+                                  </div>
+                                )}
+                                <div style={{fontSize:10,color:"#cbd5e1",marginTop:5}}>
+                                  {item.rowVar?.col&&`Linhas: ${item.rowVar.col}`}
+                                  {item.rowVar?.col&&item.colVar?.col&&' · '}
+                                  {item.colVar?.col&&`Colunas: ${item.colVar.col}`}
+                                  {(item.rowVar?.col||item.colVar?.col)&&' · '}
+                                  Salvo em {new Date(item.savedAt).toLocaleDateString('pt-BR')}
+                                </div>
+                              </div>
+                              {/* Actions */}
+                              <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+                                <button onClick={()=>loadFromLibrary(item)}
+                                  style={{padding:"6px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>
+                                  + Adicionar ao Board
+                                </button>
+                                <button onClick={()=>deleteFromLibrary(item.id)}
+                                  style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fecaca",background:"#fff",color:"#dc2626",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
+                                  Remover
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Footer */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 28px",borderTop:"1px solid #f1f5f9",flexShrink:0}}>
+                {isSaveMode ? (
+                  <>
+                    <button onClick={()=>upd({mode:'browse'})}
+                      style={{padding:"8px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                      ← Voltar
+                    </button>
+                    <button onClick={saveToLibrary} disabled={!saveMeta.name.trim()}
+                      style={{padding:"9px 22px",borderRadius:9,border:"none",background:saveMeta.name.trim()?"#4f46e5":"#c7d2fe",color:"#fff",cursor:saveMeta.name.trim()?"pointer":"not-allowed",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                      {overwriteId ? '🔄 Substituir' : '💾 Salvar na Biblioteca'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span style={{fontSize:11.5,color:"#94a3b8"}}>{filteredItems.length} resultado{filteredItems.length!==1?'s':''}</span>
+                    <button onClick={()=>setCinemaLibraryModal(null)}
+                      style={{padding:"8px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                      Fechar
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>
