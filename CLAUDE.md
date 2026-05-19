@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~3300 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~6100 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -11,13 +11,18 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ## Estrutura de dados (src/App.jsx)
 
 ### Estado principal
-- `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`, `cineminha`
+- `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`, `cineminha`, `decision_lens`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
 - `csvStore`: `{[csvId]: {name, headers, rows, columnTypes, varTypes, asIsConfig}}`
 - `wizard`: modal de importação em 3 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId}`
+- `libWizard`: wizard de importação de biblioteca — `{rawText, filename, delimiter, hasHeader, step: 1|2|3, columnRoles, agrupadorOrder, resultadoMapping}`
+- `cinemaLibrary`: biblioteca de Cineminhas salvos — `CinemaLibraryItem[]`
+- `cinemaLibraryModal`: modal da biblioteca — `null | {mode:'browse'|'save', shapeId, search, filterType, saveMeta, overwriteId, justImported?}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
+- `lensModal`: modal do Decision Lens — `null | {shapeId, rules, population}`
+- `importTypeModal`: seletor de tipo de importação — `null | {shapeId}`
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -65,6 +70,12 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
+- `openCinemaLibrary(shapeId, mode)`: abre modal da biblioteca em modo `'browse'` ou `'save'`
+- `saveToLibrary()`: salva Cineminha selecionado na biblioteca com metadata
+- `loadFromLibrary(item)`: instancia um item da biblioteca no canvas (cria shape + ports)
+- `deleteFromLibrary(itemId)`: remove item da biblioteca
+- `onLibWizardConfirm()`: processa CSV da biblioteca — agrupa por agrupadores, faz distinct de linha/coluna, monta `cells` via `resultadoMapping`, cria `CinemaLibraryItem[]` e abre biblioteca
+- `onLibFileChange(e)`: lê arquivo CSV e inicializa `libWizard`
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
@@ -81,6 +92,35 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}`
 - `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`
 - `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
+- `computeLensAffectedRows(shape, csvStore)`: retorna `{[csvId]: boolean[]}` — quais linhas são afetadas pelo Decision Lens
+- `computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations)`: sobrescreve decisões de linhas afetadas → `simulationOverlay`
+- `computeIncrementalResult(simulationOverlay, csvStore)`: computa `{baseline, simulated, impacted}` para o Business Impact widget
+- `getCinemaType(cinemaType)`: retorna configuração do tipo (`eligibility`, …) — label, ícone, cores e ports padrão
+
+### Estrutura `CinemaLibraryItem`
+```js
+{
+  id,           // uid
+  savedAt,      // ISO string
+  name,         // string — label exibido na biblioteca
+  cinemaType,   // 'eligibility' | outros tipos futuros
+  rowVar,       // null | {col}
+  colVar,       // null | {col}
+  rowDomain,    // string[]
+  colDomain,    // string[]
+  cells,        // {[cellKey]: boolean}
+  metadata: {
+    type,           // cinemaType
+    identifiers,    // {[agrupador]: value} — chaves do agrupamento de origem
+    dimensions,     // {rowVariable, columnVariable}
+    variables,      // {}
+    source,         // 'manual' | 'library_import_csv' | 'library_import'
+    description,    // string
+    tags,           // string[]
+    version,        // number
+  }
+}
+```
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
@@ -93,6 +133,45 @@ Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc
 5. Conectar ports a outros nós ou a ✅ Aprovado / ❌ Reprovado
 6. Duplo-clique em seta → editar label
 7. Painel de simulação atualiza Taxa de Aprovação, Inad. Real e Inad. Inferida em tempo real
+
+## Geração Automática de Cineminhas (Biblioteca CSV)
+
+Transforma uma tabela estruturada em múltiplos Cineminhas prontos para uso.
+
+### Fluxo do `libWizard` (3 passos)
+
+**Passo 1 — Delimitador**
+- Mesmo comportamento do wizard de CSV: detecção automática + preview
+
+**Passo 2 — Papéis das colunas**
+- Cada coluna recebe um papel via `columnRoles`:
+  | Papel | Significado |
+  |---|---|
+  | `agrupador` | Segmenta os dados em Cineminhas distintos — vários agrupadores são ordenados em `agrupadorOrder` |
+  | `linha` | Variável no eixo Y da matriz (obrigatório) |
+  | `coluna` | Variável no eixo X (opcional — gera matriz 2D) |
+  | `resultado` | Valor de elegibilidade por linha de dados |
+- Quando `resultado` é selecionado, um painel de **Mapeamento de Resultado** aparece automaticamente com todos os valores distintos da coluna, cada um com toggle **✅ Elegível / ❌ N. Elegível**; defaults inteligentes via `INELIGIBLE_VALS`
+- O mapeamento é salvo em `libWizard.resultadoMapping: {[value]: boolean}`
+
+**Passo 3 — Confirmação**
+- Banner resume: N Cineminhas serão criados, com linha/coluna/agrupadores
+- **Pré-visualização de matriz**: exibe a primeira matriz gerada (cap 6×5) com ✅/❌ reais antes de confirmar — funciona em modo 1D e 2D
+- Lista de grupos (até 10 visíveis)
+
+### Pipeline de geração (`onLibWizardConfirm`)
+1. Parse do CSV com `parseCSV`
+2. Agrupamento: `Map<groupKey, {meta, rowObjs}>` — `groupKey = agrupadores.map(a => obj[a]).join(' | ')` ou `'__all__'`
+3. Para cada grupo: distinct de linha e coluna → `sortDomain` → `rowDomain` / `colDomain`
+4. Construção de `cells`: primeira ocorrência de cada `(rv, cv)` vence (determinismo); elegibilidade via `resultadoMapping[raw]` com fallback `INELIGIBLE_VALS`; valores vazios em linha ignorados
+5. Cria `CinemaLibraryItem[]` e adiciona a `cinemaLibrary`
+6. Abre `cinemaLibraryModal` em modo `browse` com `justImported: N` → exibe banner de sucesso
+
+### Tolerância estrutural
+- Linha com `rowVal` vazio ou em branco → ignorada
+- `colVal` vazio → chave 1D `${rv}|*`
+- Duplicatas `(rv, cv)` no mesmo grupo → primeira ocorrência vence
+- Coluna resultado ausente → todas as células `= true` (Elegível)
 
 ## Constantes do Cineminha
 ```js
@@ -236,4 +315,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-decision-variable-fP4ZM`
+`claude/automate-cinema-generation-0F6WP`
