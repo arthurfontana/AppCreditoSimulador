@@ -84,6 +84,38 @@ const CINEMA_MAX_W    = 540;
 const CINEMA_MAX_H    = 420;
 
 const COLORS = ["#ffffff","#dbeafe","#fef3c7","#dcfce7","#fce7f3","#e0e7ff","#ffedd5","#fef9c3"];
+
+// ── Cineminha typing system ───────────────────────────────────────────────────
+const CINEMINHA_TYPES = {
+  eligibility: {
+    id: 'eligibility',
+    label: 'Elegibilidade',
+    icon: '🎯',
+    desc: 'Aprovação ou reprovação de registro',
+    color: '#6366f1',
+    badgeBg: '#eef2ff',
+    badgeFg: '#4f46e5',
+    ports: [
+      { label: 'Elegível',     color: '#f0fdf4' },
+      { label: 'Não Elegível', color: '#fff1f2' },
+    ],
+  },
+  offer: {
+    id: 'offer',
+    label: 'Oferta',
+    icon: '💼',
+    desc: 'Definição de grade ou nível de oferta',
+    color: '#0891b2',
+    badgeBg: '#ecfeff',
+    badgeFg: '#0e7490',
+    ports: [
+      { label: 'Com Oferta',  color: '#ecfeff' },
+      { label: 'Sem Oferta',  color: '#fef9c3' },
+    ],
+  },
+};
+const getCinemaType = (cinemaType) => CINEMINHA_TYPES[cinemaType] ?? CINEMINHA_TYPES.eligibility;
+
 const TOOLS  = [
   { id:"hand",          icon:"✋",  label:"Mover"          },
   { id:"select",        icon:"↖",   label:"Selecionar"     },
@@ -398,7 +430,8 @@ function runSimulation(shapes, conns, csvStore) {
         const cKey = node.colVar ? colVal : '*';
         const cellKey = `${rKey}|${cKey}`;
         const isEligible = (node.cells ?? {})[cellKey] !== false;
-        const targetLabel = isEligible ? 'Elegível' : 'Não Elegível';
+        const typeCfg = getCinemaType(node.cinemaType);
+        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
         const match = (out[cur] || []).find(e => e.label === targetLabel);
         if (!match) return {result:null, path};
         const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
@@ -555,7 +588,8 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
         const isEligible = (node.cells ?? {})[`${rKey}|${cKey}`] !== false;
-        const match = (out[cur] || []).find(e => e.label === (isEligible ? 'Elegível' : 'Não Elegível'));
+        const typeCfg2 = getCinemaType(node.cinemaType);
+        const match = (out[cur] || []).find(e => e.label === (isEligible ? typeCfg2.ports[0].label : typeCfg2.ports[1].label));
         if (!match) return {result:null, path};
         const cid = edgeLookup[cur]?.[`${match.to}::${match.label??''}`];
         if (cid) path.push(cid);
@@ -1059,6 +1093,8 @@ export default function App() {
   const [optimModal, setOptimModal] = useState(null);   // null | optim obj
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
+  // Cineminha type picker (shown on creation)
+  const [cinemaTypeModal, setCinemaTypeModal] = useState(null); // null | {wx, wy}
   // Cineminha export/import
   const [cinemaImportModal, setCinemaImportModal] = useState(null); // null | {shapeId, config, step, rowMapping, colMapping, availableVars}
   // Business Impact floating widget
@@ -1230,7 +1266,7 @@ export default function App() {
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
-      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy);}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected"||curTool==="as_is";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":curTool==="as_is"?"AS IS":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
+      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){setCinemaTypeModal({wx,wy});}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected"||curTool==="as_is";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":curTool==="as_is"?"AS IS":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
     }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
@@ -1276,7 +1312,7 @@ export default function App() {
     if (movedR.current) return;
     if (tool==="cineminha") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
-      createCinemaNode(wx,wy); return;
+      setCinemaTypeModal({wx,wy}); return;
     }
     if (tool==="decision_lens") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
@@ -1784,6 +1820,7 @@ export default function App() {
     const payload = {
       schemaVersion: "1.0",
       componentType: "cineminha",
+      cinemaType: shape.cinemaType ?? 'eligibility',
       ...(shape.rowVar ? { rowVar: { col: shape.rowVar.col } } : {}),
       ...(shape.colVar ? { colVar: { col: shape.colVar.col } } : {}),
       rowDomain: shape.rowDomain || [],
@@ -1893,8 +1930,10 @@ export default function App() {
     }
     const skipped = Object.keys(importedCells).filter(k => !(k in newCells)).length;
     const { w, h } = computeCinemaSize(rowDomain, colDomain);
+    const importedType = config.cinemaType && CINEMINHA_TYPES[config.cinemaType] ? config.cinemaType : undefined;
     setShapes(prev => prev.map(s => s.id !== shapeId ? s : {
       ...s, rowVar: rowVarFinal, colVar: colVarFinal, rowDomain, colDomain, cells: newCells, w, h,
+      ...(importedType ? { cinemaType: importedType } : {}),
     }));
     setCinemaImportModal(null);
     if (skipped > 0) {
@@ -1941,26 +1980,46 @@ export default function App() {
   }, []);
 
   // ── createCinemaNode ──────────────────────────────────────────
-  const createCinemaNode = useCallback((wx, wy) => {
+  const createCinemaNode = useCallback((wx, wy, cinemaType = 'eligibility') => {
     pushHistory();
     const id = uid();
-    const W = 170, H = 100;
+    const W = 170, H = 108;
+    const cfg = getCinemaType(cinemaType);
     const cinemaShape = {
       id, type:"cineminha", x:wx-W/2, y:wy-H/2, w:W, h:H,
-      label:"Cineminha", color:"#fff",
+      label:"Cineminha", color:"#fff", cinemaType,
       rowVar:null, colVar:null, rowDomain:[], colDomain:[], cells:{},
     };
     const PORT_W = 100, PORT_H = 32;
     const eligId = uid(), notId = uid();
-    const eligPort = {id:eligId, type:"port", x:wx+W/2+36, y:wy-PORT_H-6, w:PORT_W, h:PORT_H, label:"Elegível",    color:"#f0fdf4"};
-    const notPort  = {id:notId,  type:"port", x:wx+W/2+36, y:wy+6,         w:PORT_W, h:PORT_H, label:"Não Elegível",color:"#fff1f2"};
+    const eligPort = {id:eligId, type:"port", x:wx+W/2+36, y:wy-PORT_H-6, w:PORT_W, h:PORT_H, label:cfg.ports[0].label, color:cfg.ports[0].color};
+    const notPort  = {id:notId,  type:"port", x:wx+W/2+36, y:wy+6,         w:PORT_W, h:PORT_H, label:cfg.ports[1].label, color:cfg.ports[1].color};
     const newConns = [
-      {id:uid(), from:id, to:eligId, label:"Elegível"},
-      {id:uid(), from:id, to:notId,  label:"Não Elegível"},
+      {id:uid(), from:id, to:eligId, label:cfg.ports[0].label},
+      {id:uid(), from:id, to:notId,  label:cfg.ports[1].label},
     ];
     setShapes(prev => [...prev, cinemaShape, eligPort, notPort]);
     setConns(prev  => [...prev, ...newConns]);
     setSel(id);
+  }, []); // eslint-disable-line
+
+  // ── changeCinemaType ──────────────────────────────────────────
+  const changeCinemaType = useCallback((shapeId, newType) => {
+    pushHistory();
+    const cfg = getCinemaType(newType);
+    const cinConns = connsR.current.filter(c => c.from === shapeId);
+    setShapes(prev => prev.map(s => {
+      if (s.id === shapeId) return { ...s, cinemaType: newType };
+      const ci = cinConns.findIndex(c => c.to === s.id);
+      if (ci >= 0 && cfg.ports[ci]) return { ...s, label: cfg.ports[ci].label, color: cfg.ports[ci].color };
+      return s;
+    }));
+    setConns(prev => prev.map(c => {
+      if (c.from !== shapeId) return c;
+      const ci = cinConns.findIndex(cc => cc.id === c.id);
+      if (ci >= 0 && cfg.ports[ci]) return { ...c, label: cfg.ports[ci].label };
+      return c;
+    }));
   }, []); // eslint-disable-line
 
   // ── createLensNode ────────────────────────────────────────────
@@ -2339,14 +2398,15 @@ export default function App() {
   // ── Render: Cineminha (Cross Decision Matrix) ─────────────────
   const renderCinemaNode = (shape) => {
     const {id, x, y, w, h, rowVar, colVar, rowDomain, colDomain, cells, minimized} = shape;
+    const typeCfg = getCinemaType(shape.cinemaType);
     const isSel=sel===id, isFrom=fromId===id;
     const hasErr=!!flowErrors[id];
-    const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":"#6366f1";
+    const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":typeCfg.color;
     const sw=isSel||isFrom?2:hasErr?2.5:1.5;
     const flt=hasErr?"drop-shadow(0 0 6px rgba(220,38,38,.5))":
-               isSel?"drop-shadow(0 0 0 2px rgba(99,102,241,.25)) drop-shadow(0 2px 8px rgba(99,102,241,.18))":
+               isSel?`drop-shadow(0 0 0 2px ${typeCfg.badgeBg}) drop-shadow(0 2px 8px ${typeCfg.badgeBg})`:
                isFrom?"drop-shadow(0 0 0 2px rgba(245,158,11,.25)) drop-shadow(0 2px 8px rgba(245,158,11,.18))":
-               "drop-shadow(0 2px 12px rgba(99,102,241,.15))";
+               `drop-shadow(0 2px 12px ${typeCfg.badgeBg})`;
     const cur=tool==="connect"?"crosshair":tool==="select"?"grab":"default";
     const hasVars = rowVar || colVar;
 
@@ -2357,8 +2417,11 @@ export default function App() {
         <g key={id} data-sid={id}
           onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
           style={{cursor:cur, filter:flt}}>
-          <rect x={x} y={y} width={MW} height={MH} rx={10} fill="#6366f1" stroke={stroke} strokeWidth={sw}/>
+          <rect x={x} y={y} width={MW} height={MH} rx={10} fill={typeCfg.color} stroke={stroke} strokeWidth={sw}/>
           <text x={x+12} y={y+27} fontSize={13} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",14)}</text>
+          {/* Type badge */}
+          <rect x={x+MW-78} y={y+11} width={44} height={16} rx={8} fill="rgba(255,255,255,.22)" style={{pointerEvents:"none"}}/>
+          <text x={x+MW-56} y={y+22} fontSize={8.5} textAnchor="middle" fontWeight="700" fill="#fff" fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,5)}</text>
           <g onClick={e=>{e.stopPropagation();pushHistory();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,...computeCinemaSize(s.rowDomain||[],s.colDomain||[])}:s));}} style={{cursor:"pointer"}}>
             <rect x={x+MW-28} y={y+8} width={22} height={22} rx={6} fill="rgba(255,255,255,.2)"/>
             <text x={x+MW-17} y={y+23} fontSize={13} textAnchor="middle" fill="#fff">⤢</text>
@@ -2381,9 +2444,12 @@ export default function App() {
             return <rect key={`${ci}-${ri}`} x={x+20+ci*16} y={y+20+ri*14} width={13} height={11} rx={2} fill={colors[ri*3+ci]} opacity={.85}/>;
           }))}
           <text x={x+w/2} y={y+62} textAnchor="middle" fontSize={10.5}
-            fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill="#6366f1"
+            fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill={typeCfg.color}
             style={{pointerEvents:"none",userSelect:"none"}}>Cineminha</text>
-          <text x={x+w/2} y={y+76} textAnchor="middle" fontSize={9} fill="#94a3b8"
+          {/* Type badge below label */}
+          <rect x={x+w/2-28} y={y+66} width={56} height={16} rx={8} fill={typeCfg.badgeBg} style={{pointerEvents:"none"}}/>
+          <text x={x+w/2} y={y+77} textAnchor="middle" fontSize={8.5} fontWeight="700" fill={typeCfg.badgeFg} fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,7)}</text>
+          <text x={x+w/2} y={y+92} textAnchor="middle" fontSize={9} fill="#94a3b8"
             fontFamily="'DM Sans',system-ui,sans-serif"
             style={{pointerEvents:"none",userSelect:"none"}}>Arraste variáveis aqui</text>
           {hasErr&&<>
@@ -2405,18 +2471,22 @@ export default function App() {
         <rect x={x} y={y} width={w} height={h} rx={12} fill="#fff" stroke={stroke} strokeWidth={sw}/>
 
         {/* Title bar — drag handle */}
-        <rect data-sid={id} x={x} y={y} width={w} height={CINEMA_TITLE_H} rx={12} fill="#6366f1"
+        <rect data-sid={id} x={x} y={y} width={w} height={CINEMA_TITLE_H} rx={12} fill={typeCfg.color}
           onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} style={{cursor:"grab"}}/>
-        <rect x={x} y={y+CINEMA_TITLE_H-8} width={w} height={8} fill="#6366f1"/>
+        <rect x={x} y={y+CINEMA_TITLE_H-8} width={w} height={8} fill={typeCfg.color}/>
 
         {/* Title text */}
         <text x={x+12} y={y+24} fontSize={11} fontWeight="700" fill="#fff"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",16)}</text>
 
+        {/* Type badge in title bar */}
+        <rect x={x+12} y={y+27} width={58} height={14} rx={7} fill="rgba(255,255,255,.2)" style={{pointerEvents:"none"}}/>
+        <text x={x+41} y={y+37} textAnchor="middle" fontSize={8.5} fontWeight="700" fill="#fff" fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,7)}</text>
+
         {/* Variable labels */}
-        {rowVar&&<text x={x+w-40} y={y+16} textAnchor="end" fontSize={9} fill="#c7d2fe"
+        {rowVar&&<text x={x+w-40} y={y+16} textAnchor="end" fontSize={9} fill="rgba(255,255,255,.75)"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>L: {trunc(rowVar.col,12)}</text>}
-        {colVar&&<text x={x+w-40} y={y+28} textAnchor="end" fontSize={9} fill="#c7d2fe"
+        {colVar&&<text x={x+w-40} y={y+28} textAnchor="end" fontSize={9} fill="rgba(255,255,255,.75)"
           fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>C: {trunc(colVar.col,12)}</text>}
 
         {/* Interactive matrix via foreignObject */}
@@ -2473,7 +2543,7 @@ export default function App() {
                           )}
                           <button
                             onClick={()=>toggleCinemaCell(id, cellKey)}
-                            title={eligible?"Elegível (clique para reprovar)":"Não Elegível (clique para aprovar)"}
+                            title={eligible?`${typeCfg.ports[0].label} (clique para alternar)`:`${typeCfg.ports[1].label} (clique para alternar)`}
                             style={{
                               width:"100%",height:CINEMA_CELL_H-6,border:"none",borderRadius:4,
                               background:eligible?"#22c55e":"#ef4444",
@@ -2515,7 +2585,7 @@ export default function App() {
           [x,y+h,"sw"],[x,y+h/2,"w"],
         ].map(([hx,hy,dir])=>(
           <rect key={dir} x={hx-5} y={hy-5} width={10} height={10} rx={3}
-            fill="#6366f1" stroke="#fff" strokeWidth={1.5}
+            fill={typeCfg.color} stroke="#fff" strokeWidth={1.5}
             style={{cursor:resizeCursor(dir)}}
             onMouseDown={e=>onCinemaResizeDown(e,id,dir)}/>
         ))}
@@ -3111,30 +3181,50 @@ export default function App() {
         })()}
 
         {/* Cineminha toolbar — shows when a single cineminha is selected */}
-        {selShape?.type==='cineminha'&&multiSel.size<=1&&(
-          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-            border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
-            <button onClick={()=>openOptimModal(sel)}
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
-                color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              ⚙ Otimizar Decisão
-            </button>
-            <button onClick={()=>exportCinema(sel)}
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #bbf7d0",background:"#f0fdf4",
-                color:"#16a34a",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              ⬇ Exportar
-            </button>
-            <button onClick={()=>startCinemaImport(sel)}
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fed7aa",background:"#fff7ed",
-                color:"#ea580c",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              ⬆ Importar
-            </button>
-          </div>
-        )}
+        {selShape?.type==='cineminha'&&multiSel.size<=1&&(()=>{
+          const selCfg = getCinemaType(selShape.cinemaType);
+          return (
+            <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
+              display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+              border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)",alignItems:"center"}}>
+              {/* Type selector */}
+              <div style={{display:"flex",gap:2,marginRight:4,paddingRight:8,borderRight:"1px solid #e2e8f0"}}>
+                {Object.values(CINEMINHA_TYPES).map(t=>{
+                  const active = (selShape.cinemaType ?? 'eligibility') === t.id;
+                  return (
+                    <button key={t.id} onClick={()=>changeCinemaType(sel,t.id)}
+                      title={t.desc}
+                      style={{padding:"4px 10px",borderRadius:6,fontFamily:"inherit",fontSize:11,fontWeight:600,cursor:"pointer",
+                        whiteSpace:"nowrap",transition:"all .12s",
+                        border: active ? `1.5px solid ${t.badgeFg}` : "1.5px solid #e2e8f0",
+                        background: active ? t.badgeBg : "#fff",
+                        color: active ? t.badgeFg : "#94a3b8"}}>
+                      {t.icon} {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <button onClick={()=>openOptimModal(sel)}
+                style={{padding:"5px 14px",borderRadius:7,border:`1px solid ${selCfg.badgeBg}`,background:selCfg.badgeBg,
+                  color:selCfg.badgeFg,cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                ⚙ Otimizar Decisão
+              </button>
+              <button onClick={()=>exportCinema(sel)}
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #bbf7d0",background:"#f0fdf4",
+                  color:"#16a34a",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                ⬇ Exportar
+              </button>
+              <button onClick={()=>startCinemaImport(sel)}
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fed7aa",background:"#fff7ed",
+                  color:"#ea580c",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                ⬆ Importar
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Decision Lens toolbar — shows when a single decision_lens is selected */}
         {selShape?.type==='decision_lens'&&multiSel.size<=1&&(
@@ -4139,6 +4229,39 @@ export default function App() {
           </div>
         );
       })()}
+
+      {/* ═══════════════ CINEMINHA TYPE PICKER MODAL ═══════════ */}
+      {cinemaTypeModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:440,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:20}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div style={{width:38,height:38,borderRadius:10,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⊞</div>
+              <div>
+                <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>Novo Cineminha</h3>
+                <p style={{fontSize:12.5,color:"#64748b"}}>Selecione o tipo desta matriz de decisão</p>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:12}}>
+              {Object.values(CINEMINHA_TYPES).map(t=>(
+                <button key={t.id}
+                  onClick={()=>{ createCinemaNode(cinemaTypeModal.wx, cinemaTypeModal.wy, t.id); setCinemaTypeModal(null); }}
+                  style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"18px 12px",borderRadius:14,
+                    border:`1.5px solid ${t.badgeBg}`,background:t.badgeBg,cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor=t.badgeFg;e.currentTarget.style.boxShadow=`0 4px 16px ${t.badgeBg}`;}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor=t.badgeBg;e.currentTarget.style.boxShadow="none";}}>
+                  <span style={{fontSize:28}}>{t.icon}</span>
+                  <span style={{fontSize:13.5,fontWeight:700,color:t.badgeFg}}>{t.label}</span>
+                  <span style={{fontSize:11,color:"#64748b",textAlign:"center",lineHeight:1.4}}>{t.desc}</span>
+                </button>
+              ))}
+            </div>
+            <button onClick={()=>setCinemaTypeModal(null)}
+              style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
 
       {axisModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
