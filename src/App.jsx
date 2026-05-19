@@ -1613,7 +1613,7 @@ export default function App() {
     reader.onload = (ev) => {
       const text = ev.target.result;
       const { delimiter, confident } = detectDelimiter(text);
-      setLibWizard({ rawText: text, filename: file.name, delimiter, detected: delimiter, confident, hasHeader: true, step: 1, columnRoles: {}, agrupadorOrder: [], resultadoMapping: {} });
+      setLibWizard({ rawText: text, filename: file.name, delimiter, detected: delimiter, confident, hasHeader: true, step: 1, columnRoles: {}, agrupadorOrder: [], resultadoMapping: {}, rowLabelCol: null, colLabelCol: null });
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -1622,7 +1622,7 @@ export default function App() {
   const onLibWizardConfirm = () => {
     if (!libWizard) return;
     const { headers, rows } = parseCSV(libWizard.rawText, libWizard.delimiter, libWizard.hasHeader);
-    const { columnRoles, agrupadorOrder, resultadoMapping } = libWizard;
+    const { columnRoles, agrupadorOrder, resultadoMapping, rowLabelCol, colLabelCol } = libWizard;
     const linhaCol = Object.entries(columnRoles).find(([,v]) => v === 'linha')?.[0] ?? null;
     const colunaCol = Object.entries(columnRoles).find(([,v]) => v === 'coluna')?.[0] ?? null;
     const resultadoCol = Object.entries(columnRoles).find(([,v]) => v === 'resultado')?.[0] ?? null;
@@ -1663,6 +1663,25 @@ export default function App() {
           cells[ck] = true;
         }
       }
+
+      // Build value→label lookup dictionaries for row and col variables
+      const rowValueLabels = {};
+      if (linhaCol && rowLabelCol && rowLabelCol !== linhaCol) {
+        for (const rowObj of group.rowObjs) {
+          const techVal = String(rowObj[linhaCol] ?? '').trim();
+          const labelVal = String(rowObj[rowLabelCol] ?? '').trim();
+          if (techVal && labelVal && !rowValueLabels[techVal]) rowValueLabels[techVal] = labelVal;
+        }
+      }
+      const colValueLabels = {};
+      if (colunaCol && colLabelCol && colLabelCol !== colunaCol) {
+        for (const rowObj of group.rowObjs) {
+          const techVal = String(rowObj[colunaCol] ?? '').trim();
+          const labelVal = String(rowObj[colLabelCol] ?? '').trim();
+          if (techVal && labelVal && !colValueLabels[techVal]) colValueLabels[techVal] = labelVal;
+        }
+      }
+
       const name = agrupadores.length > 0
         ? agrupadores.map(a => group.meta[a]).filter(Boolean).join(' | ')
         : 'Cineminha Importado';
@@ -1680,7 +1699,12 @@ export default function App() {
           type: 'eligibility',
           identifiers: group.meta,
           dimensions: { rowVariable: linhaCol, columnVariable: colunaCol },
-          variables: {},
+          variables: {
+            rowLabel: rowLabelCol || null,
+            colLabel: colLabelCol || null,
+            ...(Object.keys(rowValueLabels).length > 0 ? { rowValueLabels } : {}),
+            ...(Object.keys(colValueLabels).length > 0 ? { colValueLabels } : {}),
+          },
           source: 'library_import_csv',
           description: '',
           tags: [],
@@ -2147,36 +2171,161 @@ export default function App() {
     setCinemaLibraryModal(null);
   };
 
-  const loadFromLibrary = (item) => {
+  const loadFromLibraryWithMapping = (item) => {
+    // Build a config object compatible with cinemaImportModal
+    const config = {
+      schemaVersion: "1.0",
+      componentType: "cineminha",
+      cinemaType: item.cinemaType ?? 'eligibility',
+      ...(item.rowVar ? { rowVar: item.rowVar } : {}),
+      ...(item.colVar ? { colVar: item.colVar } : {}),
+      rowDomain: item.rowDomain || [],
+      colDomain: item.colDomain || [],
+      cells: { ...(item.cells || {}) },
+      metadata: { ...(item.metadata ?? {}), source: 'library_import' },
+      name: item.name,
+    };
+
+    // Collect available decision variables from all loaded datasets
+    const availableVars = [];
+    for (const [csvId, csv] of Object.entries(csvStoreR.current)) {
+      for (const col of (csv.headers || [])) {
+        if ((csv.columnTypes?.[col] || '') === 'decision') {
+          availableVars.push({ col, csvId, csvName: csv.name });
+        }
+      }
+    }
+    const tryMatchVar = (colName) => {
+      if (!colName) return null;
+      return availableVars.find(v => v.col === colName)
+        || availableVars.find(v => v.col.toLowerCase() === colName.toLowerCase())
+        || null;
+    };
+
+    // If a cineminha is currently selected on the board, apply to it
+    const selectedCinema = selR.current
+      ? shapesR.current.find(s => s.id === selR.current && s.type === 'cineminha')
+      : null;
+
+    if (selectedCinema) {
+      const hasExistingConfig = !!(selectedCinema.rowVar || selectedCinema.colVar);
+      setCinemaImportModal({
+        shapeId: selectedCinema.id,
+        config,
+        step: hasExistingConfig ? 'confirm' : 'mapping',
+        rowMapping: config.rowVar ? tryMatchVar(config.rowVar.col) : null,
+        colMapping: config.colVar ? tryMatchVar(config.colVar.col) : null,
+        availableVars,
+        fromLibrary: true,
+      });
+      setCinemaLibraryModal(null);
+      return;
+    }
+
+    // No cineminha selected — create a new blank shape then immediately open mapping
     const cx = (-vpR.current.x + 500) / vpR.current.s;
     const cy = (-vpR.current.y + 320) / vpR.current.s;
     pushHistory();
     const id = uid();
     const cinemaType = item.cinemaType ?? 'eligibility';
     const cfg = getCinemaType(cinemaType);
-    const rowDom = item.rowDomain || [];
-    const colDom = item.colDomain || [];
-    const { w: sw, h: sh } = computeCinemaSize(rowDom, colDom);
-    const W = Math.max(170, sw), H = Math.max(108, sh);
+    const PORT_W = 100, PORT_H = 32;
+    const W = 170, H = 108;
     const cinemaShape = {
       id, type: 'cineminha', x: cx - W / 2, y: cy - H / 2, w: W, h: H,
       label: item.name || 'Cineminha', color: '#fff', cinemaType,
-      rowVar: null, colVar: null, rowDomain: rowDom, colDomain: colDom,
-      cells: { ...(item.cells || {}) },
+      rowVar: null, colVar: null, rowDomain: [], colDomain: [], cells: {},
       metadata: { ...(item.metadata ?? {}), source: 'library_import' },
     };
-    const PORT_W = 100, PORT_H = 32;
     const eligId = uid(), notId = uid();
     const eligPort = { id: eligId, type: 'port', x: cx + W / 2 + 36, y: cy - PORT_H - 6, w: PORT_W, h: PORT_H, label: cfg.ports[0].label, color: cfg.ports[0].color };
     const notPort  = { id: notId,  type: 'port', x: cx + W / 2 + 36, y: cy + 6,          w: PORT_W, h: PORT_H, label: cfg.ports[1].label, color: cfg.ports[1].color };
     setShapes(prev => [...prev, cinemaShape, eligPort, notPort]);
-    setConns(prev  => [...prev, { id: uid(), from: id, to: eligId, label: cfg.ports[0].label }, { id: uid(), from: id, to: notId, label: cfg.ports[1].label }]);
+    setConns(prev  => [...prev,
+      { id: uid(), from: id, to: eligId, label: cfg.ports[0].label },
+      { id: uid(), from: id, to: notId,  label: cfg.ports[1].label },
+    ]);
     setSel(id);
+    setCinemaImportModal({
+      shapeId: id,
+      config,
+      step: 'mapping',
+      rowMapping: config.rowVar ? tryMatchVar(config.rowVar.col) : null,
+      colMapping: config.colVar ? tryMatchVar(config.colVar.col) : null,
+      availableVars,
+      fromLibrary: true,
+    });
     setCinemaLibraryModal(null);
   };
 
   const deleteFromLibrary = (itemId) => {
     setCinemaLibrary(prev => prev.filter(it => it.id !== itemId));
+  };
+
+  // ── exportLibrary ─────────────────────────────────────────────
+  const exportLibrary = () => {
+    const library = cinemaLibraryR.current;
+    if (library.length === 0) return;
+
+    // Collect all unique identifier keys across every item (for consistent columns)
+    const allIdKeys = [...new Set(library.flatMap(item => Object.keys(item.metadata?.identifiers ?? {})))];
+
+    const csvHeaders = [
+      'NOME_MODELO', 'TIPO',
+      'VARIAVEL_LINHA', 'VARIAVEL_COLUNA',
+      'LABEL_LINHA', 'LABEL_COLUNA',
+      ...allIdKeys.map(k => `ID_${k}`),
+      'VALOR_LINHA', 'VALOR_COLUNA', 'RESULTADO',
+      'VERSAO', 'SOURCE', 'SALVO_EM',
+    ];
+
+    const escCSV = (v) => {
+      const s = String(v ?? '');
+      return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const dataRows = [];
+    for (const item of library) {
+      const ids = item.metadata?.identifiers ?? {};
+      const vars = item.metadata?.variables ?? {};
+      const rowDom = item.rowDomain || [];
+      const colDom = item.colDomain.length > 0 ? item.colDomain : ['*'];
+
+      const baseFields = [
+        item.name,
+        item.cinemaType ?? 'eligibility',
+        item.rowVar?.col ?? '',
+        item.colVar?.col ?? '',
+        vars.rowLabel ?? '',
+        vars.colLabel ?? '',
+        ...allIdKeys.map(k => String(ids[k] ?? '')),
+      ];
+      const tailFields = [
+        String(item.metadata?.version ?? 1),
+        item.metadata?.source ?? '',
+        item.savedAt ?? '',
+      ];
+
+      if (rowDom.length === 0) {
+        dataRows.push([...baseFields, '', '', '', ...tailFields]);
+      } else {
+        for (const r of rowDom) {
+          for (const c of colDom) {
+            const eligible = getCellValue(item.cells, `${r}|${c}`);
+            dataRows.push([...baseFields, r, c === '*' ? '' : c, eligible > 0 ? 'ELEGÍVEL' : 'NÃO ELEGÍVEL', ...tailFields]);
+          }
+        }
+      }
+    }
+
+    const csv = [csvHeaders, ...dataRows].map(row => row.map(escCSV).join(',')).join('\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `biblioteca-cineminhas-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   // ── createDecisionNode ────────────────────────────────────────
@@ -4779,9 +4928,14 @@ export default function App() {
 
       {/* ═══════════════ CINEMINHA IMPORT MODAL ═══════════════ */}
       {cinemaImportModal&&(()=>{
-        const {config, step, rowMapping, colMapping, availableVars} = cinemaImportModal;
+        const {config, step, rowMapping, colMapping, availableVars, fromLibrary} = cinemaImportModal;
         const hasRow = !!config.rowVar;
         const hasCol = !!config.colVar;
+        const vars = config.metadata?.variables ?? {};
+        const rowValueLabels = vars.rowValueLabels ?? {};
+        const colValueLabels = vars.colValueLabels ?? {};
+        const rowLabelSamples = Object.values(rowValueLabels).slice(0, 5);
+        const colLabelSamples = Object.values(colValueLabels).slice(0, 5);
         const btnStyle = (active) => ({
           padding:"5px 14px",borderRadius:7,border:`1px solid ${active?"#6366f1":"#e2e8f0"}`,
           background:active?"#eef2ff":"#fff",color:active?"#4f46e5":"#64748b",
@@ -4792,7 +4946,10 @@ export default function App() {
           fontSize:12.5,fontFamily:"inherit",color:"#1e293b",background:"#fff",cursor:"pointer",
           outline:"none",
         };
-        const canApply = (!hasRow || rowMapping) && (!hasCol || colMapping);
+        // fromLibrary: allow applying without mapping (structure-only import when no datasets loaded)
+        const canApply = fromLibrary
+          ? ((!hasRow || !availableVars.length || rowMapping) && (!hasCol || !availableVars.length || colMapping))
+          : ((!hasRow || rowMapping) && (!hasCol || colMapping));
 
         return (
           <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -4801,12 +4958,14 @@ export default function App() {
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                 <div>
                   <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:4}}>
-                    {step==='confirm' ? "Substituir Configuração?" : "Importar Configuração"}
+                    {step==='confirm' ? "Substituir Configuração?" : fromLibrary ? "Aplicar da Biblioteca" : "Importar Configuração"}
                   </h2>
                   <p style={{fontSize:12.5,color:"#64748b"}}>
                     {step==='confirm'
                       ? "Este Cineminha já possui variáveis configuradas."
-                      : "Mapeie as variáveis do arquivo para o dataset atual."}
+                      : fromLibrary
+                        ? `Mapeie as variáveis de "${config.name||'Cineminha'}" para o dataset atual.`
+                        : "Mapeie as variáveis do arquivo para o dataset atual."}
                   </p>
                 </div>
                 <button onClick={()=>setCinemaImportModal(null)}
@@ -4816,8 +4975,16 @@ export default function App() {
               {step==='confirm' && (
                 <div style={{padding:"14px 16px",borderRadius:12,background:"#fffbeb",border:"1px solid #fde68a",fontSize:12.5,color:"#78350f",lineHeight:1.6}}>
                   <div style={{fontWeight:600,marginBottom:6}}>⚠ Configuração atual será substituída por:</div>
-                  {config.rowVar && <div>Linha: <strong>{config.rowVar.col}</strong></div>}
-                  {config.colVar && <div>Coluna: <strong>{config.colVar.col}</strong></div>}
+                  {config.rowVar && (
+                    <div>Linha: <strong>{config.rowVar.col}</strong>
+                      {rowLabelSamples.length > 0 && <span style={{color:"#92400e",fontWeight:400}}> ({rowLabelSamples.join(', ')}{Object.keys(rowValueLabels).length > 5 ? '…' : ''})</span>}
+                    </div>
+                  )}
+                  {config.colVar && (
+                    <div>Coluna: <strong>{config.colVar.col}</strong>
+                      {colLabelSamples.length > 0 && <span style={{color:"#92400e",fontWeight:400}}> ({colLabelSamples.join(', ')}{Object.keys(colValueLabels).length > 5 ? '…' : ''})</span>}
+                    </div>
+                  )}
                   <div style={{marginTop:4}}>Domínio: {(config.rowDomain||[]).length} × {(config.colDomain||[]).length} células</div>
                 </div>
               )}
@@ -4826,12 +4993,17 @@ export default function App() {
                 <div style={{display:"flex",flexDirection:"column",gap:14}}>
                   {hasRow && (
                     <div>
-                      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:5}}>
+                      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:2}}>
                         Variável de Linha
                         <span style={{fontWeight:400,color:"#6b7280",marginLeft:6}}>
                           (original: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:4}}>{config.rowVar.col}</code>)
                         </span>
                       </div>
+                      {rowLabelSamples.length > 0 && (
+                        <div style={{fontSize:11,color:"#0369a1",background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:6,padding:"3px 8px",marginBottom:6,lineHeight:1.5}}>
+                          🏷 Labels: <strong>{rowLabelSamples.join(', ')}</strong>{Object.keys(rowValueLabels).length > 5 ? '…' : ''}
+                        </div>
+                      )}
                       {availableVars.length > 0 ? (
                         <select value={rowMapping ? `${rowMapping.csvId}::${rowMapping.col}` : ""}
                           onChange={e => {
@@ -4853,12 +5025,17 @@ export default function App() {
                   )}
                   {hasCol && (
                     <div>
-                      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:5}}>
+                      <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:2}}>
                         Variável de Coluna
                         <span style={{fontWeight:400,color:"#6b7280",marginLeft:6}}>
                           (original: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:4}}>{config.colVar.col}</code>)
                         </span>
                       </div>
+                      {colLabelSamples.length > 0 && (
+                        <div style={{fontSize:11,color:"#0369a1",background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:6,padding:"3px 8px",marginBottom:6,lineHeight:1.5}}>
+                          🏷 Labels: <strong>{colLabelSamples.join(', ')}</strong>{Object.keys(colValueLabels).length > 5 ? '…' : ''}
+                        </div>
+                      )}
                       {availableVars.length > 0 ? (
                         <select value={colMapping ? `${colMapping.csvId}::${colMapping.col}` : ""}
                           onChange={e => {
@@ -5143,6 +5320,40 @@ export default function App() {
                     <div><strong style={{color:"#1d4ed8"}}>↓ Coluna</strong> — variável no eixo X (opcional)</div>
                     <div><strong style={{color:"#7e22ce"}}>✓ Resultado</strong> — elegibilidade por célula (opcional)</div>
                   </div>
+                  {/* ── Label columns selector (optional) ── */}
+                  {(()=>{
+                    const linhaCol=Object.entries(libWizard.columnRoles).find(([,v])=>v==='linha')?.[0]??null;
+                    const colunaCol=Object.entries(libWizard.columnRoles).find(([,v])=>v==='coluna')?.[0]??null;
+                    if(!linhaCol&&!colunaCol) return null;
+                    const labelCandidates=(libWizardPreview?.headers||[]).filter(h=>h!==linhaCol&&h!==colunaCol&&(libWizard.columnRoles[h]||'')==='');
+                    const selStyle={flex:1,fontSize:12,padding:"5px 8px",borderRadius:7,border:"1.5px solid #bae6fd",background:"#fff",fontFamily:"inherit",cursor:"pointer",outline:"none"};
+                    return (
+                      <div style={{marginTop:14,padding:"14px 16px",background:"#f0f9ff",border:"1.5px solid #bae6fd",borderRadius:12}}>
+                        <p style={{fontSize:11.5,fontWeight:700,color:"#0369a1",textTransform:"uppercase",letterSpacing:.5,margin:"0 0 6px"}}>🏷 Labels de Variáveis <span style={{fontWeight:400,color:"#0ea5e9",fontSize:11}}>(opcional)</span></p>
+                        <p style={{fontSize:12,color:"#0c4a6e",marginBottom:10,lineHeight:1.5}}>Selecione a coluna com o nome operacional de cada variável para exibir durante o mapeamento.</p>
+                        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                          {linhaCol&&(
+                            <div style={{display:"flex",alignItems:"center",gap:10}}>
+                              <span style={{fontSize:12,fontWeight:600,color:"#15803d",minWidth:140,flexShrink:0}}>→ Linha ({linhaCol})</span>
+                              <select value={libWizard.rowLabelCol||''} onChange={e=>setLibWizard(w=>({...w,rowLabelCol:e.target.value||null}))} style={selStyle}>
+                                <option value="">— Nenhum —</option>
+                                {labelCandidates.map(h=><option key={h} value={h}>{h}</option>)}
+                              </select>
+                            </div>
+                          )}
+                          {colunaCol&&(
+                            <div style={{display:"flex",alignItems:"center",gap:10}}>
+                              <span style={{fontSize:12,fontWeight:600,color:"#1d4ed8",minWidth:140,flexShrink:0}}>↓ Coluna ({colunaCol})</span>
+                              <select value={libWizard.colLabelCol||''} onChange={e=>setLibWizard(w=>({...w,colLabelCol:e.target.value||null}))} style={selStyle}>
+                                <option value="">— Nenhum —</option>
+                                {labelCandidates.map(h=><option key={h} value={h}>{h}</option>)}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {(()=>{
                     const resultadoCol=Object.entries(libWizard.columnRoles).find(([,v])=>v==='resultado')?.[0]??null;
                     if(!resultadoCol||!libWizardPreview) return null;
@@ -6234,16 +6445,16 @@ export default function App() {
                                   </div>
                                 )}
                                 <div style={{fontSize:10,color:"#cbd5e1",marginTop:5}}>
-                                  {item.rowVar?.col&&`Linhas: ${item.rowVar.col}`}
+                                  {item.rowVar?.col&&`Linhas: ${item.rowVar.col}${item.metadata?.variables?.rowLabel?` (${item.metadata.variables.rowLabel})`:''}`}
                                   {item.rowVar?.col&&item.colVar?.col&&' · '}
-                                  {item.colVar?.col&&`Colunas: ${item.colVar.col}`}
+                                  {item.colVar?.col&&`Colunas: ${item.colVar.col}${item.metadata?.variables?.colLabel?` (${item.metadata.variables.colLabel})`:''}`}
                                   {(item.rowVar?.col||item.colVar?.col)&&' · '}
                                   Salvo em {new Date(item.savedAt).toLocaleDateString('pt-BR')}
                                 </div>
                               </div>
                               {/* Actions */}
                               <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
-                                <button onClick={()=>loadFromLibrary(item)}
+                                <button onClick={()=>loadFromLibraryWithMapping(item)}
                                   style={{padding:"6px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>
                                   + Adicionar ao Board
                                 </button>
@@ -6276,7 +6487,15 @@ export default function App() {
                   </>
                 ) : (
                   <>
-                    <span style={{fontSize:11.5,color:"#94a3b8"}}>{filteredItems.length} resultado{filteredItems.length!==1?'s':''}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <span style={{fontSize:11.5,color:"#94a3b8"}}>{filteredItems.length} resultado{filteredItems.length!==1?'s':''}</span>
+                      {cinemaLibrary.length > 0 && (
+                        <button onClick={exportLibrary}
+                          style={{padding:"6px 13px",borderRadius:7,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:500,display:"flex",alignItems:"center",gap:5}}>
+                          ↓ Exportar Biblioteca
+                        </button>
+                      )}
+                    </div>
                     <button onClick={()=>setCinemaLibraryModal(null)}
                       style={{padding:"8px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
                       Fechar
