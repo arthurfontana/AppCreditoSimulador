@@ -827,6 +827,40 @@ function computeCellMetrics(shape, csvStore) {
   return result;
 }
 
+// ── populateCellsFromResultVar ───────────────────────────────────────────────
+// Reads resultVar column from CSV rows and builds a cells object keyed by
+// "rowVal|colVal". Uses the first matching row per combination.
+// Non-numeric values map to 1 (present) or 0 (absent/empty).
+function populateCellsFromResultVar(shape, csvStore) {
+  const { rowVar, colVar, rowDomain, colDomain, resultVar } = shape;
+  if (!resultVar) return shape.cells ?? {};
+  const csv = csvStore[resultVar.csvId];
+  if (!csv) return shape.cells ?? {};
+  const resultColIdx = csv.headers.indexOf(resultVar.col);
+  if (resultColIdx === -1) return shape.cells ?? {};
+  const rowCI = rowVar && rowVar.csvId === resultVar.csvId ? csv.headers.indexOf(rowVar.col) : -1;
+  const colCI = colVar && colVar.csvId === resultVar.csvId ? csv.headers.indexOf(colVar.col) : -1;
+  const rDom = rowDomain?.length > 0 ? rowDomain : ['*'];
+  const cDom = colDomain?.length > 0 ? colDomain : ['*'];
+  const lookup = {};
+  for (const row of csv.rows) {
+    const rv = rowVar && rowCI >= 0 ? (row[rowCI] ?? '').toString().trim() : '*';
+    const cv = colVar && colCI >= 0 ? (row[colCI] ?? '').toString().trim() : '*';
+    const key = `${rv}|${cv}`;
+    if (lookup[key] === undefined) {
+      const raw = row[resultColIdx];
+      const num = parseFloat(raw);
+      lookup[key] = isNaN(num) ? (raw ? 1 : 0) : num;
+    }
+  }
+  const newCells = {};
+  for (const rv of rDom) for (const cv of cDom) {
+    const key = `${rv}|${cv}`;
+    newCells[key] = lookup[key] ?? 0;
+  }
+  return newCells;
+}
+
 function buildParetoFrontier(cellMetrics) {
   const cells = Object.entries(cellMetrics)
     .map(([key, m]) => ({ key, ...m }))
@@ -1087,6 +1121,7 @@ export default function App() {
   const [importWarn, setImportWarn] = useState(null);   // string | null — aviso pós-importação
   const [exportModal,setExportModal]= useState(false);  // boolean — modal de escolha de exportação
   const [axisModal,  setAxisModal]  = useState(null);   // null | {shapeId, col, csvId}
+  const [resultVarModal, setResultVarModal] = useState(null); // null | {shapeId} — modal de seleção de variável de resultado
   const [varSearch,  setVarSearch]  = useState("");     // filtro de busca no painel
   const [multiSel,   setMultiSel]   = useState(new Set()); // ids selecionados em grupo
   const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
@@ -2201,7 +2236,7 @@ export default function App() {
     const cinemaShape = {
       id, type:"cineminha", x:wx-W/2, y:wy-H/2, w:W, h:H,
       label:"Cineminha", color:"#fff", cinemaType,
-      rowVar:null, colVar:null, rowDomain:[], colDomain:[], cells:{},
+      rowVar:null, colVar:null, rowDomain:[], colDomain:[], cells:{}, resultVar:null,
       metadata: {
         type: cinemaType, identifiers: {}, dimensions: { rowVariable: null, columnVariable: null },
         variables: {}, source: 'manual', description: '', tags: [], version: 1,
@@ -2294,10 +2329,35 @@ export default function App() {
         newCells[key] = getCellValue(s.cells, key);
       }
       const {w:nw, h:nh} = computeCinemaSize(newRowDomain, newColDomain);
-      return {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
+      const baseShape = {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
+      if (s.resultVar) {
+        baseShape.cells = populateCellsFromResultVar(baseShape, csvStoreR.current);
+      }
+      return baseShape;
     }));
     setAxisModal(null);
   }, []); // eslint-disable-line
+
+  // ── assignResultVar ───────────────────────────────────────────
+  const assignResultVar = useCallback((shapeId, col, csvId) => {
+    pushHistory();
+    setShapes(prev => prev.map(s => {
+      if (s.id !== shapeId) return s;
+      const updated = { ...s, resultVar: { col, csvId } };
+      if (s.rowDomain?.length > 0 || s.colDomain?.length > 0 || s.rowVar || s.colVar) {
+        updated.cells = populateCellsFromResultVar(updated, csvStoreR.current);
+      }
+      return updated;
+    }));
+    setAxisModal(null);
+    setResultVarModal(null);
+  }, []); // eslint-disable-line
+
+  // ── clearResultVar ────────────────────────────────────────────
+  const clearResultVar = useCallback((shapeId) => {
+    pushHistory();
+    setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, resultVar: null } : s));
+  }, []);
 
   // ── startPanelDrag ────────────────────────────────────────────
   const startPanelDrag = (e, col, csvId) => {
@@ -2618,8 +2678,9 @@ export default function App() {
 
   // ── Render: Cineminha (Cross Decision Matrix) ─────────────────
   const renderCinemaNode = (shape) => {
-    const {id, x, y, w, h, rowVar, colVar, rowDomain, colDomain, cells, minimized} = shape;
+    const {id, x, y, w, h, rowVar, colVar, rowDomain, colDomain, cells, minimized, resultVar} = shape;
     const typeCfg = getCinemaType(shape.cinemaType);
+    const isOffer = shape.cinemaType === 'offer';
     const isSel=sel===id, isFrom=fromId===id;
     const hasErr=!!flowErrors[id];
     const stroke=isFrom?"#f59e0b":isSel?"#3b82f6":hasErr?"#dc2626":typeCfg.color;
@@ -2630,6 +2691,33 @@ export default function App() {
                `drop-shadow(0 2px 12px ${typeCfg.badgeBg})`;
     const cur=tool==="connect"?"crosshair":tool==="select"?"grab":"default";
     const hasVars = rowVar || colVar;
+
+    // Compute max cell value for offer gradient normalization
+    const maxCellVal = isOffer
+      ? Math.max(1, ...Object.values(cells || {}).map(v => typeof v === 'number' ? v : (v ? 1 : 0)))
+      : 1;
+
+    // Returns {bg, label, color} for a cell depending on type and value
+    const cellVisual = (cellVal) => {
+      if (isOffer) {
+        if (cellVal === 0) return { bg: '#f1f5f9', label: '—', color: '#94a3b8' };
+        const t = Math.min(cellVal / maxCellVal, 1);
+        const r = Math.round(224 - t * 164);
+        const g = Math.round(242 - t * 146);
+        const b = Math.round(254 - t * 54);
+        return { bg: `rgb(${r},${g},${b})`, label: String(cellVal), color: t > 0.55 ? '#fff' : '#0c4a6e' };
+      }
+      if (cellVal === 0) return { bg: '#ef4444', label: '✗', color: '#fff' };
+      if (cellVal === 1) return { bg: '#22c55e', label: '✓', color: '#fff' };
+      return { bg: '#6366f1', label: String(cellVal), color: '#fff' };
+    };
+
+    // Compact axis label list for header
+    const axisLabels = [
+      rowVar    ? { prefix: 'L', col: rowVar.col }    : null,
+      colVar    ? { prefix: 'C', col: colVar.col }    : null,
+      resultVar ? { prefix: 'R', col: resultVar.col } : null,
+    ].filter(Boolean);
 
     // ── Minimized state ──
     if (minimized) {
@@ -2643,6 +2731,9 @@ export default function App() {
           {/* Type badge */}
           <rect x={x+MW-78} y={y+11} width={44} height={16} rx={8} fill="rgba(255,255,255,.22)" style={{pointerEvents:"none"}}/>
           <text x={x+MW-56} y={y+22} fontSize={8.5} textAnchor="middle" fontWeight="700" fill="#fff" fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,5)}</text>
+          {resultVar&&(
+            <text x={x+12} y={y+42} fontSize={8} fill="rgba(255,255,255,.75)" fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>R: {trunc(resultVar.col,14)}</text>
+          )}
           <g onClick={e=>{e.stopPropagation();pushHistory();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,...computeCinemaSize(s.rowDomain||[],s.colDomain||[])}:s));}} style={{cursor:"pointer"}}>
             <rect x={x+MW-28} y={y+8} width={22} height={22} rx={6} fill="rgba(255,255,255,.2)"/>
             <text x={x+MW-17} y={y+23} fontSize={13} textAnchor="middle" fill="#fff">⤢</text>
@@ -2653,21 +2744,24 @@ export default function App() {
 
     // ── Empty state ──
     if (!hasVars) {
+      // For offer type, show gradient mini matrix icon
+      const emptyColors = isOffer
+        ? ["#bae6fd","#7dd3fc","#38bdf8","#0ea5e9","#0284c7","#0369a1"]
+        : ["#22c55e","#ef4444","#22c55e","#ef4444","#22c55e","#22c55e"];
       return (
         <g key={id} data-sid={id}
           onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
           style={{cursor:cur, filter:flt}}>
           <rect data-sid={id} x={x} y={y} width={w} height={h} rx={12}
             fill="#fff" stroke={stroke} strokeWidth={sw}/>
-          {/* Mini matrix icon: 3×2 colored cells */}
-          {[0,1,2].map(ci=>[0,1].map(ri=>{
-            const colors=["#22c55e","#ef4444","#22c55e","#ef4444","#22c55e","#22c55e"];
-            return <rect key={`${ci}-${ri}`} x={x+20+ci*16} y={y+20+ri*14} width={13} height={11} rx={2} fill={colors[ri*3+ci]} opacity={.85}/>;
-          }))}
+          {/* Mini matrix icon */}
+          {[0,1,2].map(ci=>[0,1].map(ri=>(
+            <rect key={`${ci}-${ri}`} x={x+20+ci*16} y={y+20+ri*14} width={13} height={11} rx={2} fill={emptyColors[ri*3+ci]} opacity={.85}/>
+          )))}
           <text x={x+w/2} y={y+62} textAnchor="middle" fontSize={10.5}
             fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill={typeCfg.color}
             style={{pointerEvents:"none",userSelect:"none"}}>Cineminha</text>
-          {/* Type badge below label */}
+          {/* Type badge */}
           <rect x={x+w/2-28} y={y+66} width={56} height={16} rx={8} fill={typeCfg.badgeBg} style={{pointerEvents:"none"}}/>
           <text x={x+w/2} y={y+77} textAnchor="middle" fontSize={8.5} fontWeight="700" fill={typeCfg.badgeFg} fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,7)}</text>
           <text x={x+w/2} y={y+92} textAnchor="middle" fontSize={9} fill="#94a3b8"
@@ -2685,6 +2779,9 @@ export default function App() {
     const rDom = rowDomain.length>0 ? rowDomain : ['*'];
     const cDom = colDomain.length>0 ? colDomain : ['*'];
     const show2D = rowVar && colVar;
+    // Header colors per type
+    const hdrBg   = isOffer ? '#ecfeff' : '#eef2ff';
+    const hdrFg   = isOffer ? '#0e7490' : '#4f46e5';
 
     return (
       <g key={id} data-sid={id} style={{filter:flt}}>
@@ -2704,11 +2801,14 @@ export default function App() {
         <rect x={x+12} y={y+27} width={58} height={14} rx={7} fill="rgba(255,255,255,.2)" style={{pointerEvents:"none"}}/>
         <text x={x+41} y={y+37} textAnchor="middle" fontSize={8.5} fontWeight="700" fill="#fff" fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,7)}</text>
 
-        {/* Variable labels */}
-        {rowVar&&<text x={x+w-40} y={y+16} textAnchor="end" fontSize={9} fill="rgba(255,255,255,.75)"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>L: {trunc(rowVar.col,12)}</text>}
-        {colVar&&<text x={x+w-40} y={y+28} textAnchor="end" fontSize={9} fill="rgba(255,255,255,.75)"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>C: {trunc(colVar.col,12)}</text>}
+        {/* Axis + result variable labels — stacked on right of header */}
+        {axisLabels.map((lbl, i) => (
+          <text key={lbl.prefix} x={x+w-40} y={y+13+i*10} textAnchor="end"
+            fontSize={8.5} fill={lbl.prefix==='R' ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.75)"}
+            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+            {lbl.prefix}: {trunc(lbl.col,12)}
+          </text>
+        ))}
 
         {/* Interactive matrix via foreignObject */}
         <foreignObject x={x+1} y={y+CINEMA_TITLE_H} width={w-2} height={h-CINEMA_TITLE_H-1}>
@@ -2721,6 +2821,23 @@ export default function App() {
             onWheel={e=>e.stopPropagation()}
             onClick={e=>e.stopPropagation()}
             onTouchStart={e=>e.stopPropagation()}>
+            {/* Result variable indicator bar */}
+            {resultVar&&(
+              <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",
+                background: isOffer ? "#ecfeff" : "#eef2ff",
+                borderBottom:`1px solid ${isOffer?"#a5f3fc":"#c7d2fe"}`,fontSize:9,
+                color: isOffer ? "#0e7490" : "#4f46e5", fontWeight:600}}>
+                <span style={{opacity:.7}}>Resultado:</span>
+                <span>{trunc(resultVar.col, 22)}</span>
+                <button
+                  onClick={()=>clearResultVar(id)}
+                  title="Remover variável de resultado"
+                  style={{marginLeft:"auto",border:"none",background:"transparent",
+                    color:isOffer?"#0e7490":"#4f46e5",cursor:"pointer",fontSize:11,lineHeight:1,padding:"0 2px",opacity:.6}}>
+                  ×
+                </button>
+              </div>
+            )}
             <table style={{borderCollapse:"collapse",fontSize:11,width:"max-content",minWidth:"100%",tableLayout:"fixed"}}>
               {show2D&&(
                 <thead>
@@ -2730,8 +2847,8 @@ export default function App() {
                       {trunc(rowVar.col,8)} \ {trunc(colVar.col,8)}
                     </th>
                     {cDom.map(cv=>(
-                      <th key={cv} style={{width:CINEMA_CELL_W,background:"#eef2ff",border:"1px solid #e2e8f0",
-                        padding:"4px 6px",fontSize:10,color:"#4f46e5",fontWeight:600,textAlign:"center",
+                      <th key={cv} style={{width:CINEMA_CELL_W,background:hdrBg,border:"1px solid #e2e8f0",
+                        padding:"4px 6px",fontSize:10,color:hdrFg,fontWeight:600,textAlign:"center",
                         position:"sticky",top:0,zIndex:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                         {cv}
                       </th>
@@ -2744,8 +2861,8 @@ export default function App() {
                   <tr key={rv}>
                     {/* Row label */}
                     {rowVar&&(
-                      <td style={{width:CINEMA_LBL_W,background:"#eef2ff",border:"1px solid #e2e8f0",
-                        padding:"3px 8px",fontSize:10.5,fontWeight:600,color:"#4f46e5",
+                      <td style={{width:CINEMA_LBL_W,background:hdrBg,border:"1px solid #e2e8f0",
+                        padding:"3px 8px",fontSize:10.5,fontWeight:600,color:hdrFg,
                         position:"sticky",left:0,zIndex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                         {rv}
                       </td>
@@ -2756,13 +2873,12 @@ export default function App() {
                       const cellKey = `${rKey}|${cKey}`;
                       const cellVal = getCellValue(cells, cellKey);
                       const eligible = cellVal > 0;
-                      const cellBg = cellVal === 0 ? "#ef4444" : cellVal === 1 ? "#22c55e" : "#6366f1";
-                      const cellLabel = cellVal === 0 ? "✗" : cellVal === 1 ? "✓" : String(cellVal);
+                      const vis = cellVisual(cellVal);
                       const portLabel = eligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
                       return (
                         <td key={cv} style={{width:CINEMA_CELL_W,padding:2,border:"1px solid #f1f5f9",textAlign:"center",background:"#fff"}}>
                           {!rowVar&&colVar&&(
-                            <div style={{fontSize:10.5,fontWeight:600,color:"#4f46e5",marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:CINEMA_CELL_W-4}}>
+                            <div style={{fontSize:10.5,fontWeight:600,color:hdrFg,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:CINEMA_CELL_W-4}}>
                               {cv}
                             </div>
                           )}
@@ -2776,12 +2892,12 @@ export default function App() {
                             title={`${portLabel} — clique para alternar, botão direito para editar valor`}
                             style={{
                               width:"100%",height:CINEMA_CELL_H-6,border:"none",borderRadius:4,
-                              background:cellBg,
-                              color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,
+                              background:vis.bg,color:vis.color,
+                              cursor:"pointer",fontSize:13,fontWeight:700,
                               display:"flex",alignItems:"center",justifyContent:"center",
                               transition:"background .12s",
                             }}>
-                            {cellLabel}
+                            {vis.label}
                           </button>
                         </td>
                       );
@@ -3434,6 +3550,16 @@ export default function App() {
                   );
                 })}
               </div>
+              <button onClick={()=>setResultVarModal({shapeId:sel})}
+                title="Configurar qual coluna do CSV define o valor de cada casela"
+                style={{padding:"5px 14px",borderRadius:7,
+                  border:`1.5px solid ${selShape.resultVar ? selCfg.badgeFg : "#e2e8f0"}`,
+                  background:selShape.resultVar ? selCfg.badgeBg : "#fff",
+                  color:selShape.resultVar ? selCfg.badgeFg : "#64748b",
+                  cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:selShape.resultVar ? 700 : 500}}>
+                {selShape.resultVar ? `⊞ ${trunc(selShape.resultVar.col,10)}` : "⊞ Resultado"}
+              </button>
               <button onClick={()=>openOptimModal(sel)}
                 style={{padding:"5px 14px",borderRadius:7,border:`1px solid ${selCfg.badgeBg}`,background:selCfg.badgeBg,
                   color:selCfg.badgeFg,cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
@@ -4537,6 +4663,14 @@ export default function App() {
                 <span style={{fontSize:13,fontWeight:700,color:"#4f46e5"}}>Colunas</span>
                 <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valores como colunas da matriz</span>
               </button>
+              <button onClick={()=>assignResultVar(axisModal.shapeId, axisModal.col, axisModal.csvId)}
+                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"16px 10px",borderRadius:12,border:"1.5px solid #d1fae5",background:"#f0fdf4",cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="#6ee7b7";e.currentTarget.style.background="#dcfce7";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="#d1fae5";e.currentTarget.style.background="#f0fdf4";}}>
+                <span style={{fontSize:22}}>⊞</span>
+                <span style={{fontSize:13,fontWeight:700,color:"#15803d"}}>Resultado</span>
+                <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valor de cada casela</span>
+              </button>
             </div>
             <button onClick={()=>setAxisModal(null)}
               style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
@@ -4545,6 +4679,84 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ═══════════════ RESULT VARIABLE MODAL ════════════ */}
+      {resultVarModal&&(()=>{
+        const rShape = shapes.find(s => s.id === resultVarModal.shapeId);
+        if (!rShape) return null;
+        // Collect available CSV(s) from the shape's axis vars
+        const csvIds = [...new Set([rShape.rowVar?.csvId, rShape.colVar?.csvId].filter(Boolean))];
+        // If no axes are set yet, collect from all imported CSVs
+        const availCsvIds = csvIds.length > 0 ? csvIds : Object.keys(csvStore);
+        const axisColsUsed = new Set([rShape.rowVar?.col, rShape.colVar?.col].filter(Boolean));
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:460,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:18}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:2}}>
+                <div style={{width:40,height:40,borderRadius:10,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⊞</div>
+                <div>
+                  <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>Variável de Resultado</h3>
+                  <p style={{fontSize:12.5,color:"#64748b",lineHeight:1.5}}>Selecione qual coluna define o valor de cada casela da matriz.</p>
+                </div>
+              </div>
+              {rShape.resultVar&&(
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,background:"#f0fdf4",border:"1px solid #bbf7d0"}}>
+                  <span style={{fontSize:12,color:"#15803d",fontWeight:600}}>Atual: {rShape.resultVar.col}</span>
+                  <button onClick={()=>{clearResultVar(resultVarModal.shapeId);setResultVarModal(null);}}
+                    style={{marginLeft:"auto",padding:"3px 10px",borderRadius:6,border:"1px solid #bbf7d0",background:"#fff",color:"#dc2626",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600}}>
+                    Remover
+                  </button>
+                </div>
+              )}
+              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:300,overflowY:"auto"}}>
+                {availCsvIds.map(csvId => {
+                  const csv = csvStore[csvId];
+                  if (!csv) return null;
+                  const cols = csv.headers.filter(h => h !== '__DECISAO_ORIGINAL' && !axisColsUsed.has(h));
+                  return (
+                    <div key={csvId}>
+                      {availCsvIds.length > 1 && (
+                        <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,textTransform:"uppercase",letterSpacing:.5,padding:"4px 0 2px"}}>
+                          {csv.name}
+                        </div>
+                      )}
+                      {cols.map(col => {
+                        const isActive = rShape.resultVar?.col === col && rShape.resultVar?.csvId === csvId;
+                        const colType = csv.columnTypes?.[col];
+                        const typeInfo = COL_TYPES.find(t => t.value === colType);
+                        return (
+                          <button key={col} onClick={()=>assignResultVar(resultVarModal.shapeId, col, csvId)}
+                            style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"9px 14px",borderRadius:9,
+                              border:`1.5px solid ${isActive?"#6ee7b7":"#e2e8f0"}`,
+                              background:isActive?"#f0fdf4":"#fafafa",
+                              cursor:"pointer",fontFamily:"inherit",textAlign:"left",
+                              transition:"border-color .12s,background .12s"}}
+                            onMouseEnter={e=>{if(!isActive){e.currentTarget.style.borderColor="#bbf7d0";e.currentTarget.style.background="#f7fffe";}}}
+                            onMouseLeave={e=>{if(!isActive){e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fafafa";}}}>
+                            <span style={{fontSize:14}}>{typeInfo?.icon ?? '📋'}</span>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:13,fontWeight:isActive?700:500,color:isActive?"#15803d":"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{col}</div>
+                              {typeInfo&&<div style={{fontSize:10.5,color:"#94a3b8"}}>{typeInfo.label}</div>}
+                            </div>
+                            {isActive&&<span style={{fontSize:14,color:"#22c55e"}}>✓</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+                {availCsvIds.length === 0 && (
+                  <p style={{fontSize:13,color:"#94a3b8",textAlign:"center",padding:"16px 0"}}>Nenhum CSV importado. Importe uma base de dados primeiro.</p>
+                )}
+              </div>
+              <button onClick={()=>setResultVarModal(null)}
+                style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═══════════════ IMPORT FLOW ERROR MODAL ═══════════ */}
       {importError&&(
