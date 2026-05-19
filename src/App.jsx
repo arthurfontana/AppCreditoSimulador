@@ -1578,7 +1578,7 @@ export default function App() {
     reader.onload = (ev) => {
       const text = ev.target.result;
       const { delimiter, confident } = detectDelimiter(text);
-      setLibWizard({ rawText: text, filename: file.name, delimiter, detected: delimiter, confident, hasHeader: true, step: 1, columnRoles: {}, agrupadorOrder: [] });
+      setLibWizard({ rawText: text, filename: file.name, delimiter, detected: delimiter, confident, hasHeader: true, step: 1, columnRoles: {}, agrupadorOrder: [], resultadoMapping: {} });
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -1587,7 +1587,7 @@ export default function App() {
   const onLibWizardConfirm = () => {
     if (!libWizard) return;
     const { headers, rows } = parseCSV(libWizard.rawText, libWizard.delimiter, libWizard.hasHeader);
-    const { columnRoles, agrupadorOrder } = libWizard;
+    const { columnRoles, agrupadorOrder, resultadoMapping } = libWizard;
     const linhaCol = Object.entries(columnRoles).find(([,v]) => v === 'linha')?.[0] ?? null;
     const colunaCol = Object.entries(columnRoles).find(([,v]) => v === 'coluna')?.[0] ?? null;
     const resultadoCol = Object.entries(columnRoles).find(([,v]) => v === 'resultado')?.[0] ?? null;
@@ -1606,21 +1606,24 @@ export default function App() {
     }
 
     const INELIGIBLE_VALS = new Set(['NÃO ELEGÍVEL','NAO ELEGIVEL','INELEGIVEL','INELEGÍVEL','N','FALSE','0','NE','REPROVADO','R','NEGADO','RECUSADO']);
+    const rm = resultadoMapping || {};
     const newItems = [];
     for (const group of groups.values()) {
-      const rowVals = linhaCol ? [...new Set(group.rowObjs.map(r => r[linhaCol]))] : [];
-      const colVals = colunaCol ? [...new Set(group.rowObjs.map(r => r[colunaCol]))] : [];
+      const rowVals = linhaCol ? [...new Set(group.rowObjs.map(r => r[linhaCol]).filter(v => v !== ''))] : [];
+      const colVals = colunaCol ? [...new Set(group.rowObjs.map(r => r[colunaCol]).filter(v => v !== ''))] : [];
       const rowDomain = sortDomain(rowVals);
       const colDomain = sortDomain(colVals);
       const cells = {};
       for (const rowObj of group.rowObjs) {
         const rv = linhaCol ? rowObj[linhaCol] : null;
         const cv = colunaCol ? rowObj[colunaCol] : null;
-        if (!rv) continue;
-        const ck = cv ? `${rv}|${cv}` : `${rv}|*`;
+        if (!rv || !String(rv).trim()) continue;
+        const ck = cv && String(cv).trim() ? `${rv}|${cv}` : `${rv}|*`;
+        if (cells.hasOwnProperty(ck)) continue; // first occurrence wins — determinism
         if (resultadoCol) {
-          const norm = String(rowObj[resultadoCol] ?? '').toUpperCase().trim();
-          cells[ck] = !INELIGIBLE_VALS.has(norm);
+          const raw = String(rowObj[resultadoCol] ?? '');
+          const norm = raw.toUpperCase().trim();
+          cells[ck] = rm.hasOwnProperty(raw) ? rm[raw] : !INELIGIBLE_VALS.has(norm);
         } else {
           cells[ck] = true;
         }
@@ -1653,6 +1656,15 @@ export default function App() {
 
     setCinemaLibrary(prev => [...prev, ...newItems]);
     setLibWizard(null);
+    setCinemaLibraryModal({
+      mode: 'browse',
+      shapeId: null,
+      search: '',
+      filterType: null,
+      saveMeta: { name: '', description: '', tags: '', identifiers: '{}' },
+      overwriteId: null,
+      justImported: newItems.length,
+    });
   };
 
   const onImportConfirm = () => {
@@ -4876,6 +4888,7 @@ export default function App() {
                                 onChange={e=>{
                                   const newRole=e.target.value;
                                   const prev=libWizard.columnRoles[colName]||'';
+                                  const INEL=new Set(['NÃO ELEGÍVEL','NAO ELEGIVEL','INELEGIVEL','INELEGÍVEL','N','FALSE','0','NE','REPROVADO','R','NEGADO','RECUSADO']);
                                   setLibWizard(w=>{
                                     const roles={...w.columnRoles,[colName]:newRole};
                                     let order=[...w.agrupadorOrder];
@@ -4884,7 +4897,19 @@ export default function App() {
                                     if(['linha','coluna','resultado'].includes(newRole)){
                                       for(const k of Object.keys(roles)){if(k!==colName&&roles[k]===newRole)roles[k]='';}
                                     }
-                                    return {...w,columnRoles:roles,agrupadorOrder:order};
+                                    let resultadoMapping={...(w.resultadoMapping||{})};
+                                    if(newRole==='resultado'){
+                                      const colIdx=libWizardPreview?.headers.indexOf(colName)??-1;
+                                      if(colIdx>=0){
+                                        const distinctVals=[...new Set((libWizardPreview?.rows||[]).map(r=>String(r[colIdx]??'')).filter(v=>v!==''))];
+                                        for(const val of distinctVals){
+                                          if(!resultadoMapping.hasOwnProperty(val)) resultadoMapping[val]=!INEL.has(val.toUpperCase().trim());
+                                        }
+                                      }
+                                    } else if(prev==='resultado'){
+                                      resultadoMapping={};
+                                    }
+                                    return {...w,columnRoles:roles,agrupadorOrder:order,resultadoMapping};
                                   });
                                 }}
                                 style={{fontSize:12,padding:"4px 8px",borderRadius:7,border:`1.5px solid ${rc.bc}`,background:rc.bg,color:rc.fg,fontFamily:"inherit",cursor:"pointer",outline:"none",fontWeight:600,width:170,appearance:"none",WebkitAppearance:"none",textAlign:"center"}}>
@@ -4906,21 +4931,97 @@ export default function App() {
                     <div><strong style={{color:"#1d4ed8"}}>↓ Coluna</strong> — variável no eixo X (opcional)</div>
                     <div><strong style={{color:"#7e22ce"}}>✓ Resultado</strong> — elegibilidade por célula (opcional)</div>
                   </div>
+                  {(()=>{
+                    const resultadoCol=Object.entries(libWizard.columnRoles).find(([,v])=>v==='resultado')?.[0]??null;
+                    if(!resultadoCol||!libWizardPreview) return null;
+                    const colIdx=libWizardPreview.headers.indexOf(resultadoCol);
+                    if(colIdx<0) return null;
+                    const distinctVals=[...new Set(libWizardPreview.rows.map(r=>String(r[colIdx]??'')).filter(v=>v!==''))];
+                    if(distinctVals.length===0) return null;
+                    const INEL=new Set(['NÃO ELEGÍVEL','NAO ELEGIVEL','INELEGIVEL','INELEGÍVEL','N','FALSE','0','NE','REPROVADO','R','NEGADO','RECUSADO']);
+                    const rm=libWizard.resultadoMapping||{};
+                    const eligCount=distinctVals.filter(v=>rm.hasOwnProperty(v)?rm[v]:!INEL.has(v.toUpperCase().trim())).length;
+                    return (
+                      <div style={{marginTop:16,padding:"14px 16px",background:"#fdf4ff",border:"1.5px solid #e9d5ff",borderRadius:12}}>
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                          <p style={{fontSize:11.5,fontWeight:700,color:"#7e22ce",textTransform:"uppercase",letterSpacing:.5,margin:0}}>✓ Mapeamento de Resultado</p>
+                          <span style={{fontSize:11,color:"#6b21a8",background:"#f3e8ff",padding:"2px 8px",borderRadius:10}}>{eligCount} Elegível · {distinctVals.length-eligCount} Não Elegível</span>
+                        </div>
+                        <p style={{fontSize:12,color:"#6b21a8",marginBottom:10,lineHeight:1.5}}>
+                          Defina o que cada valor de <strong>{resultadoCol}</strong> representa.
+                        </p>
+                        <div style={{display:"flex",flexDirection:"column",gap:5,maxHeight:200,overflowY:"auto"}}>
+                          {distinctVals.map((val,i)=>{
+                            const isElig=rm.hasOwnProperty(val)?rm[val]:!INEL.has(val.toUpperCase().trim());
+                            return (
+                              <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 10px",background:"#fff",borderRadius:8,border:`1.5px solid ${isElig?"#bbf7d0":"#fecaca"}`}}>
+                                <span style={{flex:1,fontSize:13,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={val}>{val}</span>
+                                <div style={{display:"flex",gap:4,flexShrink:0}}>
+                                  <button onClick={()=>setLibWizard(w=>({...w,resultadoMapping:{...(w.resultadoMapping||{}),[val]:true}}))}
+                                    style={{padding:"3px 10px",borderRadius:6,border:`1.5px solid ${isElig?"#16a34a":"#e2e8f0"}`,background:isElig?"#f0fdf4":"#f8fafc",color:isElig?"#15803d":"#94a3b8",cursor:"pointer",fontSize:12,fontWeight:isElig?700:400,fontFamily:"inherit",transition:"all .1s"}}>
+                                    ✅ Elegível
+                                  </button>
+                                  <button onClick={()=>setLibWizard(w=>({...w,resultadoMapping:{...(w.resultadoMapping||{}),[val]:false}}))}
+                                    style={{padding:"3px 10px",borderRadius:6,border:`1.5px solid ${!isElig?"#dc2626":"#e2e8f0"}`,background:!isElig?"#fef2f2":"#f8fafc",color:!isElig?"#dc2626":"#94a3b8",cursor:"pointer",fontSize:12,fontWeight:!isElig?700:400,fontFamily:"inherit",transition:"all .1s"}}>
+                                    ❌ N. Elegível
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </>
               ) : libWizard.step===3 ? (()=>{
                 const { headers, rows } = libWizardPreview || { headers: [], rows: [] };
-                const { columnRoles, agrupadorOrder } = libWizard;
+                const { columnRoles, agrupadorOrder, resultadoMapping } = libWizard;
                 const linhaCol = Object.entries(columnRoles).find(([,v]) => v === 'linha')?.[0] ?? null;
                 const colunaCol = Object.entries(columnRoles).find(([,v]) => v === 'coluna')?.[0] ?? null;
+                const resultadoCol = Object.entries(columnRoles).find(([,v]) => v === 'resultado')?.[0] ?? null;
                 const agrupadores = agrupadorOrder.filter(c => columnRoles[c] === 'agrupador');
                 const groups = new Map();
                 for (const row of rows) {
                   const obj = Object.fromEntries(headers.map((h, i) => [h, row[i] ?? '']));
                   const groupKey = agrupadores.length > 0 ? agrupadores.map(a => obj[a]).join(' | ') : '__all__';
-                  if (!groups.has(groupKey)) groups.set(groupKey, { key: groupKey, count: 0 });
-                  groups.get(groupKey).count++;
+                  if (!groups.has(groupKey)) groups.set(groupKey, { key: groupKey, count: 0, rowObjs: [] });
+                  const g = groups.get(groupKey);
+                  g.count++;
+                  if (g.rowObjs.length < 200) g.rowObjs.push(obj); // cap for preview perf
                 }
                 const groupList = [...groups.values()];
+
+                // Build mini-matrix preview for the first group
+                const previewGroup = groupList[0];
+                const INEL_P = new Set(['NÃO ELEGÍVEL','NAO ELEGIVEL','INELEGIVEL','INELEGÍVEL','N','FALSE','0','NE','REPROVADO','R','NEGADO','RECUSADO']);
+                const rm = resultadoMapping || {};
+                let previewMatrix = null;
+                if (previewGroup && linhaCol) {
+                  const fRows = previewGroup.rowObjs;
+                  const rvSet = [...new Set(fRows.map(r => r[linhaCol]).filter(Boolean))];
+                  const cvSet = colunaCol ? [...new Set(fRows.map(r => r[colunaCol]).filter(Boolean))] : [];
+                  const previewRowDom = sortDomain(rvSet).slice(0, 6);
+                  const previewColDom = sortDomain(cvSet).slice(0, 5);
+                  const cellMap = {};
+                  for (const rowObj of fRows) {
+                    const rv = rowObj[linhaCol];
+                    const cv = colunaCol ? rowObj[colunaCol] : null;
+                    if (!rv || !String(rv).trim()) continue;
+                    const ck = cv && String(cv).trim() ? `${rv}|${cv}` : `${rv}|*`;
+                    if (cellMap.hasOwnProperty(ck)) continue;
+                    if (resultadoCol) {
+                      const raw = String(rowObj[resultadoCol] ?? '');
+                      cellMap[ck] = rm.hasOwnProperty(raw) ? rm[raw] : !INEL_P.has(raw.toUpperCase().trim());
+                    } else {
+                      cellMap[ck] = true;
+                    }
+                  }
+                  const rowTrunc = rvSet.length > 6;
+                  const colTrunc = cvSet.length > 5;
+                  previewMatrix = { previewRowDom, previewColDom, cellMap, rowTrunc, colTrunc, rvSet, cvSet, is2D: previewColDom.length > 0 };
+                }
+
                 return (
                   <>
                     <div style={{padding:"14px 16px",borderRadius:12,background:"#f0fdf4",border:"1px solid #bbf7d0",marginBottom:16,display:"flex",alignItems:"center",gap:12}}>
@@ -4935,12 +5036,59 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+
+                    {/* Mini-matrix preview for first group */}
+                    {previewMatrix && (
+                      <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden",marginBottom:12}}>
+                        <div style={{padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",fontSize:11,fontWeight:600,color:"#64748b",textTransform:"uppercase",letterSpacing:.5,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <span>Pré-visualização — {previewGroup.key==='__all__'?'Cineminha gerado':previewGroup.key}</span>
+                          {(previewMatrix.rowTrunc||previewMatrix.colTrunc) && <span style={{fontSize:10,fontWeight:400,color:"#94a3b8"}}>exibição parcial</span>}
+                        </div>
+                        <div style={{overflowX:"auto",padding:10}}>
+                          {previewMatrix.is2D ? (
+                            <table style={{borderCollapse:"collapse",fontSize:11}}>
+                              <thead>
+                                <tr>
+                                  <th style={{padding:"4px 8px",background:"#f1f5f9",border:"1px solid #e2e8f0",fontSize:10,color:"#64748b",minWidth:60,fontWeight:600}}>{linhaCol} ↓ / {colunaCol} →</th>
+                                  {previewMatrix.previewColDom.map((cv,i)=><th key={i} style={{padding:"4px 8px",background:"#f1f5f9",border:"1px solid #e2e8f0",fontWeight:600,color:"#1e293b",whiteSpace:"nowrap",minWidth:50,textAlign:"center"}}>{cv}</th>)}
+                                  {previewMatrix.colTrunc&&<th style={{padding:"4px 8px",background:"#f1f5f9",border:"1px solid #e2e8f0",color:"#94a3b8",textAlign:"center"}}>…</th>}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {previewMatrix.previewRowDom.map((rv,ri)=>(
+                                  <tr key={ri}>
+                                    <td style={{padding:"4px 8px",background:"#f8fafc",border:"1px solid #e2e8f0",fontWeight:600,color:"#1e293b",whiteSpace:"nowrap"}}>{rv}</td>
+                                    {previewMatrix.previewColDom.map((cv,ci)=>{
+                                      const ck=`${rv}|${cv}`;
+                                      const st=previewMatrix.cellMap[ck];
+                                      return <td key={ci} style={{padding:"4px 8px",border:"1px solid #e2e8f0",textAlign:"center",background:st===undefined?"#f8fafc":st?"#f0fdf4":"#fef2f2"}}>{st===undefined?<span style={{color:"#cbd5e1",fontSize:11}}>—</span>:<span style={{fontSize:13}}>{st?"✅":"❌"}</span>}</td>;
+                                    })}
+                                    {previewMatrix.colTrunc&&<td style={{padding:"4px 8px",border:"1px solid #e2e8f0",textAlign:"center",color:"#94a3b8"}}>…</td>}
+                                  </tr>
+                                ))}
+                                {previewMatrix.rowTrunc&&<tr><td colSpan={previewMatrix.previewColDom.length+1+(previewMatrix.colTrunc?1:0)} style={{padding:"4px 14px",border:"1px solid #e2e8f0",textAlign:"center",color:"#94a3b8",fontSize:11}}>+{previewMatrix.rvSet.length-6} linhas…</td></tr>}
+                              </tbody>
+                            </table>
+                          ) : (
+                            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                              {previewMatrix.previewRowDom.map((rv,i)=>{
+                                const ck=`${rv}|*`;
+                                const st=previewMatrix.cellMap[ck];
+                                return <div key={i} style={{padding:"4px 10px",borderRadius:6,background:st===undefined?"#f1f5f9":st?"#f0fdf4":"#fef2f2",border:`1px solid ${st===undefined?"#e2e8f0":st?"#bbf7d0":"#fecaca"}`,fontSize:12,fontWeight:500,color:"#1e293b",display:"flex",alignItems:"center",gap:4}}><span>{st===undefined?"—":st?"✅":"❌"}</span><span>{rv}</span></div>;
+                              })}
+                              {previewMatrix.rowTrunc&&<div style={{padding:"4px 10px",fontSize:11,color:"#94a3b8",alignSelf:"center"}}>+{previewMatrix.rvSet.length-6} mais…</div>}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     {groupList.length>0 && (
                       <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden",marginBottom:12}}>
                         <div style={{padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>
                           Grupos{groupList.length>10?` (mostrando 10 de ${groupList.length})`:''}
                         </div>
-                        <div style={{maxHeight:280,overflowY:"auto"}}>
+                        <div style={{maxHeight:200,overflowY:"auto"}}>
                           {groupList.slice(0,10).map((g,i)=>(
                             <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 14px",borderBottom:i<Math.min(groupList.length,10)-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
                               <span style={{fontSize:13,fontWeight:500,color:"#1e293b"}}>{g.key==='__all__'?'(sem agrupador)':g.key}</span>
@@ -5792,6 +5940,18 @@ export default function App() {
               ) : (
                 /* ── Browse mode ── */
                 <div style={{display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+                  {/* Post-import success banner */}
+                  {cinemaLibraryModal.justImported > 0 && (
+                    <div style={{margin:"12px 28px 0",padding:"12px 16px",background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:10,display:"flex",alignItems:"center",gap:12,flexShrink:0}}>
+                      <span style={{fontSize:22,flexShrink:0}}>✅</span>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:13,fontWeight:700,color:"#15803d"}}>{cinemaLibraryModal.justImported} Cineminha{cinemaLibraryModal.justImported!==1?'s':''} gerado{cinemaLibraryModal.justImported!==1?'s':''} com sucesso!</div>
+                        <div style={{fontSize:12,color:"#4b7c61",marginTop:1}}>Selecione um item abaixo para inserir no canvas.</div>
+                      </div>
+                      <button onClick={()=>upd({justImported:0})}
+                        style={{fontSize:16,background:"none",border:"none",color:"#4b7c61",cursor:"pointer",padding:0,lineHeight:1,fontFamily:"inherit"}}>×</button>
+                    </div>
+                  )}
                   {/* Search + filters */}
                   <div style={{padding:"14px 28px 12px",borderBottom:"1px solid #f1f5f9",flexShrink:0,display:"flex",gap:10,alignItems:"center"}}>
                     <input value={search} onChange={e=>upd({search:e.target.value})}
