@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~2600 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~5200 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -17,6 +17,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
+- `cinemaTypeModal`: modal de escolha de tipo ao criar Cineminha — `null | {wx, wy}`
 - `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
 
 ### Tipos de coluna (`COL_TYPES`)
@@ -34,28 +35,63 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 {
   id, type:"cineminha", x, y, w, h,
   label: "Cineminha",
+  cinemaType: string,              // tipo funcional — chave de CINEMINHA_TYPES (default: 'eligibility')
   rowVar: null | {col, csvId},     // variável no eixo de linhas
   colVar: null | {col, csvId},     // variável no eixo de colunas
   rowDomain: string[],             // valores distintos ordenados do eixo linha
   colDomain: string[],             // valores distintos ordenados do eixo coluna
-  cells: { [`${rowVal}|${colVal}`]: boolean },  // true = Elegível (default), false = Não Elegível
+  cells: { [`${rowVal}|${colVal}`]: boolean },  // true = port[0] (default), false = port[1]
 }
 ```
-- Criado automaticamente com dois ports filhos: `"Elegível"` (verde) e `"Não Elegível"` (vermelho)
+- Criado via modal de escolha de tipo (`cinemaTypeModal`); tipo determina os labels dos ports filhos
 - Chave de célula 1D-linha: `"${rowVal}|*"` / 1D-coluna: `"*|${colVal}"`
+- Compatibilidade retroativa: shapes sem `cinemaType` são tratados como `'eligibility'` via `getCinemaType()`
+
+### Sistema de tipagem: `CINEMINHA_TYPES`
+Constante declarativa que define todos os tipos suportados. Adicionar um novo tipo exige apenas uma nova entrada aqui — sem alterações em lógica de renderização ou simulação.
+
+```js
+CINEMINHA_TYPES = {
+  eligibility: {
+    id, label, icon, desc,
+    color,           // cor da barra de título e stroke
+    badgeBg, badgeFg, // cores do badge de tipo
+    ports: [
+      { label: 'Elegível',     color: '#f0fdf4' },
+      { label: 'Não Elegível', color: '#fff1f2' },
+    ],
+  },
+  offer: {
+    // ...mesma estrutura
+    ports: [
+      { label: 'Com Oferta', color: '#ecfeff' },
+      { label: 'Sem Oferta', color: '#fef9c3' },
+    ],
+  },
+  // extensível: adicionar novos tipos aqui
+}
+```
+
+| Tipo | `id` | Icon | Ports |
+|------|------|------|-------|
+| Elegibilidade | `eligibility` | 🎯 | Elegível / Não Elegível |
+| Oferta | `offer` | 💼 | Com Oferta / Sem Oferta |
+
+`getCinemaType(cinemaType)` — helper de acesso seguro com fallback para `'eligibility'`.
 
 ### Funções-chave
 - `createDecisionNode(col, csvId, wx, wy)`: cria losango de decisão + ports automáticos com setas rotuladas (valores distintos da coluna)
-- `createCinemaNode(wx, wy)`: cria nó Cineminha vazio + ports "Elegível" e "Não Elegível"
+- `createCinemaNode(wx, wy, cinemaType)`: cria nó Cineminha vazio com tipo especificado + ports derivados de `CINEMINHA_TYPES`
+- `changeCinemaType(shapeId, newType)`: altera o tipo do Cineminha e propaga labels/cores para ports filhos e labels de conexão
 - `assignCinemaVar(shapeId, col, csvId, axis)`: atribui variável ao eixo `'row'` ou `'col'`, recomputa domínio e reconstrói `cells`
-- `toggleCinemaCell(shapeId, cellKey)`: alterna elegibilidade de uma célula
+- `toggleCinemaCell(shapeId, cellKey)`: alterna estado de uma célula (port[0] ↔ port[1])
 - `deleteShape(id)`: deleta shape + cascade (ports filhos de nós `decision` e `cineminha`)
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
-- `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
+- `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone + badge de tipo), 1D ou 2D via `foreignObject`; barra de título e resize handles usam cor do tipo
 - `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real e Inad. Inferida
 
 ### Componentes globais (fora do componente principal)
@@ -95,7 +131,7 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
-- `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
+- `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia usando `getCinemaType(node.cinemaType).ports[0|1].label` — independente de tipo
 - Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
 - Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
   - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
@@ -188,4 +224,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-version-indicator-Tcb42`
+`claude/cineminha-typing-system-i9CdR` (PR #33)
