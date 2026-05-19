@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~3300 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~5200 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -38,7 +38,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
   colVar: null | {col, csvId},     // variável no eixo de colunas
   rowDomain: string[],             // valores distintos ordenados do eixo linha
   colDomain: string[],             // valores distintos ordenados do eixo coluna
-  cells: { [`${rowVal}|${colVal}`]: boolean },  // true = Elegível (default), false = Não Elegível
+  cells: { [`${rowVal}|${colVal}`]: number },   // 0 = Não Elegível, ≥1 = Elegível (ex.: 1, 5, 10)
 }
 ```
 - Criado automaticamente com dois ports filhos: `"Elegível"` (verde) e `"Não Elegível"` (vermelho)
@@ -60,7 +60,8 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `createDecisionNode(col, csvId, wx, wy)`: cria losango de decisão + ports automáticos com setas rotuladas (valores distintos da coluna)
 - `createCinemaNode(wx, wy)`: cria nó Cineminha vazio + ports "Elegível" e "Não Elegível"
 - `assignCinemaVar(shapeId, col, csvId, axis)`: atribui variável ao eixo `'row'` ou `'col'`, recomputa domínio e reconstrói `cells`
-- `toggleCinemaCell(shapeId, cellKey)`: alterna elegibilidade de uma célula
+- `toggleCinemaCell(shapeId, cellKey)`: alterna valor da célula entre `0` e `1`
+- `setCinemaCellValue(shapeId, cellKey, value)`: define valor numérico arbitrário na célula (≥ 0)
 - `deleteShape(id)`: deleta shape + cascade (ports filhos de nós `decision` e `cineminha`)
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
@@ -78,8 +79,10 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `computeCinemaSize(rowDomain, colDomain)`: calcula `{w, h}` do nó a partir dos domínios (caps: 540×420)
 - `fmtQty(n)`: formata número como inteiro, `k` ou `M`
 - `fmtPct(v)`: formata ratio como `"XX.XX%"` ou `"N/A"` quando `v === null`
+- `getCellValue(cells, key)`: lê valor numérico de uma célula com compatibilidade retroativa — `false→0`, `true/undefined/null→1`, `number→number`
+- `isCellEligible(cells, key)`: retorna `true` quando `getCellValue > 0`; usado em toda leitura de elegibilidade
 - `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}`
-- `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`
+- `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`; células aprovadas armazenadas como `1`
 - `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
 
 ### Padrão de refs
@@ -107,7 +110,7 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
-- `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
+- `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` via `isCellEligible()` e roteia para o port `"Elegível"` (valor > 0) ou `"Não Elegível"` (valor = 0)
 - Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
 - Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
   - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
@@ -174,7 +177,7 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
   frontier,         // array de pontos Pareto ordenado por approvalRate crescente
   scenarios,        // {conservador, medio, maximo} — pontos extraídos da fronteira
   activeCard,       // 'conservador' | 'medio' | 'maximo' | 'personalizado'
-  proposedCells,    // {[cellKey]: boolean} — estado em edição (não aplicado ao canvas)
+  proposedCells,    // {[cellKey]: number} — estado em edição (0 = não elegível, ≥1 = elegível)
   sliderApproval,   // ratio 0–1 (driver primário)
   sliderInadReal,   // ratio 0–1 (restrição de teto)
   sliderInadInf,    // ratio 0–1 (restrição de teto)
@@ -212,6 +215,35 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 - Decision Lens: comparação AS IS vs simulado usando `__DECISAO_ORIGINAL`
 - Motor de simulação incremental: sobrescrever apenas subconjunto da base histórica
 - Cálculo de delta e impacto marginal
+- UI multinível: editor de valores > 1 no modal de otimização (hoje apenas via botão direito no canvas)
+
+## Modelo de Resultado das Caselas
+
+### Estrutura
+Caselas armazenam `number` (inteiro ≥ 0). O significado depende do tipo funcional do Cineminha:
+
+| Tipo | Valor 0 | Valor 1 | Valor > 1 |
+|------|---------|---------|-----------|
+| Elegibilidade | Reprovado | Aprovado | — |
+| Oferta | Sem oferta | Nível 1 | Nível N |
+
+### Interpretação visual no canvas
+| Valor | Cor | Label |
+|-------|-----|-------|
+| `0` | Vermelho `#ef4444` | `✗` |
+| `1` | Verde `#22c55e` | `✓` |
+| `> 1` | Índigo `#6366f1` | número |
+
+### Edição pelo usuário
+- **Clique esquerdo**: alterna entre `0` e `1`
+- **Clique direito** (canvas): abre `window.prompt` para digitar qualquer inteiro ≥ 0
+
+### Compatibilidade retroativa
+Células com valores legados (boolean) são migradas automaticamente por `getCellValue()`:
+| Legado | Novo |
+|--------|------|
+| `false` | `0` |
+| `true` / `undefined` / `null` | `1` |
 
 ## Indicador de Versão/Build (`BuildBadge`)
 
@@ -236,4 +268,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-decision-variable-fP4ZM`
+`claude/evolve-cell-result-model-ynvjH`
