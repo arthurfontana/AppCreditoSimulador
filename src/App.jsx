@@ -143,12 +143,13 @@ const LENS_OPERATORS = [
 ];
 
 const COL_TYPES = [
-  { value:"id",           icon:"🔑", label:"ID",               shortLabel:"ID"       },
-  { value:"decision",     icon:"🔀", label:"Filtro",           shortLabel:"Filtro"   },
-  { value:"qty",          icon:"📊", label:"Vol. Propostas",   shortLabel:"Vol."     },
-  { value:"qtdAltas",     icon:"📈", label:"Qtd Altas/Vendas", shortLabel:"Altas"    },
-  { value:"inadReal",     icon:"⚠️", label:"Inad. Real",       shortLabel:"Inad.R"   },
-  { value:"inadInferida", icon:"🎯", label:"Inad. Inferida",   shortLabel:"Inad.I"   },
+  { value:"id",            icon:"🔑", label:"ID",                shortLabel:"ID"       },
+  { value:"decision",      icon:"🔀", label:"Filtro",            shortLabel:"Filtro"   },
+  { value:"qty",           icon:"📊", label:"Vol. Propostas",    shortLabel:"Vol."     },
+  { value:"qtdAltas",      icon:"📈", label:"Altas Reais",       shortLabel:"Altas R"  },
+  { value:"qtdAltasInfer", icon:"🔮", label:"Conv. Inferida",    shortLabel:"Conv.I"   },
+  { value:"inadReal",      icon:"⚠️", label:"Inad. Real",        shortLabel:"Inad.R"   },
+  { value:"inadInferida",  icon:"🎯", label:"Inad. Inferida",    shortLabel:"Inad.I"   },
 ];
 
 const DELIMITERS = [
@@ -208,6 +209,23 @@ function suggestVarType(colName, values) {
   }
 
   return "categorical";
+}
+
+function suggestMetricColumns(headers) {
+  const patterns = [
+    { type:'qty',           re: /qtd_proposta|qtd_prop|num_proposta|vol_proposta|qt_prop|count_prop|total_prop|qtde_prop/i },
+    { type:'qtdAltas',      re: /qtd_altas?(?!.*infer)|qtd_aprov(?!.*infer)|num_altas?|vol_altas?|altas_reais/i },
+    { type:'inadReal',      re: /qtd_atrs|qtd_inad(?!.*infer)|vol_atrs|over_30(?!.*infer)|parc_over(?!.*infer)|inadimpl(?!.*infer)|atraso(?!.*infer)|ftra_parc/i },
+    { type:'qtdAltasInfer', re: /infer_conv|conv_infer|infer.*conv|altas_infer|qtd_infer_conv/i },
+    { type:'inadInferida',  re: /infer.*atrs|infer.*inad|infer.*over|fl_atrs|inad_infer|inadimpl_infer|infer_fl/i },
+  ];
+  const result = {};
+  const used = new Set();
+  for (const {type, re} of patterns) {
+    const match = headers.find(h => re.test(h) && !used.has(h));
+    if (match) { result[type] = match; used.add(match); }
+  }
+  return result;
 }
 
 // ── CSV helpers ──────────────────────────────────────────────────────────────
@@ -401,8 +419,8 @@ function runSimulation(shapes, conns, csvStore) {
   }
 
   // edgeStats accumulator
-  const edgeAcc = {}; // connId -> {qty,approvedQty,rejectedQty,asIsQty,inadRealSum,inadInferidaSum,qtdAltasSum}
-  const initEdge = (cid) => { if (!edgeAcc[cid]) edgeAcc[cid]={qty:0,approvedQty:0,rejectedQty:0,asIsQty:0,inadRealSum:0,inadInferidaSum:0,qtdAltasSum:0}; };
+  const edgeAcc = {};
+  const initEdge = (cid) => { if (!edgeAcc[cid]) edgeAcc[cid]={qty:0,approvedQty:0,rejectedQty:0,asIsQty:0,inadRealSum:0,inadInferidaSum:0,qtdAltasSum:0,qtdAltasInferSum:0}; };
 
   function traverseRow(row, headers, startId, rowMeta) {
     let cur = startId; const visited = new Set();
@@ -458,17 +476,18 @@ function runSimulation(shapes, conns, csvStore) {
   }
 
   let totalQty = 0, approvedQty = 0, rejectedQty = 0, asIsQty = 0;
-  let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0;
+  let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
   for (const [csvId, csv] of Object.entries(csvStore)) {
     const types = csv.columnTypes || {};
     const colIdx = (type) => {
       const col = Object.entries(types).find(([,t]) => t === type)?.[0];
       return col ? csv.headers.indexOf(col) : -1;
     };
-    const qtyIdx         = colIdx('qty');
-    const qtdAltasIdx    = colIdx('qtdAltas');
-    const inadRealIdx    = colIdx('inadReal');
-    const inadInferidaIdx= colIdx('inadInferida');
+    const qtyIdx          = colIdx('qty');
+    const qtdAltasIdx     = colIdx('qtdAltas');
+    const qtdAltasInferIdx= colIdx('qtdAltasInfer');
+    const inadRealIdx     = colIdx('inadReal');
+    const inadInferidaIdx = colIdx('inadInferida');
     const dOrigIdx       = csv.headers.indexOf('__DECISAO_ORIGINAL');
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
@@ -479,10 +498,11 @@ function runSimulation(shapes, conns, csvStore) {
     if (csvRoots.length === 0) continue;
     const rootId = csvRoots[0].id;
     for (const row of csv.rows) {
-      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
-      const qtdAltas = qtdAltasIdx >= 0 ? (parseFloat(row[qtdAltasIdx]) || 0) : 0;
-      const inadR = inadRealIdx >= 0 ? (parseFloat(row[inadRealIdx]) || 0) : 0;
-      const inadI = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
+      const qty          = qtyIdx          >= 0 ? (parseFloat(row[qtyIdx])          || 0) : 1;
+      const qtdAltas     = qtdAltasIdx     >= 0 ? (parseFloat(row[qtdAltasIdx])     || 0) : 0;
+      const qtdAltasInfer= qtdAltasInferIdx>= 0 ? (parseFloat(row[qtdAltasInferIdx])|| 0) : 0;
+      const inadR        = inadRealIdx     >= 0 ? (parseFloat(row[inadRealIdx])     || 0) : 0;
+      const inadI        = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
       totalQty += qty;
       const {result:res, path} = traverseRow(row, csv.headers, rootId, {qty, qtdAltas, inadR, inadI});
       let isApproved = res === 'approved', isRejected = res === 'rejected';
@@ -491,23 +511,25 @@ function runSimulation(shapes, conns, csvStore) {
         const origDecision = dOrigIdx >= 0 ? String(row[dOrigIdx] ?? '').toUpperCase() : '';
         if (origDecision === 'APROVADO') isApproved = true;
         else if (origDecision === 'REPROVADO') isRejected = true;
-        else asIsQty += qty; // no original decision available — count separately
+        else asIsQty += qty;
       }
       if (isApproved) {
-        approvedQty += qty;
-        qtdAltasSum    += qtdAltas;
-        inadRealSum    += inadR;
-        inadInferidaSum+= inadI;
+        approvedQty      += qty;
+        qtdAltasSum      += qtdAltas;
+        qtdAltasInferSum += qtdAltasInfer;
+        inadRealSum      += inadR;
+        inadInferidaSum  += inadI;
       } else if (isRejected) rejectedQty += qty;
       // Accumulate edge stats for every traversed edge
       for (const cid of path) {
         initEdge(cid);
         edgeAcc[cid].qty += qty;
         if (isApproved) {
-          edgeAcc[cid].approvedQty += qty;
-          edgeAcc[cid].qtdAltasSum += qtdAltas;
-          edgeAcc[cid].inadRealSum += inadR;
-          edgeAcc[cid].inadInferidaSum += inadI;
+          edgeAcc[cid].approvedQty       += qty;
+          edgeAcc[cid].qtdAltasSum       += qtdAltas;
+          edgeAcc[cid].qtdAltasInferSum  += qtdAltasInfer;
+          edgeAcc[cid].inadRealSum       += inadR;
+          edgeAcc[cid].inadInferidaSum   += inadI;
         } else if (isRejected) {
           edgeAcc[cid].rejectedQty += qty;
         } else if (res === 'as_is') {
@@ -516,8 +538,9 @@ function runSimulation(shapes, conns, csvStore) {
       }
     }
   }
-  const inadReal     = qtdAltasSum > 0    ? inadRealSum / qtdAltasSum   : null;
-  const inadInferida = approvedQty  > 0   ? inadInferidaSum / approvedQty : null;
+  const inadReal     = qtdAltasSum > 0 ? inadRealSum / qtdAltasSum : null;
+  const inadInferida = qtdAltasInferSum > 0 ? inadInferidaSum / qtdAltasInferSum
+                     : approvedQty      > 0 ? inadInferidaSum / approvedQty : null;
 
   // Compute derived per-edge stats
   const edgeStats = {};
@@ -530,7 +553,8 @@ function runSimulation(shapes, conns, csvStore) {
       qtdAltas: acc.qtdAltasSum,
       approvalRate: acc.qty > 0 ? acc.approvedQty / acc.qty : null,
       inadReal: acc.qtdAltasSum > 0 ? acc.inadRealSum / acc.qtdAltasSum : null,
-      inadInferida: acc.approvedQty > 0 ? acc.inadInferidaSum / acc.approvedQty : null,
+      inadInferida: acc.qtdAltasInferSum > 0 ? acc.inadInferidaSum / acc.qtdAltasInferSum
+                  : acc.approvedQty      > 0 ? acc.inadInferidaSum / acc.approvedQty : null,
     };
   }
 
@@ -688,8 +712,8 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
 function computeIncrementalResult(overlay, csvStore) {
   if (!overlay) return null;
 
-  const bl  = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, inadRRaw:0, inadIRaw:0 };
-  const sim = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, inadRRaw:0, inadIRaw:0 };
+  const bl  = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, qtdAltasInferSum:0, inadRRaw:0, inadIRaw:0 };
+  const sim = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, qtdAltasInferSum:0, inadRRaw:0, inadIRaw:0 };
   const imp = { qty:0, rToA:0, aToR:0, qtdAltasSimSum:0, inadRSimRaw:0, inadISimRaw:0 };
 
   for (const [csvId, { rowDecisions }] of Object.entries(overlay)) {
@@ -701,22 +725,24 @@ function computeIncrementalResult(overlay, csvStore) {
       return col != null ? csv.headers.indexOf(col) : -1;
     };
     const qtyIdx   = getIdx('qty');
-    const altasIdx = getIdx('qtdAltas');
-    const inadRIdx = getIdx('inadReal');
-    const inadIIdx = getIdx('inadInferida');
+    const altasIdx      = getIdx('qtdAltas');
+    const altasInferIdx = getIdx('qtdAltasInfer');
+    const inadRIdx      = getIdx('inadReal');
+    const inadIIdx      = getIdx('inadInferida');
 
     for (const rd of rowDecisions) {
       const row = csv.rows[rd.rowIdx];
       if (!row) continue;
-      const qty   = qtyIdx   >= 0 ? (parseFloat(row[qtyIdx])   || 1) : 1;
-      const altas = altasIdx >= 0 ? (parseFloat(row[altasIdx]) || 0) : 0;
-      const inadR = inadRIdx >= 0 ? (parseFloat(row[inadRIdx]) || 0) : 0;
-      const inadI = inadIIdx >= 0 ? (parseFloat(row[inadIIdx]) || 0) : 0;
+      const qty        = qtyIdx       >= 0 ? (parseFloat(row[qtyIdx])       || 1) : 1;
+      const altas      = altasIdx     >= 0 ? (parseFloat(row[altasIdx])     || 0) : 0;
+      const altasInfer = altasInferIdx>= 0 ? (parseFloat(row[altasInferIdx])|| 0) : 0;
+      const inadR      = inadRIdx     >= 0 ? (parseFloat(row[inadRIdx])     || 0) : 0;
+      const inadI      = inadIIdx     >= 0 ? (parseFloat(row[inadIIdx])     || 0) : 0;
 
       // Baseline (decisao original)
       bl.totalQty += qty;
       if (rd.decisaoOriginal === 'APROVADO') {
-        bl.approvedQty += qty; bl.qtdAltasSum += altas; bl.inadRRaw += inadR; bl.inadIRaw += inadI;
+        bl.approvedQty += qty; bl.qtdAltasSum += altas; bl.qtdAltasInferSum += altasInfer; bl.inadRRaw += inadR; bl.inadIRaw += inadI;
       } else if (rd.decisaoOriginal === 'REPROVADO') {
         bl.rejectedQty += qty;
       }
@@ -724,7 +750,7 @@ function computeIncrementalResult(overlay, csvStore) {
       // Simulado híbrido: original p/ não-impactados, simulada p/ impactados
       sim.totalQty += qty;
       if (rd.decisaoSimulada === 'APROVADO') {
-        sim.approvedQty += qty; sim.qtdAltasSum += altas; sim.inadRRaw += inadR; sim.inadIRaw += inadI;
+        sim.approvedQty += qty; sim.qtdAltasSum += altas; sim.qtdAltasInferSum += altasInfer; sim.inadRRaw += inadR; sim.inadIRaw += inadI;
       } else if (rd.decisaoSimulada === 'REPROVADO') {
         sim.rejectedQty += qty;
       }
@@ -747,14 +773,16 @@ function computeIncrementalResult(overlay, csvStore) {
     baseline: {
       approvedQty: bl.approvedQty, rejectedQty: bl.rejectedQty, totalQty: bl.totalQty,
       approvalRate: blRate,
-      inadReal:     bl.qtdAltasSum  > 0 ? bl.inadRRaw  / bl.qtdAltasSum  : null,
-      inadInferida: bl.approvedQty  > 0 ? bl.inadIRaw  / bl.approvedQty  : null,
+      inadReal:     bl.qtdAltasSum      > 0 ? bl.inadRRaw / bl.qtdAltasSum : null,
+      inadInferida: bl.qtdAltasInferSum > 0 ? bl.inadIRaw / bl.qtdAltasInferSum
+                  : bl.approvedQty      > 0 ? bl.inadIRaw / bl.approvedQty : null,
     },
     simulated: {
       approvedQty: sim.approvedQty, rejectedQty: sim.rejectedQty, totalQty: sim.totalQty,
       approvalRate: simRate,
-      inadReal:     sim.qtdAltasSum > 0 ? sim.inadRRaw / sim.qtdAltasSum : null,
-      inadInferida: sim.approvedQty > 0 ? sim.inadIRaw / sim.approvedQty : null,
+      inadReal:     sim.qtdAltasSum      > 0 ? sim.inadRRaw / sim.qtdAltasSum : null,
+      inadInferida: sim.qtdAltasInferSum > 0 ? sim.inadIRaw / sim.qtdAltasInferSum
+                  : sim.approvedQty      > 0 ? sim.inadIRaw / sim.approvedQty : null,
     },
     impacted: {
       qty: imp.qty, totalQty: bl.totalQty,
@@ -793,35 +821,38 @@ function computeCellMetrics(shape, csvStore) {
   };
   const rowCI = rowVar ? csv.headers.indexOf(rowVar.col) : -1;
   const colCI = colVar ? csv.headers.indexOf(colVar.col) : -1;
-  const qtyI = getIdx('qty'), altasI = getIdx('qtdAltas');
+  const qtyI = getIdx('qty'), altasI = getIdx('qtdAltas'), altasInferI = getIdx('qtdAltasInfer');
   const inadRI = getIdx('inadReal'), inadII = getIdx('inadInferida');
   const rDom = rowDomain?.length > 0 ? rowDomain : ['*'];
   const cDom = colDomain?.length > 0 ? colDomain : ['*'];
   const acc = {};
   for (const rv of rDom)
     for (const cv of cDom)
-      acc[`${rv}|${cv}`] = { qty: 0, qtdAltas: 0, inadRRaw: 0, inadIRaw: 0 };
+      acc[`${rv}|${cv}`] = { qty: 0, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0 };
   for (const row of csv.rows) {
     const rv = rowVar && rowCI >= 0 ? (row[rowCI] ?? '').toString().trim() : '*';
     const cv = colVar && colCI >= 0 ? (row[colCI] ?? '').toString().trim() : '*';
     const key = `${rv}|${cv}`;
     if (!acc[key]) continue;
-    const qty   = qtyI   >= 0 ? (parseFloat(row[qtyI])   || 0) : 1;
-    const altas = altasI >= 0 ? (parseFloat(row[altasI]) || 0) : 0;
-    const inadR = inadRI >= 0 ? (parseFloat(row[inadRI]) || 0) : 0;
-    const inadI = inadII >= 0 ? (parseFloat(row[inadII]) || 0) : 0;
-    acc[key].qty      += qty;
-    acc[key].qtdAltas += altas;
-    acc[key].inadRRaw += inadR;
-    acc[key].inadIRaw += inadI;
+    const qty        = qtyI       >= 0 ? (parseFloat(row[qtyI])       || 0) : 1;
+    const altas      = altasI     >= 0 ? (parseFloat(row[altasI])     || 0) : 0;
+    const altasInfer = altasInferI>= 0 ? (parseFloat(row[altasInferI])|| 0) : 0;
+    const inadR      = inadRI     >= 0 ? (parseFloat(row[inadRI])     || 0) : 0;
+    const inadI      = inadII     >= 0 ? (parseFloat(row[inadII])     || 0) : 0;
+    acc[key].qty          += qty;
+    acc[key].qtdAltas     += altas;
+    acc[key].qtdAltasInfer+= altasInfer;
+    acc[key].inadRRaw     += inadR;
+    acc[key].inadIRaw     += inadI;
   }
   const result = {};
   for (const [key, m] of Object.entries(acc)) {
     result[key] = {
-      qty: m.qty, qtdAltas: m.qtdAltas,
+      qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer,
       inadRRaw: m.inadRRaw, inadIRaw: m.inadIRaw,
-      inadReal:     m.qtdAltas > 0 ? m.inadRRaw / m.qtdAltas : null,
-      inadInferida: m.qty      > 0 ? m.inadIRaw / m.qty      : null,
+      inadReal:     m.qtdAltas      > 0 ? m.inadRRaw / m.qtdAltas      : null,
+      inadInferida: m.qtdAltasInfer > 0 ? m.inadIRaw / m.qtdAltasInfer
+                  : m.qty           > 0 ? m.inadIRaw / m.qty            : null,
     };
   }
   return result;
@@ -1730,14 +1761,22 @@ export default function App() {
     if (!wizard) return;
     const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId}=wizard;
 
+    // Auto-assign 'decision' to all columns without an explicit type
+    const buildFinalTypes = (headers, types) => {
+      const final = {...(types || {})};
+      for (const h of headers) { if (!final[h]) final[h] = 'decision'; }
+      return final;
+    };
+
     // ── Edit mode: update existing dataset, no new canvas nodes ──
     if (editCsvId) {
       const prev = csvStoreR.current[editCsvId];
       if (!prev) { setWizard(null); return; }
       pushHistory();
+      const finalTypes = buildFinalTypes(prev.headers.filter(h => h !== '__DECISAO_ORIGINAL'), columnTypes);
       setCsvStore(store => ({
         ...store,
-        [editCsvId]: { ...prev, name: filename||prev.name, columnTypes: columnTypes||{}, varTypes: varTypes||{}, asIsConfig: asIsVar ? { col: asIsVar, mapping: asIsMapping||{} } : (prev.asIsConfig||null) }
+        [editCsvId]: { ...prev, name: filename||prev.name, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: asIsVar ? { col: asIsVar, mapping: asIsMapping||{} } : (prev.asIsConfig||null) }
       }));
       setWizard(null);
       return;
@@ -1769,7 +1808,8 @@ export default function App() {
         return [...r, mapped];
       });
     }
-    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,rows:finalRows,columnTypes:columnTypes||{},varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null}}));
+    const finalTypes = buildFinalTypes(headers, columnTypes);
+    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,rows:finalRows,columnTypes:finalTypes,varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null}}));
 
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
@@ -5567,7 +5607,7 @@ export default function App() {
       {/* ═══════════════ IMPORT WIZARD MODAL ═══════════════ */}
       {wizard && (
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?900:wizard.step===3?680:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
+          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?820:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
 
             {/* Wizard header */}
             <div style={{padding:"22px 28px 18px",borderBottom:"1px solid #f1f5f9"}}>
@@ -5580,8 +5620,7 @@ export default function App() {
                     <div style={{display:"flex",alignItems:"center",gap:4,marginTop:8}}>
                       <div style={{width:24,height:4,borderRadius:2,background:"#3b82f6"}}/>
                       <div style={{width:24,height:4,borderRadius:2,background:wizard.step>=2?"#3b82f6":"#e2e8f0"}}/>
-                      <div style={{width:24,height:4,borderRadius:2,background:wizard.step>=3?"#3b82f6":"#e2e8f0"}}/>
-                      <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {wizard.step} de 3</span>
+                      <span style={{fontSize:10.5,color:"#94a3b8",marginLeft:4}}>Passo {wizard.step} de 2</span>
                     </div>
                   )}
                 </div>
@@ -5641,173 +5680,170 @@ export default function App() {
                     {wizardPreview && <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>{wizardPreview.rows.length} linhas · {wizardPreview.headers.length} colunas encontradas</p>}
                   </div>
                 </>
-              ) : wizard.step===2 ? (
-                <>
-                  {/* Step 2: Column classification */}
-                  <p style={{fontSize:13,color:"#475569",marginBottom:16,lineHeight:1.6}}>
-                    Classifique cada coluna para habilitar o simulador de crédito.
-                  </p>
-                  {/* Fixed-layout table for perfect alignment */}
-                  <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
-                    {/* Header — sticky */}
-                    <div style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 60px) 100px",alignItems:"center",padding:"8px 14px",background:"#f8fafc",borderBottom:"2px solid #e2e8f0",position:"sticky",top:0,zIndex:1}}>
-                      <span style={{fontSize:11,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Coluna</span>
-                      {COL_TYPES.map(ct=>(
-                        <div key={ct.value} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                          <span style={{fontSize:13}}>{ct.icon}</span>
-                          <span style={{fontSize:9.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.3,textAlign:"center",lineHeight:1.2}}>{ct.shortLabel}</span>
-                        </div>
-                      ))}
-                      <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                        <span style={{fontSize:13}}>📶</span>
-                        <span style={{fontSize:9.5,fontWeight:700,color:"#7c3aed",textTransform:"uppercase",letterSpacing:.3,textAlign:"center",lineHeight:1.2}}>Tipo Var.</span>
-                      </div>
-                    </div>
-                    {/* Scrollable rows */}
-                    <div style={{maxHeight:340,overflowY:"auto",overflowX:"hidden"}}>
-                      {(wizardPreview?.headers||[]).map((colName,i)=>{
-                        const selected = wizard.columnTypes[colName];
-                        const varType = (wizard.varTypes||{})[colName] || "categorical";
-                        return (
-                          <div key={i} style={{display:"grid",gridTemplateColumns:"1fr repeat(6, 60px) 100px",alignItems:"center",padding:"9px 14px",borderBottom:i<(wizardPreview.headers.length-1)?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
-                            <span style={{fontSize:13,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",paddingRight:8}} title={colName}>{colName}</span>
-                            {COL_TYPES.map(ct=>{
-                              const isSelected = selected === ct.value;
-                              return (
-                                <label key={ct.value} style={{display:"flex",justifyContent:"center",cursor:"pointer"}}>
-                                  <input type="radio" name={`col-${i}`} value={ct.value}
-                                    checked={isSelected}
-                                    onChange={()=>setWizard(w=>({...w,columnTypes:{...w.columnTypes,[colName]:ct.value}}))}
-                                    style={{display:"none"}}/>
-                                  <div style={{width:22,height:22,borderRadius:6,
-                                    border:`2px solid ${isSelected?"#3b82f6":"#e2e8f0"}`,
-                                    background:isSelected?"#3b82f6":"#fff",
-                                    display:"flex",alignItems:"center",justifyContent:"center",
-                                    transition:"all .12s",flexShrink:0}}>
-                                    {isSelected&&<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-                                  </div>
-                                </label>
-                              );
-                            })}
-                            {/* Variable type selector */}
-                            <div style={{display:"flex",justifyContent:"center"}}>
-                              <select
-                                value={varType}
-                                onChange={e=>setWizard(w=>({...w,varTypes:{...(w.varTypes||{}),[colName]:e.target.value}}))}
-                                style={{fontSize:11,padding:"3px 6px",borderRadius:6,border:`1.5px solid ${varType==="ordinal"?"#7c3aed":"#e2e8f0"}`,background:varType==="ordinal"?"#f5f3ff":"#f8fafc",color:varType==="ordinal"?"#7c3aed":"#64748b",fontFamily:"inherit",cursor:"pointer",outline:"none",fontWeight:600,appearance:"none",WebkitAppearance:"none",width:88,textAlign:"center"}}>
-                                {VAR_TYPES.map(vt=>(
-                                  <option key={vt.value} value={vt.value}>{vt.icon} {vt.label}</option>
-                                ))}
-                              </select>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <p style={{fontSize:11,color:"#94a3b8",marginTop:10,lineHeight:1.6}}>
-                    Colunas <strong>Filtro</strong> ficam disponíveis no canvas · <strong>Vol. Propostas</strong>, <strong>Qtd Altas</strong> e indicadores de inadimplência alimentam o painel analítico. · <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco; <strong>Categórica</strong> = sem ordem definida.
-                  </p>
-                </>
-              ) : wizard.step===3 ? (()=>{
-                // Candidate columns: exclude pure-metric cols (qty/qtdAltas/inadReal/inadInferida)
-                const METRIC_TYPES = new Set(['qty','qtdAltas','inadReal','inadInferida']);
+              ) : wizard.step===2 ? (()=>{
+                const METRIC_TYPES_SET = new Set(['qty','qtdAltas','qtdAltasInfer','inadReal','inadInferida']);
                 const allHeaders = wizardPreview?.headers || (wizard.editCsvId ? csvStore[wizard.editCsvId]?.headers?.filter(h=>h!=='__DECISAO_ORIGINAL') : []) || [];
-                const candidateCols = allHeaders.filter(h => !METRIC_TYPES.has(wizard.columnTypes[h]));
-                // Distinct values for selected column
                 const rows4preview = wizardPreview?.rows || (wizard.editCsvId ? csvStore[wizard.editCsvId]?.rows : []) || [];
+
+                // Derive current metric col selections from columnTypes
+                const selMetric = {};
+                for (const t of METRIC_TYPES_SET) {
+                  const col = Object.entries(wizard.columnTypes||{}).find(([,v])=>v===t)?.[0];
+                  if (col) selMetric[t] = col;
+                }
+                const usedMetricCols = new Set(Object.values(selMetric));
+
+                const setMetricCol = (metricType, colName) => {
+                  setWizard(w => {
+                    const newTypes = {...(w.columnTypes||{})};
+                    for (const [h, t] of Object.entries(newTypes)) { if (t === metricType) delete newTypes[h]; }
+                    if (colName) newTypes[colName] = metricType;
+                    return {...w, columnTypes: newTypes};
+                  });
+                };
+
+                const availableFor = (metricType) => {
+                  const cur = selMetric[metricType];
+                  return allHeaders.filter(h => !usedMetricCols.has(h) || h === cur);
+                };
+
+                const asIsCandidates = allHeaders.filter(h => !usedMetricCols.has(h));
+                const filterCols = allHeaders.filter(h => !usedMetricCols.has(h) && h !== wizard.asIsVar);
+
                 const asIsColIdx = wizard.asIsVar ? allHeaders.indexOf(wizard.asIsVar) : -1;
                 const distinctVals = asIsColIdx >= 0
                   ? [...new Set(rows4preview.map(r => String(r[asIsColIdx]??'')).filter(v=>v!==''))].sort()
                   : [];
-                // Validation state
                 const mapping = wizard.asIsMapping || {};
                 const hasAprovado = distinctVals.some(v => mapping[v]==='APROVADO');
                 const hasReprovado = distinctVals.some(v => mapping[v]==='REPROVADO');
                 const allMapped = distinctVals.length > 0 && distinctVals.every(v => mapping[v]==='APROVADO'||mapping[v]==='REPROVADO'||mapping[v]==='IGNORAR');
-                const isValid = wizard.asIsVar && hasAprovado && hasReprovado && allMapped;
+
+                const METRIC_DEFS = [
+                  { type:'qty',           icon:'📊', label:'Volume de Propostas',    desc:'Contagem de propostas por grupo' },
+                  { type:'qtdAltas',       icon:'📈', label:'Altas Reais',            desc:'Altas/vendas reais observadas' },
+                  { type:'inadReal',       icon:'⚠️', label:'Inadimplência Real',     desc:'Atrasos históricos observados' },
+                  { type:'qtdAltasInfer',  icon:'🔮', label:'Conversões Inferidas',   desc:'Altas estimadas pelo modelo de inferência' },
+                  { type:'inadInferida',   icon:'🎯', label:'Inadimplência Inferida', desc:'Inadimplência estimada pelo modelo' },
+                ];
+
                 return (
                   <>
-                    <div style={{marginBottom:8}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
-                        <div style={{width:32,height:32,borderRadius:8,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🏷️</div>
-                        <div>
-                          <div style={{fontSize:14,fontWeight:700,color:"#1e293b"}}>Variável de Decisão AS IS</div>
-                          <div style={{fontSize:12,color:"#64748b"}}>Informe qual coluna representa a decisão histórica real da operação</div>
-                        </div>
+                    {/* ── Métricas ── */}
+                    <div style={{marginBottom:22}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                        <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.7}}>Variáveis de Métricas</span>
+                        <div style={{flex:1,height:1,background:"#f1f5f9"}}/>
                       </div>
-
-                      {/* Column selector */}
-                      <div style={{marginBottom:20}}>
-                        <label style={{fontSize:12.5,fontWeight:600,color:"#374151",display:"block",marginBottom:6}}>Variável de decisão AS IS</label>
-                        <select
-                          value={wizard.asIsVar||''}
-                          onChange={e=>setWizard(w=>({...w,asIsVar:e.target.value||null,asIsMapping:{}}))}
-                          style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #cbd5e1",fontSize:13,fontFamily:"inherit",color:wizard.asIsVar?"#1e293b":"#94a3b8",background:"#fff",outline:"none",cursor:"pointer"}}>
-                          <option value="">Selecionar variável...</option>
-                          {candidateCols.map(c=>(
-                            <option key={c} value={c}>{c}</option>
-                          ))}
-                        </select>
-                      </div>
-
-                      {/* Value mapping */}
-                      {wizard.asIsVar && (
-                        <div>
-                          <label style={{fontSize:12.5,fontWeight:600,color:"#374151",display:"block",marginBottom:6}}>
-                            Valores encontrados em <strong style={{color:"#1d4ed8"}}>{wizard.asIsVar}</strong>
-                            <span style={{fontSize:11,fontWeight:400,color:"#94a3b8",marginLeft:8}}>{distinctVals.length} valor(es) distinto(s)</span>
-                          </label>
-                          {distinctVals.length===0 ? (
-                            <div style={{padding:"12px 16px",borderRadius:9,background:"#fef3c7",border:"1px solid #fde68a",fontSize:12.5,color:"#92400e"}}>Nenhum valor encontrado nesta coluna.</div>
-                          ) : (
-                            <div style={{border:"1px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
-                              <div style={{display:"grid",gridTemplateColumns:"1fr 180px",padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>
-                                <span style={{fontSize:11,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Valor na base</span>
-                                <span style={{fontSize:11,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Significado</span>
-                              </div>
-                              <div style={{maxHeight:240,overflowY:"auto"}}>
-                                {distinctVals.map((val,i)=>{
-                                  const mapped = mapping[val]||'';
-                                  const color = mapped==='APROVADO'?'#16a34a':mapped==='REPROVADO'?'#dc2626':mapped==='IGNORAR'?'#94a3b8':'#64748b';
-                                  return (
-                                    <div key={val} style={{display:"grid",gridTemplateColumns:"1fr 180px",alignItems:"center",padding:"8px 14px",borderBottom:i<distinctVals.length-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
-                                      <span style={{fontSize:13,fontWeight:500,color:"#1e293b",fontFamily:"monospace",background:"#f1f5f9",display:"inline-block",padding:"2px 8px",borderRadius:4}}>{val}</span>
-                                      <select
-                                        value={mapped}
-                                        onChange={e=>setWizard(w=>({...w,asIsMapping:{...(w.asIsMapping||{}),[val]:e.target.value}}))}
-                                        style={{padding:"5px 10px",borderRadius:7,border:`1.5px solid ${mapped?color+"66":"#e2e8f0"}`,fontSize:12.5,fontFamily:"inherit",color,background:mapped==='APROVADO'?"#f0fdf4":mapped==='REPROVADO'?"#fff1f2":mapped==='IGNORAR'?"#f8fafc":"#fff",fontWeight:mapped?600:400,outline:"none",cursor:"pointer"}}>
-                                        <option value="">Selecionar...</option>
-                                        <option value="APROVADO">✅ Aprovado</option>
-                                        <option value="REPROVADO">❌ Reprovado</option>
-                                        <option value="IGNORAR">— Ignorar</option>
-                                      </select>
-                                    </div>
-                                  );
-                                })}
+                      <div style={{display:"flex",flexDirection:"column",gap:9}}>
+                        {METRIC_DEFS.map(m=>(
+                          <div key={m.type} style={{display:"grid",gridTemplateColumns:"200px 1fr",alignItems:"center",gap:12}}>
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              <span style={{fontSize:17,lineHeight:1}}>{m.icon}</span>
+                              <div>
+                                <div style={{fontSize:12.5,fontWeight:600,color:"#1e293b",lineHeight:1.2}}>{m.label}</div>
+                                <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.3}}>{m.desc}</div>
                               </div>
                             </div>
-                          )}
-                          {/* Validation feedback */}
-                          {wizard.asIsVar && distinctVals.length > 0 && (
-                            <div style={{marginTop:10,display:"flex",gap:12,flexWrap:"wrap"}}>
-                              <span style={{fontSize:11.5,display:"flex",alignItems:"center",gap:4,color:hasAprovado?"#16a34a":"#94a3b8"}}>
-                                {hasAprovado?"✅":"○"} Aprovado mapeado
-                              </span>
-                              <span style={{fontSize:11.5,display:"flex",alignItems:"center",gap:4,color:hasReprovado?"#dc2626":"#94a3b8"}}>
-                                {hasReprovado?"❌":"○"} Reprovado mapeado
-                              </span>
-                              <span style={{fontSize:11.5,display:"flex",alignItems:"center",gap:4,color:allMapped?"#2563eb":"#94a3b8"}}>
-                                {allMapped?"🔵":"○"} Todos os valores mapeados
-                              </span>
+                            <select
+                              value={selMetric[m.type]||''}
+                              onChange={e=>setMetricCol(m.type, e.target.value||null)}
+                              style={{padding:"8px 12px",borderRadius:8,border:`1.5px solid ${selMetric[m.type]?"#3b82f6":"#e2e8f0"}`,fontSize:12.5,fontFamily:"inherit",background:selMetric[m.type]?"#eff6ff":"#fafafa",color:selMetric[m.type]?"#1d4ed8":"#94a3b8",outline:"none",cursor:"pointer",fontWeight:selMetric[m.type]?600:400}}>
+                              <option value="">— Não usar —</option>
+                              {availableFor(m.type).map(h=>(<option key={h} value={h}>{h}</option>))}
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* ── Decisão AS IS ── */}
+                    <div style={{marginBottom:22}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                        <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.7}}>Decisão AS IS</span>
+                        <div style={{flex:1,height:1,background:"#f1f5f9"}}/>
+                        <span style={{fontSize:10,color:"#94a3b8",background:"#f8fafc",border:"1px solid #e2e8f0",padding:"1px 8px",borderRadius:10}}>opcional</span>
+                      </div>
+                      <select
+                        value={wizard.asIsVar||''}
+                        onChange={e=>setWizard(w=>({...w,asIsVar:e.target.value||null,asIsMapping:{}}))}
+                        style={{width:"100%",padding:"8px 12px",borderRadius:8,border:`1.5px solid ${wizard.asIsVar?"#3b82f6":"#e2e8f0"}`,fontSize:12.5,fontFamily:"inherit",background:wizard.asIsVar?"#eff6ff":"#fafafa",color:wizard.asIsVar?"#1d4ed8":"#94a3b8",outline:"none",cursor:"pointer",fontWeight:wizard.asIsVar?600:400,marginBottom:10}}>
+                        <option value="">— Selecionar variável de decisão histórica —</option>
+                        {asIsCandidates.map(c=>(<option key={c} value={c}>{c}</option>))}
+                      </select>
+                      {wizard.asIsVar && distinctVals.length > 0 && (
+                        <>
+                          <div style={{border:"1px solid #e2e8f0",borderRadius:9,overflow:"hidden",marginBottom:8}}>
+                            <div style={{display:"grid",gridTemplateColumns:"1fr 170px",padding:"7px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>
+                              <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Valor na base</span>
+                              <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Significado</span>
                             </div>
-                          )}
-                        </div>
+                            <div style={{maxHeight:160,overflowY:"auto"}}>
+                              {distinctVals.map((val,i)=>{
+                                const mapped = mapping[val]||'';
+                                const color = mapped==='APROVADO'?'#16a34a':mapped==='REPROVADO'?'#dc2626':mapped==='IGNORAR'?'#94a3b8':'#64748b';
+                                return (
+                                  <div key={val} style={{display:"grid",gridTemplateColumns:"1fr 170px",alignItems:"center",padding:"7px 14px",borderBottom:i<distinctVals.length-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                                    <span style={{fontSize:12,fontWeight:500,color:"#1e293b",fontFamily:"monospace",background:"#f1f5f9",display:"inline-block",padding:"2px 8px",borderRadius:4}}>{val}</span>
+                                    <select
+                                      value={mapped}
+                                      onChange={e=>setWizard(w=>({...w,asIsMapping:{...(w.asIsMapping||{}),[val]:e.target.value}}))}
+                                      style={{padding:"4px 8px",borderRadius:6,border:`1.5px solid ${mapped?color+"66":"#e2e8f0"}`,fontSize:12,fontFamily:"inherit",color,background:mapped==='APROVADO'?"#f0fdf4":mapped==='REPROVADO'?"#fff1f2":mapped==='IGNORAR'?"#f8fafc":"#fff",fontWeight:mapped?600:400,outline:"none",cursor:"pointer"}}>
+                                      <option value="">Selecionar...</option>
+                                      <option value="APROVADO">✅ Aprovado</option>
+                                      <option value="REPROVADO">❌ Reprovado</option>
+                                      <option value="IGNORAR">— Ignorar</option>
+                                    </select>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+                            <span style={{fontSize:11,display:"flex",alignItems:"center",gap:4,color:hasAprovado?"#16a34a":"#94a3b8"}}>{hasAprovado?"✅":"○"} Aprovado mapeado</span>
+                            <span style={{fontSize:11,display:"flex",alignItems:"center",gap:4,color:hasReprovado?"#dc2626":"#94a3b8"}}>{hasReprovado?"❌":"○"} Reprovado mapeado</span>
+                            <span style={{fontSize:11,display:"flex",alignItems:"center",gap:4,color:allMapped?"#2563eb":"#94a3b8"}}>{allMapped?"🔵":"○"} Todos os valores mapeados</span>
+                          </div>
+                        </>
                       )}
                     </div>
-                    <p style={{fontSize:11,color:"#94a3b8",marginTop:12,lineHeight:1.6}}>
-                      A variável AS IS estabelece a <strong>baseline operacional histórica</strong>. Será criada internamente a coluna <strong>__DECISAO_ORIGINAL</strong> com os valores normalizados (APROVADO / REPROVADO).
-                    </p>
+
+                    {/* ── Filtros ── */}
+                    {filterCols.length > 0 && (
+                      <div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                          <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.7}}>Variáveis de Filtro</span>
+                          <div style={{flex:1,height:1,background:"#f1f5f9"}}/>
+                          <span style={{fontSize:10,color:"#94a3b8"}}>{filterCols.length} coluna(s) — disponíveis no canvas</span>
+                        </div>
+                        <div style={{border:"1px solid #e2e8f0",borderRadius:9,overflow:"hidden"}}>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 120px",padding:"7px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>
+                            <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Coluna</span>
+                            <span style={{fontSize:10.5,fontWeight:700,color:"#7c3aed",textTransform:"uppercase",letterSpacing:.5,textAlign:"center"}}>Tipo de Variável</span>
+                          </div>
+                          <div style={{maxHeight:220,overflowY:"auto"}}>
+                            {filterCols.map((colName,i)=>{
+                              const varType = (wizard.varTypes||{})[colName] || "categorical";
+                              return (
+                                <div key={colName} style={{display:"grid",gridTemplateColumns:"1fr 120px",alignItems:"center",padding:"8px 14px",borderBottom:i<filterCols.length-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
+                                  <span style={{fontSize:12.5,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",paddingRight:8}} title={colName}>{colName}</span>
+                                  <div style={{display:"flex",justifyContent:"center"}}>
+                                    <button
+                                      onClick={()=>setWizard(w=>({...w,varTypes:{...(w.varTypes||{}),[colName]:varType==="ordinal"?"categorical":"ordinal"}}))}
+                                      style={{padding:"4px 14px",borderRadius:20,border:`1.5px solid ${varType==="ordinal"?"#7c3aed":"#e2e8f0"}`,background:varType==="ordinal"?"#f5f3ff":"#f8fafc",color:varType==="ordinal"?"#7c3aed":"#64748b",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",transition:"all .12s"}}>
+                                      {varType==="ordinal"?"📶 Ordinal":"🏷️ Categ."}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        <p style={{fontSize:10.5,color:"#94a3b8",marginTop:8,lineHeight:1.5}}>
+                          <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco (ex: score, faixa) · <strong>Categórica</strong> = sem ordem definida
+                        </p>
+                      </div>
+                    )}
                   </>
                 );
               })() : null}
@@ -5816,8 +5852,8 @@ export default function App() {
             {/* Wizard footer */}
             <div style={{padding:"16px 28px",borderTop:"1px solid #f1f5f9",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
               <div>
-                {(wizard.step===2&&!wizard.editCsvId)||(wizard.step===3)?(
-                  <button onClick={()=>setWizard(w=>({...w,step:w.step-1}))}
+                {wizard.step===2&&!wizard.editCsvId?(
+                  <button onClick={()=>setWizard(w=>({...w,step:1}))}
                     style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
                     ← Voltar
                   </button>
@@ -5829,30 +5865,33 @@ export default function App() {
                   <button onClick={()=>{
                     if (!wizardPreview) return;
                     const {headers, rows} = wizardPreview;
-                    // Auto-suggest varTypes for each column (don't overwrite existing)
-                    const suggestions = {};
+                    // Auto-suggest varTypes and metric columns
+                    const varSuggestions = {};
                     for (const h of headers) {
                       const ci = headers.indexOf(h);
                       const vals = rows.map(r => r[ci] ?? '').filter(Boolean);
-                      suggestions[h] = suggestVarType(h, vals);
+                      varSuggestions[h] = suggestVarType(h, vals);
                     }
-                    setWizard(w => ({...w, step:2, varTypes: {...suggestions, ...(w.varTypes||{})}}));
+                    const metricSuggestions = suggestMetricColumns(headers);
+                    const colTypes = {};
+                    for (const [metricType, colName] of Object.entries(metricSuggestions)) {
+                      colTypes[colName] = metricType;
+                    }
+                    setWizard(w => ({
+                      ...w, step:2,
+                      varTypes: {...varSuggestions, ...(w.varTypes||{})},
+                      columnTypes: {...colTypes, ...(w.columnTypes||{})},
+                    }));
                   }}
                     disabled={!wizardPreview||wizardPreview.headers.length===0}
                     style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview||wizardPreview.headers.length===0)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview||wizardPreview.headers.length===0)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
-                    Próximo →
-                  </button>
-                ) : wizard.step===2 ? (
-                  <button onClick={()=>setWizard(w=>({...w,step:3}))}
-                    disabled={!wizardPreview&&!wizard.editCsvId}
-                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview&&!wizard.editCsvId)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview&&!wizard.editCsvId)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
                     Próximo →
                   </button>
                 ) : (
                   <button onClick={onImportConfirm}
                     disabled={!wizardPreview&&!wizard.editCsvId}
                     style={{padding:"9px 22px",borderRadius:9,border:"none",background:(!wizardPreview&&!wizard.editCsvId)?"#cbd5e1":"#2563eb",color:"#fff",cursor:(!wizardPreview&&!wizard.editCsvId)?"not-allowed":"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
-                    {wizard.editCsvId ? "Salvar →" : "Importar →"}
+                    {wizard.editCsvId ? "Salvar" : "Importar"} →
                   </button>
                 )}
               </div>
