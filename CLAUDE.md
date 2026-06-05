@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~3300 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~3400 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -14,20 +14,21 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`, `cineminha`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
 - `csvStore`: `{[csvId]: {name, headers, rows, columnTypes, varTypes, asIsConfig}}`
-- `wizard`: modal de importação em 3 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId}`
+- `wizard`: modal de importação em 2 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
 
 ### Tipos de coluna (`COL_TYPES`)
-| value          | icon | label              | uso                                              |
-|----------------|------|--------------------|--------------------------------------------------|
-| `id`           | 🔑   | ID                 | Identificador do registro                        |
-| `decision`     | 🔀   | Filtro             | Variável de decisão arrastável ao canvas         |
-| `qty`          | 📊   | Vol. Propostas     | Volume total de propostas do agrupamento         |
-| `qtdAltas`     | 📈   | Qtd Altas/Vendas   | Volume convertido em vendas/ativações            |
-| `inadReal`     | ⚠️   | Inad. Real         | Inadimplência histórica observada                |
-| `inadInferida` | 🎯   | Inad. Inferida     | Inadimplência estimada para aprovados            |
+| value            | icon | label              | uso                                                        |
+|------------------|------|--------------------|------------------------------------------------------------|
+| `id`             | 🔑   | ID                 | Identificador do registro                                  |
+| `decision`       | 🔀   | Filtro             | Variável de decisão arrastável ao canvas                   |
+| `qty`            | 📊   | Vol. Propostas     | Volume total de propostas do agrupamento                   |
+| `qtdAltas`       | 📈   | Altas Reais        | Volume convertido em altas/vendas reais                    |
+| `qtdAltasInfer`  | 🔮   | Conv. Inferida     | Conversões/altas estimadas pelo modelo de inferência       |
+| `inadReal`       | ⚠️   | Inad. Real         | Inadimplência histórica observada (valor absoluto)         |
+| `inadInferida`   | 🎯   | Inad. Inferida     | Inadimplência estimada pelo modelo (valor absoluto)        |
 
 ### Shape: `cineminha`
 ```js
@@ -78,7 +79,9 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `computeCinemaSize(rowDomain, colDomain)`: calcula `{w, h}` do nó a partir dos domínios (caps: 540×420)
 - `fmtQty(n)`: formata número como inteiro, `k` ou `M`
 - `fmtPct(v)`: formata ratio como `"XX.XX%"` ou `"N/A"` quando `v === null`
-- `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}`
+- `suggestVarType(colName, values)`: infere `'ordinal'` ou `'categorical'` a partir do nome e amostra de valores da coluna
+- `suggestMetricColumns(headers)`: detecta automaticamente qual coluna do CSV mapeia para cada tipo de métrica (`qty`, `qtdAltas`, `qtdAltasInfer`, `inadReal`, `inadInferida`) via regex nos nomes — usado pelo wizard para pré-preencher as seleções
+- `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, inadReal, inadInferida}}`
 - `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`
 - `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
 
@@ -86,7 +89,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
 
 ## Fluxo do simulador
-1. Importar CSV → Passo 1 (delimitador) → Passo 2 (classificar colunas) → Passo 3 (variável AS IS)
+1. Importar CSV → Passo 1 (delimitador) → Passo 2 (métricas + AS IS + filtros)
 2. Colunas **Filtro** aparecem como chips arrastáveis no painel direito
 3. Arrastar chip para área vazia do canvas → losango com ports automáticos (até 10 valores)
 4. Arrastar chip sobre um ⊞ Cineminha → modal "Linha ou Coluna?" → matriz cruzada
@@ -106,33 +109,44 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 ```
 
 ## Engine de simulação
+
+### Equações principais
+- `inadReal = ∑ inadReal (linhas aprovadas) / ∑ qtdAltas (linhas aprovadas)`
+  - `inadReal` e `qtdAltas` no CSV são **valores absolutos** (contagens), não taxas
+  - null se `∑ qtdAltas = 0`
+- `inadInferida = ∑ inadInferida (linhas aprovadas) / ∑ qtdAltasInfer (linhas aprovadas)`
+  - Usa `qtdAltasInfer` (conversões inferidas pelo modelo) como denominador
+  - Fallback para `/ approvedQty` se a coluna `qtdAltasInfer` não estiver configurada no dataset
+  - null se ambos os denominadores = 0
+
+### Implementação
 - `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
 - `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
-- Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
-- Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
-  - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
-  - `inadInferida = ∑ inadInferida / approvedQty` (null se approvedQty = 0)
+- Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum`, `qtdAltasInferSum` e `inadInferidaSum`
+- Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida, edgeStats }`
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
-## Wizard de importação (3 passos)
+## Wizard de importação (2 passos)
 
 ### Passo 1 — Delimitador
 - Modal 600px; detecção automática do delimitador com badge "detectado automaticamente" / "verifique abaixo"
 - Preview das 5 primeiras linhas
+- Ao avançar, `suggestMetricColumns` e `suggestVarType` rodam automaticamente para pré-preencher o passo 2
 
-### Passo 2 — Classificar colunas
-- Modal alarga para 900px para acomodar 6 colunas de tipo + coluna Tipo Var.
-- Layout em CSS `grid` com `gridTemplateColumns: "1fr repeat(6, 60px) 100px"`
-- Header sticky; lista de colunas com scroll interno (`maxHeight: 340px`)
-- Seletor de varType por coluna: `categorical` | `ordinal`
+### Passo 2 — Configurar Variáveis (unificado)
+- Modal 820px; scroll vertical único
+- **Seção Métricas**: 5 dropdowns (um por tipo de métrica) com seleção exclusiva — coluna selecionada em um dropdown some dos outros
+  - Tipos: Vol. Propostas (`qty`), Altas Reais (`qtdAltas`), Inad. Real (`inadReal`), Conv. Inferida (`qtdAltasInfer`), Inad. Inferida (`inadInferida`)
+  - Auto-sugestão via `suggestMetricColumns` ao entrar no passo 2
+- **Seção Decisão AS IS** (opcional): seletor de coluna + mapeamento de valores → `APROVADO / REPROVADO / IGNORAR`
+  - Indicadores em tempo real: aprovado mapeado, reprovado mapeado, todos os valores atribuídos
+  - On confirm: deriva coluna `__DECISAO_ORIGINAL` salva `asIsConfig` no csvStore
+- **Seção Filtros**: todas as colunas não selecionadas como métrica e não selecionadas como AS IS, listadas com toggle clicável **📶 Ordinal / 🏷️ Categ.**
+  - Auto-sugestão via `suggestVarType` ao entrar no passo 2
+- `onImportConfirm`: auto-atribui tipo `decision` a qualquer coluna sem classificação explícita
 
-### Passo 3 — Variável de Decisão AS IS
-- Modal 680px; etapa obrigatória para configurar a baseline histórica
-- **Seletor de coluna**: lista apenas colunas não-métricas (exclui `qty`, `qtdAltas`, `inadReal`, `inadInferida`)
-- **Mapping de valores**: ao selecionar a coluna, exibe todos os distinct values com dropdown `✅ Aprovado / ❌ Reprovado / — Ignorar`
-- **Validação em tempo real**: indicadores mostram se aprovado mapeado, reprovado mapeado, todos os valores atribuídos
-- **On confirm**: deriva coluna `__DECISAO_ORIGINAL` (última posição em `headers`/`rows`) com valores `APROVADO` / `REPROVADO` / `''`; salva `asIsConfig` no csvStore
-- **Edit mode**: restaura `asIsVar` e `asIsMapping` do `asIsConfig` salvo
+### Edit mode
+- `onEditDataset(csvId)`: reabre o wizard no passo 2 já populado com `columnTypes`, `varTypes` e `asIsConfig` do dataset existente
 
 ## Variável de Decisão AS IS — Conceito
 
@@ -144,11 +158,10 @@ O simulador opera em modelo de **simulação incremental sobre comportamento obs
 ### Estrutura `asIsConfig`
 ```js
 {
-  col: string,     // nome da coluna original no CSV (ex: "DECISAO_FINAL")
+  col: string,     // nome da coluna original no CSV (ex: "DECISAO_ANALISE")
   mapping: {       // valor encontrado → significado normalizado
-    "A": "APROVADO",
-    "R": "REPROVADO",
-    "P": "IGNORAR",
+    "APROVADO": "APROVADO",
+    "NEGADO":   "REPROVADO",
   }
 }
 ```
@@ -157,8 +170,8 @@ O simulador opera em modelo de **simulação incremental sobre comportamento obs
 - Tamanho padrão: `w: 260, h: 280`
 - Exibe três indicadores:
   1. **Taxa de Aprovação** — número grande + barra de progresso + contadores ✅/❌
-  2. **Inad. Real** — `∑ Inad.Real / ∑ Altas aprovadas`; cor vermelha > 5%, laranja ≤ 5%, cinza = N/A
-  3. **Inad. Inferida** — `∑ Inad.Inferida / Vol. Aprovado`; mesma escala de cor
+  2. **Inad. Real** — `∑ inadReal / ∑ qtdAltas` das linhas aprovadas; cor vermelha > 5%, laranja ≤ 5%, cinza = N/A
+  3. **Inad. Inferida** — `∑ inadInferida / ∑ qtdAltasInfer` das linhas aprovadas; mesma escala de cor
 - Sidebar direita espelha os três indicadores com recalculo reativo
 
 ## Motor de Recomendação — Cineminha (`optimModal`)
@@ -170,7 +183,7 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 ```js
 {
   shapeId,          // id do cineminha sendo otimizado
-  cellMetrics,      // {[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}
+  cellMetrics,      // {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, inadReal, inadInferida}}
   frontier,         // array de pontos Pareto ordenado por approvalRate crescente
   scenarios,        // {conservador, medio, maximo} — pontos extraídos da fronteira
   activeCard,       // 'conservador' | 'medio' | 'maximo' | 'personalizado'
@@ -184,7 +197,7 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 ```
 
 ### Algoritmo Pareto (fase 1 — sem restrição de monotonicidade)
-1. `computeCellMetrics`: para cada `(rowVal, colVal)` do domínio, filtra linhas do CSV e agrega `qty`, `qtdAltas`, `inadRRaw` (soma de inadReal absolutas), `inadIRaw` (soma de inadInferida absolutas); computa taxas finais ponderadas
+1. `computeCellMetrics`: para cada `(rowVal, colVal)` do domínio, filtra linhas do CSV e agrega `qty`, `qtdAltas`, `qtdAltasInfer`, `inadRRaw` (soma de inadReal absolutas), `inadIRaw` (soma de inadInferida absolutas); computa taxas finais ponderadas
 2. `buildParetoFrontier`: sort por `inadInferida` crescente (nulls ao final); varre acumulando `approvedQty / totalQty` e inad ponderadas — produz fronteira greedy ótima para variáveis categóricas
 3. `extractScenarios`: conservador = primeiro ponto (menor inad), máximo = último (maior aprovação), médio = joelho da curva via distância perpendicular máxima à reta entre conservador e máximo
 
@@ -206,7 +219,7 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 
 ### Roadmap futuro (não implementado)
 
-- Flag `ordinal` por coluna de decisão (wizard passo 2) + restrição de corte monotônico no algoritmo Pareto (escada Young diagram) para variáveis como ratings R1–R20
+- Flag `ordinal` por coluna de decisão + restrição de corte monotônico no algoritmo Pareto (escada Young diagram) para variáveis como ratings R1–R20
 - Sliders adicionais: margem, rentabilidade
 - Fronteira Pareto multi-dimensional
 - Decision Lens: comparação AS IS vs simulado usando `__DECISAO_ORIGINAL`
@@ -236,4 +249,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-decision-variable-fP4ZM`
+`claude/simulator-equations-validation-qS1XW`
