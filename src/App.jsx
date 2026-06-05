@@ -566,6 +566,183 @@ function runSimulation(shapes, conns, csvStore) {
   };
 }
 
+// ── Exportação de Diagnóstico de Simulação ────────────────────────────────────
+// Gera CSV com visão de funil por nó+valor: qty_entrada, aprovados, reprovados,
+// numeradores e denominadores brutos das inadimplências.
+function exportDiagnosticCSV(shapes, conns, csvStore) {
+  const {out} = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved','rejected','as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+  if (rootNodes.length === 0) return;
+
+  const edgeLookup = {};
+  for (const c of conns) {
+    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
+    edgeLookup[c.from][`${c.to}::${c.label??''}`] = c.id;
+  }
+
+  // nodeValAcc: { [nodeId_label]: { nodeName, stepOrder, label, qty, approvedQty, rejectedQty, qtdAltasSum, qtdAltasInferSum, inadRealSum, inadInferidaSum } }
+  const nodeValAcc = {};
+  const nodeOrder = {};
+  let stepCounter = 0;
+
+  function getNodeLabel(node) {
+    if (node.type === 'decision') return node.label || node.variableCol || node.id;
+    if (node.type === 'cineminha') return node.label || 'Cineminha';
+    if (node.type === 'decision_lens') return node.label || 'Decision Lens';
+    return node.label || node.id;
+  }
+
+  function accKey(nodeId, val) { return `${nodeId}__${val}`; }
+
+  function initAcc(nodeId, val, nodeName) {
+    const k = accKey(nodeId, val);
+    if (!nodeValAcc[k]) {
+      if (nodeOrder[nodeId] === undefined) { nodeOrder[nodeId] = stepCounter++; }
+      nodeValAcc[k] = { nodeName, stepOrder: nodeOrder[nodeId], label: val, qty: 0, approvedQty: 0, rejectedQty: 0, qtdAltasSum: 0, qtdAltasInferSum: 0, inadRealSum: 0, inadInferidaSum: 0 };
+    }
+    return k;
+  }
+
+  function traverseRow(row, headers, startId) {
+    let cur = startId;
+    const visited = new Set();
+    const stops = []; // [{nodeId, val}]
+    while (cur) {
+      if (visited.has(cur)) break;
+      visited.add(cur);
+      const node = shapesMap[cur]; if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const ci = headers.indexOf(node.variableCol);
+        const val = (ci >= 0 ? (row[ci] ?? '') : '').trim();
+        stops.push({ nodeId: cur, val, nodeName: getNodeLabel(node) });
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const ri = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const ci = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rv = node.rowVar && ri >= 0 ? (row[ri] ?? '').trim() : '*';
+        const cv = node.colVar && ci >= 0 ? (row[ci] ?? '').trim() : '*';
+        const cellKey = `${rv}|${cv}`;
+        stops.push({ nodeId: cur, val: cellKey, nodeName: getNodeLabel(node) });
+        const isEligible = isCellEligible(node.cells, cellKey);
+        const typeCfg = getCinemaType(node.cinemaType);
+        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
+        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || []; if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else break;
+    }
+    const termNode = shapesMap[cur];
+    const result = termNode && TERM.has(termNode.type) ? termNode.type : null;
+    return { stops, result };
+  }
+
+  let totalQty = 0, totalApproved = 0, totalRejected = 0;
+  let gQtdAltasSum = 0, gQtdAltasInferSum = 0, gInadRealSum = 0, gInadInferidaSum = 0;
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const colIdx = (type) => { const col = Object.entries(types).find(([,t]) => t === type)?.[0]; return col ? csv.headers.indexOf(col) : -1; };
+    const qtyIdx = colIdx('qty'), qtdAltasIdx = colIdx('qtdAltas'), qtdAltasInferIdx = colIdx('qtdAltasInfer');
+    const inadRealIdx = colIdx('inadReal'), inadInferidaIdx = colIdx('inadInferida');
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision') return d.csvId === csvId;
+      if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      return true;
+    });
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+
+    for (const row of csv.rows) {
+      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
+      const qtdAltas = qtdAltasIdx >= 0 ? (parseFloat(row[qtdAltasIdx]) || 0) : 0;
+      const qtdAltasInfer = qtdAltasInferIdx >= 0 ? (parseFloat(row[qtdAltasInferIdx]) || 0) : 0;
+      const inadR = inadRealIdx >= 0 ? (parseFloat(row[inadRealIdx]) || 0) : 0;
+      const inadI = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
+      totalQty += qty;
+
+      const { stops, result } = traverseRow(row, csv.headers, rootId);
+      let isApproved = result === 'approved';
+      let isRejected = result === 'rejected';
+      if (result === 'as_is') {
+        const orig = dOrigIdx >= 0 ? String(row[dOrigIdx] ?? '').toUpperCase() : '';
+        if (orig === 'APROVADO') isApproved = true;
+        else if (orig === 'REPROVADO') isRejected = true;
+      }
+      if (isApproved) { totalApproved += qty; gQtdAltasSum += qtdAltas; gQtdAltasInferSum += qtdAltasInfer; gInadRealSum += inadR; gInadInferidaSum += inadI; }
+      else if (isRejected) totalRejected += qty;
+
+      for (const { nodeId, val, nodeName } of stops) {
+        const k = initAcc(nodeId, val, nodeName);
+        const a = nodeValAcc[k];
+        a.qty += qty;
+        if (isApproved) { a.approvedQty += qty; a.qtdAltasSum += qtdAltas; a.qtdAltasInferSum += qtdAltasInfer; a.inadRealSum += inadR; a.inadInferidaSum += inadI; }
+        else if (isRejected) a.rejectedQty += qty;
+      }
+    }
+  }
+
+  // Build CSV rows
+  const header = [
+    'etapa','no','valor',
+    'qty_entrada','qty_aprovado','qty_reprovado',
+    'taxa_aprovacao',
+    'inad_real_num','qtd_altas_den','inad_real_resultado',
+    'inad_inf_num','qty_aprovado_den','inad_inf_resultado',
+  ];
+
+  const rows = Object.values(nodeValAcc)
+    .sort((a, b) => a.stepOrder - b.stepOrder || a.nodeName.localeCompare(b.nodeName) || a.label.localeCompare(b.label))
+    .map((a, i) => {
+      const inadReal = a.qtdAltasSum > 0 ? a.inadRealSum / a.qtdAltasSum : null;
+      const inadInf = a.qtdAltasInferSum > 0 ? a.inadInferidaSum / a.qtdAltasInferSum
+                    : a.approvedQty > 0 ? a.inadInferidaSum / a.approvedQty : null;
+      const apRate = a.qty > 0 ? a.approvedQty / a.qty : null;
+      const inadInfDen = a.qtdAltasInferSum > 0 ? a.qtdAltasInferSum : a.approvedQty;
+      return [
+        a.stepOrder + 1, a.nodeName, a.label,
+        a.qty, a.approvedQty, a.rejectedQty,
+        apRate !== null ? (apRate * 100).toFixed(4) + '%' : 'N/A',
+        a.inadRealSum.toFixed(6), a.qtdAltasSum, inadReal !== null ? (inadReal * 100).toFixed(4) + '%' : 'N/A',
+        a.inadInferidaSum.toFixed(6), inadInfDen, inadInf !== null ? (inadInf * 100).toFixed(4) + '%' : 'N/A',
+      ];
+    });
+
+  // Totals row
+  const gInadReal = gQtdAltasSum > 0 ? gInadRealSum / gQtdAltasSum : null;
+  const gInadInf = gQtdAltasInferSum > 0 ? gInadInferidaSum / gQtdAltasInferSum : totalApproved > 0 ? gInadInferidaSum / totalApproved : null;
+  const gInadInfDen = gQtdAltasInferSum > 0 ? gQtdAltasInferSum : totalApproved;
+  rows.unshift([
+    '(total)', '— RESULTADO GLOBAL —', '—',
+    totalQty, totalApproved, totalRejected,
+    totalQty > 0 ? ((totalApproved / totalQty) * 100).toFixed(4) + '%' : 'N/A',
+    gInadRealSum.toFixed(6), gQtdAltasSum, gInadReal !== null ? (gInadReal * 100).toFixed(4) + '%' : 'N/A',
+    gInadInferidaSum.toFixed(6), gInadInfDen, gInadInf !== null ? (gInadInf * 100).toFixed(4) + '%' : 'N/A',
+  ]);
+
+  const escape = (v) => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s; };
+  const csv = [header, ...rows].map(r => r.map(escape).join(',')).join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `diagnostico_simulacao_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 // ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ────────────────────
 // Requer: lensPopulations com ao menos um Lens, e coluna __DECISAO_ORIGINAL no CSV (asIsConfig).
 // Retorna null se não há contexto de simulação marginal, ou
@@ -4072,6 +4249,18 @@ export default function App() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Exportar Diagnóstico */}
+                {hasData && (
+                  <div style={{ padding: `${s(6)}px ${s(11)}px ${s(8)}px`, borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
+                    <button
+                      onClick={() => exportDiagnosticCSV(shapes, conns, csvStore)}
+                      style={{ width: '100%', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: s(8), padding: `${s(6)}px ${s(10)}px`, cursor: 'pointer', color: '#818cf8', fontSize: s(10), fontWeight: 700, fontFamily: "'DM Sans',system-ui,sans-serif", letterSpacing: '0.04em', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: s(6) }}
+                    >
+                      <span style={{ fontSize: s(12) }}>⬇</span> Exportar Diagnóstico (.csv)
+                    </button>
                   </div>
                 )}
 
