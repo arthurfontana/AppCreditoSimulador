@@ -245,6 +245,23 @@ function detectDelimiter(text) {
   return { delimiter: sorted[0][1] > 0 ? sorted[0][0] : ",", confident };
 }
 
+function detectDecimalSep(text, delimiter) {
+  const lines = text.split(/\r?\n/).slice(1, 60).filter(l => l.trim());
+  let commas = 0, dots = 0;
+  for (const line of lines) {
+    const cells = line.split(delimiter);
+    for (const cell of cells) {
+      const v = cell.trim();
+      // Matches values like "0,394" or "1.234,56" (comma decimal) vs "0.394" or "1,234.56" (dot decimal)
+      if (/^\-?\d+,\d+$/.test(v)) commas++;
+      else if (/^\-?\d+\.\d+$/.test(v)) dots++;
+    }
+  }
+  if (commas === 0 && dots === 0) return { decimalSep: '.', confident: false };
+  const confident = Math.abs(commas - dots) / (commas + dots) > 0.7;
+  return { decimalSep: commas >= dots ? ',' : '.', confident };
+}
+
 function parseCSV(text, delimiter, hasHeader) {
   const lines = text.split(/\r?\n/).filter(l => l.trim());
   const split = (line) => {
@@ -270,6 +287,14 @@ const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
 const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
 const fmtPct = (v) => v === null ? "N/A" : `${(v * 100).toFixed(2)}%`;
 const normalizeColName = (s) => (s || "").toLowerCase().replace(/[\s_\-\.]+/g, "").trim();
+const normalizeDecimalSep = (rows, sep) => {
+  if (sep === '.') return rows;
+  return rows.map(row => row.map(cell => {
+    const v = cell.trim();
+    if (/^\-?\d+,\d+$/.test(v)) return v.replace(',', '.');
+    return cell;
+  }));
+};
 
 function sortDomain(values) {
   const allNum = values.length > 0 && values.every(v => v !== "" && !isNaN(parseFloat(v)) && isFinite(Number(v)));
@@ -1809,7 +1834,8 @@ export default function App() {
     reader.onload=(ev)=>{
       const text=ev.target.result;
       const {delimiter,confident}=detectDelimiter(text);
-      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null});
+      const {decimalSep, confident: decConfident}=detectDecimalSep(text, delimiter);
+      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident});
     };
     reader.readAsText(file);
     e.target.value="";
@@ -1936,7 +1962,7 @@ export default function App() {
 
   const onImportConfirm = () => {
     if (!wizard) return;
-    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId}=wizard;
+    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId,decimalSep}=wizard;
 
     // Auto-assign 'decision' to all columns without an explicit type
     const buildFinalTypes = (headers, types) => {
@@ -1959,7 +1985,8 @@ export default function App() {
       return;
     }
 
-    const {headers,rows}=parseCSV(rawText,delimiter,hasHeader);
+    const {headers, rows: rawRows}=parseCSV(rawText,delimiter,hasHeader);
+    const rows = normalizeDecimalSep(rawRows, decimalSep || '.');
 
     pushHistory();
     const csvId=uid();
@@ -2088,6 +2115,8 @@ export default function App() {
       asIsVar: csv.asIsConfig?.col || null,
       asIsMapping: csv.asIsConfig?.mapping || {},
       editCsvId: csvId,
+      decimalSep: '.',
+      decimalSepConfident: true,
     });
   };
 
@@ -5832,6 +5861,23 @@ export default function App() {
                         <label key={d.value} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",borderRadius:9,border:`1.5px solid ${wizard.delimiter===d.value?"#3b82f6":"#e2e8f0"}`,background:wizard.delimiter===d.value?"#eff6ff":"#fafafa",cursor:"pointer",fontSize:13,color:wizard.delimiter===d.value?"#1d4ed8":"#475569",fontWeight:wizard.delimiter===d.value?600:400,transition:"all .12s"}}>
                           <input type="radio" name="delim" value={d.value} checked={wizard.delimiter===d.value} onChange={()=>setWizard(w=>({...w,delimiter:d.value}))} style={{accentColor:"#3b82f6"}}/>
                           {d.label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Decimal separator */}
+                  <div style={{marginBottom:20}}>
+                    <p style={{fontSize:12,fontWeight:600,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>
+                      Separador Decimal
+                      {wizard.decimalSepConfident
+                        ? <span style={{marginLeft:8,fontSize:11,color:"#16a34a",background:"#f0fdf4",border:"1px solid #bbf7d0",padding:"1px 8px",borderRadius:20}}>detectado automaticamente</span>
+                        : <span style={{marginLeft:8,fontSize:11,color:"#d97706",background:"#fffbeb",border:"1px solid #fde68a",padding:"1px 8px",borderRadius:20}}>verifique abaixo</span>}
+                    </p>
+                    <div style={{display:"flex",gap:8}}>
+                      {[{value:',',label:'Vírgula  ( 1,50 )'},{value:'.',label:'Ponto  ( 1.50 )'}].map(opt=>(
+                        <label key={opt.value} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",borderRadius:9,border:`1.5px solid ${wizard.decimalSep===opt.value?"#3b82f6":"#e2e8f0"}`,background:wizard.decimalSep===opt.value?"#eff6ff":"#fafafa",cursor:"pointer",fontSize:13,color:wizard.decimalSep===opt.value?"#1d4ed8":"#475569",fontWeight:wizard.decimalSep===opt.value?600:400,transition:"all .12s"}}>
+                          <input type="radio" name="dec-sep" value={opt.value} checked={wizard.decimalSep===opt.value} onChange={()=>setWizard(w=>({...w,decimalSep:opt.value}))} style={{accentColor:"#3b82f6"}}/>
+                          {opt.label}
                         </label>
                       ))}
                     </div>
