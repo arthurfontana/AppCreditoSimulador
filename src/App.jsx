@@ -4720,7 +4720,12 @@ export default function App() {
           for (const csv of Object.values(csvStore)) {
             const idx = csv.headers.indexOf(col);
             if (idx < 0) continue;
-            for (const row of csv.rows.slice(0, 2000)) {
+            const rows = csv.rows;
+            // Random sample of up to 2000 rows to ensure full value coverage
+            const sample = rows.length <= 2000
+              ? rows
+              : Array.from({length: 2000}, () => rows[Math.floor(Math.random() * rows.length)]);
+            for (const row of sample) {
               const v = String(row[idx] ?? "").trim();
               if (v) vals.add(v);
             }
