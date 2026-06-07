@@ -916,7 +916,7 @@ function computeIncrementalResult(overlay, csvStore) {
 
   const bl  = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, qtdAltasInferSum:0, inadRRaw:0, inadIRaw:0 };
   const sim = { approvedQty:0, rejectedQty:0, totalQty:0, qtdAltasSum:0, qtdAltasInferSum:0, inadRRaw:0, inadIRaw:0 };
-  const imp = { qty:0, rToA:0, aToR:0, qtdAltasSimSum:0, inadRSimRaw:0, inadISimRaw:0 };
+  const imp = { qty:0, rToA:0, aToR:0, qtdAltasSimSum:0, inadRSimRaw:0, inadISimRaw:0, altasInferRtoA:0, altasRealAtoR:0 };
 
   for (const [csvId, { rowDecisions }] of Object.entries(overlay)) {
     const csv = csvStore[csvId];
@@ -962,8 +962,10 @@ function computeIncrementalResult(overlay, csvStore) {
         imp.qty += qty;
         if (rd.decisaoOriginal === 'REPROVADO' && rd.decisaoSimulada === 'APROVADO') {
           imp.rToA += qty; imp.qtdAltasSimSum += altas; imp.inadRSimRaw += inadR; imp.inadISimRaw += inadI;
+          imp.altasInferRtoA += altasInfer;
         } else if (rd.decisaoOriginal === 'APROVADO' && rd.decisaoSimulada === 'REPROVADO') {
           imp.aToR += qty;
+          imp.altasRealAtoR += altas;
         }
       }
     }
@@ -991,6 +993,8 @@ function computeIncrementalResult(overlay, csvStore) {
       pct: bl.totalQty > 0 ? (imp.qty / bl.totalQty) * 100 : 0,
       rToA: imp.rToA, aToR: imp.aToR,
       approvalDelta: simRate - blRate,
+      altasInferRtoA: imp.altasInferRtoA,
+      altasRealAtoR: imp.altasRealAtoR,
     },
   };
 }
@@ -1182,14 +1186,6 @@ function SimIndicators({ simResult, csvStore, incrementalResult }) {
   const heroColor = hasInc && rateDelta !== null ? deltaClr(rateDelta, true) : rateColor;
   const heroIsGood = hasInc && rateDelta !== null ? rateDelta > 0 : rate !== null && rate >= 50;
 
-  // Risk/Growth balance: 0 = pure risk, 1 = pure growth
-  const balance = !hasData ? 0.5 : (() => {
-    const a = Math.min(1, (rate ?? 50) / 100);
-    const i = irV !== null ? Math.max(0, 1 - irV / 0.12) : 0.5;
-    return a * 0.6 + i * 0.4;
-  })();
-  const balanceColor = balance > 0.6 ? "#22c55e" : balance < 0.4 ? "#ef4444" : "#f59e0b";
-  const balanceLabel = balance > 0.65 ? "Perfil expansivo" : balance < 0.35 ? "Perfil conservador" : "Perfil balanceado";
 
   // Context badges
   const badges = [];
@@ -1288,31 +1284,12 @@ function SimIndicators({ simResult, csvStore, incrementalResult }) {
         </div>
       </div>
 
-      {/* Risk/Growth Balance Bar */}
-      <div style={{ padding: '7px 13px 11px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
-          <span style={{ fontSize: 8, color: '#ef4444', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>◄ Risco</span>
-          <span style={{ fontSize: 8, color: '#334155', fontWeight: 600 }}>Equilíbrio Estratégico</span>
-          <span style={{ fontSize: 8, color: '#22c55e', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Crescimento ►</span>
-        </div>
-        <div style={{ position: 'relative', height: 8, borderRadius: 4, background: 'linear-gradient(90deg, #7f1d1d44, #1e293b 42%, #1e293b 58%, #14532d44)', border: '1px solid rgba(255,255,255,0.06)' }}>
-          <div style={{
-            position: 'absolute', top: '50%', left: `${Math.round(balance * 100)}%`,
-            transform: 'translate(-50%, -50%)', width: 14, height: 14, borderRadius: '50%',
-            background: hasData ? balanceColor : '#1e293b',
-            border: '2px solid rgba(255,255,255,0.25)',
-            boxShadow: hasData ? `0 0 10px ${balanceColor}66` : 'none',
-            transition: 'left 0.4s ease',
-          }}/>
-        </div>
-        {hasData && <div style={{ textAlign: 'center', marginTop: 5, fontSize: 8.5, color: balanceColor, fontWeight: 600 }}>{balanceLabel}</div>}
-      </div>
-
       {/* Efeito da Mudança */}
       {hasInc && inc.impacted.qty > 0 && (
         <div style={{ padding: '9px 11px 12px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           <div style={{ fontSize: 9, color: '#a78bfa', fontWeight: 800, marginBottom: 7, textTransform: 'uppercase', letterSpacing: '0.08em' }}>⚡ Efeito da Mudança</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          {/* Volume row */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
             <div style={{ background: 'rgba(74,222,128,0.07)', border: '1px solid rgba(74,222,128,0.2)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
               <div style={{ fontSize: 7.5, color: '#4ade80', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Novos Aprovados</div>
               <div style={{ fontSize: 15, fontWeight: 800, color: '#4ade80' }}>+{fmtQty(inc.impacted.rToA)}</div>
@@ -1322,7 +1299,22 @@ function SimIndicators({ simResult, csvStore, incrementalResult }) {
               <div style={{ fontSize: 15, fontWeight: 800, color: '#f87171' }}>−{fmtQty(inc.impacted.aToR)}</div>
             </div>
           </div>
-          <div style={{ marginTop: 7, textAlign: 'center', fontSize: 8.5, color: '#475569' }}>
+          {/* Vendas row — only when conv. inferida is available */}
+          {(inc.impacted.altasInferRtoA > 0 || inc.impacted.altasRealAtoR > 0) && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
+              <div style={{ background: 'rgba(74,222,128,0.05)', border: '1px solid rgba(74,222,128,0.15)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
+                <div style={{ fontSize: 7.5, color: '#86efac', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Conv. Inferida</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: '#86efac' }}>+{fmtQty(inc.impacted.altasInferRtoA)}</div>
+                <div style={{ fontSize: 7, color: '#475569', marginTop: 1 }}>altas estimadas</div>
+              </div>
+              <div style={{ background: 'rgba(248,113,113,0.05)', border: '1px solid rgba(248,113,113,0.15)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
+                <div style={{ fontSize: 7.5, color: '#fca5a5', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Altas Reais Perdidas</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: '#fca5a5' }}>−{fmtQty(inc.impacted.altasRealAtoR)}</div>
+                <div style={{ fontSize: 7, color: '#475569', marginTop: 1 }}>altas históricas</div>
+              </div>
+            </div>
+          )}
+          <div style={{ marginTop: 2, textAlign: 'center', fontSize: 8.5, color: '#475569' }}>
             {fmtQty(inc.impacted.qty)} registros impactados · {inc.impacted.pct.toFixed(1)}% da base
           </div>
         </div>
@@ -3592,13 +3584,6 @@ export default function App() {
     const heroLabel = hasInc && rateDelta !== null ? 'VARIAÇÃO NA APROVAÇÃO' : 'TAXA DE APROVAÇÃO';
     const heroColor = hasInc && rateDelta !== null ? deltaClr(rateDelta, true) : rateColor;
 
-    const balance = !hasData ? 0.5 : (() => {
-      const a = Math.min(1, (rate ?? 50) / 100);
-      const i = irV !== null ? Math.max(0, 1 - irV / 0.12) : 0.5;
-      return a * 0.6 + i * 0.4;
-    })();
-    const balColor = balance > 0.6 ? "#22c55e" : balance < 0.4 ? "#ef4444" : "#f59e0b";
-
     return (
       <g key={id} data-sid={id}
         onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)}
@@ -3680,26 +3665,11 @@ export default function App() {
               </div>
             </div>
 
-            {/* Risk/Growth balance bar */}
-            <div style={{padding:"4px 12px 8px",borderTop:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
-              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                <span style={{fontSize:7.5,color:"#ef4444",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em"}}>◄ Risco</span>
-                <span style={{fontSize:7.5,color:"#334155"}}>Equilíbrio</span>
-                <span style={{fontSize:7.5,color:"#22c55e",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em"}}>Crescimento ►</span>
-              </div>
-              <div style={{position:"relative",height:7,borderRadius:4,background:"linear-gradient(90deg,#7f1d1d44,#1e293b 42%,#1e293b 58%,#14532d44)",border:"1px solid rgba(255,255,255,0.05)"}}>
-                <div style={{position:"absolute",top:"50%",left:`${Math.round(balance*100)}%`,transform:"translate(-50%,-50%)",width:12,height:12,borderRadius:"50%",background:hasData?balColor:"#1e293b",border:"2px solid rgba(255,255,255,0.2)",boxShadow:hasData?`0 0 8px ${balColor}66`:"none",transition:"left .4s ease"}}/>
-              </div>
-              {hasData&&<div style={{textAlign:"center",marginTop:4,fontSize:8,color:balColor,fontWeight:600}}>
-                {balance>0.65?"Perfil expansivo":balance<0.35?"Perfil conservador":"Perfil balanceado"}
-              </div>}
-            </div>
-
             {/* Efeito da Mudança */}
             {hasInc && inc.impacted.qty > 0 && (
               <div style={{padding:"7px 10px 10px",borderTop:"1px solid rgba(255,255,255,0.05)",flexShrink:0}}>
                 <div style={{fontSize:8,color:"#a78bfa",fontWeight:800,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.08em"}}>⚡ Efeito da Mudança</div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:5}}>
                   <div style={{background:"rgba(74,222,128,0.07)",border:"1px solid rgba(74,222,128,0.18)",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
                     <div style={{fontSize:7,color:"#4ade80",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:2}}>Novos Aprov.</div>
                     <div style={{fontSize:14,fontWeight:800,color:"#4ade80"}}>+{fmtQty(inc.impacted.rToA)}</div>
@@ -3709,7 +3679,21 @@ export default function App() {
                     <div style={{fontSize:14,fontWeight:800,color:"#f87171"}}>−{fmtQty(inc.impacted.aToR)}</div>
                   </div>
                 </div>
-                <div style={{marginTop:5,textAlign:"center",fontSize:8,color:"#475569"}}>
+                {(inc.impacted.altasInferRtoA > 0 || inc.impacted.altasRealAtoR > 0) && (
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:5}}>
+                    <div style={{background:"rgba(74,222,128,0.05)",border:"1px solid rgba(74,222,128,0.12)",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:7,color:"#86efac",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:2}}>Conv. Inferida</div>
+                      <div style={{fontSize:14,fontWeight:800,color:"#86efac"}}>+{fmtQty(inc.impacted.altasInferRtoA)}</div>
+                      <div style={{fontSize:6.5,color:"#475569",marginTop:1}}>altas estimadas</div>
+                    </div>
+                    <div style={{background:"rgba(248,113,113,0.05)",border:"1px solid rgba(248,113,113,0.12)",borderRadius:7,padding:"5px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:7,color:"#fca5a5",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:2}}>Altas Perdidas</div>
+                      <div style={{fontSize:14,fontWeight:800,color:"#fca5a5"}}>−{fmtQty(inc.impacted.altasRealAtoR)}</div>
+                      <div style={{fontSize:6.5,color:"#475569",marginTop:1}}>altas históricas</div>
+                    </div>
+                  </div>
+                )}
+                <div style={{textAlign:"center",fontSize:8,color:"#475569"}}>
                   {fmtQty(inc.impacted.qty)} impactados · {inc.impacted.pct.toFixed(1)}% da base
                 </div>
               </div>
@@ -4821,7 +4805,7 @@ export default function App() {
                       return (
                         <div key={col}
                           onClick={() => addRule(col, csvId)}
-                          title={numeric ? "Variável numérica" : "Variável categórica"}
+                          title={col}
                           style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:8,
                             marginBottom:3,cursor:"pointer",fontSize:12.5,fontWeight:500,color:"#1e293b",
                             background:"#fff",border:"1px solid #e2e8f0",transition:"all .12s"}}
