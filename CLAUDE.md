@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~3300 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~3350 linhas)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -25,9 +25,10 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 | `id`           | 🔑   | ID                 | Identificador do registro                        |
 | `decision`     | 🔀   | Filtro             | Variável de decisão arrastável ao canvas         |
 | `qty`          | 📊   | Vol. Propostas     | Volume total de propostas do agrupamento         |
-| `qtdAltas`     | 📈   | Qtd Altas/Vendas   | Volume convertido em vendas/ativações            |
-| `inadReal`     | ⚠️   | Inad. Real         | Inadimplência histórica observada                |
-| `inadInferida` | 🎯   | Inad. Inferida     | Inadimplência estimada para aprovados            |
+| `qtdAltas`      | 📈   | Altas Reais        | Volume convertido em vendas/ativações históricas |
+| `qtdAltasInfer` | 🔮   | Conv. Inferida     | Conversão estimada para aprovados                |
+| `inadReal`      | ⚠️   | Inad. Real         | Inadimplência histórica observada                |
+| `inadInferida`  | 🎯   | Inad. Inferida     | Inadimplência estimada para aprovados            |
 
 ### Shape: `cineminha`
 ```js
@@ -68,10 +69,11 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
-- `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real e Inad. Inferida
+- `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real, Inad. Inferida e Efeito da Mudança (quando incremental)
 
 ### Componentes globais (fora do componente principal)
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
+- `SimIndicators`: card de simulação exibido na sidebar direita — espelha `renderSimPanel` em HTML, recebe `{simResult, csvStore, incrementalResult}`
 
 ### Helpers globais (fora do componente)
 - `sortDomain(values)`: ordena domínio — numérico crescente ou A-Z (locale pt-BR)
@@ -108,11 +110,35 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
 - `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
-- Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
+- Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum`, `qtdAltasInferSum` e `inadInferidaSum`
 - Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
   - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
-  - `inadInferida = ∑ inadInferida / approvedQty` (null se approvedQty = 0)
+  - `inadInferida = ∑ inadInferida / ∑ qtdAltasInfer` ou `/ approvedQty` como fallback (null se ambos = 0)
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
+
+## Motor Incremental (`computeIncrementalResult`)
+Recalcula KPIs considerando decisão original para não-impactados e decisão simulada para impactados. Retorna `{baseline, simulated, impacted}` ou `null` se overlay ausente.
+
+### Estrutura `impacted`
+```js
+{
+  qty,              // total de registros com decisão alterada
+  totalQty,         // total da base
+  pct,              // % da base impactada
+  rToA,             // registros Reprovado → Aprovado (novos aprovados)
+  aToR,             // registros Aprovado → Reprovado (novos reprovados)
+  approvalDelta,    // variação em pp na taxa de aprovação
+  altasInferRtoA,   // ∑ qtdAltasInfer dos rToA — conversões estimadas ganhas
+  altasRealAtoR,    // ∑ qtdAltas dos aToR — altas históricas perdidas
+}
+```
+
+## Decision Lens (`decision_lens`)
+Nó de segmentação que filtra a população via regras compostas (operadores: igual, diferente, contém, maior/menor que, entre, etc.).
+
+- Tooltip ao hover nas variáveis disponíveis exibe o **nome completo da coluna** (não o tipo NUM/CAT)
+- Modal Builder: painel esquerdo lista todas as colunas de todos os CSVs; clique adiciona regra; regras são avaliadas com `matchLensRule`
+- Population counter atualiza em tempo real conforme regras são editadas
 
 ## Wizard de importação (3 passos)
 
@@ -155,11 +181,16 @@ O simulador opera em modelo de **simulação incremental sobre comportamento obs
 
 ## Painel de Simulação (`simPanel`)
 - Tamanho padrão: `w: 260, h: 280`
-- Exibe três indicadores:
+- Exibe indicadores:
   1. **Taxa de Aprovação** — número grande + barra de progresso + contadores ✅/❌
   2. **Inad. Real** — `∑ Inad.Real / ∑ Altas aprovadas`; cor vermelha > 5%, laranja ≤ 5%, cinza = N/A
-  3. **Inad. Inferida** — `∑ Inad.Inferida / Vol. Aprovado`; mesma escala de cor
-- Sidebar direita espelha os três indicadores com recalculo reativo
+  3. **Inad. Inferida** — `∑ Inad.Inferida / ∑ Conv.Inferida` (fallback: `/ Vol. Aprovado`); mesma escala de cor
+  4. **Vol. Aprovado** — contagem aprovada + percentual da base
+- Seção **⚡ Efeito da Mudança** (visível apenas quando há resultado incremental com registros impactados):
+  - **Novos Aprovados / Novos Reprovados** — volume de registros que mudaram de decisão (rToA / aToR)
+  - **Conv. Inferida** — soma de `qtdAltasInfer` dos novos aprovados (altas estimadas ganhas); exibido quando > 0
+  - **Altas Perdidas** — soma de `qtdAltas` dos novos reprovados (altas históricas perdidas); exibido quando > 0
+- Sidebar direita espelha todos os indicadores via componente `SimIndicators`
 
 ## Motor de Recomendação — Cineminha (`optimModal`)
 
@@ -236,4 +267,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-decision-variable-fP4ZM`
+`claude/vigilant-mayer-35oX4` (PR #45)
