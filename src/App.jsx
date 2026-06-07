@@ -1976,10 +1976,32 @@ export default function App() {
       const prev = csvStoreR.current[editCsvId];
       if (!prev) { setWizard(null); return; }
       pushHistory();
-      const finalTypes = buildFinalTypes(prev.headers.filter(h => h !== '__DECISAO_ORIGINAL'), columnTypes);
+
+      // Strip any existing __DECISAO_ORIGINAL column from headers/rows
+      const DORIGINAL_COL = '__DECISAO_ORIGINAL';
+      const existingIdx = prev.headers.indexOf(DORIGINAL_COL);
+      const baseHeaders = existingIdx >= 0 ? prev.headers.filter((_,i) => i !== existingIdx) : prev.headers;
+      const baseRows = existingIdx >= 0 ? prev.rows.map(r => r.filter((_,i) => i !== existingIdx)) : prev.rows;
+
+      // Rebuild __DECISAO_ORIGINAL if asIsVar is configured
+      let finalHeaders = baseHeaders;
+      let finalRows = baseRows;
+      if (asIsVar && baseHeaders.includes(asIsVar)) {
+        const asIsIdx = baseHeaders.indexOf(asIsVar);
+        finalHeaders = [...baseHeaders, DORIGINAL_COL];
+        finalRows = baseRows.map(r => {
+          const val = String(r[asIsIdx] ?? '');
+          const mapped = (asIsMapping || {})[val] || '';
+          return [...r, mapped];
+        });
+      }
+
+      const finalTypes = buildFinalTypes(baseHeaders, columnTypes);
+      const newAsIsConfig = asIsVar ? { col: asIsVar, mapping: asIsMapping || {} } : (prev.asIsConfig || null);
+
       setCsvStore(store => ({
         ...store,
-        [editCsvId]: { ...prev, name: filename||prev.name, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: asIsVar ? { col: asIsVar, mapping: asIsMapping||{} } : (prev.asIsConfig||null) }
+        [editCsvId]: { ...prev, name: filename||prev.name, headers: finalHeaders, rows: finalRows, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: newAsIsConfig }
       }));
       setWizard(null);
       return;
