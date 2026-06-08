@@ -1420,6 +1420,15 @@ export default function App() {
 
   // ── Engine de População Impactada (Feature 4) ─────────────────
   // lensPopulations: {[lensId]: {[csvId]: boolean[]}} — FLAG_POPULACAO_ALVO por linha
+  // lensRulesKey: chave estável que só muda quando regras de um lens mudam (não quando x/y muda)
+  const lensRulesKey = useMemo(() =>
+    JSON.stringify(
+      shapes
+        .filter(s => s.type === 'decision_lens')
+        .map(s => ({ id: s.id, rules: s.rules }))
+    )
+  , [shapes]);
+
   const lensPopulations = useMemo(() => {
     const result = {};
     for (const shape of shapes) {
@@ -1427,7 +1436,8 @@ export default function App() {
       result[shape.id] = computeLensAffectedRows(shape, csvStore);
     }
     return result;
-  }, [shapes, csvStore]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lensRulesKey, csvStore]);
 
   const lensPopulationsR = useRef(lensPopulations);
   useEffect(() => { lensPopulationsR.current = lensPopulations; }, [lensPopulations]);
