@@ -1,0 +1,62 @@
+name: Build e atualiza release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Copiar dist/ para release/ (preserva iniciar.bat)
+        run: |
+          # Salva iniciar.bat se existir
+          if [ -f release/iniciar.bat ]; then
+            cp release/iniciar.bat /tmp/iniciar.bat
+          fi
+
+          # Limpa e recria release/ com o conteúdo do build
+          rm -rf release/*
+          cp -r dist/. release/
+
+          # Restaura iniciar.bat
+          if [ -f /tmp/iniciar.bat ]; then
+            cp /tmp/iniciar.bat release/iniciar.bat
+          fi
+
+      - name: Commit e push da release/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add release/
+
+          # Só commita se houver mudanças
+          if git diff --cached --quiet; then
+            echo "Nenhuma mudança na release/, pulando commit."
+          else
+            git commit -m "chore: atualiza build local [skip ci]"
+            git push origin main
+          fi
