@@ -1416,7 +1416,15 @@ export default function App() {
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
-  const simResult  = useMemo(() => runSimulation(shapes, conns, csvStore), [shapes, conns, csvStore]);
+  const [simResult, setSimResult] = useState(() => ({totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{}}));
+  const simDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(simDebounceRef.current);
+    simDebounceRef.current = setTimeout(() => {
+      setSimResult(runSimulation(shapes, conns, csvStore));
+    }, 300);
+    return () => clearTimeout(simDebounceRef.current);
+  }, [shapes, conns, csvStore]);
 
   // ── Engine de População Impactada (Feature 4) ─────────────────
   // lensPopulations: {[lensId]: {[csvId]: boolean[]}} — FLAG_POPULACAO_ALVO por linha
@@ -1444,10 +1452,15 @@ export default function App() {
 
   // ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ──────
   // simulationOverlay: null | {[csvId]: {rowDecisions, summaryStats}}
-  const simulationOverlay = useMemo(
-    () => computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations),
-    [shapes, conns, csvStore, lensPopulations]
-  );
+  const [simulationOverlay, setSimulationOverlay] = useState(null);
+  const overlayDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(overlayDebounceRef.current);
+    overlayDebounceRef.current = setTimeout(() => {
+      setSimulationOverlay(computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations));
+    }, 300);
+    return () => clearTimeout(overlayDebounceRef.current);
+  }, [shapes, conns, csvStore, lensPopulations]);
 
   // ── Feature 6: Reprocessamento Incremental de Indicadores ──────
   // incrementalResult: null | {baseline, simulated, impacted}
