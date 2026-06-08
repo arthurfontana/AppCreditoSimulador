@@ -1,7 +1,8 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~3300 linhas)
+- React + Vite; lógica principal em `src/App.jsx` (~2800 linhas)
+- Engine de simulação em `src/simulation.worker.js` (Web Worker — thread separada)
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -63,7 +64,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `toggleCinemaCell(shapeId, cellKey)`: alterna elegibilidade de uma célula
 - `deleteShape(id)`: deleta shape + cascade (ports filhos de nós `decision` e `cineminha`)
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
-- `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
+- `openOptimModal(shapeId)`: envia `COMPUTE_OPTIM` ao worker; abre `optimModal` ao receber `OPTIM_RESULT` (assíncrono)
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
@@ -73,14 +74,18 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ### Componentes globais (fora do componente principal)
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
 
-### Helpers globais (fora do componente)
+### Helpers globais em `src/App.jsx` (fora do componente)
 - `sortDomain(values)`: ordena domínio — numérico crescente ou A-Z (locale pt-BR)
 - `computeCinemaSize(rowDomain, colDomain)`: calcula `{w, h}` do nó a partir dos domínios (caps: 540×420)
 - `fmtQty(n)`: formata número como inteiro, `k` ou `M`
 - `fmtPct(v)`: formata ratio como `"XX.XX%"` ou `"N/A"` quando `v === null`
-- `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}`
-- `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`
-- `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
+- `buildFlowGraph(shapes, conns)`: constrói listas de adjacência `{out, inc}` — usado por `validateFlow` e `exportDiagnosticCSV`
+- `validateFlow(shapes, conns)`: verifica loops e caminhos sem finalização — roda no thread principal via `useMemo`
+- `matchLensRule` / `rowMatchesLensRules`: avalia regras do Decision Lens por linha — usados em `computeLensAffectedRows`
+- `computeLensAffectedRows(lensShape, csvStore)`: retorna `{[csvId]: boolean[]}` marcando linhas que passam pelas regras do Lens
+- `getCellValue(cells, key)` / `isCellEligible(cells, key)`: leitura de valor de célula com backward-compat para booleanos legados
+- `populateCellsFromResultVar(shape, csvStore)`: lê coluna resultado do CSV e constrói objeto `cells` para o Cineminha
+- `exportDiagnosticCSV(shapes, conns, csvStore)`: gera e baixa CSV de diagnóstico com visão de funil por nó+valor
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
@@ -105,13 +110,50 @@ CINEMA_MAX_W   = 540  // largura máxima do nó
 CINEMA_MAX_H   = 420  // altura máxima do nó
 ```
 
+## Web Worker (`src/simulation.worker.js`)
+
+Todas as funções pesadas rodam em thread separada para não travar a UI:
+
+| Função | Descrição |
+|--------|-----------|
+| `runSimulation` | Varredura de todas as linhas do CSV pelo grafo de fluxo |
+| `computeSimulatedDecisions` | Sobrescrita de decisão para população alvo do Lens |
+| `computeIncrementalResult` | Reprocessamento de KPIs baseline vs simulado |
+| `computeCellMetrics` | Agrega métricas do CSV por célula do Cineminha |
+| `buildParetoFrontier` | Fronteira Pareto greedy de células por inadInferida crescente |
+| `extractScenarios` | Extrai 4 cenários da fronteira (conservador, balanceado, melhorEficiencia, expansao) |
+
+### Protocolo de mensagens
+
+**Main → Worker:**
+| `type` | Payload | Quando |
+|--------|---------|--------|
+| `UPDATE_CSV_STORE` | `{csvStore}` | A cada mudança de `csvStore` (sem debounce) |
+| `RUN_SIMULATION` | `{shapes, conns}` | Debounce 300ms em mudanças de shapes/conns/csvStore |
+| `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Debounce 300ms em mudanças de shapes/conns/csvStore/lensPopulations |
+| `COMPUTE_OPTIM` | `{shape}` | Ao abrir o modal de otimização |
+
+**Worker → Main:**
+| `type` | Payload | Efeito |
+|--------|---------|--------|
+| `SIMULATION_RESULT` | `{result}` | `setSimResult(result)` |
+| `OVERLAY_RESULT` | `{overlay, incrementalResult}` | `setSimulationOverlay` + `setIncrementalResult` |
+| `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` | `setOptimModal(...)` se `pendingOptimShapeIdRef` bater |
+
+### Padrão de estado — csvStore no worker
+O worker mantém `workerCsvStore` internamente. `UPDATE_CSV_STORE` é enviado imediatamente (sem debounce) a cada mudança de csvStore — garante que `RUN_SIMULATION` e `COMPUTE_OVERLAY` sempre recebem dados frescos. As mensagens são processadas em ordem FIFO pelo worker, portanto o UPDATE sempre chega antes do próximo cálculo.
+
+### openOptimModal — fluxo assíncrono
+`openOptimModal(shapeId)` registra `pendingOptimShapeIdRef.current = shapeId` e dispara `COMPUTE_OPTIM`. O handler `onmessage` verifica o `shapeId` na resposta antes de abrir o modal, descartando resultados obsoletos se o usuário fechou a seleção antes de o worker responder.
+
 ## Engine de simulação
-- `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
-- `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
+- `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos — roda no thread principal via `useMemo` (rápido, sem varredura de linhas)
+- `runSimulation` / `traverseRow` (worker): para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
 - Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
-- Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
+- Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida, edgeStats }`
   - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
   - `inadInferida = ∑ inadInferida / approvedQty` (null se approvedQty = 0)
+  - `edgeStats`: `{[connId]: {qty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida}}` — usado para espessura dinâmica e tooltips de setas
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
 ## Wizard de importação (3 passos)
@@ -236,4 +278,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-decision-variable-fP4ZM`
+`claude/web-worker-simulation-OzSFR` (PR #48)
