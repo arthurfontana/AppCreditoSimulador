@@ -1,7 +1,7 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~3300 linhas)
+- React + Vite, arquivo único: `src/App.jsx`
 - Sem CSS externo — tudo inline styles
 - Sem bibliotecas de UI — SVG puro para o canvas; matrizes interativas via `foreignObject`
 
@@ -11,13 +11,28 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ## Estrutura de dados (src/App.jsx)
 
 ### Estado principal
-- `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `csv`, `simPanel`, `cineminha`
+- `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `as_is`, `csv`, `simPanel`, `cineminha`, `decision_lens`, `frame`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
 - `csvStore`: `{[csvId]: {name, headers, rows, columnTypes, varTypes, asIsConfig}}`
 - `wizard`: modal de importação em 3 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId}`
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApproval, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
+- `multiSel`: `Set<id>` — IDs das shapes selecionadas em modo multi-seleção
+- `selRect`: `null | {x1, y1, x2, y2}` — retângulo de seleção em coordenadas de mundo
+- `hoveredConn` / `hoveredConnPos`: estado de hover em conexão + posição na tela
+- `panelDrag` / `ghostPos`: drag de variável do painel + posição do ghost
+- `undoStack` / `redoStack`: pilhas de histórico para Ctrl+Z / Ctrl+Y
+- `editConn`: estado do modal de edição inline de label de conexão
+- `enableDynThickness`: espessura dinâmica de arestas baseada em volume
+- `showEdgeVol` / `showEdgeInadReal` / `showEdgeInadInf`: toggles de métricas nas arestas
+- `cinemaLibrary`: array persistente de templates salvos de cineminha
+- `cinemaLibraryModal`: estado do modal de browse/save da biblioteca
+- `cinemaTypeModal`: modal de seleção de tipo ao criar novo cineminha
+- `importTypeModal`: modal de escolha entre importação padrão e importação da biblioteca
+- `resultVarModal`: modal de seleção de variável de resultado para nós cineminha
+- `incrementalResult`: `null | {baseline, simulated, impacted}` — resultado da simulação incremental
+- `businessWidget`: `{visible, x, y, w, h}` — painel flutuante de métricas de negócio
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -34,15 +49,43 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 {
   id, type:"cineminha", x, y, w, h,
   label: "Cineminha",
+  cinemaType: string,              // tipo do template (ex: 'eligibility', 'offer')
   rowVar: null | {col, csvId},     // variável no eixo de linhas
   colVar: null | {col, csvId},     // variável no eixo de colunas
   rowDomain: string[],             // valores distintos ordenados do eixo linha
   colDomain: string[],             // valores distintos ordenados do eixo coluna
   cells: { [`${rowVal}|${colVal}`]: boolean },  // true = Elegível (default), false = Não Elegível
+  resultVar: null | {col, csvId},  // variável de resultado mapeada ao output
+  minimized: boolean,              // modo compacto (oculta matriz)
+  identifiers: {},                 // metadados adicionais
+  dimensions: {rowVariable, columnVariable},
 }
 ```
 - Criado automaticamente com dois ports filhos: `"Elegível"` (verde) e `"Não Elegível"` (vermelho)
 - Chave de célula 1D-linha: `"${rowVal}|*"` / 1D-coluna: `"*|${colVal}"`
+- `CINEMINHA_TYPES`: objeto com templates predefinidos; `getCinemaType(cinemaType)` resolve o config do template
+
+### Shape: `decision_lens`
+```js
+{
+  id, type:"decision_lens", x, y, w, h,
+  label: string,
+  rules: [{col, operator, value}],  // regras do filtro
+  color: string,
+}
+```
+- Constantes: `LENS_W = 182`, `LENS_H = 86`
+- Operadores definidos em `LENS_OPERATORS`
+- Incluído no conjunto `FLOW` do validador; incluído no `traverseRow`
+
+### Shape: `frame`
+- Container visual para agrupamento no canvas; renderizado na camada inferior (SVG separado)
+- Campos: `{id, type:"frame", x, y, w, label, color}`
+- Não participa do grafo de fluxo
+
+### Shape: `as_is`
+- Nó terminal representando a decisão histórica baseline
+- Incluído no conjunto `TERM` (como `approved`/`rejected`) e no conjunto `FLOW`
 
 ### csvStore: entrada por dataset
 ```js
@@ -59,15 +102,21 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ### Funções-chave
 - `createDecisionNode(col, csvId, wx, wy)`: cria losango de decisão + ports automáticos com setas rotuladas (valores distintos da coluna)
 - `createCinemaNode(wx, wy)`: cria nó Cineminha vazio + ports "Elegível" e "Não Elegível"
+- `createLensNode(wx, wy)`: cria nó Decision Lens vazio
 - `assignCinemaVar(shapeId, col, csvId, axis)`: atribui variável ao eixo `'row'` ou `'col'`, recomputa domínio e reconstrói `cells`
+- `assignResultVar(shapeId, col, csvId)` / `clearResultVar(shapeId)`: gerencia variável de resultado do cineminha
 - `toggleCinemaCell(shapeId, cellKey)`: alterna elegibilidade de uma célula
 - `deleteShape(id)`: deleta shape + cascade (ports filhos de nós `decision` e `cineminha`)
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
+- `pushHistory()` / `undo()` / `redo()`: sistema de histórico (Ctrl+Z / Ctrl+Y)
+- `startCinemaImport(shapeId)`: inicia fluxo de importação de template da biblioteca
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
+- `renderDecisionLensNode(shape)`: nó de filtro com regras inline
+- `renderFrame(shape)`: container visual renderizado na camada inferior
 - `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real e Inad. Inferida
 
 ### Componentes globais (fora do componente principal)
@@ -81,6 +130,11 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, inadRRaw, inadIRaw, inadReal, inadInferida}}`
 - `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → `[{cells, approvalRate, inadReal, inadInferida, totalQty, approvedQty}]`
 - `extractScenarios(frontier)`: extrai 3 pontos representativos → `{conservador, medio, maximo}` onde `medio` é o joelho da curva (máxima distância perpendicular à reta conservador–máximo)
+- `matchLensRule(cellVal, operator, ruleVal)`: avalia uma única regra do Decision Lens
+- `rowMatchesLensRules(row, headers, rules)`: verifica se linha do CSV atende todas as regras
+- `computeLensPopulation(rules, csvStore)` / `computeLensAffectedRows(lensShape, csvStore)`: agrega linhas afetadas pelo lens
+- `getCellValue(cells, key)` / `isCellEligible(cells, key)`: helpers de lookup de elegibilidade
+- `populateCellsFromResultVar(shape, csvStore)`: preenche `cells` automaticamente a partir de coluna do CSV
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
@@ -90,9 +144,10 @@ Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc
 2. Colunas **Filtro** aparecem como chips arrastáveis no painel direito
 3. Arrastar chip para área vazia do canvas → losango com ports automáticos (até 10 valores)
 4. Arrastar chip sobre um ⊞ Cineminha → modal "Linha ou Coluna?" → matriz cruzada
-5. Conectar ports a outros nós ou a ✅ Aprovado / ❌ Reprovado
+5. Conectar ports a outros nós ou a ✅ Aprovado / ❌ Reprovado / AS IS
 6. Duplo-clique em seta → editar label
-7. Painel de simulação atualiza Taxa de Aprovação, Inad. Real e Inad. Inferida em tempo real
+7. Ctrl+Z / Ctrl+Y → desfazer/refazer
+8. Painel de simulação atualiza Taxa de Aprovação, Inad. Real e Inad. Inferida em tempo real
 
 ## Constantes do Cineminha
 ```js
@@ -106,12 +161,13 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 ```
 
 ## Engine de simulação
-- `validateFlow`: inclui `cineminha` no conjunto de nós de fluxo válidos
-- `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`
+- `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; `as_is` no conjunto terminal
+- `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port `"Elegível"` ou `"Não Elegível"`; para nós `decision_lens`, avalia regras via `rowMatchesLensRules`
 - Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum` e `inadInferidaSum`
 - Retorna `{ totalQty, approvedQty, rejectedQty, approvalRate, inadReal, inadInferida }`
   - `inadReal = ∑ inadReal / ∑ qtdAltas` (null se qtdAltasSum = 0)
   - `inadInferida = ∑ inadInferida / approvedQty` (null se approvedQty = 0)
+- **Simulação incremental**: `incrementalResult` armazena `{baseline, simulated, impacted}`; `SimIndicators` exibe cards de comparação quando ativo
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
 ## Wizard de importação (3 passos)
@@ -139,7 +195,7 @@ CINEMA_MAX_H   = 420  // altura máxima do nó
 O simulador opera em modelo de **simulação incremental sobre comportamento observado**:
 - A base histórica (`asIsConfig`) representa a realidade operacional
 - `__DECISAO_ORIGINAL` é a coluna interna com a decisão normalizada de cada linha
-- Será usada futuramente por: Decision Lens, motor de simulação incremental, cálculo de delta, comparação contrafactual
+- Usada por: simulação incremental (`incrementalResult`), nó terminal `as_is`, Decision Lens, cálculo de delta
 
 ### Estrutura `asIsConfig`
 ```js
@@ -160,6 +216,7 @@ O simulador opera em modelo de **simulação incremental sobre comportamento obs
   2. **Inad. Real** — `∑ Inad.Real / ∑ Altas aprovadas`; cor vermelha > 5%, laranja ≤ 5%, cinza = N/A
   3. **Inad. Inferida** — `∑ Inad.Inferida / Vol. Aprovado`; mesma escala de cor
 - Sidebar direita espelha os três indicadores com recalculo reativo
+- Quando `incrementalResult` ativo: exibe cards comparativos baseline vs simulado
 
 ## Motor de Recomendação — Cineminha (`optimModal`)
 
@@ -204,14 +261,13 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 ### Aplicar
 `applyOptimResult(shapeId, proposedCells)` — sobrescreve `cells` do Cineminha via `setShapes` e fecha o modal. Não-destrutivo: nenhuma alteração no canvas até o clique em "Aplicar".
 
-### Roadmap futuro (não implementado)
+## Biblioteca de Cineminha (`cinemaLibrary`)
 
-- Flag `ordinal` por coluna de decisão (wizard passo 2) + restrição de corte monotônico no algoritmo Pareto (escada Young diagram) para variáveis como ratings R1–R20
-- Sliders adicionais: margem, rentabilidade
-- Fronteira Pareto multi-dimensional
-- Decision Lens: comparação AS IS vs simulado usando `__DECISAO_ORIGINAL`
-- Motor de simulação incremental: sobrescrever apenas subconjunto da base histórica
-- Cálculo de delta e impacto marginal
+- Array persistente de templates salvos localmente
+- Cada item: `{name, cinemaType, rowVar, colVar, cells, metadata: {version, author, date}}`
+- `cinemaLibraryModal`: modal para navegar, salvar e carregar templates
+- `importTypeModal`: modal que aparece ao criar novo cineminha — escolhe entre "do zero" ou "da biblioteca"
+- `startCinemaImport(shapeId)`: inicia fluxo de importação de template para um nó existente
 
 ## Indicador de Versão/Build (`BuildBadge`)
 
@@ -236,4 +292,4 @@ Header do painel direito — ao lado do título "Painel".
 - Tooltip hover: número, data/hora completa, hash, branch, autor
 
 ## Branch de desenvolvimento
-`claude/add-decision-variable-fP4ZM`
+`claude/amazing-newton-oHOEt`
