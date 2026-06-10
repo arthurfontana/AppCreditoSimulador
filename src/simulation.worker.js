@@ -241,7 +241,9 @@ function runSimulation(shapes, conns, csvStore) {
 }
 
 function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
-  if (!lensPopulations || Object.keys(lensPopulations).length === 0) return null;
+  const hasLens = lensPopulations && Object.keys(lensPopulations).length > 0;
+  const hasAsIs = Object.values(csvStore).some(csv => csv.headers.indexOf('__DECISAO_ORIGINAL') >= 0);
+  if (!hasLens && !hasAsIs) return null;
 
   const { out } = buildFlowGraph(shapes, conns);
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
@@ -331,7 +333,7 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
     const rowDecisions = csv.rows.map((row, rowIdx) => {
       const decisaoOriginal = row[dOrigIdx] ?? '';
       const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 1) : 1;
-      const isMutable = Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
+      const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
 
       summaryStats.totalQty += qty;
       if (isMutable) summaryStats.mutableQty += qty;
