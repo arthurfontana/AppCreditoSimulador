@@ -1901,7 +1901,7 @@ export default function App() {
 
   // ── applyCinemaImport ─────────────────────────────────────────
   const applyCinemaImport = () => {
-    const { shapeId, config, rowMapping, colMapping } = cinemaImportModal;
+    const { shapeId, config, rowMapping, colMapping, fromLibrary } = cinemaImportModal;
     pushHistory();
     const rowVarFinal = config.rowVar && rowMapping ? { col: rowMapping.col, csvId: rowMapping.csvId } : null;
     const colVarFinal = config.colVar && colMapping ? { col: colMapping.col, csvId: colMapping.csvId } : null;
@@ -1941,6 +1941,7 @@ export default function App() {
     setShapes(prev => prev.map(s => s.id !== shapeId ? s : {
       ...s, rowVar: rowVarFinal, colVar: colVarFinal, rowDomain, colDomain, cells: newCells, w, h,
       ...(importedType ? { cinemaType: importedType } : {}),
+      ...(fromLibrary && config.name ? { label: config.name } : {}),
     }));
     setCinemaImportModal(null);
     if (skipped > 0) {
