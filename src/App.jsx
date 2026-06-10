@@ -862,14 +862,13 @@ export default function App() {
   const [optimModal, setOptimModal] = useState(null);   // null | optim obj
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
-  // Cineminha type picker (shown on creation)
-  const [cinemaTypeModal, setCinemaTypeModal] = useState(null); // null | {wx, wy}
+  // Cineminha toolbar dropdown
+  const [cinemaDropdownOpen, setCinemaDropdownOpen] = useState(false);
   // Cineminha export/import
   const [cinemaImportModal, setCinemaImportModal] = useState(null); // null | {shapeId, config, step, rowMapping, colMapping, availableVars}
   // Cineminha library
   const [cinemaLibrary,      setCinemaLibrary]      = useState([]);   // array of saved cineminha items
-  const [cinemaLibraryModal, setCinemaLibraryModal] = useState(null); // null | {mode:'browse'|'save', shapeId, search, filterType, saveMeta, overwriteId}
-  const [importTypeModal,    setImportTypeModal]    = useState(null); // null | {shapeId} — seleção de tipo de importação
+  const [cinemaLibraryModal, setCinemaLibraryModal] = useState(null); // null | {mode:'browse'|'save', shapeId, search, filterType, saveMeta, overwriteId, selectedLibIds}
   const [libWizard,          setLibWizard]          = useState(null); // null | wizard de importação de biblioteca
   // Business Impact floating widget
   const [businessWidget, setBusinessWidget] = useState({ visible: false, x: 80, y: 80, w: 420, h: 520 });
@@ -1118,7 +1117,7 @@ export default function App() {
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
-      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){setCinemaTypeModal({wx,wy});}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected"||curTool==="as_is";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":curTool==="as_is"?"AS IS":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
+      if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy,'eligibility');}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected"||curTool==="as_is";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":curTool==="as_is"?"AS IS":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
     }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
@@ -1164,7 +1163,7 @@ export default function App() {
     if (movedR.current) return;
     if (tool==="cineminha") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
-      setCinemaTypeModal({wx,wy}); return;
+      createCinemaNode(wx, wy, 'eligibility'); return;
     }
     if (tool==="decision_lens") {
       const [sx,sy]=svgPt(e.clientX,e.clientY),[wx,wy]=toWorld(sx,sy);
@@ -1965,6 +1964,7 @@ export default function App() {
         identifiers: JSON.stringify(meta.identifiers ?? {}, null, 2),
       },
       overwriteId: null,
+      selectedLibIds: [],
     });
   };
 
@@ -2093,6 +2093,55 @@ export default function App() {
 
   const deleteFromLibrary = (itemId) => {
     setCinemaLibrary(prev => prev.filter(it => it.id !== itemId));
+  };
+
+  // ── batchImportFromLibrary ────────────────────────────────────
+  const batchImportFromLibrary = (selectedIds) => {
+    const items = cinemaLibraryR.current.filter(it => selectedIds.includes(it.id));
+    if (!items.length) return;
+    pushHistory();
+
+    const svgEl = svgRef.current;
+    const svgRect = svgEl ? svgEl.getBoundingClientRect() : {width: 1000, height: 700};
+    const {x: vx, y: vy, s} = vpR.current;
+    const centerX = (-vx + svgRect.width  * 0.5) / s;
+    const centerY = (-vy + svgRect.height * 0.5) / s;
+
+    const PORT_W = 100, PORT_H = 32, GAP = 40;
+    const sizes = items.map(item => computeCinemaSize(item.rowDomain || [], item.colDomain || []));
+    const totalH = sizes.reduce((acc, sz, i) => acc + sz.h + (i > 0 ? GAP : 0), 0);
+
+    let curY = centerY - totalH / 2;
+    const newShapes = [], newConns = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const {w: W, h: H} = sizes[i];
+      const cx = centerX, cy = curY + H / 2;
+      const cinemaType = item.cinemaType ?? 'eligibility';
+      const cfg = getCinemaType(cinemaType);
+      const id = uid(), eligId = uid(), notId = uid();
+
+      newShapes.push(
+        { id, type:'cineminha', x:cx-W/2, y:cy-H/2, w:W, h:H,
+          label:item.name||'Cineminha', color:'#fff', cinemaType,
+          rowVar:null, colVar:null,
+          rowDomain:[...(item.rowDomain||[])], colDomain:[...(item.colDomain||[])],
+          cells:{...(item.cells||{})}, resultVar:null,
+          metadata:{...(item.metadata??{}), source:'library_import'} },
+        { id:eligId, type:'port', x:cx+W/2+36, y:cy-PORT_H-6, w:PORT_W, h:PORT_H, label:cfg.ports[0].label, color:cfg.ports[0].color },
+        { id:notId,  type:'port', x:cx+W/2+36, y:cy+6,         w:PORT_W, h:PORT_H, label:cfg.ports[1].label, color:cfg.ports[1].color },
+      );
+      newConns.push(
+        {id:uid(), from:id, to:eligId, label:cfg.ports[0].label},
+        {id:uid(), from:id, to:notId,  label:cfg.ports[1].label},
+      );
+      curY += H + GAP;
+    }
+
+    setShapes(prev => [...prev, ...newShapes]);
+    setConns(prev  => [...prev, ...newConns]);
+    setCinemaLibraryModal(null);
   };
 
   // ── exportLibrary ─────────────────────────────────────────────
@@ -2289,33 +2338,57 @@ export default function App() {
   }, []); // eslint-disable-line
 
   // ── assignCinemaVar ───────────────────────────────────────────
-  const assignCinemaVar = useCallback((shapeId, col, csvId, axis) => {
+  const assignCinemaVar = useCallback((shapeIdOrIds, col, csvId, axis) => {
     pushHistory();
+    const shapeIds = Array.isArray(shapeIdOrIds) ? shapeIdOrIds : [shapeIdOrIds];
     const csv = csvStoreR.current[csvId];
     if (!csv) return;
     const colIdx = csv.headers.indexOf(col);
     if (colIdx === -1) return;
     const allVals = [...new Set(csv.rows.map(r => r[colIdx]??'').filter(v=>v!==''))];
     const domain  = sortDomain(allVals);
+
+    // Pre-compute port repositioning for each cineminha
+    const PORT_H = 32;
+    const portPositions = {};
+    for (const shapeId of shapeIds) {
+      const shape = shapesR.current.find(s => s.id === shapeId);
+      if (!shape) continue;
+      const newRowDomain = axis==='row' ? domain : shape.rowDomain;
+      const newColDomain = axis==='col' ? domain : shape.colDomain;
+      const {w: nw, h: nh} = computeCinemaSize(newRowDomain, newColDomain);
+      connsR.current.filter(c => c.from === shapeId).forEach((c, i) => {
+        portPositions[c.to] = {
+          x: shape.x + nw + 36,
+          y: i === 0 ? shape.y + nh/2 - PORT_H - 6 : shape.y + nh/2 + 6,
+        };
+      });
+    }
+
     setShapes(prev => prev.map(s => {
-      if (s.id !== shapeId) return s;
-      const newRowVar    = axis==='row' ? {col,csvId} : s.rowVar;
-      const newColVar    = axis==='col' ? {col,csvId} : s.colVar;
-      const newRowDomain = axis==='row' ? domain : s.rowDomain;
-      const newColDomain = axis==='col' ? domain : s.colDomain;
-      const rDom = newRowDomain.length>0 ? newRowDomain : ['*'];
-      const cDom = newColDomain.length>0 ? newColDomain : ['*'];
-      const newCells = {};
-      for (const r of rDom) for (const c of cDom) {
-        const key = `${r}|${c}`;
-        newCells[key] = getCellValue(s.cells, key);
+      if (shapeIds.includes(s.id)) {
+        const newRowVar    = axis==='row' ? {col,csvId} : s.rowVar;
+        const newColVar    = axis==='col' ? {col,csvId} : s.colVar;
+        const newRowDomain = axis==='row' ? domain : s.rowDomain;
+        const newColDomain = axis==='col' ? domain : s.colDomain;
+        const rDom = newRowDomain.length>0 ? newRowDomain : ['*'];
+        const cDom = newColDomain.length>0 ? newColDomain : ['*'];
+        const newCells = {};
+        for (const r of rDom) for (const c of cDom) {
+          const key = `${r}|${c}`;
+          newCells[key] = getCellValue(s.cells, key);
+        }
+        const {w:nw, h:nh} = computeCinemaSize(newRowDomain, newColDomain);
+        const baseShape = {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
+        if (s.resultVar) {
+          baseShape.cells = populateCellsFromResultVar(baseShape, csvStoreR.current);
+        }
+        return baseShape;
       }
-      const {w:nw, h:nh} = computeCinemaSize(newRowDomain, newColDomain);
-      const baseShape = {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
-      if (s.resultVar) {
-        baseShape.cells = populateCellsFromResultVar(baseShape, csvStoreR.current);
+      if (portPositions[s.id]) {
+        return {...s, ...portPositions[s.id]};
       }
-      return baseShape;
+      return s;
     }));
     setAxisModal(null);
   }, []); // eslint-disable-line
@@ -2367,7 +2440,15 @@ export default function App() {
           // Check if dropped on a cineminha node
           const cinema=shapesR.current.find(sh=>sh.type==='cineminha'&&wx>=sh.x&&wx<=sh.x+sh.w&&wy>=sh.y&&wy<=sh.y+sh.h);
           if (cinema) {
-            setAxisModal({shapeId:cinema.id, col:drag.col, csvId:drag.csvId});
+            const ms = multiSelR.current;
+            const selCinemaIds = ms.size > 1 && ms.has(cinema.id)
+              ? [...ms].filter(id => shapesR.current.find(s => s.id === id && s.type === 'cineminha'))
+              : null;
+            if (selCinemaIds && selCinemaIds.length > 1) {
+              setAxisModal({shapeIds: selCinemaIds, col: drag.col, csvId: drag.csvId});
+            } else {
+              setAxisModal({shapeId: cinema.id, col: drag.col, csvId: drag.csvId});
+            }
           } else {
             createDecisionNode(drag.col,drag.csvId,wx,wy);
           }
@@ -3379,15 +3460,65 @@ export default function App() {
         <div style={{position:"absolute",top:14,left:"50%",transform:"translateX(-50%)",zIndex:300,
           display:"flex",gap:2,alignItems:"center",background:"#fff",padding:"6px 8px",borderRadius:14,
           border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)",maxWidth:"calc(100% - 24px)",overflowX:"auto"}}>
-          {TOOLS.map(t=>(
-            <button key={t.id} className="wbt" onClick={()=>{setTool(t.id);setFromId(null);}} title={t.label}
-              style={{display:"flex",alignItems:"center",gap:5,padding:"6px 11px",borderRadius:9,border:"none",
-                background:tool===t.id?"#2563eb":"transparent",color:tool===t.id?"#fff":"#475569",
-                cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",whiteSpace:"nowrap"}}>
-              <span style={{fontSize:15,lineHeight:1}}>{t.icon}</span>
-              <span className="wbl">{t.label}</span>
-            </button>
-          ))}
+          {TOOLS.map(t=>{
+            if (t.id === 'cineminha') return (
+              <div key={t.id} style={{position:"relative"}}>
+                <button className="wbt"
+                  onClick={()=>setCinemaDropdownOpen(o=>!o)}
+                  title={t.label}
+                  style={{display:"flex",alignItems:"center",gap:5,padding:"6px 11px",borderRadius:9,border:"none",
+                    background:tool==='cineminha'?"#2563eb":"transparent",
+                    color:tool==='cineminha'?"#fff":"#475569",
+                    cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                  <span style={{fontSize:15,lineHeight:1}}>⊞</span>
+                  <span className="wbl">Cineminha</span>
+                  <span style={{fontSize:9,marginLeft:1,opacity:.7}}>▾</span>
+                </button>
+                {cinemaDropdownOpen&&(
+                  <>
+                    <div style={{position:"fixed",inset:0,zIndex:399}} onClick={()=>setCinemaDropdownOpen(false)}/>
+                    <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,background:"#fff",borderRadius:10,
+                      border:"1px solid #e2e8f0",boxShadow:"0 8px 24px rgba(0,0,0,.12)",minWidth:210,zIndex:400,overflow:"hidden"}}>
+                      <button
+                        onClick={()=>{setTool('cineminha');setFromId(null);setCinemaDropdownOpen(false);}}
+                        style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 16px",border:"none",
+                          background:"transparent",cursor:"pointer",fontSize:13,fontFamily:"inherit",color:"#1e293b",textAlign:"left"}}
+                        onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"}
+                        onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                        <span style={{fontSize:15}}>⊞</span>
+                        <div>
+                          <div style={{fontWeight:600}}>Inserir no Canvas</div>
+                          <div style={{fontSize:11,color:"#94a3b8",marginTop:1}}>Clique no canvas para posicionar</div>
+                        </div>
+                      </button>
+                      <div style={{height:1,background:"#f1f5f9",margin:"0 12px"}}/>
+                      <button
+                        onClick={()=>{openCinemaLibrary(null,'browse');setCinemaDropdownOpen(false);}}
+                        style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 16px",border:"none",
+                          background:"transparent",cursor:"pointer",fontSize:13,fontFamily:"inherit",color:"#1e293b",textAlign:"left"}}
+                        onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"}
+                        onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                        <span style={{fontSize:15}}>📥</span>
+                        <div>
+                          <div style={{fontWeight:600}}>Importar da Biblioteca</div>
+                          <div style={{fontSize:11,color:"#94a3b8",marginTop:1}}>Adicionar modelos salvos ao canvas</div>
+                        </div>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+            return (
+              <button key={t.id} className="wbt" onClick={()=>{setTool(t.id);setFromId(null);}} title={t.label}
+                style={{display:"flex",alignItems:"center",gap:5,padding:"6px 11px",borderRadius:9,border:"none",
+                  background:tool===t.id?"#2563eb":"transparent",color:tool===t.id?"#fff":"#475569",
+                  cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                <span style={{fontSize:15,lineHeight:1}}>{t.icon}</span>
+                <span className="wbl">{t.label}</span>
+              </button>
+            );
+          })}
           <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
           {/* Undo / Redo */}
           <button className="wbt" onClick={undo} disabled={undoStack.length===0} title="Desfazer (Ctrl+Z)"
@@ -3520,7 +3651,7 @@ export default function App() {
                   whiteSpace:"nowrap",fontWeight:600}}>
                 ⬇ Exportar
               </button>
-              <button onClick={()=>setImportTypeModal({shapeId:sel})}
+              <button onClick={()=>startCinemaImport(sel)}
                 style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fed7aa",background:"#fff7ed",
                   color:"#ea580c",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                   whiteSpace:"nowrap",fontWeight:600}}>
@@ -4565,39 +4696,6 @@ export default function App() {
         );
       })()}
 
-      {/* ═══════════════ CINEMINHA TYPE PICKER MODAL ═══════════ */}
-      {cinemaTypeModal&&(
-        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:440,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:20}}>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <div style={{width:38,height:38,borderRadius:10,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⊞</div>
-              <div>
-                <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>Novo Cineminha</h3>
-                <p style={{fontSize:12.5,color:"#64748b"}}>Selecione o tipo desta matriz de decisão</p>
-              </div>
-            </div>
-            <div style={{display:"flex",gap:12}}>
-              {Object.values(CINEMINHA_TYPES).map(t=>(
-                <button key={t.id}
-                  onClick={()=>{ createCinemaNode(cinemaTypeModal.wx, cinemaTypeModal.wy, t.id); setCinemaTypeModal(null); }}
-                  style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"18px 12px",borderRadius:14,
-                    border:`1.5px solid ${t.badgeBg}`,background:t.badgeBg,cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
-                  onMouseEnter={e=>{e.currentTarget.style.borderColor=t.badgeFg;e.currentTarget.style.boxShadow=`0 4px 16px ${t.badgeBg}`;}}
-                  onMouseLeave={e=>{e.currentTarget.style.borderColor=t.badgeBg;e.currentTarget.style.boxShadow="none";}}>
-                  <span style={{fontSize:28}}>{t.icon}</span>
-                  <span style={{fontSize:13.5,fontWeight:700,color:t.badgeFg}}>{t.label}</span>
-                  <span style={{fontSize:11,color:"#64748b",textAlign:"center",lineHeight:1.4}}>{t.desc}</span>
-                </button>
-              ))}
-            </div>
-            <button onClick={()=>setCinemaTypeModal(null)}
-              style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
-              Cancelar
-            </button>
-          </div>
-        </div>
-      )}
-
       {axisModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:400,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:20}}>
@@ -4605,14 +4703,16 @@ export default function App() {
               <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
                 <div style={{width:38,height:38,borderRadius:10,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⊞</div>
                 <div>
-                  <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>Adicionar ao Cineminha</h3>
+                  <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>
+                    {axisModal.shapeIds ? `Adicionar a ${axisModal.shapeIds.length} Cineminhas` : 'Adicionar ao Cineminha'}
+                  </h3>
                   <p style={{fontSize:12.5,color:"#64748b"}}>Variável: <strong>{axisModal.col}</strong></p>
                 </div>
               </div>
               <p style={{fontSize:13,color:"#475569",lineHeight:1.6}}>Como deseja posicionar esta variável na matriz?</p>
             </div>
             <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>assignCinemaVar(axisModal.shapeId, axisModal.col, axisModal.csvId, 'row')}
+              <button onClick={()=>assignCinemaVar(axisModal.shapeIds??axisModal.shapeId, axisModal.col, axisModal.csvId, 'row')}
                 style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"16px 10px",borderRadius:12,border:"1.5px solid #c7d2fe",background:"#eef2ff",cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
                 onMouseEnter={e=>{e.currentTarget.style.borderColor="#818cf8";e.currentTarget.style.background="#e0e7ff";}}
                 onMouseLeave={e=>{e.currentTarget.style.borderColor="#c7d2fe";e.currentTarget.style.background="#eef2ff";}}>
@@ -4620,7 +4720,7 @@ export default function App() {
                 <span style={{fontSize:13,fontWeight:700,color:"#4f46e5"}}>Linhas</span>
                 <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valores como linhas da matriz</span>
               </button>
-              <button onClick={()=>assignCinemaVar(axisModal.shapeId, axisModal.col, axisModal.csvId, 'col')}
+              <button onClick={()=>assignCinemaVar(axisModal.shapeIds??axisModal.shapeId, axisModal.col, axisModal.csvId, 'col')}
                 style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"16px 10px",borderRadius:12,border:"1.5px solid #c7d2fe",background:"#eef2ff",cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
                 onMouseEnter={e=>{e.currentTarget.style.borderColor="#818cf8";e.currentTarget.style.background="#e0e7ff";}}
                 onMouseLeave={e=>{e.currentTarget.style.borderColor="#c7d2fe";e.currentTarget.style.background="#eef2ff";}}>
@@ -4628,14 +4728,16 @@ export default function App() {
                 <span style={{fontSize:13,fontWeight:700,color:"#4f46e5"}}>Colunas</span>
                 <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valores como colunas da matriz</span>
               </button>
-              <button onClick={()=>assignResultVar(axisModal.shapeId, axisModal.col, axisModal.csvId)}
-                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"16px 10px",borderRadius:12,border:"1.5px solid #d1fae5",background:"#f0fdf4",cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
-                onMouseEnter={e=>{e.currentTarget.style.borderColor="#6ee7b7";e.currentTarget.style.background="#dcfce7";}}
-                onMouseLeave={e=>{e.currentTarget.style.borderColor="#d1fae5";e.currentTarget.style.background="#f0fdf4";}}>
-                <span style={{fontSize:22}}>⊞</span>
-                <span style={{fontSize:13,fontWeight:700,color:"#15803d"}}>Resultado</span>
-                <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valor de cada casela</span>
-              </button>
+              {!axisModal.shapeIds&&(
+                <button onClick={()=>assignResultVar(axisModal.shapeId, axisModal.col, axisModal.csvId)}
+                  style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:"16px 10px",borderRadius:12,border:"1.5px solid #d1fae5",background:"#f0fdf4",cursor:"pointer",fontFamily:"inherit",transition:"all .15s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor="#6ee7b7";e.currentTarget.style.background="#dcfce7";}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor="#d1fae5";e.currentTarget.style.background="#f0fdf4";}}>
+                  <span style={{fontSize:22}}>⊞</span>
+                  <span style={{fontSize:13,fontWeight:700,color:"#15803d"}}>Resultado</span>
+                  <span style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Valor de cada casela</span>
+                </button>
+              )}
             </div>
             <button onClick={()=>setAxisModal(null)}
               style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
@@ -4948,46 +5050,6 @@ export default function App() {
               style={{alignSelf:"flex-end",padding:"9px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
               Cancelar
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* ═══════════════ IMPORT TYPE MODAL ═══════════════ */}
-      {importTypeModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1500,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:480,boxShadow:"0 24px 80px rgba(0,0,0,.2)",overflow:"hidden"}}>
-            <div style={{padding:"22px 28px 18px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-              <div>
-                <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:3}}>Importar Cineminha</h2>
-                <p style={{fontSize:12.5,color:"#64748b"}}>Escolha o tipo de importação</p>
-              </div>
-              <button onClick={()=>setImportTypeModal(null)}
-                style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>✕</button>
-            </div>
-            <div style={{padding:"20px 28px 28px",display:"flex",gap:12}}>
-              <button
-                onClick={()=>{ const sid=importTypeModal.shapeId; setImportTypeModal(null); startCinemaImport(sid); }}
-                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"20px 16px",borderRadius:12,border:"1.5px solid #e2e8f0",background:"#fafafa",cursor:"pointer",fontFamily:"inherit",transition:"all .15s",textAlign:"center"}}
-                onMouseEnter={e=>{e.currentTarget.style.borderColor="#3b82f6";e.currentTarget.style.background="#eff6ff";}}
-                onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fafafa";}}>
-                <span style={{fontSize:32}}>📄</span>
-                <div>
-                  <div style={{fontSize:14,fontWeight:700,color:"#1e293b",marginBottom:4}}>JSON</div>
-                  <div style={{fontSize:12,color:"#64748b",lineHeight:1.5}}>Importar configuração exportada (.json)</div>
-                </div>
-              </button>
-              <button
-                onClick={()=>{ setImportTypeModal(null); libFileInputRef.current?.click(); }}
-                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"20px 16px",borderRadius:12,border:"1.5px solid #e2e8f0",background:"#fafafa",cursor:"pointer",fontFamily:"inherit",transition:"all .15s",textAlign:"center"}}
-                onMouseEnter={e=>{e.currentTarget.style.borderColor="#6366f1";e.currentTarget.style.background="#eef2ff";}}
-                onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fafafa";}}>
-                <span style={{fontSize:32}}>📊</span>
-                <div>
-                  <div style={{fontSize:14,fontWeight:700,color:"#1e293b",marginBottom:4}}>Biblioteca (CSV)</div>
-                  <div style={{fontSize:12,color:"#64748b",lineHeight:1.5}}>Importar política tabular e gerar múltiplos Cineminhas</div>
-                </div>
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -6248,10 +6310,16 @@ export default function App() {
                           const tags = item.metadata?.tags ?? [];
                           const identifiers = item.metadata?.identifiers ?? {};
                           const identKeys = Object.keys(identifiers);
+                          const isSelected = (cinemaLibraryModal.selectedLibIds||[]).includes(item.id);
                           return (
-                            <div key={item.id} style={{border:"1.5px solid #e2e8f0",borderRadius:12,padding:"14px 16px",display:"flex",gap:14,alignItems:"flex-start",background:"#fafafa",transition:"border-color .15s"}}
-                              onMouseEnter={e=>e.currentTarget.style.borderColor=cfg.color}
-                              onMouseLeave={e=>e.currentTarget.style.borderColor="#e2e8f0"}>
+                            <div key={item.id}
+                              style={{border:`1.5px solid ${isSelected?"#6366f1":"#e2e8f0"}`,borderRadius:12,padding:"14px 16px",display:"flex",gap:14,alignItems:"flex-start",background:isSelected?"#eef2ff":"#fafafa",transition:"border-color .15s, background .15s",cursor:"pointer"}}
+                              onClick={()=>{ const cur=cinemaLibraryModal.selectedLibIds||[]; upd({selectedLibIds:isSelected?cur.filter(id=>id!==item.id):[...cur,item.id]}); }}
+                              onMouseEnter={e=>{if(!isSelected){e.currentTarget.style.borderColor=cfg.color;}}}
+                              onMouseLeave={e=>{if(!isSelected){e.currentTarget.style.borderColor="#e2e8f0";}}}>
+                              <input type="checkbox" checked={isSelected} readOnly
+                                style={{marginTop:2,accentColor:"#6366f1",width:15,height:15,cursor:"pointer",flexShrink:0}}
+                                onClick={e=>e.stopPropagation()}/>
                               {/* Type badge */}
                               <div style={{width:36,height:36,borderRadius:9,background:cfg.badgeBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{cfg.icon}</div>
                               {/* Info */}
@@ -6319,8 +6387,12 @@ export default function App() {
                   </>
                 ) : (
                   <>
-                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                       <span style={{fontSize:11.5,color:"#94a3b8"}}>{filteredItems.length} resultado{filteredItems.length!==1?'s':''}</span>
+                      <button onClick={()=>libFileInputRef.current?.click()}
+                        style={{padding:"6px 13px",borderRadius:7,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:500,display:"flex",alignItems:"center",gap:5}}>
+                        ↑ Importar Biblioteca
+                      </button>
                       {cinemaLibrary.length > 0 && (
                         <button onClick={exportLibrary}
                           style={{padding:"6px 13px",borderRadius:7,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:500,display:"flex",alignItems:"center",gap:5}}>
@@ -6328,10 +6400,18 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    <button onClick={()=>setCinemaLibraryModal(null)}
-                      style={{padding:"8px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
-                      Fechar
-                    </button>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      {(cinemaLibraryModal.selectedLibIds||[]).length > 0 && (
+                        <button onClick={()=>batchImportFromLibrary(cinemaLibraryModal.selectedLibIds||[])}
+                          style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#4f46e5",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",display:"flex",alignItems:"center",gap:6}}>
+                          📥 Importar Selecionados ({(cinemaLibraryModal.selectedLibIds||[]).length})
+                        </button>
+                      )}
+                      <button onClick={()=>setCinemaLibraryModal(null)}
+                        style={{padding:"8px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                        Fechar
+                      </button>
+                    </div>
                   </>
                 )}
               </div>
