@@ -864,6 +864,8 @@ export default function App() {
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Cineminha toolbar dropdown
   const [cinemaDropdownOpen, setCinemaDropdownOpen] = useState(false);
+  const [cinemaDropdownPos,  setCinemaDropdownPos]  = useState({x:0,y:0});
+  const cinemaDropdownBtnRef = useRef(null);
   // Cineminha export/import
   const [cinemaImportModal, setCinemaImportModal] = useState(null); // null | {shapeId, config, step, rowMapping, colMapping, availableVars}
   // Cineminha library
@@ -3464,7 +3466,12 @@ export default function App() {
             if (t.id === 'cineminha') return (
               <div key={t.id} style={{position:"relative"}}>
                 <button className="wbt"
-                  onClick={()=>setCinemaDropdownOpen(o=>!o)}
+                  ref={cinemaDropdownBtnRef}
+                  onClick={()=>{
+                    const r = cinemaDropdownBtnRef.current?.getBoundingClientRect();
+                    if(r) setCinemaDropdownPos({x:r.left, y:r.bottom+6});
+                    setCinemaDropdownOpen(o=>!o);
+                  }}
                   title={t.label}
                   style={{display:"flex",alignItems:"center",gap:5,padding:"6px 11px",borderRadius:9,border:"none",
                     background:tool==='cineminha'?"#2563eb":"transparent",
@@ -3477,7 +3484,7 @@ export default function App() {
                 {cinemaDropdownOpen&&(
                   <>
                     <div style={{position:"fixed",inset:0,zIndex:399}} onClick={()=>setCinemaDropdownOpen(false)}/>
-                    <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,background:"#fff",borderRadius:10,
+                    <div style={{position:"fixed",top:cinemaDropdownPos.y,left:cinemaDropdownPos.x,background:"#fff",borderRadius:10,
                       border:"1px solid #e2e8f0",boxShadow:"0 8px 24px rgba(0,0,0,.12)",minWidth:210,zIndex:400,overflow:"hidden"}}>
                       <button
                         onClick={()=>{setTool('cineminha');setFromId(null);setCinemaDropdownOpen(false);}}
