@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -3481,11 +3482,11 @@ export default function App() {
                   <span className="wbl">Cineminha</span>
                   <span style={{fontSize:9,marginLeft:1,opacity:.7}}>▾</span>
                 </button>
-                {cinemaDropdownOpen&&(
+                {cinemaDropdownOpen && createPortal(
                   <>
-                    <div style={{position:"fixed",inset:0,zIndex:399}} onClick={()=>setCinemaDropdownOpen(false)}/>
+                    <div style={{position:"fixed",inset:0,zIndex:9998}} onClick={()=>setCinemaDropdownOpen(false)}/>
                     <div style={{position:"fixed",top:cinemaDropdownPos.y,left:cinemaDropdownPos.x,background:"#fff",borderRadius:10,
-                      border:"1px solid #e2e8f0",boxShadow:"0 8px 24px rgba(0,0,0,.12)",minWidth:210,zIndex:400,overflow:"hidden"}}>
+                      border:"1px solid #e2e8f0",boxShadow:"0 8px 24px rgba(0,0,0,.12)",minWidth:210,zIndex:9999,overflow:"hidden"}}>
                       <button
                         onClick={()=>{setTool('cineminha');setFromId(null);setCinemaDropdownOpen(false);}}
                         style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 16px",border:"none",
@@ -3512,7 +3513,8 @@ export default function App() {
                         </div>
                       </button>
                     </div>
-                  </>
+                  </>,
+                  document.body
                 )}
               </div>
             );
