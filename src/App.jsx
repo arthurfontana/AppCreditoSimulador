@@ -2335,6 +2335,45 @@ export default function App() {
     setCinemaLibraryModal(null);
   };
 
+  // ── applyLibraryConfigToCinema ────────────────────────────────
+  // Aplica APENAS a lógica de caselas (elegível/não elegível) de um item da
+  // biblioteca sobre um Cineminha já configurado, preservando variáveis,
+  // domínios, tamanho, tipo, label e todos os conectores. O usuário só troca
+  // a configuração de aberturas/fechamentos das caselas.
+  const applyLibraryConfigToCinema = (shapeId, item) => {
+    const shape = shapesR.current.find(s => s.id === shapeId && s.type === 'cineminha');
+    if (!shape) return;
+    pushHistory();
+    const importedCells = item.cells || {};
+    const rDom = (shape.rowDomain && shape.rowDomain.length) ? shape.rowDomain : ['*'];
+    const cDom = (shape.colDomain && shape.colDomain.length) ? shape.colDomain : ['*'];
+    const impR = (item.rowDomain && item.rowDomain.length) ? item.rowDomain : ['*'];
+    const impC = (item.colDomain && item.colDomain.length) ? item.colDomain : ['*'];
+    const newCells = {};
+    for (let i = 0; i < rDom.length; i++) {
+      for (let j = 0; j < cDom.length; j++) {
+        const key = `${rDom[i]}|${cDom[j]}`;
+        if (key in importedCells) {
+          // 1) match direto por valor (mesmos rótulos de domínio)
+          newCells[key] = getCellValue(importedCells, key);
+          continue;
+        }
+        // 2) match posicional contra os domínios do item importado
+        const pr = i < impR.length ? impR[i] : undefined;
+        const pc = j < impC.length ? impC[j] : undefined;
+        const pKey = (pr !== undefined && pc !== undefined) ? `${pr}|${pc}` : null;
+        if (pKey && pKey in importedCells) {
+          newCells[key] = getCellValue(importedCells, pKey);
+          continue;
+        }
+        // 3) sem correspondência → preserva o estado atual da casela
+        newCells[key] = getCellValue(shape.cells, key);
+      }
+    }
+    setShapes(prev => prev.map(s => s.id !== shapeId ? s : { ...s, cells: newCells }));
+    setCinemaLibraryModal(null);
+  };
+
   const loadFromLibraryWithMapping = (item) => {
     // Build a config object compatible with cinemaImportModal
     const config = {
@@ -2373,10 +2412,17 @@ export default function App() {
 
     if (selectedCinema) {
       const hasExistingConfig = !!(selectedCinema.rowVar || selectedCinema.colVar);
+      // Cineminha já configurado: troca apenas a lógica das caselas, mantendo
+      // variáveis, conectores e tamanho intactos.
+      if (hasExistingConfig) {
+        applyLibraryConfigToCinema(selectedCinema.id, item);
+        return;
+      }
+      // Cineminha em branco: não há variáveis a preservar — abre o mapeamento.
       setCinemaImportModal({
         shapeId: selectedCinema.id,
         config,
-        step: hasExistingConfig ? 'confirm' : 'mapping',
+        step: 'mapping',
         rowMapping: config.rowVar ? tryMatchVar(config.rowVar.col) : null,
         colMapping: config.colVar ? tryMatchVar(config.colVar.col) : null,
         availableVars,
@@ -6566,6 +6612,10 @@ export default function App() {
         const isSaveMode = mode === 'save';
         const title = isSaveMode ? 'Salvar na Biblioteca' : 'Biblioteca de Cineminhas';
         const icon  = isSaveMode ? '💾' : '📚';
+        // Cineminha-alvo já configurado (biblioteca aberta a partir do nó selecionado):
+        // a importação por item troca somente a lógica das caselas.
+        const targetCinema = shapeId ? shapes.find(s => s.id === shapeId && s.type === 'cineminha') : null;
+        const targetHasConfig = !!(targetCinema && (targetCinema.rowVar || targetCinema.colVar));
 
         return (
           <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.5)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -6731,9 +6781,10 @@ export default function App() {
                               </div>
                               {/* Actions */}
                               <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
-                                <button onClick={()=>loadFromLibraryWithMapping(item)}
+                                <button onClick={()=> targetHasConfig ? applyLibraryConfigToCinema(targetCinema.id, item) : loadFromLibraryWithMapping(item)}
+                                  title={targetHasConfig ? "Aplica somente a lógica das caselas ao Cineminha selecionado (mantém variáveis e conexões)" : "Adiciona um novo Cineminha ao canvas"}
                                   style={{padding:"6px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>
-                                  + Adicionar ao Board
+                                  {targetHasConfig ? "↻ Aplicar caselas" : "+ Adicionar ao Board"}
                                 </button>
                                 <button onClick={()=>deleteFromLibrary(item.id)}
                                   style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fecaca",background:"#fff",color:"#dc2626",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
