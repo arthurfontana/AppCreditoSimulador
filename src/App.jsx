@@ -2787,13 +2787,18 @@ export default function App() {
 
     // ── Minimized state ──
     if (minimized) {
-      const MW=170, MH=44;
+      const MH=44;
+      const MW=Math.max(170, w); // preserve last expanded width so resize works
+      const lbl=shape.label||"Cineminha";
       return (
         <g key={id} data-sid={id}
           onMouseDown={e=>onShapeDown(e,id)} onClick={e=>onShapeClick(e,id)} onDoubleClick={e=>onShapeDbl(e,id)}
           style={{cursor:cur, filter:flt}}>
           <rect x={x} y={y} width={MW} height={MH} rx={10} fill={typeCfg.color} stroke={stroke} strokeWidth={sw}/>
-          <text x={x+12} y={y+27} fontSize={13} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",14)}</text>
+          <text x={x+12} y={y+27} fontSize={13} fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="700" fill="#fff" style={{pointerEvents:"none",userSelect:"none"}}>
+            <title>{lbl}</title>
+            ⊞ {trunc(lbl, Math.max(14, Math.floor((MW-90)/8)))}
+          </text>
           {/* Type badge */}
           <rect x={x+MW-78} y={y+11} width={44} height={16} rx={8} fill="rgba(255,255,255,.22)" style={{pointerEvents:"none"}}/>
           <text x={x+MW-56} y={y+22} fontSize={8.5} textAnchor="middle" fontWeight="700" fill="#fff" fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,5)}</text>
@@ -2804,6 +2809,19 @@ export default function App() {
             <rect x={x+MW-28} y={y+8} width={22} height={22} rx={6} fill="rgba(255,255,255,.2)"/>
             <text x={x+MW-17} y={y+23} fontSize={13} textAnchor="middle" fill="#fff">⤢</text>
           </g>
+          {/* Resize handle (right edge) when selected */}
+          {isSel&&[
+            [x+MW,y+MH/2,"e"],[x+MW,y,"ne"],[x+MW,y+MH,"se"],
+          ].map(([hx,hy,dir])=>(
+            <rect key={dir} x={hx-5} y={hy-5} width={10} height={10} rx={3}
+              fill={typeCfg.color} stroke="#fff" strokeWidth={1.5}
+              style={{cursor:resizeCursor(dir)}}
+              onMouseDown={e=>{
+                e.stopPropagation();
+                const [sx,sy]=svgPt(e.clientX,e.clientY);
+                dragR.current={type:"resize",id,dir,sx,sy,ix:x,iy:y,iw:MW,ih:MH};
+              }}/>
+          ))}
         </g>
       );
     }
@@ -2826,7 +2844,10 @@ export default function App() {
           )))}
           <text x={x+w/2} y={y+62} textAnchor="middle" fontSize={10.5}
             fontFamily="'DM Sans',system-ui,sans-serif" fontWeight="600" fill={typeCfg.color}
-            style={{pointerEvents:"none",userSelect:"none"}}>Cineminha</text>
+            style={{pointerEvents:"none",userSelect:"none"}}>
+            <title>{shape.label||"Cineminha"}</title>
+            {trunc(shape.label||"Cineminha", Math.max(16, Math.floor(w/8)))}
+          </text>
           {/* Type badge */}
           <rect x={x+w/2-28} y={y+66} width={56} height={16} rx={8} fill={typeCfg.badgeBg} style={{pointerEvents:"none"}}/>
           <text x={x+w/2} y={y+77} textAnchor="middle" fontSize={8.5} fontWeight="700" fill={typeCfg.badgeFg} fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,7)}</text>
@@ -2868,13 +2889,17 @@ export default function App() {
         <text x={x+41} y={y+37} textAnchor="middle" fontSize={8.5} fontWeight="700" fill="#fff" fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>{typeCfg.icon} {typeCfg.label.slice(0,7)}</text>
 
         {/* Axis + result variable labels — stacked on right of header */}
-        {axisLabels.map((lbl, i) => (
-          <text key={lbl.prefix} x={x+w-40} y={y+13+i*10} textAnchor="end"
-            fontSize={8.5} fill={lbl.prefix==='R' ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.75)"}
-            fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
-            {lbl.prefix}: {trunc(lbl.col,12)}
-          </text>
-        ))}
+        {axisLabels.map((lbl, i) => {
+          const maxChars = Math.max(12, Math.floor((w - 90) / 6));
+          return (
+            <text key={lbl.prefix} x={x+w-40} y={y+13+i*10} textAnchor="end"
+              fontSize={8.5} fill={lbl.prefix==='R' ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.75)"}
+              fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>
+              <title>{lbl.prefix}: {lbl.col}</title>
+              {lbl.prefix}: {trunc(lbl.col, maxChars)}
+            </text>
+          );
+        })}
 
         {/* Interactive matrix via foreignObject */}
         <foreignObject x={x+1} y={y+CINEMA_TITLE_H} width={w-2} height={h-CINEMA_TITLE_H-1}>
