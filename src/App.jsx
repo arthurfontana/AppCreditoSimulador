@@ -285,6 +285,14 @@ function parseCSV(text, delimiter, hasHeader) {
 
 const tDist = (t) => { const dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY; return Math.sqrt(dx*dx+dy*dy); };
 const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
+// Estimativa de largura do label da seta (DM Sans ~11px) — usada para
+// dimensionar a caixa do label e o vão nó↔ports no autoLayout.
+const CONN_LABEL_CW = 6.6;   // avanço médio por caractere
+const CONN_LABEL_MAX = 16;   // máximo de chars exibidos no label da seta
+const estConnLabelW = (s) => {
+  const t = trunc(s || "", CONN_LABEL_MAX);
+  return t ? t.length * CONN_LABEL_CW : 0;
+};
 const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
 const fmtPct = (v) => v === null ? "N/A" : `${(v * 100).toFixed(2)}%`;
 const normalizeColName = (s) => (s || "").toLowerCase().replace(/[\s_\-\.]+/g, "").trim();
@@ -1365,7 +1373,11 @@ export default function App() {
 
     // ── Spacing constants ────────────────────────────────────────
     const ORIGIN_X = 80, ORIGIN_Y = 80;
-    const PORT_GAP_X = 80;   // gap between a node's right edge and its port column
+    // Vão nó↔ports é adaptativo (depende do label da seta mais largo do nó):
+    // piso confortável, teto para não explodir a largura, +respiro fixo.
+    const PORT_GAP_X_MIN = 96;   // piso do vão (mesmo nós de label curto respiram)
+    const PORT_GAP_X_MAX = 260;  // teto do vão (labels muito longos não estouram o layout)
+    const PORT_LABEL_PAD = 44;   // respiro total ao redor do label da seta
     const PORT_GAP_Y = 16;   // vertical gap between stacked ports of the same node
     const GAP_X = 96;        // gap between the port column and the next layer
     const GAP_Y = 36;        // vertical gap between clusters in the same layer
@@ -1388,17 +1400,26 @@ export default function App() {
     parents.forEach(p => { ownedPorts[p.id] = []; });
     ports.forEach(pt => { const o = portOwner[pt.id]; if (o && ownedPorts[o]) ownedPorts[o].push(pt); });
 
+    // Label da seta que chega em cada port — dimensiona o vão nó↔ports.
+    const portConnLabel = {};
+    conns_.forEach(c => { if (portIds.has(c.to) && portOwner[c.to] === c.from) portConnLabel[c.to] = c.label ?? ''; });
+
     // resolve a conn endpoint to its owning parent (ports → owner)
     const toParent = id => (portIds.has(id) ? portOwner[id] : id);
 
     // ── Cluster dimensions (a node + its port column to the right) ─
-    const portsH = {}, clusterW = {}, clusterH = {};
+    const portsH = {}, clusterW = {}, clusterH = {}, portGapX = {};
     parents.forEach(p => {
       const pts = ownedPorts[p.id];
       const mpw = pts.length ? Math.max(...pts.map(pt => pt.w)) : 0;
       const ph  = pts.length ? pts.reduce((a, pt) => a + pt.h, 0) + (pts.length - 1) * PORT_GAP_Y : 0;
+      // vão adaptativo: cresce com o label mais largo do nó, dentro de [MIN, MAX]
+      const maxLW = pts.reduce((m, pt) => Math.max(m, estConnLabelW(portConnLabel[pt.id] ?? pt.label)), 0);
+      portGapX[p.id] = pts.length
+        ? Math.min(PORT_GAP_X_MAX, Math.max(PORT_GAP_X_MIN, maxLW + PORT_LABEL_PAD))
+        : 0;
       portsH[p.id]   = ph;
-      clusterW[p.id] = p.w + (pts.length ? PORT_GAP_X + mpw : 0);
+      clusterW[p.id] = p.w + (pts.length ? portGapX[p.id] + mpw : 0);
       clusterH[p.id] = Math.max(p.h, ph);
     });
 
@@ -1535,7 +1556,7 @@ export default function App() {
         const pts = ownedPorts[p.id];
         if (!pts.length) return;
         const band = cy[p.id] + shiftY;
-        const px = colX[layer[p.id]] + p.w + PORT_GAP_X;
+        const px = colX[layer[p.id]] + p.w + portGapX[p.id];
         const dyOf = pt => {
           const outs = conns_.map(c => (c.from === pt.id ? toParent(c.to) : null))
             .filter(t => t && targets[t]);
@@ -1565,7 +1586,7 @@ export default function App() {
       targets[p.id] = { x: parkX, y: py + (clH - p.h) / 2 };
       const pts = ownedPorts[p.id];
       if (pts.length) {
-        const px = parkX + p.w + PORT_GAP_X;
+        const px = parkX + p.w + portGapX[p.id];
         let y = py + (clH - portsH[p.id]) / 2;
         [...pts].sort((a, b) => a.y - b.y).forEach(pt => { portTargets[pt.id] = { x: px, y }; y += pt.h + PORT_GAP_Y; });
       }
@@ -2780,7 +2801,8 @@ export default function App() {
     // Label at cubic bezier midpoint (t=0.5)
     const lx=0.125*sx+0.375*c1x+0.375*c2x+0.125*aex;
     const ly=0.125*sy+0.375*c1y+0.375*c2y+0.125*aey;
-    const labelText=conn.label?trunc(conn.label,12):null;
+    const labelText=conn.label?trunc(conn.label,CONN_LABEL_MAX):null;
+    const labelBoxW=labelText?Math.max(56, labelText.length*CONN_LABEL_CW+16):0;
 
     // Analytics
     const es = simResult.edgeStats?.[conn.id];
@@ -2818,7 +2840,7 @@ export default function App() {
         <path d={d} fill="none" stroke={strokeColor} strokeWidth={strokeW} markerEnd="url(#arr)" style={{pointerEvents:"none"}}/>
         {labelText&&(
           <>
-            <rect x={lx-28} y={ly-10} width={56} height={20} rx={5}
+            <rect x={lx-labelBoxW/2} y={ly-10} width={labelBoxW} height={20} rx={5}
               fill="#fff" stroke="#e2e8f0" strokeWidth={1} style={{pointerEvents:"none"}}/>
             <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
               fontSize={11} fontFamily="'DM Sans',system-ui,sans-serif" fill="#475569"
