@@ -1356,6 +1356,183 @@ export default function App() {
     setSel(null); setMultiSel(new Set()); setPalette(false);
   }, []); // eslint-disable-line
 
+  // ── Auto Layout ──────────────────────────────────────────────
+  const autoLayoutRafRef = useRef(null);
+  const autoLayout = useCallback(() => {
+    const shapes_ = shapesR.current;
+    const conns_  = connsR.current;
+
+    // Separate parent nodes (non-port) from port nodes
+    const parents = shapes_.filter(s => s.type !== 'port');
+    const portSet = new Set(shapes_.filter(s => s.type === 'port').map(s => s.id));
+
+    if (parents.length === 0) return;
+
+    // Build map: portId → parentId (port's owner is whoever has conn from→port)
+    const portParent = {};
+    conns_.forEach(c => {
+      if (portSet.has(c.to)) portParent[c.to] = c.from;
+    });
+
+    // Build logical graph between parent nodes (going through ports)
+    // parentChildren[id] = Set of parent ids reachable from id
+    const parentChildren = {};
+    const parentInDegree = {};
+    parents.forEach(p => { parentChildren[p.id] = new Set(); parentInDegree[p.id] = 0; });
+
+    conns_.forEach(c => {
+      const fromParent = portSet.has(c.from) ? portParent[c.from] : c.from;
+      const toParent   = portSet.has(c.to)   ? portParent[c.to]   : c.to;
+      if (!fromParent || !toParent || fromParent === toParent) return;
+      if (!parentChildren[fromParent] || !parentChildren[toParent]) return;
+      if (!parentChildren[fromParent].has(toParent)) {
+        parentChildren[fromParent].add(toParent);
+        parentInDegree[toParent] = (parentInDegree[toParent] || 0) + 1;
+      }
+    });
+
+    // BFS topological sort to assign depth (column level)
+    const depth = {};
+    const queue = parents.filter(p => (parentInDegree[p.id] || 0) === 0).map(p => p.id);
+    queue.forEach(id => { depth[id] = 0; });
+
+    let qi = 0;
+    while (qi < queue.length) {
+      const id = queue[qi++];
+      (parentChildren[id] || new Set()).forEach(childId => {
+        const newDepth = (depth[id] || 0) + 1;
+        if (depth[childId] === undefined || depth[childId] < newDepth) {
+          depth[childId] = newDepth;
+        }
+        // Only enqueue once all parents processed (approx — good enough for DAGs)
+        if (!queue.includes(childId)) queue.push(childId);
+      });
+    }
+
+    // Nodes not reached by BFS (cycles or truly isolated): assign next depth
+    const maxReachedDepth = Math.max(0, ...Object.values(depth));
+    parents.forEach(p => {
+      if (depth[p.id] === undefined) depth[p.id] = maxReachedDepth + 1;
+    });
+
+    // Determine which nodes are connected (have at least one conn to/from as parent)
+    const connectedIds = new Set();
+    conns_.forEach(c => {
+      const fp = portSet.has(c.from) ? portParent[c.from] : c.from;
+      const tp = portSet.has(c.to)   ? portParent[c.to]   : c.to;
+      if (fp && parents.find(p=>p.id===fp)) connectedIds.add(fp);
+      if (tp && parents.find(p=>p.id===tp)) connectedIds.add(tp);
+    });
+
+    const connected    = parents.filter(p => connectedIds.has(p.id));
+    const disconnected = parents.filter(p => !connectedIds.has(p.id));
+
+    // Group connected by depth, sort within each group by current Y (preserve intent)
+    const byDepth = {};
+    connected.forEach(p => {
+      const d = depth[p.id] || 0;
+      if (!byDepth[d]) byDepth[d] = [];
+      byDepth[d].push(p);
+    });
+    Object.values(byDepth).forEach(grp => grp.sort((a, b) => a.y - b.y));
+
+    const GAP_X = 80;  // horizontal gap between columns
+    const GAP_Y = 40;  // vertical gap between nodes in same column
+
+    // Compute column widths (max shape width in each depth)
+    const colW = {};
+    Object.entries(byDepth).forEach(([d, grp]) => {
+      colW[d] = Math.max(...grp.map(p => p.w));
+    });
+
+    // Compute target X per depth (cumulative)
+    const colX = {};
+    const sortedDepths = Object.keys(byDepth).map(Number).sort((a,b)=>a-b);
+    let curX = 60;
+    sortedDepths.forEach(d => {
+      colX[d] = curX;
+      curX += colW[d] + GAP_X;
+    });
+
+    // Compute target Y per node (stack vertically per column)
+    const targets = {};
+    sortedDepths.forEach(d => {
+      const grp = byDepth[d];
+      let curY = 60;
+      grp.forEach(p => {
+        targets[p.id] = { x: colX[d], y: curY };
+        curY += p.h + GAP_Y;
+      });
+    });
+
+    // Disconnected nodes: pack into bottom-right corner
+    if (disconnected.length > 0) {
+      const rightmostX = curX;
+      const topY = 60;
+      let dcX = rightmostX;
+      let dcY = topY;
+      let rowMaxH = 0;
+      const MAX_COL_H = 600;
+      disconnected.forEach(p => {
+        if (dcY + p.h > topY + MAX_COL_H) {
+          dcX += rowMaxH + GAP_X;
+          dcY = topY;
+          rowMaxH = 0;
+        }
+        targets[p.id] = { x: dcX, y: dcY };
+        dcY += p.h + GAP_Y;
+        rowMaxH = Math.max(rowMaxH, p.w);
+      });
+    }
+
+    // Build port targets (apply same delta as their parent)
+    const portTargets = {};
+    shapes_.filter(s => s.type === 'port').forEach(port => {
+      const pid = portParent[port.id];
+      if (!pid || !targets[pid]) return;
+      const parent = parents.find(p => p.id === pid);
+      if (!parent) return;
+      const dx = targets[pid].x - parent.x;
+      const dy = targets[pid].y - parent.y;
+      portTargets[port.id] = { x: port.x + dx, y: port.y + dy };
+    });
+
+    // Collect all start positions and target positions for animation
+    const starts = {};
+    shapes_.forEach(s => { starts[s.id] = { x: s.x, y: s.y }; });
+
+    const allTargets = { ...targets, ...portTargets };
+
+    // Animate via RAF
+    if (autoLayoutRafRef.current) cancelAnimationFrame(autoLayoutRafRef.current);
+    pushHistory();
+
+    const DURATION = 600;
+    const startTime = performance.now();
+
+    const easeInOut = t => t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+
+    const tick = (now) => {
+      const raw = Math.min((now - startTime) / DURATION, 1);
+      const t = easeInOut(raw);
+
+      setShapes(prev => prev.map(s => {
+        const from = starts[s.id];
+        const to   = allTargets[s.id];
+        if (!from || !to) return s;
+        return { ...s, x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+      }));
+
+      if (raw < 1) {
+        autoLayoutRafRef.current = requestAnimationFrame(tick);
+      } else {
+        autoLayoutRafRef.current = null;
+      }
+    };
+
+    autoLayoutRafRef.current = requestAnimationFrame(tick);
+  }, []); // eslint-disable-line
+
   // ── Keyboard ──────────────────────────────────────────────────
   useEffect(()=>{
     const h=(e)=>{
@@ -3566,6 +3743,14 @@ export default function App() {
               background:"transparent",color:redoStack.length>0?"#475569":"#cbd5e1",
               cursor:redoStack.length>0?"pointer":"default",fontSize:12.5,fontFamily:"inherit",flexShrink:0}}>
             ↪ <span className="wbl">Refazer</span>
+          </button>
+          <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
+          <button className="wbt" onClick={autoLayout} title="Reorganizar todos os elementos do canvas"
+            style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
+              background:"transparent",color:"#475569",
+              cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",flexShrink:0}}>
+            <span style={{fontSize:15,lineHeight:1}}>⊹</span>
+            <span className="wbl">Reorganizar</span>
           </button>
           <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
           {selShape&&selShape.type!=="csv"&&(
