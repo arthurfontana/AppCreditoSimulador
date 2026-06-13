@@ -2336,10 +2336,10 @@ export default function App() {
   };
 
   // ── applyLibraryConfigToCinema ────────────────────────────────
-  // Aplica APENAS a lógica de caselas (elegível/não elegível) de um item da
+  // Aplica a lógica de caselas (elegível/não elegível) de um item da
   // biblioteca sobre um Cineminha já configurado, preservando variáveis,
-  // domínios, tamanho, tipo, label e todos os conectores. O usuário só troca
-  // a configuração de aberturas/fechamentos das caselas.
+  // domínios, tamanho, tipo e todos os conectores. Atualiza o label para o
+  // nome do item da biblioteca.
   const applyLibraryConfigToCinema = (shapeId, item) => {
     const shape = shapesR.current.find(s => s.id === shapeId && s.type === 'cineminha');
     if (!shape) return;
@@ -2370,7 +2370,7 @@ export default function App() {
         newCells[key] = getCellValue(shape.cells, key);
       }
     }
-    setShapes(prev => prev.map(s => s.id !== shapeId ? s : { ...s, cells: newCells }));
+    setShapes(prev => prev.map(s => s.id !== shapeId ? s : { ...s, cells: newCells, ...(item.name ? { label: item.name } : {}) }));
     setCinemaLibraryModal(null);
   };
 
