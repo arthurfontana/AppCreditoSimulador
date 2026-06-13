@@ -6746,7 +6746,7 @@ export default function App() {
                           return (
                             <div key={item.id}
                               style={{border:`1.5px solid ${isSelected?"#6366f1":"#e2e8f0"}`,borderRadius:12,padding:"14px 16px",display:"flex",gap:14,alignItems:"flex-start",background:isSelected?"#eef2ff":"#fafafa",transition:"border-color .15s, background .15s",cursor:"pointer"}}
-                              onClick={()=>{ setCinemaLibraryModal(prev=>{ const cur=prev.selectedLibIds||[]; const sel=cur.includes(item.id); return {...prev,selectedLibIds:sel?cur.filter(id=>id!==item.id):[...cur,item.id]}; }); }}
+                              onClick={()=>{ setCinemaLibraryModal(prev=>{ if(!prev) return prev; const cur=prev.selectedLibIds||[]; const sel=cur.includes(item.id); return {...prev,selectedLibIds:sel?cur.filter(id=>id!==item.id):[...cur,item.id]}; }); }}
                               onMouseEnter={e=>{if(!isSelected){e.currentTarget.style.borderColor=cfg.color;}}}
                               onMouseLeave={e=>{if(!isSelected){e.currentTarget.style.borderColor="#e2e8f0";}}}>
                               <input type="checkbox" checked={isSelected} readOnly
@@ -6786,12 +6786,12 @@ export default function App() {
                               </div>
                               {/* Actions */}
                               <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
-                                <button onClick={()=> targetHasConfig ? applyLibraryConfigToCinema(targetCinema.id, item) : loadFromLibraryWithMapping(item)}
+                                <button onClick={(e)=>{ e.stopPropagation(); targetHasConfig ? applyLibraryConfigToCinema(targetCinema.id, item) : loadFromLibraryWithMapping(item); }}
                                   title={targetHasConfig ? "Aplica somente a lógica das caselas ao Cineminha selecionado (mantém variáveis e conexões)" : "Adiciona um novo Cineminha ao canvas"}
                                   style={{padding:"6px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>
                                   {targetHasConfig ? "↻ Aplicar caselas" : "+ Adicionar ao Board"}
                                 </button>
-                                <button onClick={()=>deleteFromLibrary(item.id)}
+                                <button onClick={(e)=>{ e.stopPropagation(); deleteFromLibrary(item.id); }}
                                   style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fecaca",background:"#fff",color:"#dc2626",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
                                   Remover
                                 </button>
