@@ -2278,8 +2278,8 @@ export default function App() {
     };
     const PORT_W = 100, PORT_H = 32;
     const eligId = uid(), notId = uid();
-    const eligPort = {id:eligId, type:"port", x:wx+W/2+36, y:wy-PORT_H-6, w:PORT_W, h:PORT_H, label:cfg.ports[0].label, color:cfg.ports[0].color};
-    const notPort  = {id:notId,  type:"port", x:wx+W/2+36, y:wy+6,         w:PORT_W, h:PORT_H, label:cfg.ports[1].label, color:cfg.ports[1].color};
+    const eligPort = {id:eligId, type:"port", x:wx+W/2+72, y:wy-PORT_H-6, w:PORT_W, h:PORT_H, label:cfg.ports[0].label, color:cfg.ports[0].color};
+    const notPort  = {id:notId,  type:"port", x:wx+W/2+72, y:wy+6,         w:PORT_W, h:PORT_H, label:cfg.ports[1].label, color:cfg.ports[1].color};
     const newConns = [
       {id:uid(), from:id, to:eligId, label:cfg.ports[0].label},
       {id:uid(), from:id, to:notId,  label:cfg.ports[1].label},
