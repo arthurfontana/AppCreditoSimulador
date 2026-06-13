@@ -6323,7 +6323,7 @@ export default function App() {
                           return (
                             <div key={item.id}
                               style={{border:`1.5px solid ${isSelected?"#6366f1":"#e2e8f0"}`,borderRadius:12,padding:"14px 16px",display:"flex",gap:14,alignItems:"flex-start",background:isSelected?"#eef2ff":"#fafafa",transition:"border-color .15s, background .15s",cursor:"pointer"}}
-                              onClick={()=>{ const cur=cinemaLibraryModal.selectedLibIds||[]; upd({selectedLibIds:isSelected?cur.filter(id=>id!==item.id):[...cur,item.id]}); }}
+                              onClick={()=>{ setCinemaLibraryModal(prev=>{ const cur=prev.selectedLibIds||[]; const sel=cur.includes(item.id); return {...prev,selectedLibIds:sel?cur.filter(id=>id!==item.id):[...cur,item.id]}; }); }}
                               onMouseEnter={e=>{if(!isSelected){e.currentTarget.style.borderColor=cfg.color;}}}
                               onMouseLeave={e=>{if(!isSelected){e.currentTarget.style.borderColor="#e2e8f0";}}}>
                               <input type="checkbox" checked={isSelected} readOnly
