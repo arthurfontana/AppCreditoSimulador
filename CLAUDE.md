@@ -65,6 +65,7 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 - `startPanelDrag(e, col, csvId)`: inicia drag de variável do painel para o canvas
 - `openOptimModal(shapeId)`: computa métricas + fronteira Pareto + cenários e abre `optimModal`
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
+- `autoLayout()`: reorganização inteligente do canvas (botão **⊹ Reorganizar**) — ver seção "Reorganização Automática (Auto Layout)"
 - `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
@@ -84,6 +85,35 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 
 ### Padrão de refs
 Toda variável de estado tem um ref espelho (`vpR`, `shapesR`, `axisModalR`, etc.) para uso em event listeners sem closure stale.
+
+## Reorganização Automática (Auto Layout)
+
+`autoLayout()` (botão **⊹ Reorganizar** na toolbar) é um layout em camadas estilo Sugiyama, sempre **horizontal (esquerda → direita)** porque as portas saem sempre pelo lado direito do nó.
+
+### Classificação dos nós
+- **Portas** (`type:'port'`): nunca entram no grafo de camadas; são posicionadas como filhas do nó dono.
+- **Nós de fluxo**: parents que possuem ao menos uma aresta (via porta) para **outro** parent.
+- **Parqueados** (área lateral): `csv` e `simPanel` (sempre, definidos em `NON_FLOW`) + fragmentos isolados (sem nenhuma conexão a outro parent). Um nó alcançado por uma porta do fluxo deixa de ser isolado e entra no fluxo.
+
+### Conceito de *cluster*
+Cada parent + sua coluna de portas forma um cluster:
+- `clusterW = w + (PORT_GAP_X + maxPortW)` → a largura da coluna inclui as portas, então a próxima camada nunca sobrepõe as portas.
+- `clusterH = max(h, somatório das alturas das portas + gaps)` → o empilhamento vertical reserva espaço para a pilha de portas.
+
+### Pipeline
+1. **Camadas**: longest-path a partir das fontes (Kahn). Ciclos → fallback camada 0.
+2. **Redução de cruzamentos**: ordenação por baricentro (8 sweeps alternando ↓/↑).
+3. **X por camada**: cumulativo, somando `clusterW` + `GAP_X`.
+4. **Y por nó**: regressão isotônica (PAVA) puxando cada nó para o baricentro dos vizinhos, mantendo ordem e gap mínimo (16 sweeps alternando ↓ usa predecessores / ↑ usa sucessores). Garante alinhamento lógico filho↔pai sem sobreposição.
+
+### Portas
+Sempre à **direita** do nó (`x = parent.x + w + PORT_GAP_X`), empilhadas e centradas verticalmente no nó, ordenadas pelo Y do destino downstream (reduz cruzamento das setas).
+
+### Área de parking
+À direita de todo o fluxo (`flowRight + PARK_GAP_X`), empilhada **verticalmente** com gaps uniformes (`PARK_GAP_Y`), alinhada à esquerda. Portas de nós parqueados também ficam à direita deles.
+
+### Constantes (locais em `autoLayout`)
+`ORIGIN_X/Y=80`, `PORT_GAP_X=80`, `PORT_GAP_Y=16`, `GAP_X=96`, `GAP_Y=36`, `PARK_GAP_X=160`, `PARK_GAP_Y=44`. Animação via RAF (`DURATION=600`, easeInOut), com `pushHistory()` antes de aplicar.
 
 ## Fluxo do simulador
 1. Importar CSV → Passo 1 (delimitador) → Passo 2 (classificar colunas) → Passo 3 (variável AS IS)

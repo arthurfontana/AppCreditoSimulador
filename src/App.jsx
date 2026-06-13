@@ -1361,140 +1361,215 @@ export default function App() {
   const autoLayout = useCallback(() => {
     const shapes_ = shapesR.current;
     const conns_  = connsR.current;
+    if (shapes_.length === 0) return;
 
-    // Separate parent nodes (non-port) from port nodes
-    const parents = shapes_.filter(s => s.type !== 'port');
-    const portSet = new Set(shapes_.filter(s => s.type === 'port').map(s => s.id));
+    // ── Spacing constants ────────────────────────────────────────
+    const ORIGIN_X = 80, ORIGIN_Y = 80;
+    const PORT_GAP_X = 80;   // gap between a node's right edge and its port column
+    const PORT_GAP_Y = 16;   // vertical gap between stacked ports of the same node
+    const GAP_X = 96;        // gap between the port column and the next layer
+    const GAP_Y = 36;        // vertical gap between clusters in the same layer
+    const PARK_GAP_X = 160;  // gap between the flow and the "parking" area
+    const PARK_GAP_Y = 44;   // vertical gap between parked components
 
-    if (parents.length === 0) return;
+    // ── Classify nodes ───────────────────────────────────────────
+    // Components that are never part of the decision flow → always parked.
+    const NON_FLOW = new Set(['csv', 'simPanel']);
+    const isPort = s => s.type === 'port';
+    const ports = shapes_.filter(isPort);
+    const portIds = new Set(ports.map(s => s.id));
+    const parents = shapes_.filter(s => !isPort(s));
+    const pmap = Object.fromEntries(parents.map(p => [p.id, p]));
 
-    // Build map: portId → parentId (port's owner is whoever has conn from→port)
-    const portParent = {};
-    conns_.forEach(c => {
-      if (portSet.has(c.to)) portParent[c.to] = c.from;
-    });
+    // port → owner (the parent node that emits the port via a from→port conn)
+    const portOwner = {};
+    conns_.forEach(c => { if (portIds.has(c.to) && !portIds.has(c.from)) portOwner[c.to] = c.from; });
+    const ownedPorts = {};
+    parents.forEach(p => { ownedPorts[p.id] = []; });
+    ports.forEach(pt => { const o = portOwner[pt.id]; if (o && ownedPorts[o]) ownedPorts[o].push(pt); });
 
-    // Build logical graph between parent nodes (going through ports)
-    // parentChildren[id] = Set of parent ids reachable from id
-    const parentChildren = {};
-    const parentInDegree = {};
-    parents.forEach(p => { parentChildren[p.id] = new Set(); parentInDegree[p.id] = 0; });
+    // resolve a conn endpoint to its owning parent (ports → owner)
+    const toParent = id => (portIds.has(id) ? portOwner[id] : id);
 
-    conns_.forEach(c => {
-      const fromParent = portSet.has(c.from) ? portParent[c.from] : c.from;
-      const toParent   = portSet.has(c.to)   ? portParent[c.to]   : c.to;
-      if (!fromParent || !toParent || fromParent === toParent) return;
-      if (!parentChildren[fromParent] || !parentChildren[toParent]) return;
-      if (!parentChildren[fromParent].has(toParent)) {
-        parentChildren[fromParent].add(toParent);
-        parentInDegree[toParent] = (parentInDegree[toParent] || 0) + 1;
-      }
-    });
-
-    // BFS topological sort to assign depth (column level)
-    const depth = {};
-    const queue = parents.filter(p => (parentInDegree[p.id] || 0) === 0).map(p => p.id);
-    queue.forEach(id => { depth[id] = 0; });
-
-    let qi = 0;
-    while (qi < queue.length) {
-      const id = queue[qi++];
-      (parentChildren[id] || new Set()).forEach(childId => {
-        const newDepth = (depth[id] || 0) + 1;
-        if (depth[childId] === undefined || depth[childId] < newDepth) {
-          depth[childId] = newDepth;
-        }
-        // Only enqueue once all parents processed (approx — good enough for DAGs)
-        if (!queue.includes(childId)) queue.push(childId);
-      });
-    }
-
-    // Nodes not reached by BFS (cycles or truly isolated): assign next depth
-    const maxReachedDepth = Math.max(0, ...Object.values(depth));
+    // ── Cluster dimensions (a node + its port column to the right) ─
+    const portsH = {}, clusterW = {}, clusterH = {};
     parents.forEach(p => {
-      if (depth[p.id] === undefined) depth[p.id] = maxReachedDepth + 1;
+      const pts = ownedPorts[p.id];
+      const mpw = pts.length ? Math.max(...pts.map(pt => pt.w)) : 0;
+      const ph  = pts.length ? pts.reduce((a, pt) => a + pt.h, 0) + (pts.length - 1) * PORT_GAP_Y : 0;
+      portsH[p.id]   = ph;
+      clusterW[p.id] = p.w + (pts.length ? PORT_GAP_X + mpw : 0);
+      clusterH[p.id] = Math.max(p.h, ph);
     });
 
-    // Determine which nodes are connected (have at least one conn to/from as parent)
-    const connectedIds = new Set();
+    // ── Parent-level flow graph (cross-parent edges only) ─────────
+    const adj = {}, radj = {};
+    parents.forEach(p => { adj[p.id] = new Set(); radj[p.id] = new Set(); });
     conns_.forEach(c => {
-      const fp = portSet.has(c.from) ? portParent[c.from] : c.from;
-      const tp = portSet.has(c.to)   ? portParent[c.to]   : c.to;
-      if (fp && parents.find(p=>p.id===fp)) connectedIds.add(fp);
-      if (tp && parents.find(p=>p.id===tp)) connectedIds.add(tp);
+      const a = toParent(c.from), b = toParent(c.to);
+      if (!a || !b || a === b || !adj[a] || !adj[b]) return;
+      if (NON_FLOW.has(pmap[a].type) || NON_FLOW.has(pmap[b].type)) return;
+      adj[a].add(b); radj[b].add(a);
     });
 
-    const connected    = parents.filter(p => connectedIds.has(p.id));
-    const disconnected = parents.filter(p => !connectedIds.has(p.id));
-
-    // Group connected by depth, sort within each group by current Y (preserve intent)
-    const byDepth = {};
-    connected.forEach(p => {
-      const d = depth[p.id] || 0;
-      if (!byDepth[d]) byDepth[d] = [];
-      byDepth[d].push(p);
+    // A node belongs to the flow only if it links to another parent.
+    // Datasets/panels and isolated fragments are parked separately.
+    const inFlow = new Set();
+    parents.forEach(p => {
+      if (NON_FLOW.has(p.type)) return;
+      if (adj[p.id].size > 0 || radj[p.id].size > 0) inFlow.add(p.id);
     });
-    Object.values(byDepth).forEach(grp => grp.sort((a, b) => a.y - b.y));
+    const flowNodes = parents.filter(p => inFlow.has(p.id));
+    const parkedNodes = parents.filter(p => !inFlow.has(p.id));
+    const flowSet = new Set(flowNodes.map(p => p.id));
 
-    const GAP_X = 80;  // horizontal gap between columns
-    const GAP_Y = 40;  // vertical gap between nodes in same column
+    const targets = {};      // shapeId → {x, y}  (top-left)
+    const portTargets = {};  // portId  → {x, y}
 
-    // Compute column widths (max shape width in each depth)
-    const colW = {};
-    Object.entries(byDepth).forEach(([d, grp]) => {
-      colW[d] = Math.max(...grp.map(p => p.w));
-    });
+    // ── Layered (Sugiyama-style) layout for the flow ──────────────
+    if (flowNodes.length > 0) {
+      // 1) Layer assignment via longest path from sources
+      const indeg = {};
+      flowNodes.forEach(p => { indeg[p.id] = [...radj[p.id]].filter(n => flowSet.has(n)).length; });
+      const layer = {};
+      const q = flowNodes.filter(p => indeg[p.id] === 0).map(p => p.id);
+      q.forEach(id => { layer[id] = 0; });
+      const indegW = { ...indeg };
+      for (let qi = 0; qi < q.length; qi++) {
+        const id = q[qi];
+        adj[id].forEach(c => {
+          if (!flowSet.has(c)) return;
+          layer[c] = Math.max(layer[c] ?? 0, (layer[id] ?? 0) + 1);
+          if (--indegW[c] === 0) q.push(c);
+        });
+      }
+      flowNodes.forEach(p => { if (layer[p.id] === undefined) layer[p.id] = 0; }); // cycle fallback
 
-    // Compute target X per depth (cumulative)
-    const colX = {};
-    const sortedDepths = Object.keys(byDepth).map(Number).sort((a,b)=>a-b);
-    let curX = 60;
-    sortedDepths.forEach(d => {
-      colX[d] = curX;
-      curX += colW[d] + GAP_X;
-    });
+      // Group into layers (columns), seed order by current Y
+      const layers = [];
+      flowNodes.forEach(p => { const d = layer[p.id]; (layers[d] ||= []).push(p.id); });
+      for (let d = 0; d < layers.length; d++) { layers[d] ||= []; layers[d].sort((a, b) => pmap[a].y - pmap[b].y); }
 
-    // Compute target Y per node (stack vertically per column)
-    const targets = {};
-    sortedDepths.forEach(d => {
-      const grp = byDepth[d];
-      let curY = 60;
-      grp.forEach(p => {
-        targets[p.id] = { x: colX[d], y: curY };
-        curY += p.h + GAP_Y;
-      });
-    });
-
-    // Disconnected nodes: pack into bottom-right corner
-    if (disconnected.length > 0) {
-      const rightmostX = curX;
-      const topY = 60;
-      let dcX = rightmostX;
-      let dcY = topY;
-      let rowMaxH = 0;
-      const MAX_COL_H = 600;
-      disconnected.forEach(p => {
-        if (dcY + p.h > topY + MAX_COL_H) {
-          dcX += rowMaxH + GAP_X;
-          dcY = topY;
-          rowMaxH = 0;
+      // 2) Crossing reduction — barycenter ordering sweeps
+      const order = {};
+      const reindex = () => layers.forEach(L => L.forEach((id, i) => { order[id] = i; }));
+      reindex();
+      const nbrs = (id, up) => [...(up ? radj[id] : adj[id])].filter(n => flowSet.has(n));
+      for (let it = 0; it < 8; it++) {
+        const down = it % 2 === 0;
+        const ds = [...layers.keys()];
+        if (!down) ds.reverse();
+        for (const d of ds) {
+          const withB = layers[d].map(id => {
+            const ns = nbrs(id, down);
+            return [id, ns.length ? ns.reduce((a, n) => a + order[n], 0) / ns.length : order[id]];
+          });
+          withB.sort((a, b) => a[1] - b[1]);
+          layers[d] = withB.map(x => x[0]);
+          reindex();
         }
-        targets[p.id] = { x: dcX, y: dcY };
-        dcY += p.h + GAP_Y;
-        rowMaxH = Math.max(rowMaxH, p.w);
+      }
+
+      // 3) X per layer (cumulative; width includes the port column)
+      const colX = [];
+      let cx = ORIGIN_X;
+      for (let d = 0; d < layers.length; d++) {
+        colX[d] = cx;
+        const w = layers[d].length ? Math.max(...layers[d].map(id => clusterW[id])) : 0;
+        cx += w + GAP_X;
+      }
+
+      // 4) Y per node — isotonic (PAVA) placement pulling each node toward
+      //    its neighbours' barycenter while keeping order + min gap (no overlap).
+      const cy = {};
+      layers.forEach(L => {
+        let y = ORIGIN_Y;
+        L.forEach(id => { cy[id] = y + clusterH[id] / 2; y += clusterH[id] + GAP_Y; });
+      });
+      const resolveLayer = (L, desired) => {
+        const n = L.length;
+        if (n === 0) return;
+        const off = new Array(n).fill(0);
+        for (let i = 1; i < n; i++) off[i] = off[i - 1] + clusterH[L[i - 1]] / 2 + GAP_Y + clusterH[L[i]] / 2;
+        const tgt = L.map((id, i) => desired[id] - off[i]);
+        const blocks = []; // PAVA isotonic regression (non-decreasing)
+        for (let i = 0; i < n; i++) {
+          let b = { sum: tgt[i], cnt: 1, val: tgt[i] };
+          while (blocks.length && blocks[blocks.length - 1].val > b.val) {
+            const last = blocks.pop();
+            b = { sum: b.sum + last.sum, cnt: b.cnt + last.cnt, val: (b.sum + last.sum) / (b.cnt + last.cnt) };
+          }
+          blocks.push(b);
+        }
+        let i = 0;
+        for (const b of blocks) for (let k = 0; k < b.cnt; k++) { cy[L[i]] = b.val + off[i]; i++; }
+      };
+      for (let it = 0; it < 16; it++) {
+        const down = it % 2 === 0;
+        const ds = [...layers.keys()];
+        if (!down) ds.reverse();
+        for (const d of ds) {
+          const desired = {};
+          layers[d].forEach(id => {
+            const ns = nbrs(id, down);
+            desired[id] = ns.length ? ns.reduce((a, n) => a + cy[n], 0) / ns.length : cy[id];
+          });
+          resolveLayer(layers[d], desired);
+        }
+      }
+
+      // Normalize so the topmost cluster sits at ORIGIN_Y
+      let minTop = Infinity;
+      flowNodes.forEach(p => { minTop = Math.min(minTop, cy[p.id] - clusterH[p.id] / 2); });
+      const shiftY = isFinite(minTop) ? ORIGIN_Y - minTop : 0;
+
+      // Parent positions (centered within their cluster band)
+      flowNodes.forEach(p => {
+        const band = cy[p.id] + shiftY;
+        targets[p.id] = { x: colX[layer[p.id]], y: band - p.h / 2 };
+      });
+
+      // Port positions — always to the right of the node, stacked & centered,
+      // ordered by their downstream target to keep arrows from crossing.
+      flowNodes.forEach(p => {
+        const pts = ownedPorts[p.id];
+        if (!pts.length) return;
+        const band = cy[p.id] + shiftY;
+        const px = colX[layer[p.id]] + p.w + PORT_GAP_X;
+        const dyOf = pt => {
+          const outs = conns_.map(c => (c.from === pt.id ? toParent(c.to) : null))
+            .filter(t => t && targets[t]);
+          if (!outs.length) return null;
+          return outs.reduce((a, t) => a + targets[t].y + pmap[t].h / 2, 0) / outs.length;
+        };
+        const sorted = [...pts].sort((a, b) => {
+          const ca = dyOf(a), cb = dyOf(b);
+          if (ca == null && cb == null) return a.y - b.y;
+          if (ca == null) return 1;
+          if (cb == null) return -1;
+          return ca - cb;
+        });
+        let y = band - portsH[p.id] / 2;
+        sorted.forEach(pt => { portTargets[pt.id] = { x: px, y }; y += pt.h + PORT_GAP_Y; });
       });
     }
 
-    // Build port targets (apply same delta as their parent)
-    const portTargets = {};
-    shapes_.filter(s => s.type === 'port').forEach(port => {
-      const pid = portParent[port.id];
-      if (!pid || !targets[pid]) return;
-      const parent = parents.find(p => p.id === pid);
-      if (!parent) return;
-      const dx = targets[pid].x - parent.x;
-      const dy = targets[pid].y - parent.y;
-      portTargets[port.id] = { x: port.x + dx, y: port.y + dy };
+    // ── Parking area — non-flow + disconnected, stacked vertically ─
+    let flowRight = ORIGIN_X;
+    flowNodes.forEach(p => { flowRight = Math.max(flowRight, targets[p.id].x + clusterW[p.id]); });
+    const parkX = flowNodes.length ? flowRight + PARK_GAP_X : ORIGIN_X;
+
+    let py = ORIGIN_Y;
+    [...parkedNodes].sort((a, b) => a.y - b.y).forEach(p => {
+      const clH = clusterH[p.id];
+      targets[p.id] = { x: parkX, y: py + (clH - p.h) / 2 };
+      const pts = ownedPorts[p.id];
+      if (pts.length) {
+        const px = parkX + p.w + PORT_GAP_X;
+        let y = py + (clH - portsH[p.id]) / 2;
+        [...pts].sort((a, b) => a.y - b.y).forEach(pt => { portTargets[pt.id] = { x: px, y }; y += pt.h + PORT_GAP_Y; });
+      }
+      py += clH + PARK_GAP_Y;
     });
 
     // Collect all start positions and target positions for animation
@@ -3745,7 +3820,7 @@ export default function App() {
             ↪ <span className="wbl">Refazer</span>
           </button>
           <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
-          <button className="wbt" onClick={autoLayout} title="Reorganizar todos os elementos do canvas"
+          <button className="wbt" onClick={autoLayout} title="Reorganizar o fluxo (camadas + portas à direita); datasets e componentes soltos vão para a área lateral"
             style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
               background:"transparent",color:"#475569",
               cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",flexShrink:0}}>
