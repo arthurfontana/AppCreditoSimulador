@@ -6612,9 +6612,14 @@ export default function App() {
         const isSaveMode = mode === 'save';
         const title = isSaveMode ? 'Salvar na Biblioteca' : 'Biblioteca de Cineminhas';
         const icon  = isSaveMode ? '💾' : '📚';
-        // Cineminha-alvo já configurado (biblioteca aberta a partir do nó selecionado):
-        // a importação por item troca somente a lógica das caselas.
-        const targetCinema = shapeId ? shapes.find(s => s.id === shapeId && s.type === 'cineminha') : null;
+        // Cineminha-alvo: prioriza o nó com que a biblioteca foi aberta (shapeId),
+        // mas cai para o nó selecionado no canvas (sel) quando a biblioteca foi
+        // aberta pela toolbar global. Assim o rótulo e a ação do botão ficam
+        // sempre coerentes, independentemente do ponto de entrada.
+        const targetCinema =
+          (shapeId ? shapes.find(s => s.id === shapeId && s.type === 'cineminha') : null) ||
+          (sel ? shapes.find(s => s.id === sel && s.type === 'cineminha') : null) ||
+          null;
         const targetHasConfig = !!(targetCinema && (targetCinema.rowVar || targetCinema.colVar));
 
         return (
