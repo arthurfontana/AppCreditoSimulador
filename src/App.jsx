@@ -978,6 +978,11 @@ export default function App() {
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
   const [simResult, setSimResult] = useState(() => ({ totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{} }));
+  // Espelhos para o autoLayout medir os "balões" das arestas sem closure stale.
+  const simResultR        = useRef(simResult);        useEffect(()=>{simResultR.current=simResult},               [simResult]);
+  const showEdgeVolR      = useRef(showEdgeVol);       useEffect(()=>{showEdgeVolR.current=showEdgeVol},           [showEdgeVol]);
+  const showEdgeInadRealR = useRef(showEdgeInadReal);  useEffect(()=>{showEdgeInadRealR.current=showEdgeInadReal}, [showEdgeInadReal]);
+  const showEdgeInadInfR  = useRef(showEdgeInadInf);   useEffect(()=>{showEdgeInadInfR.current=showEdgeInadInf},   [showEdgeInadInf]);
   const simDebounceRef = useRef(null);
   useEffect(() => {
     clearTimeout(simDebounceRef.current);
@@ -1383,6 +1388,36 @@ export default function App() {
     const GAP_Y = 36;        // vertical gap between clusters in the same layer
     const PARK_GAP_X = 160;  // gap between the flow and the "parking" area
     const PARK_GAP_Y = 44;   // vertical gap between parked components
+    // Cada aresta carrega um "balão" no meio: o label do domínio + (com a
+    // simulação rodando) o chip de volume·inad.real·inad.inferida empilhado
+    // logo abaixo. Esses balões ficam no ponto médio da seta; se os nós ficam
+    // colados, os balões se sobrepõem. Medimos cada balão e inflamos os vãos.
+    const BALLOON_VPAD = 6;  // respiro vertical entre balões empilhados
+    const BALLOON_HPAD = 18; // respiro horizontal do balão dentro do vão
+
+    // ── Balloon (edge label) measurement — espelha renderConn ────
+    const edgeStats_ = simResultR.current?.edgeStats || {};
+    const showV = showEdgeVolR.current, showR = showEdgeInadRealR.current, showI = showEdgeInadInfR.current;
+    const balloonOf = (conn) => {
+      const labelText = conn.label ? trunc(conn.label, CONN_LABEL_MAX) : null;
+      const labelBoxW = labelText ? Math.max(56, labelText.length * CONN_LABEL_CW + 16) : 0;
+      const es = edgeStats_[conn.id];
+      const analytics = es ? [
+        showV && fmtQty(es.qty),
+        showR && fmtPct(es.inadReal),
+        showI && fmtPct(es.inadInferida),
+      ].filter(Boolean).join(" · ") || null : null;
+      const analyticsW = analytics ? analytics.length * 6.4 : 0;
+      // altura: caixa do label (20) + chip de analytics (14), empilhados
+      return { w: Math.max(labelBoxW, analyticsW), h: (labelText ? 20 : 0) + (analytics ? 14 : 0) };
+    };
+    const bMap = {};
+    conns_.forEach(c => { bMap[c.id] = balloonOf(c); });
+    const maxBalloonH = conns_.reduce((m, c) => Math.max(m, bMap[c.id].h), 0);
+    const maxBalloonW = conns_.reduce((m, c) => Math.max(m, bMap[c.id].w), 0);
+    // Vãos horizontais/verticais entre camadas crescem para caber o balão.
+    const gapX = Math.max(GAP_X, maxBalloonW + BALLOON_HPAD);
+    const gapY = Math.max(GAP_Y, maxBalloonH + BALLOON_VPAD);
 
     // ── Classify nodes ───────────────────────────────────────────
     // Components that are never part of the decision flow → always parked.
@@ -1401,20 +1436,40 @@ export default function App() {
     ports.forEach(pt => { const o = portOwner[pt.id]; if (o && ownedPorts[o]) ownedPorts[o].push(pt); });
 
     // Label da seta que chega em cada port — dimensiona o vão nó↔ports.
-    const portConnLabel = {};
-    conns_.forEach(c => { if (portIds.has(c.to) && portOwner[c.to] === c.from) portConnLabel[c.to] = c.label ?? ''; });
+    // Guardamos também o id da conn dona e as conns que saem do port, para
+    // medir os balões incidentes e reservar a distância vertical/horizontal.
+    const portConnLabel = {}, portOwnerConnId = {}, portOutConnIds = {};
+    ports.forEach(pt => { portOutConnIds[pt.id] = []; });
+    conns_.forEach(c => {
+      if (portIds.has(c.to) && portOwner[c.to] === c.from) { portConnLabel[c.to] = c.label ?? ''; portOwnerConnId[c.to] = c.id; }
+      if (portIds.has(c.from) && portOutConnIds[c.from]) portOutConnIds[c.from].push(c.id);
+    });
 
     // resolve a conn endpoint to its owning parent (ports → owner)
     const toParent = id => (portIds.has(id) ? portOwner[id] : id);
 
     // ── Cluster dimensions (a node + its port column to the right) ─
-    const portsH = {}, clusterW = {}, clusterH = {}, portGapX = {};
+    const portsH = {}, clusterW = {}, clusterH = {}, portGapX = {}, portGapY = {};
     parents.forEach(p => {
       const pts = ownedPorts[p.id];
       const mpw = pts.length ? Math.max(...pts.map(pt => pt.w)) : 0;
-      const ph  = pts.length ? pts.reduce((a, pt) => a + pt.h, 0) + (pts.length - 1) * PORT_GAP_Y : 0;
-      // vão adaptativo: cresce com o label mais largo do nó, dentro de [MIN, MAX]
-      const maxLW = pts.reduce((m, pt) => Math.max(m, estConnLabelW(portConnLabel[pt.id] ?? pt.label)), 0);
+      // Vão vertical adaptativo: os balões nó→port ficam no ponto médio da seta,
+      // ou seja, a meio passo vertical entre eles. Para não sobreporem, o passo
+      // (pt.h + gap) precisa ser ≥ 2× a altura do balão mais alto incidente.
+      let reqH = 0;
+      pts.forEach(pt => {
+        const oc = portOwnerConnId[pt.id]; if (oc && bMap[oc]) reqH = Math.max(reqH, bMap[oc].h);
+        (portOutConnIds[pt.id] || []).forEach(cid => { if (bMap[cid]) reqH = Math.max(reqH, bMap[cid].h); });
+      });
+      const minPH = pts.length ? Math.min(...pts.map(pt => pt.h)) : 0;
+      portGapY[p.id] = reqH > 0 ? Math.max(PORT_GAP_Y, 2 * (reqH + BALLOON_VPAD) - minPH) : PORT_GAP_Y;
+      const ph  = pts.length ? pts.reduce((a, pt) => a + pt.h, 0) + (pts.length - 1) * portGapY[p.id] : 0;
+      // vão horizontal adaptativo: cresce com o balão mais largo do nó (label do
+      // domínio ou chip de analytics), dentro de [MIN, MAX]
+      const maxLW = pts.reduce((m, pt) => {
+        const oc = portOwnerConnId[pt.id];
+        return Math.max(m, oc && bMap[oc] ? bMap[oc].w : estConnLabelW(portConnLabel[pt.id] ?? pt.label));
+      }, 0);
       portGapX[p.id] = pts.length
         ? Math.min(PORT_GAP_X_MAX, Math.max(PORT_GAP_X_MIN, maxLW + PORT_LABEL_PAD))
         : 0;
@@ -1497,7 +1552,7 @@ export default function App() {
       for (let d = 0; d < layers.length; d++) {
         colX[d] = cx;
         const w = layers[d].length ? Math.max(...layers[d].map(id => clusterW[id])) : 0;
-        cx += w + GAP_X;
+        cx += w + gapX;
       }
 
       // 4) Y per node — isotonic (PAVA) placement pulling each node toward
@@ -1505,13 +1560,13 @@ export default function App() {
       const cy = {};
       layers.forEach(L => {
         let y = ORIGIN_Y;
-        L.forEach(id => { cy[id] = y + clusterH[id] / 2; y += clusterH[id] + GAP_Y; });
+        L.forEach(id => { cy[id] = y + clusterH[id] / 2; y += clusterH[id] + gapY; });
       });
       const resolveLayer = (L, desired) => {
         const n = L.length;
         if (n === 0) return;
         const off = new Array(n).fill(0);
-        for (let i = 1; i < n; i++) off[i] = off[i - 1] + clusterH[L[i - 1]] / 2 + GAP_Y + clusterH[L[i]] / 2;
+        for (let i = 1; i < n; i++) off[i] = off[i - 1] + clusterH[L[i - 1]] / 2 + gapY + clusterH[L[i]] / 2;
         const tgt = L.map((id, i) => desired[id] - off[i]);
         const blocks = []; // PAVA isotonic regression (non-decreasing)
         for (let i = 0; i < n; i++) {
@@ -1571,7 +1626,7 @@ export default function App() {
           return ca - cb;
         });
         let y = band - portsH[p.id] / 2;
-        sorted.forEach(pt => { portTargets[pt.id] = { x: px, y }; y += pt.h + PORT_GAP_Y; });
+        sorted.forEach(pt => { portTargets[pt.id] = { x: px, y }; y += pt.h + portGapY[p.id]; });
       });
     }
 
@@ -1588,7 +1643,7 @@ export default function App() {
       if (pts.length) {
         const px = parkX + p.w + portGapX[p.id];
         let y = py + (clH - portsH[p.id]) / 2;
-        [...pts].sort((a, b) => a.y - b.y).forEach(pt => { portTargets[pt.id] = { x: px, y }; y += pt.h + PORT_GAP_Y; });
+        [...pts].sort((a, b) => a.y - b.y).forEach(pt => { portTargets[pt.id] = { x: px, y }; y += pt.h + portGapY[p.id]; });
       }
       py += clH + PARK_GAP_Y;
     });
