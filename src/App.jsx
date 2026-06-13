@@ -3155,8 +3155,14 @@ export default function App() {
         <rect x={x} y={y+CINEMA_TITLE_H-8} width={w} height={8} fill={typeCfg.color}/>
 
         {/* Title text */}
-        <text x={x+12} y={y+24} fontSize={11} fontWeight="700" fill="#fff"
-          fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha",16)}</text>
+        {(()=>{
+          const rightReserve = axisLabels.length > 0 ? 100 : 50;
+          const titleMaxChars = Math.max(10, Math.floor((w - 20 - rightReserve) / 6.5));
+          return (
+            <text x={x+12} y={y+24} fontSize={11} fontWeight="700" fill="#fff"
+              fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none",userSelect:"none"}}>⊞ {trunc(shape.label||"Cineminha", titleMaxChars)}</text>
+          );
+        })()}
 
         {/* Type badge in title bar */}
         <rect x={x+12} y={y+27} width={58} height={14} rx={7} fill="rgba(255,255,255,.2)" style={{pointerEvents:"none"}}/>
