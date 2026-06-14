@@ -563,6 +563,178 @@ function extractScenarios(frontier) {
   return { conservador, balanceado, melhorEficiencia, expansao };
 }
 
+// ── Johnny optimizer ─────────────────────────────────────────────────────────
+
+function computeJohnnyData(shapes, csvStore) {
+  const cinemas = shapes.filter(s => s.type === 'cineminha');
+  if (cinemas.length === 0) return null;
+
+  const pooledMetrics = {};
+  const mixCatsSet = new Set();
+  let totalQty = 0;
+
+  for (const shape of cinemas) {
+    const { rowVar, colVar, rowDomain, colDomain } = shape;
+    const csvId = rowVar?.csvId || colVar?.csvId;
+    if (!csvId) continue;
+    const csv = csvStore[csvId];
+    if (!csv) continue;
+
+    const varTypes  = csv.varTypes      || {};
+    const colTypes  = csv.columnTypes   || {};
+    const rowIsOrd  = rowVar ? varTypes[rowVar.col] === 'ordinal' : false;
+    const colIsOrd  = colVar ? varTypes[colVar.col] === 'ordinal' : false;
+    const rDom      = rowDomain?.length > 0 ? rowDomain : ['*'];
+    const cDom      = colDomain?.length > 0 ? colDomain : ['*'];
+
+    const getIdx = (type) => {
+      const col = Object.entries(colTypes).find(([, t]) => t === type)?.[0];
+      return col != null ? csv.headers.indexOf(col) : -1;
+    };
+    const rowCI      = rowVar ? csv.headers.indexOf(rowVar.col) : -1;
+    const colCI      = colVar ? csv.headers.indexOf(colVar.col) : -1;
+    const qtyI       = getIdx('qty');
+    const altasI     = getIdx('qtdAltas');
+    const altasInfI  = getIdx('qtdAltasInfer');
+    const inadRI     = getIdx('inadReal');
+    const inadII     = getIdx('inadInferida');
+    const mixI       = getIdx('mixRisco');
+
+    // Accumulate per cell
+    const acc = {};
+    for (const rv of rDom)
+      for (const cv of cDom)
+        acc[`${rv}|${cv}`] = { qty:0, qtdAltas:0, qtdAltasInfer:0, inadRRaw:0, inadIRaw:0, mix:{} };
+
+    for (const row of csv.rows) {
+      const rv  = rowVar && rowCI >= 0 ? (row[rowCI] ?? '').toString().trim() : '*';
+      const cv  = colVar && colCI >= 0 ? (row[colCI] ?? '').toString().trim() : '*';
+      const key = `${rv}|${cv}`;
+      if (!acc[key]) continue;
+      const qty       = qtyI      >= 0 ? (parseFloat(row[qtyI])      || 0) : 1;
+      const altas     = altasI    >= 0 ? (parseFloat(row[altasI])    || 0) : 0;
+      const altasInf  = altasInfI >= 0 ? (parseFloat(row[altasInfI]) || 0) : 0;
+      const inadR     = inadRI    >= 0 ? (parseFloat(row[inadRI])    || 0) : 0;
+      const inadI     = inadII    >= 0 ? (parseFloat(row[inadII])    || 0) : 0;
+      acc[key].qty          += qty;
+      acc[key].qtdAltas     += altas;
+      acc[key].qtdAltasInfer+= altasInf;
+      acc[key].inadRRaw     += inadR;
+      acc[key].inadIRaw     += inadI;
+      if (mixI >= 0) {
+        const mv = (row[mixI] ?? '').toString().trim();
+        if (mv) { acc[key].mix[mv] = (acc[key].mix[mv] || 0) + qty; mixCatsSet.add(mv); }
+      }
+    }
+
+    for (const rv of rDom) {
+      for (const cv of cDom) {
+        const cellKey = `${rv}|${cv}`;
+        const m = acc[cellKey];
+        if (!m || m.qty === 0) continue;
+        const rowRank = rowIsOrd && rDom.length > 1 ? rDom.indexOf(rv) / (rDom.length - 1) : 0.5;
+        const colRank = colIsOrd && cDom.length > 1 ? cDom.indexOf(cv) / (cDom.length - 1) : 0.5;
+        const badness = (rowIsOrd ? rowRank : 0.5) + (colIsOrd ? colRank : 0.5);
+        const pk = `${shape.id}|${cellKey}`;
+        pooledMetrics[pk] = {
+          shapeId: shape.id, cellKey, rowVal: rv, colVal: cv,
+          qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer,
+          inadRRaw: m.inadRRaw, inadIRaw: m.inadIRaw,
+          inadReal:     m.qtdAltas      > 0 ? m.inadRRaw / m.qtdAltas      : null,
+          inadInferida: m.qtdAltasInfer > 0 ? m.inadIRaw / m.qtdAltasInfer
+                      : m.qty           > 0 ? m.inadIRaw / m.qty            : null,
+          badness, rowRank, colRank,
+          mixBreakdown: m.mix,
+        };
+        totalQty += m.qty;
+      }
+    }
+  }
+
+  if (totalQty === 0) return null;
+
+  // Sort: badness asc, then inadInferida asc, then qty desc
+  const sorted = Object.entries(pooledMetrics)
+    .map(([pk, m]) => ({ pk, ...m }))
+    .filter(c => c.qty > 0)
+    .sort((a, b) => {
+      const bd = a.badness - b.badness;
+      if (Math.abs(bd) > 1e-9) return bd;
+      const ai = a.inadInferida ?? Infinity, bi = b.inadInferida ?? Infinity;
+      const id = ai - bi;
+      if (Math.abs(id) > 1e-9) return id;
+      return b.qty - a.qty;
+    });
+
+  // Build frontier (greedy from best → worst badness)
+  const frontier = [{
+    cells: {}, approvalRate: 0, inadReal: null, inadInferida: null,
+    totalQty, approvedQty: 0, mixBreakdown: {},
+  }];
+  let approvedQty = 0, altasSum = 0, inadRSum = 0, inadISum = 0;
+  const curCells = {}, curMix = {};
+  for (const c of sorted) {
+    approvedQty += c.qty; altasSum += c.qtdAltas;
+    inadRSum += c.inadRRaw; inadISum += c.inadIRaw;
+    curCells[c.pk] = true;
+    for (const [mv, mq] of Object.entries(c.mixBreakdown || {}))
+      curMix[mv] = (curMix[mv] || 0) + mq;
+    frontier.push({
+      cells: { ...curCells },
+      approvalRate: approvedQty / totalQty,
+      inadReal:     altasSum    > 0 ? inadRSum / altasSum    : null,
+      inadInferida: approvedQty > 0 ? inadISum / approvedQty : null,
+      totalQty, approvedQty,
+      mixBreakdown: { ...curMix },
+    });
+  }
+
+  // Scenarios (knee algorithm)
+  const pts = frontier.filter(p => p.approvalRate > 0);
+  let conservador = pts[0] || null;
+  const expansao  = pts[pts.length - 1] || null;
+  let melhorEficiencia = conservador;
+  if (pts.length >= 3) {
+    const x0 = conservador.approvalRate,   y0 = conservador.inadInferida   ?? 0;
+    const x1 = expansao.approvalRate,      y1 = expansao.inadInferida      ?? 0;
+    const dx = x1-x0, dy = y1-y0, len = Math.sqrt(dx*dx+dy*dy);
+    let maxD = -1;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const px = pts[i].approvalRate, py = pts[i].inadInferida ?? 0;
+      const d = len > 0 ? Math.abs(dy*px - dx*py + x1*y0 - y1*x0) / len
+                        : Math.abs(px-x0) + Math.abs(py-y0);
+      if (d > maxD) { maxD = d; melhorEficiencia = pts[i]; }
+    }
+  }
+
+  // Baseline: current cells state in each cineminha
+  let baselineApprQty = 0;
+  for (const shape of cinemas) {
+    for (const [pk, m] of Object.entries(pooledMetrics)) {
+      if (m.shapeId !== shape.id) continue;
+      if (isCellEligible(shape.cells || {}, m.cellKey)) baselineApprQty += m.qty;
+    }
+  }
+  const baselineApprovalRate = totalQty > 0 ? baselineApprQty / totalQty : 0;
+
+  const shapeMetas = cinemas.map(s => ({
+    id: s.id, label: s.label || 'Cineminha',
+    rowVar: s.rowVar, colVar: s.colVar,
+    rowDomain: s.rowDomain || [], colDomain: s.colDomain || [],
+    originalCells: { ...(s.cells || {}) },
+  }));
+
+  const maxInadReal = Math.max(0, ...Object.values(pooledMetrics).map(m => m.inadReal     ?? 0));
+  const maxInadInf  = Math.max(0, ...Object.values(pooledMetrics).map(m => m.inadInferida ?? 0));
+
+  return {
+    pooledMetrics, frontier,
+    scenarios: { conservador, melhorEficiencia, expansao },
+    mixCats: [...mixCatsSet],
+    shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf,
+  };
+}
+
 // ── Worker state ─────────────────────────────────────────────────────────────
 let workerCsvStore = {};
 
@@ -595,6 +767,13 @@ self.onmessage = (e) => {
     const maxInadReal = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadReal     ?? 0));
     const maxInadInf  = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadInferida ?? 0));
     self.postMessage({ type: 'OPTIM_RESULT', shapeId: shape.id, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf });
+    return;
+  }
+
+  if (type === 'COMPUTE_JOHNNY') {
+    const result = computeJohnnyData(e.data.shapes, workerCsvStore);
+    if (!result) { self.postMessage({ type: 'JOHNNY_RESULT', error: 'no_data' }); return; }
+    self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
   }
 };

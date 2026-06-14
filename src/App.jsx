@@ -151,6 +151,7 @@ const COL_TYPES = [
   { value:"qtdAltasInfer", icon:"🔮", label:"Conv. Inferida",    shortLabel:"Conv.I"   },
   { value:"inadReal",      icon:"⚠️", label:"Inad. Real",        shortLabel:"Inad.R"   },
   { value:"inadInferida",  icon:"🎯", label:"Inad. Inferida",    shortLabel:"Inad.I"   },
+  { value:"mixRisco",      icon:"🎨", label:"Mix de Risco",       shortLabel:"Mix"      },
 ];
 
 const DELIMITERS = [
@@ -623,6 +624,22 @@ function isCellEligible(cells, key) {
   return getCellValue(cells, key) > 0;
 }
 
+function buildProposedByShape(poolCells, shapeMetas) {
+  const result = {};
+  for (const meta of shapeMetas) {
+    const rDom = meta.rowDomain.length > 0 ? meta.rowDomain : ['*'];
+    const cDom = meta.colDomain.length > 0 ? meta.colDomain : ['*'];
+    const sc = {};
+    for (const rv of rDom)
+      for (const cv of cDom) {
+        const ck = `${rv}|${cv}`;
+        sc[ck] = poolCells[`${meta.id}|${ck}`] === true ? 1 : 0;
+      }
+    result[meta.id] = sc;
+  }
+  return result;
+}
+
 // ── populateCellsFromResultVar ───────────────────────────────────────────────
 // Reads resultVar column from CSV rows and builds a cells object keyed by
 // "rowVal|colVal". Uses the first matching row per combination.
@@ -868,7 +885,9 @@ export default function App() {
   // Feature: tooltips
   const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
   // Optimization modal
-  const [optimModal, setOptimModal] = useState(null);   // null | optim obj
+  const [optimModal,  setOptimModal]  = useState(null);   // null | optim obj
+  // Johnny multi-cineminha optimizer modal
+  const [johnnyModal, setJohnnyModal] = useState(null);   // null | johnny obj
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Cineminha toolbar dropdown
@@ -961,6 +980,24 @@ export default function App() {
           maxInadReal:       maxInadReal || 0.2,
           maxInadInf:        maxInadInf  || 0.2,
           matrixZoom: 1, matrixPanX: 0, matrixPanY: 0,
+        });
+      } else if (msgType === 'JOHNNY_RESULT') {
+        if (e.data.error) return;
+        const { pooledMetrics, frontier, scenarios, mixCats, shapeMetas,
+                baselineApprovalRate, maxInadReal, maxInadInf } = e.data;
+        const initPt = scenarios?.melhorEficiencia || frontier[Math.floor(frontier.length / 2)];
+        const initIdx = Math.max(0, frontier.indexOf(initPt));
+        setJohnnyModal({
+          pooledMetrics, frontier, scenarios, mixCats, shapeMetas,
+          baselineApprovalRate,
+          activeCard:        'melhorEficiencia',
+          proposedByShape:   buildProposedByShape(initPt?.cells || {}, shapeMetas),
+          sliderApprovalIdx: initIdx,
+          sliderInadReal:    maxInadReal || 0.2,
+          sliderInadInf:     maxInadInf  || 0.2,
+          maxInadReal:       maxInadReal || 0.2,
+          maxInadInf:        maxInadInf  || 0.2,
+          activeShapePreview: shapeMetas[0]?.id || null,
         });
       }
     };
@@ -3847,6 +3884,20 @@ export default function App() {
     setOptimModal(null);
   };
 
+  const openJohnnyModal = (shapeIds) => {
+    const targets = shapes.filter(s => shapeIds.includes(s.id) && s.type === 'cineminha');
+    if (targets.length === 0) return;
+    workerRef.current?.postMessage({ type: 'COMPUTE_JOHNNY', shapes: targets });
+  };
+
+  const applyJohnnyResult = (proposedByShape) => {
+    pushHistory();
+    setShapes(prev => prev.map(s =>
+      proposedByShape[s.id] ? { ...s, cells: proposedByShape[s.id] } : s
+    ));
+    setJohnnyModal(null);
+  };
+
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
   // ────────────────────────────────────────────────────────────────────────────
@@ -4068,6 +4119,12 @@ export default function App() {
                   whiteSpace:"nowrap",fontWeight:600}}>
                 ⚙ Otimizar Decisão
               </button>
+              <button onClick={()=>openJohnnyModal([sel])}
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fde68a",background:"#fefce8",
+                  color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                ⚡ Otimização Johnny
+              </button>
               <button onClick={()=>exportCinema(sel)}
                 style={{padding:"5px 14px",borderRadius:7,border:"1px solid #bbf7d0",background:"#f0fdf4",
                   color:"#16a34a",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
@@ -4096,6 +4153,24 @@ export default function App() {
             </div>
           );
         })()}
+
+        {/* Johnny toolbar — shows when 2+ cineminhas are selected */}
+        {multiSel.size>1&&[...multiSel].every(id=>shapes.find(s=>s.id===id)?.type==='cineminha')&&(
+          <div style={{position:"absolute",top:110,left:"50%",transform:"translateX(-50%)",zIndex:300,
+            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+            border:"1px solid #fde68a",boxShadow:"0 2px 12px rgba(0,0,0,.08)",alignItems:"center"}}>
+            <span style={{fontSize:11,color:"#92400e",fontWeight:600,padding:"0 4px"}}>
+              ⊞ {multiSel.size} cineminhas
+            </span>
+            <div style={{width:1,height:20,background:"#fde68a"}}/>
+            <button onClick={()=>openJohnnyModal([...multiSel])}
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fde68a",background:"#fefce8",
+                color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:700}}>
+              ⚡ Otimização Johnny ({multiSel.size})
+            </button>
+          </div>
+        )}
 
         {/* Decision Lens toolbar — shows when a single decision_lens is selected */}
         {selShape?.type==='decision_lens'&&multiSel.size<=1&&(
@@ -6583,6 +6658,585 @@ export default function App() {
                       cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",
                       display:"flex",alignItems:"center",gap:6}}>
                     ✓ Aplicar ao Cineminha
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ JOHNNY MODAL ═══════════════ */}
+      {johnnyModal&&(()=>{
+        const {
+          pooledMetrics, frontier, scenarios, mixCats, shapeMetas,
+          baselineApprovalRate, activeCard, proposedByShape,
+          sliderApprovalIdx, sliderInadReal, sliderInadInf,
+          maxInadReal, maxInadInf, activeShapePreview,
+        } = johnnyModal;
+
+        const totalQty  = frontier[frontier.length-1]?.totalQty || 0;
+        const maxFIdx   = Math.max(0, frontier.length-1);
+
+        // Compute personalizado metrics from proposedByShape
+        let pApprQty=0, pAltas=0, pInadRRaw=0, pInadIRaw=0;
+        for (const [pk, m] of Object.entries(pooledMetrics)) {
+          if (isCellEligible(proposedByShape[m.shapeId]||{}, m.cellKey)) {
+            pApprQty += m.qty; pAltas += m.qtdAltas;
+            pInadRRaw += m.inadRRaw; pInadIRaw += m.inadIRaw;
+          }
+        }
+        const personalizado = {
+          approvalRate: totalQty > 0 ? pApprQty/totalQty : 0,
+          inadReal:     pAltas   > 0 ? pInadRRaw/pAltas  : null,
+          inadInferida: pApprQty > 0 ? pInadIRaw/pApprQty: null,
+          approvedQty:  pApprQty,
+        };
+
+        // Handlers
+        const selectFrontierPt = (pt, card) => {
+          if (!pt) return;
+          const idx = frontier.indexOf(pt);
+          setJohnnyModal(m => ({
+            ...m, activeCard: card || 'personalizado',
+            proposedByShape:   buildProposedByShape(pt.cells, m.shapeMetas),
+            sliderApprovalIdx: idx >= 0 ? idx : m.sliderApprovalIdx,
+            sliderInadReal:    pt.inadReal     ?? m.maxInadReal,
+            sliderInadInf:     pt.inadInferida ?? m.maxInadInf,
+          }));
+        };
+        const handleApprSlider = (idx) => {
+          const pt = frontier[idx];
+          if (!pt) return;
+          setJohnnyModal(m => ({
+            ...m, activeCard: 'personalizado',
+            proposedByShape:   buildProposedByShape(pt.cells, m.shapeMetas),
+            sliderApprovalIdx: idx,
+          }));
+        };
+        const handleInadSlider = (val, type) => {
+          let best = null;
+          for (const pt of frontier) {
+            const inad = type==='real' ? pt.inadReal : pt.inadInferida;
+            if (inad===null || inad<=val) {
+              if (!best || pt.approvalRate > best.approvalRate) best = pt;
+            }
+          }
+          if (!best) return;
+          const idx = frontier.indexOf(best);
+          setJohnnyModal(m => ({
+            ...m, activeCard: 'personalizado',
+            proposedByShape:   buildProposedByShape(best.cells, m.shapeMetas),
+            sliderApprovalIdx: idx >= 0 ? idx : m.sliderApprovalIdx,
+            [type==='real' ? 'sliderInadReal' : 'sliderInadInf']: val,
+          }));
+        };
+        const toggleJohnnyCell = (shapeId, cellKey, isElig) => {
+          const newSC = { ...(proposedByShape[shapeId]||{}), [cellKey]: isElig ? 0 : 1 };
+          const newPBS = { ...proposedByShape, [shapeId]: newSC };
+          let newApprQty = 0;
+          for (const [, m] of Object.entries(pooledMetrics)) {
+            if (isCellEligible(newPBS[m.shapeId]||{}, m.cellKey)) newApprQty += m.qty;
+          }
+          const newRate = totalQty > 0 ? newApprQty/totalQty : 0;
+          let nearIdx=0, bestD=Infinity;
+          frontier.forEach((pt,i) => { const d=Math.abs(pt.approvalRate-newRate); if(d<bestD){bestD=d;nearIdx=i;} });
+          setJohnnyModal(m => ({...m, proposedByShape:newPBS, sliderApprovalIdx:nearIdx, activeCard:'personalizado'}));
+        };
+
+        // Cards
+        const scen = scenarios;
+        const approvalColor = r => r>=0.7?'#16a34a':r>=0.4?'#d97706':'#dc2626';
+        const CARD_DEFS = [
+          {id:'conservador',     pt:scen.conservador,     icon:'🛡', label:'Conservador',     sub:'Menor risco',      bg:'#dcfce7', fg:'#15803d'},
+          {id:'melhorEficiencia',pt:scen.melhorEficiencia,icon:'⚖', label:'Melhor Eficiência',sub:'Joelho da curva',  bg:'#fef9c3', fg:'#a16207'},
+          {id:'expansao',        pt:scen.expansao,        icon:'🚀', label:'Expansão',         sub:'Máximo volume',    bg:'#dbeafe', fg:'#1d4ed8'},
+          {id:'personalizado',   pt:personalizado,         icon:'🎛', label:'Personalizado',    sub:'Estado atual',     bg:'#f3e8ff', fg:'#7c3aed'},
+        ];
+
+        // ── SVG Curve ──
+        const CW=440, CH=180, PL=44, PR=16, PT=14, PB=32;
+        const plotW=CW-PL-PR, plotH=CH-PT-PB;
+        const SAMP = Math.min(frontier.length, 300);
+        const sStep = frontier.length > 1 ? (frontier.length-1)/(SAMP-1) : 1;
+        const sampled = Array.from({length:SAMP},(_,i)=>frontier[Math.round(i*sStep)]).filter(Boolean);
+        const cx = (i) => PL + (i/(Math.max(1,SAMP-1)))*plotW;
+        const cy = (r) => PT + (1-r)*plotH;
+        const curvePts = sampled.map((p,i)=>`${cx(i)},${cy(p.approvalRate)}`).join(' ');
+        const pxOf = (pt) => {
+          if (!pt) return null;
+          const idx = frontier.indexOf(pt);
+          if (idx<0) return null;
+          const si = Math.round(idx/Math.max(1,frontier.length-1)*(SAMP-1));
+          return {x:cx(si), y:cy(pt.approvalRate)};
+        };
+        const currentSvgPt = {
+          x: cx(Math.round(sliderApprovalIdx/Math.max(1,frontier.length-1)*(SAMP-1))),
+          y: cy(personalizado.approvalRate),
+        };
+        const baselineY = cy(baselineApprovalRate);
+
+        // ── Mix chart ──
+        const MIX_ORDER_DEF = ["BAIXISSIMO","BAIXO","MEDIO","ALTO","ALTISSIMO","INDETERMINADO"];
+        const MIX_COLORS_DEF = {
+          ALTISSIMO:"#e35d6a", ALTO:"#f59e0b", MEDIO:"#e0a84e",
+          BAIXO:"#4ea1ff", BAIXISSIMO:"#36c98a", INDETERMINADO:"#94a3b8",
+        };
+        const ordMix = [
+          ...MIX_ORDER_DEF.filter(c=>mixCats.includes(c)),
+          ...mixCats.filter(c=>!MIX_ORDER_DEF.includes(c)).sort(),
+        ];
+        const hasMix = ordMix.length > 0;
+        const MH = 100;
+        const mixPaths = [];
+        if (hasMix) {
+          const cumBot = sampled.map(()=>0);
+          for (const cat of ordMix) {
+            const tops = sampled.map((pt,i) => {
+              const tot = pt.approvedQty || 1;
+              return cumBot[i] + ((pt.mixBreakdown?.[cat]||0)/tot);
+            });
+            const topLine = sampled.map((_,i)=>`${cx(i).toFixed(1)},${(PT+(1-tops[i])*MH).toFixed(1)}`).join('L');
+            const botLine = sampled.map((_,i)=>`${cx(i).toFixed(1)},${(PT+(1-cumBot[i])*MH).toFixed(1)}`).reverse().join('L');
+            mixPaths.push({cat, d:`M${topLine}L${botLine}Z`, color:MIX_COLORS_DEF[cat]||'#94a3b8'});
+            tops.forEach((t,i)=>{cumBot[i]=t;});
+          }
+        }
+
+        // ── Preview matrix for selected cineminha ──
+        const prevMeta = shapeMetas.find(m=>m.id===activeShapePreview) || shapeMetas[0];
+        const prevCells = prevMeta ? (proposedByShape[prevMeta.id]||{}) : {};
+        const prevOrig  = prevMeta?.originalCells || {};
+        const prevRDom  = prevMeta?.rowDomain?.length>0 ? prevMeta.rowDomain : ['*'];
+        const prevCDom  = prevMeta?.colDomain?.length>0 ? prevMeta.colDomain : ['*'];
+        const show2D    = prevMeta?.rowVar && prevMeta?.colVar;
+
+        // ── Per-shape breakdown ──
+        const breakdown = shapeMetas.map(meta => {
+          let vol=0, propApprQty=0, origApprQty=0, eligible=0, changed=0;
+          const rDom = meta.rowDomain.length>0?meta.rowDomain:['*'];
+          const cDom = meta.colDomain.length>0?meta.colDomain:['*'];
+          for (const rv of rDom) for (const cv of cDom) {
+            const ck = `${rv}|${cv}`;
+            const pk = `${meta.id}|${ck}`;
+            const m  = pooledMetrics[pk];
+            if (!m) continue;
+            vol += m.qty;
+            const propElig = isCellEligible(proposedByShape[meta.id]||{}, ck);
+            const origElig = isCellEligible(meta.originalCells||{}, ck);
+            if (propElig) { propApprQty += m.qty; eligible++; }
+            if (origElig)   origApprQty += m.qty;
+            if (propElig !== origElig) changed++;
+          }
+          const total = rDom.length * cDom.length;
+          return { meta, vol, propRate: vol>0?propApprQty/vol:0, origRate: vol>0?origApprQty/vol:0, eligible, total, changed };
+        });
+
+        const nCinemas = shapeMetas.length;
+
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:1200,maxHeight:"96vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#fefce8 0%,#fff7ed 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#fde68a",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⚡</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Otimização Johnny</h2>
+                    <p style={{fontSize:11,color:"#92400e"}}>
+                      {nCinemas===1 ? `⊞ ${shapeMetas[0]?.label||'Cineminha'}` : `⊞ ${nCinemas} cineminhas · otimização conjunta`}
+                    </p>
+                  </div>
+                </div>
+                <button onClick={()=>setJohnnyModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              {/* Cards strip */}
+              <div style={{display:"flex",gap:8,padding:"12px 20px",borderBottom:"1px solid #f1f5f9",
+                flexShrink:0,overflowX:"auto"}}>
+                {CARD_DEFS.map(({id,pt,icon,label,sub,bg,fg})=>{
+                  const isActive = activeCard===id;
+                  const isPerso  = id==='personalizado';
+                  const disp     = isPerso ? personalizado : pt;
+                  return (
+                    <button key={id}
+                      onClick={()=>isPerso?null:selectFrontierPt(pt,id)}
+                      style={{flex:'1 1 150px',minWidth:130,padding:'10px 12px',borderRadius:12,
+                        textAlign:'left',fontFamily:'inherit',transition:'all .15s',
+                        cursor:(isPerso||!pt)?'default':'pointer',
+                        border:`2px solid ${isActive?fg:'#e2e8f0'}`,
+                        background:isActive?bg:'#f8fafc',
+                        opacity:(!isPerso&&!pt)?0.45:1}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                        <span style={{fontSize:16}}>{icon}</span>
+                        <div>
+                          <div style={{fontSize:11,fontWeight:700,color:fg,lineHeight:1.2}}>{label}</div>
+                          <div style={{fontSize:9.5,color:'#94a3b8'}}>{sub}</div>
+                        </div>
+                        {isActive&&<span style={{marginLeft:'auto',fontSize:8,background:fg,color:'#fff',
+                          borderRadius:99,padding:'2px 6px',fontWeight:700,flexShrink:0}}>ativo</span>}
+                      </div>
+                      {disp ? (
+                        <div style={{display:'flex',gap:6,justifyContent:'space-between'}}>
+                          {[['Aprovação',disp.approvalRate,approvalColor(disp.approvalRate)],
+                            ['Inad.Real',disp.inadReal,disp.inadReal===null?'#94a3b8':disp.inadReal>0.05?'#dc2626':'#d97706'],
+                            ['Inad.Inf.',disp.inadInferida,disp.inadInferida===null?'#94a3b8':disp.inadInferida>0.05?'#dc2626':'#d97706'],
+                          ].map(([lbl,val,col])=>(
+                            <div key={lbl} style={{textAlign:'center'}}>
+                              <div style={{fontSize:9,color:'#94a3b8',marginBottom:1}}>{lbl}</div>
+                              <div style={{fontSize:12,fontWeight:700,color:col}}>{fmtPct(val)}</div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : <span style={{fontSize:10,color:'#94a3b8'}}>Dados insuficientes</span>}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Body */}
+              <div style={{display:"flex",flex:1,overflow:"hidden",minHeight:0}}>
+
+                {/* Left — sliders */}
+                <div style={{width:220,flexShrink:0,borderRight:"1px solid #f1f5f9",
+                  padding:"16px 16px",display:"flex",flexDirection:"column",gap:12,overflowY:"auto"}}>
+                  <div style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em"}}>
+                    Simulação
+                  </div>
+
+                  {/* Approval slider */}
+                  <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#1e293b"}}>Taxa de Aprovação</span>
+                      <span style={{fontSize:13,fontWeight:700,color:"#92400e"}}>{Math.round(personalizado.approvalRate*100)}%</span>
+                    </div>
+                    <input type="range" min={0} max={maxFIdx} step={1} value={sliderApprovalIdx}
+                      onChange={e=>handleApprSlider(parseInt(e.target.value))}
+                      style={{width:"100%",accentColor:"#f59e0b",cursor:"pointer"}}/>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#94a3b8",marginTop:2}}>
+                      <span>0%</span><span>{Math.round((frontier[maxFIdx]?.approvalRate||0)*100)}%</span>
+                    </div>
+                  </div>
+
+                  <div style={{height:1,background:"#f1f5f9"}}/>
+
+                  {/* Inad Real ceiling */}
+                  <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#1e293b"}}>⚠ Teto Inad. Real</span>
+                      <span style={{fontSize:12,fontWeight:700,color:"#f59e0b"}}>{fmtPct(sliderInadReal)}</span>
+                    </div>
+                    <input type="range" min={0} max={maxInadReal} step={maxInadReal/200||0.001}
+                      value={sliderInadReal} onChange={e=>handleInadSlider(parseFloat(e.target.value),'real')}
+                      style={{width:"100%",accentColor:"#f59e0b",cursor:"pointer"}}/>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#94a3b8",marginTop:2}}>
+                      <span>0%</span><span>{fmtPct(maxInadReal)}</span>
+                    </div>
+                  </div>
+
+                  {/* Inad Inf ceiling */}
+                  <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#1e293b"}}>🎯 Teto Inad. Inf.</span>
+                      <span style={{fontSize:12,fontWeight:700,color:"#8b5cf6"}}>{fmtPct(sliderInadInf)}</span>
+                    </div>
+                    <input type="range" min={0} max={maxInadInf} step={maxInadInf/200||0.001}
+                      value={sliderInadInf} onChange={e=>handleInadSlider(parseFloat(e.target.value),'inferida')}
+                      style={{width:"100%",accentColor:"#8b5cf6",cursor:"pointer"}}/>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#94a3b8",marginTop:2}}>
+                      <span>0%</span><span>{fmtPct(maxInadInf)}</span>
+                    </div>
+                  </div>
+
+                  <div style={{height:1,background:"#f1f5f9"}}/>
+
+                  {/* Current state box */}
+                  <div style={{background:"#fefce8",borderRadius:10,padding:"10px 12px",border:"1px solid #fde68a"}}>
+                    <div style={{fontSize:9.5,fontWeight:700,color:"#92400e",marginBottom:7,textTransform:"uppercase",letterSpacing:".05em"}}>
+                      Estado Proposto
+                    </div>
+                    {[
+                      {label:"Aprovação",   val:`${Math.round(personalizado.approvalRate*100)}%`, color:approvalColor(personalizado.approvalRate)},
+                      {label:"Inad. Real",  val:fmtPct(personalizado.inadReal),    color:personalizado.inadReal===null?'#94a3b8':personalizado.inadReal>0.05?'#dc2626':'#d97706'},
+                      {label:"Inad. Inf.",  val:fmtPct(personalizado.inadInferida),color:personalizado.inadInferida===null?'#94a3b8':personalizado.inadInferida>0.05?'#dc2626':'#d97706'},
+                      {label:"Volume",      val:fmtQty(personalizado.approvedQty), color:'#475569'},
+                    ].map(({label,val,color})=>(
+                      <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                        <span style={{fontSize:10.5,color:"#64748b"}}>{label}</span>
+                        <span style={{fontSize:11.5,fontWeight:700,color}}>{val}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Monotonicity note */}
+                  <div style={{fontSize:9.5,color:"#92400e",background:"#fff7ed",borderRadius:8,
+                    padding:"7px 10px",border:"1px solid #fed7aa",lineHeight:1.5}}>
+                    <strong>Ordenação monotônica</strong><br/>
+                    Células inseridas da melhor para pior posição na matriz (badness posicional).
+                    Colunas ordinais respeitam a sequência dos eixos.
+                  </div>
+                </div>
+
+                {/* Center — curve + mix */}
+                <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",background:"#f8fafc"}}>
+
+                  {/* SVG Curve */}
+                  <div style={{padding:"12px 16px 0",flexShrink:0}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",
+                      letterSpacing:".06em",marginBottom:8}}>
+                      Curva de Aprovação
+                    </div>
+                    <svg width={CW} height={CH} style={{display:"block",overflow:"visible"}}>
+                      {/* Axes */}
+                      <line x1={PL} y1={PT} x2={PL} y2={PT+plotH} stroke="#e2e8f0" strokeWidth={1}/>
+                      <line x1={PL} y1={PT+plotH} x2={PL+plotW} y2={PT+plotH} stroke="#e2e8f0" strokeWidth={1}/>
+                      {/* Y grid & labels */}
+                      {[0,.25,.5,.75,1].map(r=>(
+                        <g key={r}>
+                          <line x1={PL} y1={cy(r)} x2={PL+plotW} y2={cy(r)} stroke="#f1f5f9" strokeWidth={1}/>
+                          <text x={PL-4} y={cy(r)+4} textAnchor="end" fontSize={9} fill="#94a3b8">{Math.round(r*100)}%</text>
+                        </g>
+                      ))}
+                      {/* Baseline */}
+                      <line x1={PL} y1={baselineY} x2={PL+plotW} y2={baselineY}
+                        stroke="#94a3b8" strokeWidth={1} strokeDasharray="4,3"/>
+                      <text x={PL+plotW+2} y={baselineY+4} fontSize={8.5} fill="#94a3b8">baseline</text>
+                      {/* Curve */}
+                      <polyline points={curvePts} fill="none" stroke="#f59e0b" strokeWidth={2.5}
+                        strokeLinejoin="round" strokeLinecap="round"/>
+                      {/* Scenario dots */}
+                      {CARD_DEFS.filter(c=>c.id!=='personalizado').map(c=>{
+                        const p = pxOf(c.pt); if(!p) return null;
+                        return <circle key={c.id} cx={p.x} cy={p.y} r={5}
+                          fill={activeCard===c.id?c.fg:'#fff'} stroke={c.fg} strokeWidth={2}/>;
+                      })}
+                      {/* Current position */}
+                      <circle cx={currentSvgPt.x} cy={currentSvgPt.y} r={6}
+                        fill="#f59e0b" stroke="#fff" strokeWidth={2}/>
+                      {/* Click overlay */}
+                      <rect x={PL} y={PT} width={plotW} height={plotH} fill="transparent" cursor="crosshair"
+                        onClick={e=>{
+                          const rect=e.currentTarget.getBoundingClientRect();
+                          const t=Math.max(0,Math.min(1,(e.clientX-rect.left)/plotW));
+                          const idx=Math.round(t*(frontier.length-1));
+                          handleApprSlider(idx);
+                        }}/>
+                      {/* X label */}
+                      <text x={PL+plotW/2} y={CH-2} textAnchor="middle" fontSize={9} fill="#94a3b8">
+                        ← Conservador · · · Expansão →  ({frontier.length-1} pontos)
+                      </text>
+                    </svg>
+                  </div>
+
+                  {/* Mix chart */}
+                  {hasMix && (
+                    <div style={{padding:"8px 16px 4px",flexShrink:0}}>
+                      <div style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",
+                        letterSpacing:".06em",marginBottom:6}}>
+                        Mix de Risco (aprovados)
+                      </div>
+                      <svg width={CW} height={MH+PT+PB} style={{display:"block",overflow:"visible"}}>
+                        <line x1={PL} y1={PT+MH} x2={PL+plotW} y2={PT+MH} stroke="#e2e8f0" strokeWidth={1}/>
+                        <line x1={PL} y1={PT} x2={PL} y2={PT+MH} stroke="#e2e8f0" strokeWidth={1}/>
+                        {[0,.5,1].map(r=>(
+                          <g key={r}>
+                            <line x1={PL} y1={PT+(1-r)*MH} x2={PL+plotW} y2={PT+(1-r)*MH} stroke="#f1f5f9" strokeWidth={1}/>
+                            <text x={PL-4} y={PT+(1-r)*MH+4} textAnchor="end" fontSize={9} fill="#94a3b8">{Math.round(r*100)}%</text>
+                          </g>
+                        ))}
+                        {mixPaths.map(({cat,d,color})=>(
+                          <path key={cat} d={d} fill={color} opacity={0.85}/>
+                        ))}
+                        {/* Current vertical line */}
+                        <line x1={currentSvgPt.x} y1={PT} x2={currentSvgPt.x} y2={PT+MH}
+                          stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="3,2"/>
+                      </svg>
+                      {/* Legend */}
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:2}}>
+                        {ordMix.map(cat=>(
+                          <div key={cat} style={{display:"flex",alignItems:"center",gap:3,fontSize:9.5,color:"#475569"}}>
+                            <div style={{width:10,height:10,borderRadius:2,background:MIX_COLORS_DEF[cat]||'#94a3b8',flexShrink:0}}/>
+                            {cat}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Breakdown table */}
+                  <div style={{flex:1,overflow:"auto",padding:"8px 16px 12px"}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",
+                      letterSpacing:".06em",marginBottom:6}}>
+                      Detalhamento por Cineminha
+                    </div>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"inherit"}}>
+                      <thead>
+                        <tr style={{background:"#f8fafc"}}>
+                          {["Cineminha","Vol. Pool","Original","Proposta","Elegíveis","Alterações"].map(h=>(
+                            <th key={h} style={{padding:"6px 10px",textAlign:"left",fontWeight:600,color:"#64748b",
+                              borderBottom:"2px solid #e2e8f0",whiteSpace:"nowrap",fontSize:10.5}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {breakdown.map(({meta,vol,propRate,origRate,eligible,total,changed})=>(
+                          <tr key={meta.id}
+                            onClick={()=>setJohnnyModal(m=>({...m,activeShapePreview:meta.id}))}
+                            style={{cursor:"pointer",background:activeShapePreview===meta.id?'#fefce8':'transparent',
+                              transition:"background .1s"}}>
+                            <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",color:"#1e293b",fontWeight:500}}>
+                              {meta.label||'Cineminha'}
+                            </td>
+                            <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",color:"#64748b"}}>{fmtQty(vol)}</td>
+                            <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",color:"#64748b"}}>{Math.round(origRate*100)}%</td>
+                            <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",fontWeight:700,
+                              color:propRate>origRate?'#16a34a':propRate<origRate?'#dc2626':'#475569'}}>
+                              {Math.round(propRate*100)}%
+                              {propRate!==origRate&&<span style={{fontSize:9.5,marginLeft:3}}>
+                                {propRate>origRate?'▲':'▼'}{Math.abs(Math.round((propRate-origRate)*100))}pp
+                              </span>}
+                            </td>
+                            <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",color:"#64748b"}}>
+                              {eligible}/{total}
+                            </td>
+                            <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9"}}>
+                              {changed>0
+                                ? <span style={{fontSize:10,background:"#fef3c7",color:"#92400e",padding:"2px 6px",borderRadius:99,fontWeight:600}}>{changed} células</span>
+                                : <span style={{fontSize:10,color:"#94a3b8"}}>sem alteração</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Right — matrix preview */}
+                <div style={{width:320,flexShrink:0,borderLeft:"1px solid #f1f5f9",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+                  <div style={{padding:"10px 14px 6px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",
+                      letterSpacing:".06em",marginBottom:6}}>
+                      Preview · Células
+                    </div>
+                    {shapeMetas.length > 1 && (
+                      <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                        {shapeMetas.map(meta=>(
+                          <button key={meta.id}
+                            onClick={()=>setJohnnyModal(m=>({...m,activeShapePreview:meta.id}))}
+                            style={{padding:"3px 8px",borderRadius:6,fontSize:10,fontFamily:"inherit",fontWeight:600,cursor:"pointer",
+                              border:`1.5px solid ${activeShapePreview===meta.id?'#f59e0b':'#e2e8f0'}`,
+                              background:activeShapePreview===meta.id?'#fefce8':'#fff',
+                              color:activeShapePreview===meta.id?'#92400e':'#64748b'}}>
+                            {(meta.label||'Cineminha').slice(0,14)}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{flex:1,overflow:"auto",padding:"10px 12px"}}>
+                    {prevMeta && (
+                      <>
+                        <div style={{fontSize:9.5,color:"#64748b",marginBottom:6}}>
+                          {prevMeta.rowVar?.col && <span>Linha: <strong>{prevMeta.rowVar.col}</strong></span>}
+                          {prevMeta.rowVar && prevMeta.colVar && <span style={{margin:"0 4px"}}>×</span>}
+                          {prevMeta.colVar?.col && <span>Coluna: <strong>{prevMeta.colVar.col}</strong></span>}
+                        </div>
+                        <table style={{borderCollapse:"collapse",fontSize:11,fontFamily:"inherit"}}>
+                          {show2D && (
+                            <thead>
+                              <tr>
+                                <th style={{width:64,background:"#f1f5f9",border:"1px solid #e2e8f0",
+                                  padding:"4px 6px",fontSize:9.5,color:"#94a3b8",fontWeight:600,whiteSpace:"nowrap"}}>
+                                  {(prevMeta.rowVar?.col||'').slice(0,7)}·{(prevMeta.colVar?.col||'').slice(0,7)}
+                                </th>
+                                {prevCDom.map(cv=>(
+                                  <th key={cv} style={{width:52,background:"#f1f5f9",border:"1px solid #e2e8f0",
+                                    padding:"4px 3px",fontSize:9.5,color:"#475569",fontWeight:600,
+                                    textAlign:"center",whiteSpace:"nowrap",overflow:"hidden",
+                                    textOverflow:"ellipsis",maxWidth:52}}>
+                                    {cv}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                          )}
+                          <tbody>
+                            {prevRDom.map(rv=>(
+                              <tr key={rv}>
+                                <td style={{background:"#f1f5f9",border:"1px solid #e2e8f0",
+                                  padding:"4px 8px",fontSize:10,fontWeight:600,color:"#475569",whiteSpace:"nowrap"}}>
+                                  {show2D ? rv : (prevMeta.rowVar?.col||prevMeta.colVar?.col||'')}
+                                </td>
+                                {prevCDom.map(cv=>{
+                                  const ck = `${rv}|${cv}`;
+                                  const isElig = isCellEligible(prevCells, ck);
+                                  const wasElig= isCellEligible(prevOrig,  ck);
+                                  const changed= isElig !== wasElig;
+                                  const pk     = `${prevMeta.id}|${ck}`;
+                                  const m      = pooledMetrics[pk];
+                                  return (
+                                    <td key={cv}
+                                      onClick={()=>toggleJohnnyCell(prevMeta.id,ck,isElig)}
+                                      style={{width:52,border:`2px solid ${changed?(isElig?'#22c55e':'#ef4444'):'#e2e8f0'}`,
+                                        background:isElig?'#dcfce7':'#fee2e2',
+                                        textAlign:"center",padding:"4px 2px",cursor:"pointer",
+                                        transition:"background .1s",position:"relative"}}>
+                                      <div style={{fontSize:13,fontWeight:700,color:isElig?"#15803d":"#dc2626",lineHeight:1}}>
+                                        {isElig?"✓":"✗"}
+                                      </div>
+                                      {m&&m.qty>0&&<div style={{fontSize:8.5,color:"#64748b",marginTop:1}}>{fmtQty(m.qty)}</div>}
+                                      {changed&&(
+                                        <div style={{position:"absolute",top:1,right:2,fontSize:7.5,
+                                          fontWeight:700,color:isElig?'#15803d':'#dc2626'}}>
+                                          {isElig?'▲':'▼'}
+                                        </div>
+                                      )}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <div style={{marginTop:8,display:"flex",gap:10,fontSize:9.5,color:"#64748b"}}>
+                          <span><span style={{display:"inline-block",width:8,height:8,borderRadius:2,
+                            border:"2px solid #22c55e",background:"#dcfce7",marginRight:3}}/>Nova elegível</span>
+                          <span><span style={{display:"inline-block",width:8,height:8,borderRadius:2,
+                            border:"2px solid #ef4444",background:"#fee2e2",marginRight:3}}/>Nova inelegível</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                padding:"12px 24px",borderTop:"1px solid #e2e8f0",flexShrink:0,background:"#fafafa"}}>
+                <button onClick={()=>setJohnnyModal(null)}
+                  style={{padding:"8px 18px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                    color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                  Cancelar
+                </button>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <span style={{fontSize:11,color:"#94a3b8"}}>
+                    {`${Math.round(personalizado.approvalRate*100)}% aprovação · ${fmtQty(personalizado.approvedQty)} propostas`}
+                    {nCinemas>1 && ` · ${nCinemas} cineminhas`}
+                  </span>
+                  <button onClick={()=>applyJohnnyResult(proposedByShape)}
+                    style={{padding:"9px 22px",borderRadius:9,border:"none",background:"#f59e0b",color:"#fff",
+                      cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",
+                      display:"flex",alignItems:"center",gap:6}}>
+                    ⚡ Aplicar{nCinemas>1?` (${nCinemas} cineminhas)`:''}
                   </button>
                 </div>
               </div>
