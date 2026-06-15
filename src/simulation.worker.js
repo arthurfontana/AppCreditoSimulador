@@ -742,11 +742,11 @@ const ANALYTICS_METRIC_TYPES = new Set(['qty', 'qtdAltas', 'qtdAltasInfer', 'ina
 
 // Overlay (decisão simulada por csvId+rowIdx) de um canvas, memoizado por hash de
 // shapes/conns/lensPopulations + versão do csvStore (5B — evita reprocessar canvases intocados).
-function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations) {
+function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations, csvStore) {
   const key = csvStoreVersion + '|' + JSON.stringify(shapes) + '|' + JSON.stringify(conns) + '|' + JSON.stringify(lensPopulations || {});
   const hit = analyticsOverlayCache[canvasId];
   if (hit && hit.key === key) return hit.overlay;
-  const overlay = computeSimulatedDecisions(shapes, conns, workerCsvStore, lensPopulations);
+  const overlay = computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations);
   analyticsOverlayCache[canvasId] = { key, overlay };
   return overlay;
 }
@@ -766,7 +766,7 @@ function computeAnalyticsDataset(canvasInputs, csvStore) {
     id: ci.id,
     nome: ci.nome,
     decisionCol: `__DECISAO_${ci.id}`,
-    overlay: cachedCanvasOverlay(ci.id, ci.shapes, ci.conns, ci.lensPopulations),
+    overlay: cachedCanvasOverlay(ci.id, ci.shapes, ci.conns, ci.lensPopulations, csvStore),
   }));
 
   const dimensionSet = new Set();
@@ -841,7 +841,7 @@ let workerCsvStore = {};
 let csvStoreVersion = 0;             // bump a cada UPDATE_CSV_STORE — invalida caches de overlay
 const analyticsOverlayCache = {};    // {[canvasId]: {key, overlay}} — cache por canvas (5B)
 
-self.onmessage = (e) => {
+function handleMessage(e) {
   const { type } = e.data;
 
   if (type === 'UPDATE_CSV_STORE') {
@@ -886,4 +886,20 @@ self.onmessage = (e) => {
     self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
   }
+}
+
+// Só registra o handler em contexto de worker real; permite importar as funções
+// puras em testes (Node/jsdom) sem disparar o protocolo de mensagens.
+if (typeof self !== 'undefined' && typeof self.postMessage === 'function') {
+  self.onmessage = handleMessage;
+}
+
+// Permite que o csvStore do worker seja semeado em testes (em produção vem de UPDATE_CSV_STORE).
+function __setWorkerCsvStoreForTest(store) { workerCsvStore = store || {}; csvStoreVersion++; }
+
+export {
+  computeAnalyticsDataset,
+  computeSimulatedDecisions,
+  buildFlowGraph,
+  __setWorkerCsvStoreForTest,
 };

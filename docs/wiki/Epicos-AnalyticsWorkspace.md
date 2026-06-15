@@ -303,15 +303,16 @@ Pelo porte da refatoração multi-canvas, a Sessão 5 é **fatiada em 3 sub-sess
 
 ---
 
-#### Sub-sessão 5C — KPI A vs B + Export (Entrega 2, parte 2)
+#### Sub-sessão 5C — KPI A vs B + Export (Entrega 2, parte 2) ✅ ENTREGUE
 
 **Entrega:**
-- `KpiCard` (DEC-AW-008): seletores **Baseline (A)** e **Comparação (B)** aceitando qualquer cenário (incl. AS IS); número grande = B, delta = `B − A` colorido por `GOOD_WHEN_LOWER`. Default A=AS IS, B=primeiro canvas. Persistir A/B no `WidgetConfig`.
-- Export: dataset largo (dimensões + métricas intrínsecas + **todas** as colunas de decisão por cenário + AS IS) como CSV (e, se viável, XLSX) — abrível no Excel com cenários lado a lado.
+- `KpiCard` (DEC-AW-008): seletores **Baseline (A)** e **Comparação (B)** (dois `<select>` no topo do card) aceitando qualquer cenário registrado, incl. AS IS; número grande = B, baseline = A, delta = `B − A` colorido por `GOOD_WHEN_LOWER`. Default A=AS IS, B=primeiro canvas via `resolveKpiScenarios(scenarios, kpiA, kpiB)`. A/B persistidos em `WidgetConfig.config.kpiA`/`kpiB` (gravados via `onChange`/`changeConfig`).
+- **Retrocompat (risco resolvido):** KPIs antigos sem `kpiA`/`kpiB` resolvem o default em tempo de render — `resolveKpiScenarios` faz fallback quando o id salvo não existe mais (cenário removido). Não há migração no load.
+- Export: botão **⬇ Exportar CSV** no header da aba → `exportAnalyticsDatasetCSV(ds)` → `buildAnalyticsCSV(ds)` serializa o dataset largo (dimensões + métricas intrínsecas + **todas** as colunas de decisão por cenário, incl. AS IS) como CSV com BOM, abrível no Excel com cenários lado a lado (escape RFC 4180).
+
+**Testes (5A→5C):** suíte `tests/analytics.test.js` (Vitest + jsdom) cobrindo `cloneCanvasWithNewIds` (5A), `computeAnalyticsDataset` join/cenários/AS IS global (5B), `computeWidgetMetric`/`pivotWidget` (2/3), `resolveKpiScenarios` e `buildAnalyticsCSV` (5C). Rodar com `npm test`.
 
 **Destrava:** indicador executivo comparando duas políticas quaisquer + exportação completa para análise externa.
-
-**Riscos:** retrocompatibilidade do `WidgetConfig` de KPI antigo (sem A/B) — migrar no load.
 
 ---
 

@@ -629,6 +629,47 @@ function exportDiagnosticCSV(shapes, conns, csvStore) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
+// Métricas intrínsecas do agrupamento exportadas no dataset largo (DEC-AW-003).
+const ANALYTICS_EXPORT_METRICS = [
+  { key: "qty",           label: "Vol. Propostas" },
+  { key: "qtdAltas",      label: "Altas Reais" },
+  { key: "qtdAltasInfer", label: "Conv. Inferida" },
+  { key: "inadRRaw",      label: "Inad. Real (num)" },
+  { key: "inadIRaw",      label: "Inad. Inferida (num)" },
+];
+
+// Serializa o dataset analítico largo como CSV: dimensões + métricas intrínsecas +
+// uma coluna de decisão por cenário (AS IS + cada aba marcada). Excel-friendly (5C).
+export function buildAnalyticsCSV(ds) {
+  if (!ds || !Array.isArray(ds.rows) || ds.rows.length === 0) return null;
+  const dimensions = ds.dimensions || [];
+  const scenarios = ds.scenarios || [];
+  const esc = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const header = [
+    ...dimensions,
+    ...ANALYTICS_EXPORT_METRICS.map(m => m.label),
+    ...scenarios.map(s => `Decisão · ${s.nome}`),
+  ];
+  const lines = ds.rows.map(r => [
+    ...dimensions.map(d => r[d]),
+    ...ANALYTICS_EXPORT_METRICS.map(m => r[m.key]),
+    ...scenarios.map(s => r[s.decisionCol]),
+  ].map(esc).join(","));
+  return [header.map(esc).join(","), ...lines].join("\n");
+}
+
+function exportAnalyticsDatasetCSV(ds) {
+  const csv = buildAnalyticsCSV(ds);
+  if (!csv) return;
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `analytics_cenarios_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 // ── Cell value helpers ───────────────────────────────────────────────────────
 // Reads a cell's numeric result value with backward-compat for legacy booleans.
 function getCellValue(cells, key) {
@@ -892,7 +933,7 @@ const GOOD_WHEN_LOWER = new Set(["inadReal", "inadInferida"]);
 
 // Agrega uma métrica sobre um conjunto de linhas (formato largo) para uma coluna de decisão.
 // Replica a semântica do motor: numeradores/denominadores acumulados apenas sobre aprovados.
-function computeWidgetMetric(rows, metricId, decisionCol) {
+export function computeWidgetMetric(rows, metricId, decisionCol) {
   let total = 0, appr = 0, inadR = 0, altas = 0, inadI = 0, altasInf = 0;
   for (const r of rows) {
     const q = r.qty || 0;
@@ -918,7 +959,7 @@ function computeWidgetMetric(rows, metricId, decisionCol) {
 const fmtMetricVal = (v, unit) => v == null ? "N/A" : unit === "qty" ? fmtQty(v) : `${v.toFixed(2)}%`;
 
 // Pivot client-side: dataset largo + config → série tidy {data, series, metricDef, xCol}.
-function pivotWidget(ds, config) {
+export function pivotWidget(ds, config) {
   if (!ds) return { state: "no_data" };
   const { rows, scenarios, metrics, temporalColumns } = ds;
   const xCol = config.xDimension;
@@ -1073,28 +1114,40 @@ function FieldWell({ icon, label, accept, value, displayValue, options, onChange
   );
 }
 
-// ── KpiCard — indicador pontual (Simulado + comparativo AS IS) ────────────────
-function KpiCard({ analyticsDataset, metricId }) {
+// Resolve os cenários Baseline (A) e Comparação (B) do KPI a partir dos ids salvos
+// no WidgetConfig, com fallback retrocompatível (DEC-AW-008): A = AS IS, B = 1º canvas.
+export function resolveKpiScenarios(scenarios, kpiA, kpiB) {
+  if (!scenarios || scenarios.length === 0) return { a: null, b: null };
+  const find = (id) => scenarios.find(s => s.id === id);
+  const a = find(kpiA) || find("as_is") || scenarios[0];
+  const defaultB = scenarios.find(s => s.id !== "as_is") || scenarios[scenarios.length - 1];
+  const b = find(kpiB) || defaultB;
+  return { a, b };
+}
+
+// ── KpiCard — indicador pontual comparando dois cenários (A vs B, DEC-AW-008) ──
+function KpiCard({ analyticsDataset, metricId, kpiA, kpiB, onChange }) {
   const kpi = useMemo(() => {
     if (!analyticsDataset) return null;
     const { rows, scenarios, metrics } = analyticsDataset;
     const md = metrics.find(m => m.id === metricId) || metrics[0];
     if (!md) return null;
-    const asIs = scenarios.find(s => s.id === "as_is") || scenarios[0];
-    const sim  = scenarios.find(s => s.id === "simulado") || scenarios[scenarios.length - 1];
+    const { a, b } = resolveKpiScenarios(scenarios, kpiA, kpiB);
     return {
       metricDef: md,
-      asIs: asIs ? computeWidgetMetric(rows, md.id, asIs.decisionCol) : null,
-      sim:  sim  ? computeWidgetMetric(rows, md.id, sim.decisionCol)  : null,
+      aScen: a, bScen: b,
+      aVal: a ? computeWidgetMetric(rows, md.id, a.decisionCol) : null,
+      bVal: b ? computeWidgetMetric(rows, md.id, b.decisionCol) : null,
     };
-  }, [analyticsDataset, metricId]);
+  }, [analyticsDataset, metricId, kpiA, kpiB]);
 
   if (!kpi) return <AWEmptyState icon="🔢" title="Escolha a métrica" hint="Selecione uma métrica para o indicador." />;
-  const { metricDef, asIs, sim } = kpi;
+  const { metricDef, aScen, bScen, aVal, bVal } = kpi;
+  const scenarios = analyticsDataset.scenarios;
   const unit = metricDef.unit;
-  let delta = null, deltaTxt = null, deltaColor = "#94a3b8", arrow = "→";
-  if (sim != null && asIs != null) {
-    delta = sim - asIs;
+  let deltaTxt = null, deltaColor = "#94a3b8", arrow = "→";
+  if (bVal != null && aVal != null) {
+    const delta = bVal - aVal;
     const sign = delta > 0 ? "+" : delta < 0 ? "−" : "";
     const mag = Math.abs(delta);
     deltaTxt = unit === "qty" ? `${sign}${fmtQty(mag)}` : `${sign}${mag.toFixed(2)} pp`;
@@ -1105,19 +1158,42 @@ function KpiCard({ analyticsDataset, metricId }) {
     }
   }
 
+  const selStyle = { width: "100%", padding: "4px 6px", borderRadius: 7, border: "1px solid #e2e8f0",
+    background: "#f8fafc", fontSize: 11.5, color: "#1e293b", fontFamily: "inherit", outline: "none", cursor: "pointer", boxSizing: "border-box" };
+  const labelStyle = { fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 3, display: "block" };
+
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: "28px 16px 24px", minHeight: 240 }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>{metricDef.label}</div>
-      <div style={{ fontSize: 52, fontWeight: 700, color: "#1e293b", lineHeight: 1 }}>{fmtMetricVal(sim, unit)}</div>
-      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 10 }}>Simulado</div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18 }}>
-        <span style={{ fontSize: 13, color: "#64748b" }}>AS IS <strong style={{ color: "#475569" }}>{fmtMetricVal(asIs, unit)}</strong></span>
-        {deltaTxt && (
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 700, color: deltaColor,
-            background: deltaColor === "#94a3b8" ? "#f1f5f9" : `${deltaColor}14`, padding: "3px 9px", borderRadius: 20 }}>
-            {arrow} {deltaTxt}
-          </span>
-        )}
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 240 }}>
+      {/* Seletores Baseline (A) e Comparação (B) */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 4, flexShrink: 0 }}>
+        <div>
+          <span style={labelStyle}>Baseline (A)</span>
+          <select value={aScen?.id ?? ""} onChange={(e) => onChange && onChange({ kpiA: e.target.value })} style={selStyle}>
+            {scenarios.map(s => <option key={s.id} value={s.id}>{s.nome}</option>)}
+          </select>
+        </div>
+        <div>
+          <span style={labelStyle}>Comparação (B)</span>
+          <select value={bScen?.id ?? ""} onChange={(e) => onChange && onChange({ kpiB: e.target.value })} style={selStyle}>
+            {scenarios.map(s => <option key={s.id} value={s.id}>{s.nome}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Indicador — número grande é B (Comparação) */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: "14px 16px 18px" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>{metricDef.label}</div>
+        <div style={{ fontSize: 52, fontWeight: 700, color: "#1e293b", lineHeight: 1 }}>{fmtMetricVal(bVal, unit)}</div>
+        <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 10, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{bScen?.nome ?? "—"}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, flexWrap: "wrap", justifyContent: "center" }}>
+          <span style={{ fontSize: 13, color: "#64748b" }}>{aScen?.nome ?? "—"} <strong style={{ color: "#475569" }}>{fmtMetricVal(aVal, unit)}</strong></span>
+          {deltaTxt && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 700, color: deltaColor,
+              background: deltaColor === "#94a3b8" ? "#f1f5f9" : `${deltaColor}14`, padding: "3px 9px", borderRadius: 20 }}>
+              {arrow} {deltaTxt}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1159,7 +1235,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
   const xOptions = [{ value: "", label: "— escolher —" }, ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d }))];
   const metricOptions = metrics.map(m => ({ value: m.id, label: m.label }));
   const serieOptions = [
-    { value: SERIE_CENARIO, label: "Cenário (AS IS vs Simulado)" },
+    { value: SERIE_CENARIO, label: "Cenário (todas as abas)" },
     { value: SERIE_NONE, label: "Nenhuma (linha única)" },
     ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
   ];
@@ -1208,7 +1284,8 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
       {/* Gráfico ou estado vazio */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {isKpi ? (
-          <KpiCard analyticsDataset={analyticsDataset} metricId={cfg.metric} />
+          <KpiCard analyticsDataset={analyticsDataset} metricId={cfg.metric}
+            kpiA={cfg.kpiA} kpiB={cfg.kpiB} onChange={set} />
         ) : pivot.state === "no_x" ? (
           <AWEmptyState icon="📐" title="Escolha o Eixo X"
             hint="Arraste uma dimensão para o campo Eixo X (temporais ⏱ habilitam evolução cronológica)." />
@@ -1341,15 +1418,23 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
           <div>
             <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>Dashboard</h1>
             <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
-              Construa análises sobre os resultados da simulação · AS IS vs Simulado
+              Construa análises sobre os resultados da simulação · cenários lado a lado
             </p>
           </div>
           {hasData && (
-            <button onClick={addWidget}
-              style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
-                border: "1px solid #2563eb", background: "#2563eb", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
-              <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> Adicionar gráfico
-            </button>
+            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={() => exportAnalyticsDatasetCSV(analyticsDataset)}
+                title="Exporta o dataset largo (dimensões + métricas + todos os cenários) como CSV"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 14, lineHeight: 1 }}>⬇</span> Exportar CSV
+              </button>
+              <button onClick={addWidget}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #2563eb", background: "#2563eb", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> Adicionar gráfico
+              </button>
+            </div>
           )}
         </div>
 
@@ -1408,7 +1493,7 @@ function _initCanvasStore() {
 }
 
 // Clones shapes + conns replacing all IDs — used in canvas duplication
-function cloneCanvasWithNewIds(shapes, conns) {
+export function cloneCanvasWithNewIds(shapes, conns) {
   const idMap = {};
   for (const s of shapes) idMap[s.id] = uid();
   const newShapes = shapes.map(s => ({ ...s, id: idMap[s.id] }));

@@ -181,7 +181,7 @@ AppCreditoSimulador/
 - `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
 - `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
-- `KpiCard({analyticsDataset, metricId})`: indicador pontual — valor Simulado grande + baseline AS IS + delta colorido pela direção da métrica (`GOOD_WHEN_LOWER`)
+- `KpiCard({analyticsDataset, metricId, kpiA, kpiB, onChange})`: indicador pontual comparando dois cenários (DEC-AW-008) — seletores Baseline (A) e Comparação (B) aceitam qualquer cenário (incl. AS IS); valor grande = B, baseline = A, delta `B − A` colorido pela direção da métrica (`GOOD_WHEN_LOWER`). A/B persistidos em `config.kpiA`/`kpiB`; default via `resolveKpiScenarios`
 - `FieldWell`: drop zone para campos — valida `kind` via `accept`; destaca ao arrastar por cima
 
 ### Helpers globais (fora do componente)
@@ -206,6 +206,8 @@ AppCreditoSimulador/
 - `normalizeColName(s)`: normaliza nome de coluna para comparação fuzzy
 - `exportDiagnosticCSV(shapes, conns, csvStore, simulationOverlay)`: gera CSV de auditoria com métricas de funil por nó+valor (aprovação, volume, inadimplência) para diagnóstico da política
 - `pivotWidget(ds, config)`: pivot client-side genérico → `{state, data, series, metricDef, xCol, truncated}`; usado pelos gráficos do Analytics Workspace
+- `resolveKpiScenarios(scenarios, kpiA, kpiB)`: resolve os cenários Baseline (A) e Comparação (B) do KPI a partir dos ids salvos no `WidgetConfig`, com fallback retrocompatível (A=AS IS, B=1º canvas; DEC-AW-008)
+- `buildAnalyticsCSV(ds)` / `exportAnalyticsDatasetCSV(ds)`: serializa/baixa o dataset analítico largo como CSV (dimensões + métricas intrínsecas + uma coluna de decisão por cenário, incl. AS IS), com BOM e escape RFC 4180 — abrível no Excel (5C)
 - `computeWidgetMetric(rows, metricId, decisionCol)`: agrega 1 métrica sobre linhas do dataset largo, replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`)
 
 ### Padrão de refs
@@ -316,7 +318,7 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
 - **Tipo `temporal` (DEC-AW-005)**: marcado no Passo 2 do wizard (toggle de 3 estados Categórica → Ordinal → ⏱ Temporal, grava `columnTypes[col]='temporal'`). `parseTemporalKey(str)` deriva a chave de ordenação cronológica.
 - **Sessão 1** (entregue): pipeline ponta a ponta com um gráfico de linha fixo (Recharts, DEC-AW-001).
 - **Sessão 2** (entregue): builder de dashboard configurável — gráficos de linha configuráveis + painel de campos arrastáveis.
-  - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type:"line", config:{title, xDimension, metric, serieBy}}`. Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
+  - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type, x, y, w, h, config:{title, xDimension, metric, serieBy, kpiA?, kpiB?}}` (`kpiA`/`kpiB` só nos cards `kpi`, 5C). Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
   - **`AnalysisTab`**: layout em 2 colunas — área de gráficos (scroll) + `FieldPanel` à direita. Header com botão **+ Adicionar gráfico**. Funções: `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`.
   - **`FieldPanel`**: chips arrastáveis — dimensões (temporais ⏱ primeiro, depois categóricas; `kind:'dim'`) e métricas (`kind:'metric'`). MIME `application/aw-field`.
   - **`AnalyticsWidget`**: card com título editável, botão remover, barra de 3 `FieldWell` (Eixo X, Métrica, Série) e `LineChart`. Pivot memoizado por `[analyticsDataset, xDimension, metric, serieBy]`.
@@ -328,7 +330,7 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   - **`WidgetConfig.type`**: `"line" | "bar" | "bar100" | "kpi"` — seletor segmentado (📈/📊/🧱/🔢) no header do `AnalyticsWidget`; handler `changeType(id, type)` em `AnalysisTab`.
   - **`bar`**: reusa `pivotWidget`; renderiza `<Bar>` agrupado por série (Recharts `BarChart`).
   - **`bar100`**: normaliza cada bucket do eixo X para somar 100% (memo `stacked100` derivado do pivot), `<Bar stackId>`, eixo Y `[0,100]%`; poço de série rotulado "Composição".
-  - **`kpi`**: ignora Eixo X/Série, usa só a Métrica; `KpiCard` computa AS IS vs Simulado sobre todas as linhas via `computeWidgetMetric`; valor grande (Simulado) + baseline AS IS + delta (pp/qty) colorido por `GOOD_WHEN_LOWER` (`inadReal`/`inadInferida` = menor é melhor).
+  - **`kpi`**: ignora Eixo X/Série, usa só a Métrica + seletores Baseline (A)/Comparação (B) (5C, DEC-AW-008); `KpiCard` computa A e B sobre todas as linhas via `computeWidgetMetric`; valor grande = B + baseline A + delta `B − A` (pp/qty) colorido por `GOOD_WHEN_LOWER` (`inadReal`/`inadInferida` = menor é melhor). A/B persistidos em `config.kpiA`/`kpiB`; export do dataset largo via **⬇ Exportar CSV** no header.
   - **Constantes**: `CHART_TYPES`, `GOOD_WHEN_LOWER`.
 
 ## Engine de simulação
