@@ -1662,14 +1662,35 @@ export default function App() {
 
   // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
   // Recomputado pelo worker quando a simulação muda; cacheado em analyticsDataset.
+  // 5B: monta as abas marcadas (includeInDashboard) como cenários — working copy para o
+  // canvas ativo, store para os demais — e resolve lensPopulations por canvas (DEC-AW-007).
+  const buildAnalyticsCanvasInputs = useCallback(() => {
+    const cs = canvasesR.current;
+    const activeId = activeCanvasIdR.current;
+    const store = csvStoreR.current;
+    const inputs = [];
+    for (const id of Object.keys(cs)) {
+      const c = cs[id];
+      if (!c.includeInDashboard) continue;
+      const shapes_ = id === activeId ? shapesR.current : (c.shapes || []);
+      const conns_  = id === activeId ? connsR.current  : (c.conns  || []);
+      const lensPop = {};
+      for (const shape of shapes_) {
+        if (shape.type === 'decision_lens') lensPop[shape.id] = computeLensAffectedRows(shape, store);
+      }
+      inputs.push({ id, nome: c.name, shapes: shapes_, conns: conns_, lensPopulations: lensPop });
+    }
+    return inputs;
+  }, []);
+
   const analyticsDebounceRef = useRef(null);
   useEffect(() => {
     clearTimeout(analyticsDebounceRef.current);
     analyticsDebounceRef.current = setTimeout(() => {
-      workerRef.current?.postMessage({ type: 'COMPUTE_ANALYTICS_DATASET', shapes: shapesR.current, conns: connsR.current, lensPopulations: lensPopulationsR.current });
+      workerRef.current?.postMessage({ type: 'COMPUTE_ANALYTICS_DATASET', canvases: buildAnalyticsCanvasInputs() });
     }, 300);
     return () => clearTimeout(analyticsDebounceRef.current);
-  }, [shapes, conns, csvStore, lensPopulations]);
+  }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs]);
 
   // Persiste layout do dashboard no localStorage para sobreviver a reloads (Sessão 4).
   useEffect(() => { localStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);

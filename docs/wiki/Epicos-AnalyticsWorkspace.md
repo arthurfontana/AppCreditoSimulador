@@ -285,17 +285,17 @@ Pelo porte da refatoração multi-canvas, a Sessão 5 é **fatiada em 3 sub-sess
 
 ---
 
-#### Sub-sessão 5B — Pipeline N-cenários no worker (Entrega 2, parte 1)
+#### Sub-sessão 5B — Pipeline N-cenários no worker (Entrega 2, parte 1) ✅ ENTREGUE
 
 **Escopo:** worker + dataset analítico. Os componentes de gráfico **não mudam** (DEC-AW-004 — cenário já é série no `pivotWidget`).
 
 **Entrega:**
-- `COMPUTE_ANALYTICS_DATASET` passa a receber **todos os canvases marcados** (`includeInDashboard`), não `{shapes, conns}` de um só.
-- `computeAnalyticsDataset` roda `computeSimulatedDecisions` por canvas e faz **join por `(csvId, rowIdx)`** (datasets compartilhados ⇒ agrupamentos idênticos). Emite uma coluna `__DECISAO_<canvasId>` por canvas + `__DECISAO_AS_IS` **única e global**.
+- `COMPUTE_ANALYTICS_DATASET` passa a receber **todos os canvases marcados** (`includeInDashboard`) via `{canvases: [{id, nome, shapes, conns, lensPopulations}]}`, não `{shapes, conns}` de um só. O dispatch (`buildAnalyticsCanvasInputs`) usa a working copy para o canvas ativo e o store para os demais, e re-emite quando `canvases`/`activeCanvasId` mudam (toggle/rename/switch).
+- `computeAnalyticsDataset(canvasInputs, csvStore)` roda `computeSimulatedDecisions` por canvas e faz **join por `(csvId, rowIdx)`** (datasets compartilhados ⇒ agrupamentos idênticos). Emite uma coluna `__DECISAO_<canvasId>` por canvas + `__DECISAO_AS_IS` **única e global** (substitui o antigo par fixo AS IS/Simulado).
 - `scenarios` = `[{id:'as_is', nome:'AS IS', ...}]` + um `{id, nome:<nome da aba>, decisionCol}` por canvas marcado.
-- `lensPopulations` por canvas: mover o cálculo para o worker (ou computar por canvas na main thread) — cada canvas pode ter lenses próprios.
-- Validar (sem código novo) que line/bar/bar100 listam todos os cenários como série e ciclam `SCENARIO_COLORS`.
-- Otimização: cache de overlay por canvas via hash de `shapes/conns` para não reprocessar canvases intocados ao editar um só.
+- `lensPopulations` por canvas: computado por canvas na main thread (`computeLensAffectedRows` sobre os shapes de cada canvas) e enviado no payload — cada canvas pode ter lenses próprios.
+- Validado (sem código novo) que line/bar/bar100 listam todos os cenários como série e ciclam `SCENARIO_COLORS` — `pivotWidget` já mapeia `scenarios → seriesDefs`. `KpiCard`/quebra por dimensão usam fallback `scenarios[length-1]` (último canvas) quando não há mais id `'simulado'`.
+- Otimização: cache de overlay por canvas (`cachedCanvasOverlay`) via hash de `shapes/conns/lensPopulations` + `csvStoreVersion` — não reprocessa canvases intocados ao editar um só; entradas de canvases removidos são podadas.
 
 **Destrava:** "Cenário A vs B vs C no mesmo gráfico".
 

@@ -286,7 +286,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult`; responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
 | `COMPUTE_JOHNNY` | `{shapes}` | Roda `computeJohnnyData`; responde com `JOHNNY_RESULT` |
-| `COMPUTE_ANALYTICS_DATASET` | `{shapes, conns, lensPopulations}` | Roda `computeAnalyticsDataset` (Analytics Workspace); responde com `ANALYTICS_RESULT` |
+| `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns, lensPopulations}]` — abas marcadas (cenários, 5B). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -305,7 +305,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `buildParetoFrontier(cellMetrics)`: fronteira Pareto greedy (sort por `inadInferida` crescente)
 - `extractScenarios(frontier)`: `{conservador, balanceado, melhorEficiencia, expansao}` — `melhorEficiencia` é o joelho da curva
 - `computeJohnnyData(shapes, csvStore)`: agrupa métricas de **todos** os Cineminhas em pool único, gera fronteira Pareto global com suporte a ordinalidade
-- `computeAnalyticsDataset(shapes, conns, csvStore, lensPopulations)`: reusa `computeSimulatedDecisions` e emite o dataset analítico **largo** (uma linha por agrupamento: dimensões + métricas intrínsecas + `__DECISAO_AS_IS`/`__DECISAO_SIMULADO`) — ver Analytics Workspace
+- `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo** (dimensões + métricas intrínsecas + `__DECISAO_AS_IS` global + uma coluna `__DECISAO_<canvasId>` por cenário); `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
+- `cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations)`: overlay por canvas memoizado por hash de `shapes`/`conns`/`lensPopulations` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só)
 
 ## Analytics Workspace (aba Dashboard)
 
