@@ -1172,6 +1172,19 @@ export default function App() {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
       if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy,'eligibility');}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected"||curTool==="as_is";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":curTool==="as_is"?"AS IS":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
     }
+    // Forward tap to interactive elements inside foreignObject (e.g. cineminha cells)
+    // because e.preventDefault() on touchstart blocks synthetic click generation.
+    if (!moved && e.changedTouches.length > 0) {
+      const t = e.changedTouches[0];
+      const el = document.elementFromPoint(t.clientX, t.clientY);
+      if (el) {
+        let cur = el;
+        while (cur && cur !== svgRef.current) {
+          if (cur.tagName?.toLowerCase() === 'foreignobject') { el.click(); break; }
+          cur = cur.parentElement;
+        }
+      }
+    }
     dragR.current=null; pinchR.current=null; movedR.current=false;
   },[]); // eslint-disable-line
 
@@ -2831,24 +2844,33 @@ export default function App() {
   // ── startPanelDrag ────────────────────────────────────────────
   const startPanelDrag = (e, col, csvId) => {
     e.preventDefault();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
     setPanelDrag({col,csvId});
-    setGhostPos({x:e.clientX,y:e.clientY});
+    setGhostPos({x:cx,y:cy});
   };
 
-  // ── Global mouse listeners for panel→canvas drag ──────────────
+  // ── Global mouse/touch listeners for panel→canvas drag ───────
   useEffect(()=>{
+    const getXY = (e) => e.changedTouches
+      ? {x:e.changedTouches[0].clientX,y:e.changedTouches[0].clientY}
+      : e.touches
+        ? {x:e.touches[0].clientX,y:e.touches[0].clientY}
+        : {x:e.clientX,y:e.clientY};
     const onMove=(e)=>{
       if (!panelDragR.current) return;
-      setGhostPos({x:e.clientX,y:e.clientY});
+      const {x,y}=getXY(e);
+      setGhostPos({x,y});
     };
     const onUp=(e)=>{
       const drag=panelDragR.current;
       if (!drag) return;
+      const {x:cx,y:cy}=getXY(e);
       const svgEl=svgRef.current;
       if (svgEl) {
         const rect=svgEl.getBoundingClientRect();
-        if (e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom) {
-          const sx=e.clientX-rect.left,sy=e.clientY-rect.top;
+        if (cx>=rect.left&&cx<=rect.right&&cy>=rect.top&&cy<=rect.bottom) {
+          const sx=cx-rect.left,sy=cy-rect.top;
           const {x:vx,y:vy,s}=vpR.current;
           const wx=(sx-vx)/s, wy=(sy-vy)/s;
           // Check if dropped on a cineminha node
@@ -2872,7 +2894,14 @@ export default function App() {
     };
     window.addEventListener('mousemove',onMove);
     window.addEventListener('mouseup',onUp);
-    return()=>{ window.removeEventListener('mousemove',onMove); window.removeEventListener('mouseup',onUp); };
+    window.addEventListener('touchmove',onMove,{passive:false});
+    window.addEventListener('touchend',onUp);
+    return()=>{
+      window.removeEventListener('mousemove',onMove);
+      window.removeEventListener('mouseup',onUp);
+      window.removeEventListener('touchmove',onMove);
+      window.removeEventListener('touchend',onUp);
+    };
   },[]); // eslint-disable-line
 
   // ── Wizard preview ────────────────────────────────────────────
@@ -4663,9 +4692,11 @@ export default function App() {
               return filtered.length>0 ? filtered.map(({col,csvId})=>(
                 <div key={`${csvId}-${col}`}
                   onMouseDown={(e)=>startPanelDrag(e,col,csvId)}
+                  onTouchStart={(e)=>startPanelDrag(e,col,csvId)}
                   style={{display:"flex",alignItems:"center",gap:6,padding:"7px 10px",borderRadius:8,
                     border:"1.5px solid #fde68a",background:"#fef9c3",marginBottom:4,
-                    cursor:"grab",userSelect:"none",fontSize:12,fontWeight:500,color:"#92400e",transition:"all .12s"}}
+                    cursor:"grab",userSelect:"none",fontSize:12,fontWeight:500,color:"#92400e",transition:"all .12s",
+                    touchAction:"none"}}
                   onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
                   onMouseLeave={e=>{e.currentTarget.style.background="#fef9c3";e.currentTarget.style.borderColor="#fde68a";}}>
                   <span>◇</span>
