@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -873,6 +873,16 @@ const AW_DRAG_MIME = "application/aw-field";
 const SERIE_CENARIO = "__cenario__";
 const SERIE_NONE = "__none__";
 
+// Tipos de gráfico (Sessão 3). 'line' e 'bar'/'bar100' usam o pivot tidy; 'kpi' é pontual.
+const CHART_TYPES = [
+  { id: "line",   icon: "📈", label: "Linha" },
+  { id: "bar",    icon: "📊", label: "Barras" },
+  { id: "bar100", icon: "🧱", label: "100%" },
+  { id: "kpi",    icon: "🔢", label: "KPI" },
+];
+// Métricas em que "menor é melhor" — orienta a cor do delta no KPI.
+const GOOD_WHEN_LOWER = new Set(["inadReal", "inadInferida"]);
+
 // Agrega uma métrica sobre um conjunto de linhas (formato largo) para uma coluna de decisão.
 // Replica a semântica do motor: numeradores/denominadores acumulados apenas sobre aprovados.
 function computeWidgetMetric(rows, metricId, decisionCol) {
@@ -1056,12 +1066,79 @@ function FieldWell({ icon, label, accept, value, displayValue, options, onChange
   );
 }
 
+// ── KpiCard — indicador pontual (Simulado + comparativo AS IS) ────────────────
+function KpiCard({ analyticsDataset, metricId }) {
+  const kpi = useMemo(() => {
+    if (!analyticsDataset) return null;
+    const { rows, scenarios, metrics } = analyticsDataset;
+    const md = metrics.find(m => m.id === metricId) || metrics[0];
+    if (!md) return null;
+    const asIs = scenarios.find(s => s.id === "as_is") || scenarios[0];
+    const sim  = scenarios.find(s => s.id === "simulado") || scenarios[scenarios.length - 1];
+    return {
+      metricDef: md,
+      asIs: asIs ? computeWidgetMetric(rows, md.id, asIs.decisionCol) : null,
+      sim:  sim  ? computeWidgetMetric(rows, md.id, sim.decisionCol)  : null,
+    };
+  }, [analyticsDataset, metricId]);
+
+  if (!kpi) return <AWEmptyState icon="🔢" title="Escolha a métrica" hint="Selecione uma métrica para o indicador." />;
+  const { metricDef, asIs, sim } = kpi;
+  const unit = metricDef.unit;
+  let delta = null, deltaTxt = null, deltaColor = "#94a3b8", arrow = "→";
+  if (sim != null && asIs != null) {
+    delta = sim - asIs;
+    const sign = delta > 0 ? "+" : delta < 0 ? "−" : "";
+    const mag = Math.abs(delta);
+    deltaTxt = unit === "qty" ? `${sign}${fmtQty(mag)}` : `${sign}${mag.toFixed(2)} pp`;
+    arrow = delta > 0 ? "▲" : delta < 0 ? "▼" : "→";
+    if (delta !== 0) {
+      const good = GOOD_WHEN_LOWER.has(metricDef.id) ? delta < 0 : delta > 0;
+      deltaColor = good ? "#16a34a" : "#dc2626";
+    }
+  }
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: "28px 16px 24px", minHeight: 240 }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>{metricDef.label}</div>
+      <div style={{ fontSize: 52, fontWeight: 700, color: "#1e293b", lineHeight: 1 }}>{fmtMetricVal(sim, unit)}</div>
+      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 10 }}>Simulado</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18 }}>
+        <span style={{ fontSize: 13, color: "#64748b" }}>AS IS <strong style={{ color: "#475569" }}>{fmtMetricVal(asIs, unit)}</strong></span>
+        {deltaTxt && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 700, color: deltaColor,
+            background: deltaColor === "#94a3b8" ? "#f1f5f9" : `${deltaColor}14`, padding: "3px 9px", borderRadius: 20 }}>
+            {arrow} {deltaTxt}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── AnalyticsWidget — um gráfico configurável ─────────────────────────────────
-function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onDelete }) {
+function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChange, onDelete }) {
   const cfg = widget.config;
-  const pivot = useMemo(() => pivotWidget(analyticsDataset, cfg),
+  const type = widget.type || "line";
+  const isKpi = type === "kpi";
+  const pivot = useMemo(() => isKpi ? { state: "kpi" } : pivotWidget(analyticsDataset, cfg),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [analyticsDataset, cfg.xDimension, cfg.metric, cfg.serieBy]);
+    [analyticsDataset, isKpi, cfg.xDimension, cfg.metric, cfg.serieBy]);
+
+  // Barra 100% empilhada: normaliza cada bucket do eixo X para somar 100%.
+  const stacked100 = useMemo(() => {
+    if (type !== "bar100" || pivot.state !== "ok") return null;
+    return pivot.data.map((row) => {
+      let sum = 0;
+      for (const sd of pivot.series) { const v = row[sd.label]; if (typeof v === "number") sum += v; }
+      const out = { x: row.x };
+      for (const sd of pivot.series) {
+        const v = row[sd.label];
+        out[sd.label] = (sum > 0 && typeof v === "number") ? (v / sum) * 100 : null;
+      }
+      return out;
+    });
+  }, [type, pivot]);
 
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
@@ -1085,7 +1162,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onDelete })
 
   return (
     <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "14px 16px 12px", marginBottom: 18 }}>
-      {/* Título editável + remover */}
+      {/* Título editável + seletor de tipo + remover */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <input value={cfg.title} onChange={(e) => set({ title: e.target.value })}
           placeholder="Título do gráfico"
@@ -1093,23 +1170,37 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onDelete })
             borderRadius: 7, padding: "4px 7px", background: "transparent", fontFamily: "inherit", outline: "none", minWidth: 0 }}
           onFocus={(e) => { e.target.style.borderColor = "#e2e8f0"; e.target.style.background = "#f8fafc"; }}
           onBlur={(e) => { e.target.style.borderColor = "transparent"; e.target.style.background = "transparent"; }} />
+        <div style={{ display: "flex", flexShrink: 0, gap: 2, padding: 2, background: "#f1f5f9", borderRadius: 9 }}>
+          {CHART_TYPES.map((ct) => (
+            <button key={ct.id} onClick={() => onTypeChange(widget.id, ct.id)} title={ct.label}
+              style={{ width: 30, height: 26, borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13, lineHeight: 1,
+                background: type === ct.id ? "#fff" : "transparent", boxShadow: type === ct.id ? "0 1px 2px rgba(0,0,0,.1)" : "none",
+                opacity: type === ct.id ? 1 : 0.55 }}>{ct.icon}</button>
+          ))}
+        </div>
         <button onClick={() => onDelete(widget.id)} title="Remover gráfico"
           style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
             color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
       </div>
 
-      {/* Barra de configuração — poços de campo */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9" }}>
-        <FieldWell icon="📅" label="Eixo X" accept="dim" value={cfg.xDimension} displayValue={cfg.xDimension}
-          options={xOptions} onChange={(v) => set({ xDimension: v })} />
+      {/* Barra de configuração — poços de campo (KPI usa apenas a métrica) */}
+      <div style={{ display: "grid", gridTemplateColumns: isKpi ? "1fr" : "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9" }}>
+        {!isKpi && (
+          <FieldWell icon="📅" label="Eixo X" accept="dim" value={cfg.xDimension} displayValue={cfg.xDimension}
+            options={xOptions} onChange={(v) => set({ xDimension: v })} />
+        )}
         <FieldWell icon="Σ" label="Métrica" accept="metric" value={cfg.metric} displayValue={cfg.metric}
           options={metricOptions} onChange={(v) => set({ metric: v || metrics[0]?.id })} />
-        <FieldWell icon="🎨" label="Série" accept="dim" value={cfg.serieBy} displayValue
-          options={serieOptions} onChange={(v) => set({ serieBy: v || SERIE_CENARIO })} />
+        {!isKpi && (
+          <FieldWell icon="🎨" label={type === "bar100" ? "Composição" : "Série"} accept="dim" value={cfg.serieBy} displayValue
+            options={serieOptions} onChange={(v) => set({ serieBy: v || SERIE_CENARIO })} />
+        )}
       </div>
 
       {/* Gráfico ou estado vazio */}
-      {pivot.state === "no_x" ? (
+      {isKpi ? (
+        <KpiCard analyticsDataset={analyticsDataset} metricId={cfg.metric} />
+      ) : pivot.state === "no_x" ? (
         <AWEmptyState icon="📐" title="Escolha o Eixo X"
           hint="Arraste uma dimensão para o campo Eixo X (temporais ⏱ habilitam evolução cronológica)." />
       ) : pivot.state === "empty" ? (
@@ -1119,20 +1210,36 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onDelete })
         <>
           <div style={{ width: "100%", height: 320 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
-                <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
-                <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
-                  unit={isPct ? "%" : ""} domain={isPct ? [0, 100] : ["auto", "auto"]} />
-                <Tooltip
-                  formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
-                  contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                {pivot.series.map((sd) => (
-                  <Line key={sd.key} type="monotone" dataKey={sd.label}
-                    stroke={sd.color} strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
-                ))}
-              </LineChart>
+              {type === "line" ? (
+                <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+                  <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
+                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
+                    unit={isPct ? "%" : ""} domain={isPct ? [0, 100] : ["auto", "auto"]} />
+                  <Tooltip formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
+                    contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  {pivot.series.map((sd) => (
+                    <Line key={sd.key} type="monotone" dataKey={sd.label}
+                      stroke={sd.color} strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
+                  ))}
+                </LineChart>
+              ) : (
+                <BarChart data={type === "bar100" ? stacked100 : pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+                  <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
+                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
+                    unit={type === "bar100" ? "%" : (isPct ? "%" : "")}
+                    domain={type === "bar100" ? [0, 100] : (isPct ? [0, 100] : ["auto", "auto"])} />
+                  <Tooltip formatter={(v) => type === "bar100" ? (v == null ? "N/A" : `${v.toFixed(1)}%`) : fmtMetricVal(v, pivot.metricDef.unit)}
+                    contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  {pivot.series.map((sd) => (
+                    <Bar key={sd.key} dataKey={sd.label} fill={sd.color} radius={type === "bar100" ? 0 : [3, 3, 0, 0]}
+                      stackId={type === "bar100" ? "s" : undefined} />
+                  ))}
+                </BarChart>
+              )}
             </ResponsiveContainer>
           </div>
           {pivot.truncated && (
@@ -1166,6 +1273,7 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
   const addWidget = () => setAnalyticsLayout(prev => [...prev, makeWidget("Novo gráfico")]);
   const removeWidget = (id) => setAnalyticsLayout(prev => prev.filter(w => w.id !== id));
   const changeConfig = (id, patch) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, config: { ...w.config, ...patch } } : w));
+  const changeType = (id, type) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, type } : w));
 
   const hasData = !!analyticsDataset;
 
@@ -1199,7 +1307,7 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
           <div style={{ padding: "8px 28px 28px", maxWidth: 1100 }}>
             {analyticsLayout.map(w => (
               <AnalyticsWidget key={w.id} widget={w} analyticsDataset={analyticsDataset}
-                onConfigChange={changeConfig} onDelete={removeWidget} />
+                onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget} />
             ))}
           </div>
         )}
