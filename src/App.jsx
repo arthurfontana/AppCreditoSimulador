@@ -1410,6 +1410,30 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
   const set = (patch) => onConfigChange(widget.id, patch);
   const isPct = pivot.metricDef?.unit !== "qty";
   const showLabels = cfg.showLabels ?? false;
+
+  // Auto Y-axis domain: computa min/max dos dados reais com folga estilo Excel.
+  const autoYDomain = useMemo(() => {
+    if (pivot.state !== "ok" || type === "bar100") return null;
+    let minVal = Infinity, maxVal = -Infinity;
+    for (const row of pivot.data) {
+      for (const sd of pivot.series) {
+        const v = row[sd.label];
+        if (typeof v === "number" && !isNaN(v)) { minVal = Math.min(minVal, v); maxVal = Math.max(maxVal, v); }
+      }
+    }
+    if (minVal === Infinity) return null;
+    const range = maxVal - minVal;
+    const pad = range === 0 ? Math.max(maxVal * 0.1, 1) : range * 0.1;
+    return [Math.max(0, Math.floor(minVal - pad)), Math.ceil(maxVal + pad)];
+  }, [pivot.state, pivot.data, pivot.series, type]);
+
+  const yDomain = (() => {
+    if (type === "bar100") return [0, 100];
+    const hasMin = cfg.yMin !== null && cfg.yMin !== undefined && cfg.yMin !== "";
+    const hasMax = cfg.yMax !== null && cfg.yMax !== undefined && cfg.yMax !== "";
+    const fallback = autoYDomain || (isPct ? [0, 100] : ["auto", "auto"]);
+    return [hasMin ? Number(cfg.yMin) : fallback[0], hasMax ? Number(cfg.yMax) : fallback[1]];
+  })();
   const setSeriesStyle = (key, patch) => {
     const current = cfg.seriesStyles || {};
     set({ seriesStyles: { ...current, [key]: { ...(current[key] || {}), ...patch } } });
@@ -1473,6 +1497,38 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
         )}
       </div>
 
+      {/* Controles de Eixo Y — min/max personalizáveis */}
+      {!isKpi && type !== "bar100" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexShrink: 0 }}>
+          <span style={{ fontSize: 11, color: "#64748b", fontWeight: 500, letterSpacing: 0.2 }}>Eixo Y:</span>
+          {[["Mín", "yMin"], ["Máx", "yMax"]].map(([label, key]) => {
+            const val = cfg[key];
+            const hasVal = val !== null && val !== undefined && val !== "";
+            return (
+              <label key={key} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#64748b" }}>
+                {label}
+                <input
+                  type="number"
+                  placeholder="auto"
+                  value={hasVal ? val : ""}
+                  onChange={(e) => set({ [key]: e.target.value === "" ? null : Number(e.target.value) })}
+                  style={{ width: 64, padding: "3px 6px", borderRadius: 6, border: `1px solid ${hasVal ? "#86efac" : "#e2e8f0"}`,
+                    fontSize: 11, fontFamily: "inherit", textAlign: "right", outline: "none",
+                    background: hasVal ? "#f0fdf4" : "#f8fafc", color: "#1e293b" }}
+                />
+              </label>
+            );
+          })}
+          {(cfg.yMin !== null && cfg.yMin !== undefined && cfg.yMin !== "" || cfg.yMax !== null && cfg.yMax !== undefined && cfg.yMax !== "") && (
+            <button onClick={() => set({ yMin: null, yMax: null })} title="Redefinir para automático"
+              style={{ fontSize: 10, padding: "2px 8px", borderRadius: 5, border: "1px solid #e2e8f0",
+                background: "#f8fafc", color: "#94a3b8", cursor: "pointer", fontFamily: "inherit" }}>
+              ↺ auto
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Chips de cenário — visíveis quando a série ou o eixo X está em modo Cenário */}
       {!isKpi && allScenarios.length > 1 && (xIsCenario || cfg.serieBy == null || cfg.serieBy === SERIE_CENARIO) && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, flexShrink: 0 }}>
@@ -1525,7 +1581,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                     <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
                     <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
-                      unit={isPct ? "%" : ""} domain={isPct ? [0, 100] : ["auto", "auto"]} />
+                      unit={isPct ? "%" : ""} domain={yDomain} />
                     <Tooltip formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
                       contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -1548,7 +1604,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
                     <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
                     <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
                       unit={type === "bar100" ? "%" : (isPct ? "%" : "")}
-                      domain={type === "bar100" ? [0, 100] : (isPct ? [0, 100] : ["auto", "auto"])} />
+                      domain={yDomain} />
                     <Tooltip formatter={(v) => type === "bar100" ? (v == null ? "N/A" : `${v.toFixed(1)}%`) : fmtMetricVal(v, pivot.metricDef.unit)}
                       contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -1591,7 +1647,7 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
     const nextY = analyticsLayout.reduce((acc, w) => Math.max(acc, (w.y ?? 0) + (w.h ?? 500)), 0);
     return {
       id: uid(), type: "line", x: 24, y: analyticsLayout.length === 0 ? 24 : nextY + 24, w: 560, h: 500,
-      config: { title, xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_CENARIO },
+      config: { title, xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_CENARIO, yMin: null, yMax: null },
     };
   };
 
