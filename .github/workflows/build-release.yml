@@ -60,3 +60,37 @@ jobs:
             git commit -m "chore: atualiza build local [skip ci]"
             git push origin main
           fi
+
+      - name: Empacotar release/ em ZIP
+        run: |
+          BUILD_NUM=$(git rev-list --count HEAD)
+          cd release
+          zip -r ../AppCreditoSimulador-local.zip .
+          echo "BUILD_NUM=${BUILD_NUM}" >> $GITHUB_ENV
+
+      - name: Publicar GitHub Release (latest)
+        run: |
+          # Remove release e tag existentes para recriar sempre no mesmo link
+          gh release delete latest --yes 2>/dev/null || true
+          git push origin :refs/tags/latest 2>/dev/null || true
+
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u '+%d/%m/%Y %H:%M UTC')
+
+          gh release create latest \
+            --title "Build #${BUILD_NUM} · ${BUILD_DATE}" \
+            --notes "## AppCreditoSimulador — distribuição local
+
+          **Build:** #${BUILD_NUM}
+          **Commit:** \`${COMMIT_SHORT}\`
+          **Data:** ${BUILD_DATE}
+
+          ### Como usar
+          1. Baixe o arquivo \`AppCreditoSimulador-local.zip\` abaixo
+          2. Extraia em qualquer pasta
+          3. Execute \`iniciar.bat\` (requer Python instalado)
+          4. O app abre automaticamente no navegador em http://localhost:8080" \
+            --latest \
+            AppCreditoSimulador-local.zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
