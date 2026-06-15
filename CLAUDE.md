@@ -175,9 +175,10 @@ AppCreditoSimulador/
 ### Componentes globais (fora do componente principal)
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
 - `SimIndicators`: exibe indicadores de simulação na sidebar direita — mostra resultado atual + comparativo com baseline AS IS quando disponível (`incrementalResult`)
-- `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`
+- `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
-- `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onDelete})`: card de gráfico configurável com `FieldWell` e `LineChart` (Recharts)
+- `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
+- `KpiCard({analyticsDataset, metricId})`: indicador pontual — valor Simulado grande + baseline AS IS + delta colorido pela direção da métrica (`GOOD_WHEN_LOWER`)
 - `FieldWell`: drop zone para campos — valida `kind` via `accept`; destaca ao arrastar por cima
 
 ### Helpers globais (fora do componente)
@@ -319,6 +320,12 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   - **`pivotWidget(ds, config)`**: `serieBy` aceita `__cenario__` (AS IS vs Simulado), `__none__` (linha única Simulado) ou nome de dimensão (série por valores distintos, teto `MAX_SERIES=12`). Eixo X temporal ordena via `parseTemporalKey`; senão numérico/A-Z.
   - **Métricas disponíveis**: `approvalRate`, `inadReal`, `inadInferida` (pct), `qty`, `approvedQty` (qty).
   - **Tabs de navegação**: barra inferior esquerda com "Canvas" e "Dashboard" — padrão ao carregar é Canvas.
+- **Sessão 3** (entregue): tipos de gráfico — barras, barras 100% empilhadas e KPI card.
+  - **`WidgetConfig.type`**: `"line" | "bar" | "bar100" | "kpi"` — seletor segmentado (📈/📊/🧱/🔢) no header do `AnalyticsWidget`; handler `changeType(id, type)` em `AnalysisTab`.
+  - **`bar`**: reusa `pivotWidget`; renderiza `<Bar>` agrupado por série (Recharts `BarChart`).
+  - **`bar100`**: normaliza cada bucket do eixo X para somar 100% (memo `stacked100` derivado do pivot), `<Bar stackId>`, eixo Y `[0,100]%`; poço de série rotulado "Composição".
+  - **`kpi`**: ignora Eixo X/Série, usa só a Métrica; `KpiCard` computa AS IS vs Simulado sobre todas as linhas via `computeWidgetMetric`; valor grande (Simulado) + baseline AS IS + delta (pp/qty) colorido por `GOOD_WHEN_LOWER` (`inadReal`/`inadInferida` = menor é melhor).
+  - **Constantes**: `CHART_TYPES`, `GOOD_WHEN_LOWER`.
 
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos

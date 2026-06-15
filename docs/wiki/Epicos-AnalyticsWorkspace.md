@@ -211,13 +211,14 @@ activeTab: "analysis" | "canvas"            // aba ativa
 
 ---
 
-### Sessão 3 — Tipos de gráfico: barras e KPI
+### Sessão 3 — Tipos de gráfico: barras e KPI ✅ ENTREGUE
 
 **Entrega:**
-- Componente **barra normal** (comparação entre categorias)
-- Componente **barra 100% empilhada** (composição / mix de risco)
-- Componente **KPI card** (indicador pontual com valor + comparativo)
-- Cada tipo configurável pelo mesmo painel de campos da Sessão 2
+- `WidgetConfig.type` passa a ser `"line" | "bar" | "bar100" | "kpi"`; seletor segmentado de tipo no header de cada `AnalyticsWidget` (📈/📊/🧱/🔢) — handler `changeType(id, type)` em `AnalysisTab`
+- Componente **barra normal** (`bar`) — comparação entre categorias; reusa `pivotWidget`, renderiza `<Bar>` agrupado por série (Recharts `BarChart`)
+- Componente **barra 100% empilhada** (`bar100`) — composição / mix de risco; normaliza cada bucket do eixo X para somar 100% (memo `stacked100` derivado do pivot), `<Bar stackId>`, eixo Y `[0,100]%`
+- Componente **KPI card** (`kpi`) — indicador pontual: ignora Eixo X/Série, usa só a Métrica; computa AS IS vs Simulado sobre todas as linhas via `computeWidgetMetric`; exibe valor grande (Simulado) + baseline AS IS + delta (pp/qty) colorido pela direção da métrica (`GOOD_WHEN_LOWER` = `inadReal`/`inadInferida`) — componente `KpiCard`
+- Cada tipo configurável pelo mesmo painel de campos da Sessão 2; KPI mostra apenas o poço "Métrica"; em `bar100` o poço de série é rotulado "Composição"
 
 **Destrava:** caso de uso "mix de score dos aprovados ao longo do tempo" (barra 100%) e indicadores executivos (KPI).
 
