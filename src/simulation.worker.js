@@ -735,6 +735,79 @@ function computeJohnnyData(shapes, csvStore) {
   };
 }
 
+// ── Analytics dataset (Analytics Workspace) ───────────────────────────────────
+// Emits the canonical wide dataset (DEC-AW-003): one row per CSV grouping, with
+// the original dimensions + intrinsic metrics + one decision column per scenario.
+const ANALYTICS_METRIC_TYPES = new Set(['qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida', 'mixRisco']);
+
+function computeAnalyticsDataset(shapes, conns, csvStore, lensPopulations) {
+  const overlay = computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations);
+  if (!overlay) return null;
+
+  const dimensionSet = new Set();
+  const temporalSet = new Set();
+  const rows = [];
+
+  for (const [csvId, { rowDecisions }] of Object.entries(overlay)) {
+    const csv = csvStore[csvId];
+    if (!csv) continue;
+    const types = csv.columnTypes || {};
+    const getIdx = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col != null ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx        = getIdx('qty');
+    const altasIdx      = getIdx('qtdAltas');
+    const altasInferIdx = getIdx('qtdAltasInfer');
+    const inadRIdx      = getIdx('inadReal');
+    const inadIIdx      = getIdx('inadInferida');
+
+    // Dimensions: every non-metric, non-internal column.
+    const dimCols = csv.headers.filter(h =>
+      h !== '__DECISAO_ORIGINAL' && !ANALYTICS_METRIC_TYPES.has(types[h] ?? '')
+    );
+    for (const h of dimCols) {
+      dimensionSet.add(h);
+      if ((types[h] ?? '') === 'temporal') temporalSet.add(h);
+    }
+    const dimIdx = dimCols.map(h => csv.headers.indexOf(h));
+
+    for (const rd of rowDecisions) {
+      const row = csv.rows[rd.rowIdx];
+      if (!row) continue;
+      const out = {};
+      for (let i = 0; i < dimCols.length; i++) out[dimCols[i]] = row[dimIdx[i]] ?? '';
+      out.qty           = qtyIdx        >= 0 ? (parseFloat(row[qtyIdx])        || 0) : 1;
+      out.qtdAltas      = altasIdx      >= 0 ? (parseFloat(row[altasIdx])      || 0) : 0;
+      out.qtdAltasInfer = altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0;
+      out.inadRRaw      = inadRIdx      >= 0 ? (parseFloat(row[inadRIdx])      || 0) : 0;
+      out.inadIRaw      = inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0;
+      out.__DECISAO_AS_IS    = rd.decisaoOriginal || '';
+      out.__DECISAO_SIMULADO = rd.decisaoSimulada || '';
+      rows.push(out);
+    }
+  }
+
+  if (rows.length === 0) return null;
+
+  return {
+    rows,
+    dimensions: [...dimensionSet],
+    temporalColumns: [...temporalSet],
+    metrics: [
+      { id: 'approvalRate', label: 'Taxa de Aprovação', unit: 'pct' },
+      { id: 'inadReal',     label: 'Inad. Real',        unit: 'pct' },
+      { id: 'inadInferida', label: 'Inad. Inferida',    unit: 'pct' },
+      { id: 'qty',          label: 'Vol. Propostas',    unit: 'qty' },
+      { id: 'approvedQty',  label: 'Vol. Aprovado',     unit: 'qty' },
+    ],
+    scenarios: [
+      { id: 'as_is',    nome: 'AS IS',    decisionCol: '__DECISAO_AS_IS' },
+      { id: 'simulado', nome: 'Simulado', decisionCol: '__DECISAO_SIMULADO' },
+    ],
+  };
+}
+
 // ── Worker state ─────────────────────────────────────────────────────────────
 let workerCsvStore = {};
 
@@ -767,6 +840,12 @@ self.onmessage = (e) => {
     const maxInadReal = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadReal     ?? 0));
     const maxInadInf  = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadInferida ?? 0));
     self.postMessage({ type: 'OPTIM_RESULT', shapeId: shape.id, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf });
+    return;
+  }
+
+  if (type === 'COMPUTE_ANALYTICS_DATASET') {
+    const dataset = computeAnalyticsDataset(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
+    self.postMessage({ type: 'ANALYTICS_RESULT', dataset });
     return;
   }
 
