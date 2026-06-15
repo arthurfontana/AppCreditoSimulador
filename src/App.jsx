@@ -920,6 +920,8 @@ const AW_DRAG_MIME = "application/aw-field";
 // Sentinelas de "série por": cenário (AS IS vs Simulado) ou nenhuma (linha única).
 const SERIE_CENARIO = "__cenario__";
 const SERIE_NONE = "__none__";
+// Sentinela de "eixo X por cenário": cada aba vira um bucket no X.
+const XDIM_CENARIO = "__x_cenario__";
 
 // Tipos de gráfico (Sessão 3). 'line' e 'bar'/'bar100' usam o pivot tidy; 'kpi' é pontual.
 const CHART_TYPES = [
@@ -967,6 +969,41 @@ export function pivotWidget(ds, config) {
   const metricDef = metrics.find(m => m.id === config.metric) || metrics[0];
   if (!metricDef) return { state: "no_metric" };
   const serieBy = config.serieBy || SERIE_CENARIO;
+
+  // Modo especial: cenários no eixo X (cada aba = um bucket X).
+  if (xCol === XDIM_CENARIO) {
+    const activeIds = config.activeScenarios;
+    const visScenarios = (activeIds && activeIds.length > 0)
+      ? scenarios.filter(s => activeIds.includes(s.id))
+      : scenarios;
+    if (visScenarios.length === 0) return { state: "empty" };
+
+    // Série = dimensão categórica ou linha única.
+    let seriesDefs;
+    let truncated = false;
+    if (serieBy === SERIE_NONE || serieBy === SERIE_CENARIO) {
+      seriesDefs = [{ key: "valor", label: metricDef.label, color: SCENARIO_COLORS[1] }];
+    } else {
+      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort((a, b) => {
+        const na = parseFloat(a), nb = parseFloat(b);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return a.localeCompare(b, "pt-BR");
+      });
+      const capped = distinct.slice(0, MAX_SERIES);
+      truncated = capped.length >= MAX_SERIES && distinct.length > MAX_SERIES;
+      seriesDefs = capped.map((v, i) => ({ key: v, label: v, filterCol: serieBy, filterVal: v, color: SERIE_COLORS[i % SERIE_COLORS.length] }));
+    }
+
+    const data = visScenarios.map((s) => {
+      const row = { x: s.nome };
+      for (const sd of seriesDefs) {
+        const subset = sd.filterCol ? rows.filter(r => String(r[sd.filterCol] ?? "").trim() === sd.filterVal) : rows;
+        row[sd.label] = computeWidgetMetric(subset, metricDef.id, s.decisionCol);
+      }
+      return row;
+    });
+    return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated };
+  }
 
   // Define as séries.
   let seriesDefs;
@@ -1072,6 +1109,7 @@ function FieldPanel({ analyticsDataset }) {
   return (
     <div style={{ width: 220, flexShrink: 0, borderLeft: "1px solid #e2e8f0", background: "#fff", overflowY: "auto", padding: "16px 14px" }}>
       <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Dimensões</p>
+      {chip("Cenários (abas)", "🎬", "#fff7ed", "#fed7aa", "#c2410c", "dim", XDIM_CENARIO)}
       {orderedDims.length > 0 ? orderedDims.map(d =>
         temporalCols.has(d)
           ? chip(d, "⏱", "#eef2ff", "#c7d2fe", "#4338ca", "dim", d)
@@ -1240,13 +1278,23 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
     return a.localeCompare(b, "pt-BR");
   });
 
-  const xOptions = [{ value: "", label: "— escolher —" }, ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d }))];
-  const metricOptions = metrics.map(m => ({ value: m.id, label: m.label }));
-  const serieOptions = [
-    { value: SERIE_CENARIO, label: "Cenário (todas as abas)" },
-    { value: SERIE_NONE, label: "Nenhuma (linha única)" },
+  const xIsCenario = cfg.xDimension === XDIM_CENARIO;
+  const xOptions = [
+    { value: "", label: "— escolher —" },
+    { value: XDIM_CENARIO, label: "🎬 Cenários (abas)" },
     ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
   ];
+  const metricOptions = metrics.map(m => ({ value: m.id, label: m.label }));
+  const serieOptions = xIsCenario
+    ? [
+      { value: SERIE_NONE, label: "Nenhuma (linha única)" },
+      ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
+    ]
+    : [
+      { value: SERIE_CENARIO, label: "Cenário (todas as abas)" },
+      { value: SERIE_NONE, label: "Nenhuma (linha única)" },
+      ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
+    ];
 
   const set = (patch) => onConfigChange(widget.id, patch);
   const isPct = pivot.metricDef?.unit !== "qty";
@@ -1279,7 +1327,13 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
       <div style={{ display: "grid", gridTemplateColumns: isKpi ? "1fr" : "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9", flexShrink: 0 }}>
         {!isKpi && (
           <FieldWell icon="📅" label="Eixo X" accept="dim" value={cfg.xDimension} displayValue={cfg.xDimension}
-            options={xOptions} onChange={(v) => set({ xDimension: v })} />
+            options={xOptions} onChange={(v) => {
+              const patch = { xDimension: v };
+              if (v === XDIM_CENARIO && (cfg.serieBy == null || cfg.serieBy === SERIE_CENARIO)) {
+                patch.serieBy = SERIE_NONE;
+              }
+              set(patch);
+            }} />
         )}
         <FieldWell icon="Σ" label="Métrica" accept="metric" value={cfg.metric} displayValue={cfg.metric}
           options={metricOptions} onChange={(v) => set({ metric: v || metrics[0]?.id })} />
@@ -1289,8 +1343,8 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
         )}
       </div>
 
-      {/* Chips de cenário — visíveis quando a série está em modo Cenário */}
-      {!isKpi && allScenarios.length > 1 && (cfg.serieBy == null || cfg.serieBy === SERIE_CENARIO) && (
+      {/* Chips de cenário — visíveis quando a série ou o eixo X está em modo Cenário */}
+      {!isKpi && allScenarios.length > 1 && (xIsCenario || cfg.serieBy == null || cfg.serieBy === SERIE_CENARIO) && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, flexShrink: 0 }}>
           {allScenarios.map((s) => {
             const active = cfg.activeScenarios == null || cfg.activeScenarios.includes(s.id);
