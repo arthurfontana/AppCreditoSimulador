@@ -1124,7 +1124,7 @@ function KpiCard({ analyticsDataset, metricId }) {
 }
 
 // ── AnalyticsWidget — um gráfico configurável ─────────────────────────────────
-function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChange, onDelete }) {
+function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChange, onDelete, onDragStart, onResizeStart }) {
   const cfg = widget.config;
   const type = widget.type || "line";
   const isKpi = type === "kpi";
@@ -1168,9 +1168,10 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
   const isPct = pivot.metricDef?.unit !== "qty";
 
   return (
-    <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "14px 16px 12px", marginBottom: 18 }}>
+    <div style={{ position: "relative", background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "14px 16px 12px", display: "flex", flexDirection: "column", height: "100%", boxSizing: "border-box" }}>
       {/* Título editável + seletor de tipo + remover */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexShrink: 0 }}>
+        {onDragStart && <div onMouseDown={(e) => { e.stopPropagation(); onDragStart(e); }} style={{ cursor: "grab", color: "#cbd5e1", fontSize: 15, userSelect: "none", flexShrink: 0, lineHeight: 1 }}>⠿</div>}
         <input value={cfg.title} onChange={(e) => set({ title: e.target.value })}
           placeholder="Título do gráfico"
           style={{ flex: 1, fontSize: 14, fontWeight: 600, color: "#1e293b", border: "1px solid transparent",
@@ -1191,7 +1192,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
       </div>
 
       {/* Barra de configuração — poços de campo (KPI usa apenas a métrica) */}
-      <div style={{ display: "grid", gridTemplateColumns: isKpi ? "1fr" : "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isKpi ? "1fr" : "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9", flexShrink: 0 }}>
         {!isKpi && (
           <FieldWell icon="📅" label="Eixo X" accept="dim" value={cfg.xDimension} displayValue={cfg.xDimension}
             options={xOptions} onChange={(v) => set({ xDimension: v })} />
@@ -1205,57 +1206,67 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
       </div>
 
       {/* Gráfico ou estado vazio */}
-      {isKpi ? (
-        <KpiCard analyticsDataset={analyticsDataset} metricId={cfg.metric} />
-      ) : pivot.state === "no_x" ? (
-        <AWEmptyState icon="📐" title="Escolha o Eixo X"
-          hint="Arraste uma dimensão para o campo Eixo X (temporais ⏱ habilitam evolução cronológica)." />
-      ) : pivot.state === "empty" ? (
-        <AWEmptyState icon="📉" title="Sem valores para agrupar"
-          hint="A dimensão escolhida não tem valores preenchidos nas linhas da base." />
-      ) : pivot.state === "ok" ? (
-        <>
-          <div style={{ width: "100%", height: 320 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              {type === "line" ? (
-                <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
-                  <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
-                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
-                    unit={isPct ? "%" : ""} domain={isPct ? [0, 100] : ["auto", "auto"]} />
-                  <Tooltip formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
-                    contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  {pivot.series.map((sd) => (
-                    <Line key={sd.key} type="monotone" dataKey={sd.label}
-                      stroke={sd.color} strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
-                  ))}
-                </LineChart>
-              ) : (
-                <BarChart data={type === "bar100" ? stacked100 : pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
-                  <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
-                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
-                    unit={type === "bar100" ? "%" : (isPct ? "%" : "")}
-                    domain={type === "bar100" ? [0, 100] : (isPct ? [0, 100] : ["auto", "auto"])} />
-                  <Tooltip formatter={(v) => type === "bar100" ? (v == null ? "N/A" : `${v.toFixed(1)}%`) : fmtMetricVal(v, pivot.metricDef.unit)}
-                    contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  {pivot.series.map((sd) => (
-                    <Bar key={sd.key} dataKey={sd.label} fill={sd.color} radius={type === "bar100" ? 0 : [3, 3, 0, 0]}
-                      stackId={type === "bar100" ? "s" : undefined} />
-                  ))}
-                </BarChart>
-              )}
-            </ResponsiveContainer>
-          </div>
-          {pivot.truncated && (
-            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6, paddingLeft: 6 }}>
-              Mostrando as primeiras {MAX_SERIES} séries.
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {isKpi ? (
+          <KpiCard analyticsDataset={analyticsDataset} metricId={cfg.metric} />
+        ) : pivot.state === "no_x" ? (
+          <AWEmptyState icon="📐" title="Escolha o Eixo X"
+            hint="Arraste uma dimensão para o campo Eixo X (temporais ⏱ habilitam evolução cronológica)." />
+        ) : pivot.state === "empty" ? (
+          <AWEmptyState icon="📉" title="Sem valores para agrupar"
+            hint="A dimensão escolhida não tem valores preenchidos nas linhas da base." />
+        ) : pivot.state === "ok" ? (
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            <div style={{ width: "100%", flex: 1, minHeight: 200 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                {type === "line" ? (
+                  <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+                    <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
+                    <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
+                      unit={isPct ? "%" : ""} domain={isPct ? [0, 100] : ["auto", "auto"]} />
+                    <Tooltip formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
+                      contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {pivot.series.map((sd) => (
+                      <Line key={sd.key} type="monotone" dataKey={sd.label}
+                        stroke={sd.color} strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
+                    ))}
+                  </LineChart>
+                ) : (
+                  <BarChart data={type === "bar100" ? stacked100 : pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+                    <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
+                    <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
+                      unit={type === "bar100" ? "%" : (isPct ? "%" : "")}
+                      domain={type === "bar100" ? [0, 100] : (isPct ? [0, 100] : ["auto", "auto"])} />
+                    <Tooltip formatter={(v) => type === "bar100" ? (v == null ? "N/A" : `${v.toFixed(1)}%`) : fmtMetricVal(v, pivot.metricDef.unit)}
+                      contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {pivot.series.map((sd) => (
+                      <Bar key={sd.key} dataKey={sd.label} fill={sd.color} radius={type === "bar100" ? 0 : [3, 3, 0, 0]}
+                        stackId={type === "bar100" ? "s" : undefined} />
+                    ))}
+                  </BarChart>
+                )}
+              </ResponsiveContainer>
             </div>
-          )}
-        </>
-      ) : null}
+            {pivot.truncated && (
+              <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6, paddingLeft: 6, flexShrink: 0 }}>
+                Mostrando as primeiras {MAX_SERIES} séries.
+              </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Resize handles — transparentes, ativam cursor e drag */}
+      {onResizeStart && ['n','s','e','w','ne','nw','se','sw'].map(dir => {
+        const H = 8, C = 16;
+        const cur = { n:'n-resize', s:'s-resize', e:'e-resize', w:'w-resize', ne:'ne-resize', nw:'nw-resize', se:'se-resize', sw:'sw-resize' };
+        const pos = { n:{top:0,left:C,right:C,height:H}, s:{bottom:0,left:C,right:C,height:H}, e:{right:0,top:C,bottom:C,width:H}, w:{left:0,top:C,bottom:C,width:H}, ne:{top:0,right:0,width:C,height:C}, nw:{top:0,left:0,width:C,height:C}, se:{bottom:0,right:0,width:C,height:C}, sw:{bottom:0,left:0,width:C,height:C} }[dir];
+        return <div key={dir} onMouseDown={(e) => { e.stopPropagation(); onResizeStart(e, dir); }} style={{ position:"absolute", zIndex:10, cursor:cur[dir], ...pos }} />;
+      })}
     </div>
   );
 }
@@ -1265,10 +1276,13 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = analyticsDataset?.temporalColumns || [];
 
-  const makeWidget = (title) => ({
-    id: uid(), type: "line",
-    config: { title, xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_CENARIO },
-  });
+  const makeWidget = (title) => {
+    const nextY = analyticsLayout.reduce((acc, w) => Math.max(acc, (w.y ?? 0) + (w.h ?? 500)), 0);
+    return {
+      id: uid(), type: "line", x: 24, y: analyticsLayout.length === 0 ? 24 : nextY + 24, w: 560, h: 500,
+      config: { title, xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_CENARIO },
+    };
+  };
 
   // Auto-init: ao chegar o primeiro dataset com layout vazio, cria o gráfico padrão (Sessão 1).
   useEffect(() => {
@@ -1284,11 +1298,46 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
 
   const hasData = !!analyticsDataset;
 
+  const layoutRef = useRef(analyticsLayout);
+  useEffect(() => { layoutRef.current = analyticsLayout; }, [analyticsLayout]);
+  const dragRef = useRef(null);
+
+  const startWidgetInteract = (id, e, type, dir) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const wgt = layoutRef.current.find(w => w.id === id);
+    if (!wgt) return;
+    dragRef.current = { id, type, dir, startX: e.clientX, startY: e.clientY, startWx: wgt.x ?? 24, startWy: wgt.y ?? 24, startW: wgt.w ?? 560, startH: wgt.h ?? 500 };
+    const onMove = (ev) => {
+      const dr = dragRef.current; if (!dr) return;
+      const dx = ev.clientX - dr.startX, dy = ev.clientY - dr.startY;
+      if (dr.type === 'move') {
+        setAnalyticsLayout(prev => prev.map(w => w.id === dr.id ? { ...w, x: Math.max(0, dr.startWx + dx), y: Math.max(0, dr.startWy + dy) } : w));
+      } else {
+        const d = dr.dir;
+        let nx = dr.startWx, ny = dr.startWy, nw = dr.startW, nh = dr.startH;
+        if (d.includes('e')) nw = Math.min(1200, Math.max(340, dr.startW + dx));
+        if (d.includes('s')) nh = Math.min(900, Math.max(340, dr.startH + dy));
+        if (d.includes('w')) { nw = Math.min(1200, Math.max(340, dr.startW - dx)); nx = Math.max(0, dr.startWx + dr.startW - nw); }
+        if (d.includes('n')) { nh = Math.min(900, Math.max(340, dr.startH - dy)); ny = Math.max(0, dr.startWy + dr.startH - nh); }
+        setAnalyticsLayout(prev => prev.map(w => w.id === dr.id ? { ...w, x: nx, y: ny, w: nw, h: nh } : w));
+      }
+    };
+    const onUp = () => { dragRef.current = null; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const canvasH = analyticsLayout.reduce((acc, w) => Math.max(acc, (w.y ?? 24) + (w.h ?? 500) + 80), 600);
+  const canvasW = analyticsLayout.reduce((acc, w) => Math.max(acc, (w.x ?? 24) + (w.w ?? 560) + 40), 640);
+
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row", overflow: "hidden", background: "#f8fafc" }}>
-      {/* Área de gráficos */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
-        <div style={{ padding: "20px 28px 12px", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+      {/* Área principal */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {/* Header fixo */}
+        <div style={{ flexShrink: 0, padding: "20px 28px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
           <div>
             <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>Dashboard</h1>
             <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
@@ -1304,20 +1353,27 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
           )}
         </div>
 
-        {!hasData ? (
-          <AWEmptyState icon="📊" title="Nenhum dado de simulação ainda"
-            hint="Importe um CSV com a Decisão AS IS configurada e monte um fluxo no Canvas. Quando a simulação rodar, os gráficos aparecem aqui." />
-        ) : analyticsLayout.length === 0 ? (
-          <AWEmptyState icon="➕" title="Nenhum gráfico"
-            hint="Clique em “+ Adicionar gráfico” para começar a montar seu dashboard." />
-        ) : (
-          <div style={{ padding: "8px 28px 28px", maxWidth: 1100 }}>
-            {analyticsLayout.map(w => (
-              <AnalyticsWidget key={w.id} widget={w} analyticsDataset={analyticsDataset}
-                onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget} />
-            ))}
-          </div>
-        )}
+        {/* Canvas — área scrollável com widgets posicionados livremente */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "auto" }}>
+          {!hasData ? (
+            <AWEmptyState icon="📊" title="Nenhum dado de simulação ainda"
+              hint="Importe um CSV com a Decisão AS IS configurada e monte um fluxo no Canvas. Quando a simulação rodar, os gráficos aparecem aqui." />
+          ) : analyticsLayout.length === 0 ? (
+            <AWEmptyState icon="➕" title="Nenhum gráfico"
+              hint='Clique em "+ Adicionar gráfico" para começar a montar seu dashboard.' />
+          ) : (
+            <div style={{ position: "relative", minHeight: canvasH, minWidth: canvasW }}>
+              {analyticsLayout.map(w => (
+                <div key={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 560, height: w.h ?? 500 }}>
+                  <AnalyticsWidget widget={w} analyticsDataset={analyticsDataset}
+                    onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget}
+                    onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
+                    onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Painel de campos */}
@@ -1343,7 +1399,7 @@ export default function App() {
   // Analytics Workspace
   const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
-  const [analyticsLayout, setAnalyticsLayout] = useState([]); // WidgetConfig[] — gráficos do dashboard
+  const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = localStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
   const [activeCell, setActiveCell] = useState(null);   // {shapeId,csvId,ri,ci}
   // Credit simulator state
   const [editConn,   setEditConn]   = useState(null);   // {id, val} — edição de label de conexão
@@ -1562,6 +1618,9 @@ export default function App() {
     }, 300);
     return () => clearTimeout(analyticsDebounceRef.current);
   }, [shapes, conns, csvStore, lensPopulations]);
+
+  // Persiste layout do dashboard no localStorage para sobreviver a reloads (Sessão 4).
+  useEffect(() => { localStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
 
   // ── Feature 6: Reprocessamento Incremental de Indicadores ──────
   // incrementalResult: null | {baseline, simulated, impacted}
