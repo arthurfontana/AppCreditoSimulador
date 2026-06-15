@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from "recharts";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -1067,6 +1067,110 @@ export function pivotWidget(ds, config) {
   return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated: serieBy !== SERIE_CENARIO && serieBy !== SERIE_NONE && seriesDefs.length >= MAX_SERIES };
 }
 
+// Calcula cor de texto com contraste WCAG sobre um fundo hex.
+function getContrastColor(hex) {
+  if (!hex || hex.length < 7) return "#ffffff";
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.5 ? "#1e293b" : "#ffffff";
+}
+
+// Rótulo customizado para barras: badge colorido com contraste automático e posição inteligente.
+function ChartBarLabel({ x, y, width, height, value, color, metricDef, isBar100 }) {
+  if (value == null) return null;
+  const text = isBar100 ? `${(+value).toFixed(1)}%` : fmtMetricVal(value, metricDef?.unit);
+  const textColor = getContrastColor(color || "#2563eb");
+  const labelW = Math.max(34, text.length * 6.2 + 12);
+  const labelH = 17;
+  const cx = (x || 0) + (width || 0) / 2;
+  const barH = Math.abs(height || 0);
+  const barTop = (height || 0) >= 0 ? (y || 0) : (y || 0) + (height || 0);
+  const inside = barH > labelH + 8;
+  const ly = inside ? barTop + barH / 2 - labelH / 2 : barTop - labelH - 3;
+  return (
+    <g>
+      <rect x={cx - labelW / 2} y={ly} width={labelW} height={labelH} fill={color} rx={3} opacity={0.93} />
+      <text x={cx} y={ly + labelH / 2} textAnchor="middle" dominantBaseline="middle"
+        fill={textColor} fontSize={10} fontFamily="inherit" fontWeight={500}>{text}</text>
+    </g>
+  );
+}
+
+// Rótulo customizado para pontos de linha: badge colorido acima do ponto.
+function ChartLineLabel({ x, y, value, color, metricDef }) {
+  if (value == null) return null;
+  const text = fmtMetricVal(value, metricDef?.unit);
+  const textColor = getContrastColor(color || "#2563eb");
+  const labelW = Math.max(34, text.length * 6.2 + 12);
+  const labelH = 17;
+  const lx = (x || 0) - labelW / 2;
+  const ly = (y || 0) - labelH - 6;
+  return (
+    <g>
+      <rect x={lx} y={ly} width={labelW} height={labelH} fill={color} rx={3} opacity={0.93} />
+      <text x={x || 0} y={ly + labelH / 2} textAnchor="middle" dominantBaseline="middle"
+        fill={textColor} fontSize={10} fontFamily="inherit" fontWeight={500}>{text}</text>
+    </g>
+  );
+}
+
+// Painel inline de personalização de séries (cor + estilo de linha para tipo "line").
+function SeriesStylePanel({ series, isLine, seriesStyles, onChange }) {
+  const DASH_OPTS = [
+    { id: "0",   title: "Contínua",   icon: <svg width={22} height={8}><line x1={1} y1={4} x2={21} y2={4} stroke="currentColor" strokeWidth={2} /></svg> },
+    { id: "8 4", title: "Tracejada",  icon: <svg width={22} height={8}><line x1={1} y1={4} x2={21} y2={4} stroke="currentColor" strokeWidth={2} strokeDasharray="8 4" /></svg> },
+    { id: "2 4", title: "Pontilhada", icon: <svg width={22} height={8}><line x1={1} y1={4} x2={21} y2={4} stroke="currentColor" strokeWidth={2} strokeDasharray="2 4" /></svg> },
+  ];
+  const WIDTH_OPTS = [
+    { id: 1.5, title: "Fina",   icon: <svg width={22} height={8}><line x1={1} y1={4} x2={21} y2={4} stroke="currentColor" strokeWidth={1.5} /></svg> },
+    { id: 2.5, title: "Média",  icon: <svg width={22} height={8}><line x1={1} y1={4} x2={21} y2={4} stroke="currentColor" strokeWidth={2.5} /></svg> },
+    { id: 4,   title: "Grossa", icon: <svg width={22} height={8}><line x1={1} y1={4} x2={21} y2={4} stroke="currentColor" strokeWidth={4} /></svg> },
+  ];
+  if (!series || series.length === 0) return null;
+  return (
+    <div style={{ background: "#fafafa", borderRadius: 9, border: "1px solid #e8ecf0", padding: "10px 12px", marginBottom: 10, flexShrink: 0 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.7 }}>Personalizar séries</div>
+      {series.map((sd) => {
+        const st = seriesStyles[sd.key] || {};
+        const curDash = st.strokeDasharray ?? "0";
+        const curWidth = st.strokeWidth ?? 2.5;
+        const btnBase = (active) => ({
+          width: 32, height: 24, display: "flex", alignItems: "center", justifyContent: "center",
+          borderRadius: 5, border: `1px solid ${active ? "#2563eb" : "#e2e8f0"}`,
+          background: active ? "#eff6ff" : "#fff", color: active ? "#2563eb" : "#64748b",
+          cursor: "pointer", padding: 0,
+        });
+        return (
+          <div key={sd.key} style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6, flexWrap: "wrap" }}>
+            <div style={{ width: 11, height: 11, borderRadius: "50%", background: sd.color, flexShrink: 0, border: "1px solid rgba(0,0,0,.12)" }} />
+            <span style={{ fontSize: 11.5, color: "#374151", flex: 1, minWidth: 60, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {sd.label}
+            </span>
+            <input type="color" value={sd.color} title="Cor da série"
+              onChange={(e) => onChange(sd.key, { color: e.target.value })}
+              style={{ width: 26, height: 22, border: "1px solid #e2e8f0", borderRadius: 5, padding: "1px", cursor: "pointer", flexShrink: 0 }} />
+            {isLine && (
+              <>
+                <div style={{ display: "flex", gap: 2 }}>
+                  {DASH_OPTS.map(opt => (
+                    <button key={opt.id} title={opt.title} onClick={() => onChange(sd.key, { strokeDasharray: opt.id })} style={btnBase(curDash === opt.id)}>{opt.icon}</button>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 2 }}>
+                  {WIDTH_OPTS.map(opt => (
+                    <button key={opt.id} title={opt.title} onClick={() => onChange(sd.key, { strokeWidth: opt.id })} style={btnBase(curWidth === opt.id)}>{opt.icon}</button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // Estado vazio reutilizável.
 function AWEmptyState({ icon, title, hint }) {
   return (
@@ -1253,6 +1357,13 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [analyticsDataset, isKpi, cfg.xDimension, cfg.metric, cfg.serieBy, cfg.activeScenarios]);
 
+  const [seriesStylesOpen, setSeriesStylesOpen] = useState(false);
+  const styles = cfg.seriesStyles || {};
+  // Aplica overrides de cor sem precisar modificar pivotWidget.
+  const effectiveSeries = pivot.state === "ok"
+    ? pivot.series.map(sd => { const ov = styles[sd.key]; return ov?.color ? { ...sd, color: ov.color } : sd; })
+    : [];
+
   // Barra 100% empilhada: normaliza cada bucket do eixo X para somar 100%.
   const stacked100 = useMemo(() => {
     if (type !== "bar100" || pivot.state !== "ok") return null;
@@ -1298,6 +1409,11 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
 
   const set = (patch) => onConfigChange(widget.id, patch);
   const isPct = pivot.metricDef?.unit !== "qty";
+  const showLabels = cfg.showLabels ?? false;
+  const setSeriesStyle = (key, patch) => {
+    const current = cfg.seriesStyles || {};
+    set({ seriesStyles: { ...current, [key]: { ...(current[key] || {}), ...patch } } });
+  };
 
   return (
     <div style={{ position: "relative", background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "14px 16px 12px", display: "flex", flexDirection: "column", height: "100%", boxSizing: "border-box" }}>
@@ -1318,6 +1434,20 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
                 opacity: type === ct.id ? 1 : 0.55 }}>{ct.icon}</button>
           ))}
         </div>
+        {!isKpi && (
+          <>
+            <button onClick={() => set({ showLabels: !showLabels })} title={showLabels ? "Ocultar rótulos" : "Mostrar rótulos nos pontos"}
+              style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: `1px solid ${showLabels ? "#0891b2" : "#e2e8f0"}`,
+                background: showLabels ? "#ecfeff" : "#fff", color: showLabels ? "#0891b2" : "#94a3b8",
+                cursor: "pointer", fontSize: 12, fontWeight: 700, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit" }}>Aa</button>
+            {pivot.state === "ok" && (
+              <button onClick={() => setSeriesStylesOpen(v => !v)} title="Personalizar séries (cor, estilo, espessura)"
+                style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: `1px solid ${seriesStylesOpen ? "#7c3aed" : "#e2e8f0"}`,
+                  background: seriesStylesOpen ? "#f5f3ff" : "#fff", color: seriesStylesOpen ? "#7c3aed" : "#94a3b8",
+                  cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>🎨</button>
+            )}
+          </>
+        )}
         <button onClick={() => onDelete(widget.id)} title="Remover gráfico"
           style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
             color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
@@ -1370,6 +1500,11 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
         </div>
       )}
 
+      {/* Painel de personalização de séries */}
+      {seriesStylesOpen && pivot.state === "ok" && (
+        <SeriesStylePanel series={effectiveSeries} isLine={type === "line"} seriesStyles={styles} onChange={setSeriesStyle} />
+      )}
+
       {/* Gráfico ou estado vazio */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {isKpi ? (
@@ -1394,10 +1529,18 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
                     <Tooltip formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
                       contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    {pivot.series.map((sd) => (
-                      <Line key={sd.key} type="monotone" dataKey={sd.label}
-                        stroke={sd.color} strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
-                    ))}
+                    {effectiveSeries.map((sd) => {
+                      const st = styles[sd.key] || {};
+                      const strokeW = st.strokeWidth ?? 2.5;
+                      const strokeDash = st.strokeDasharray && st.strokeDasharray !== "0" ? st.strokeDasharray : undefined;
+                      return (
+                        <Line key={sd.key} type="monotone" dataKey={sd.label}
+                          stroke={sd.color} strokeWidth={strokeW} strokeDasharray={strokeDash}
+                          dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls>
+                          {showLabels && <LabelList dataKey={sd.label} content={(props) => <ChartLineLabel {...props} color={sd.color} metricDef={pivot.metricDef} />} />}
+                        </Line>
+                      );
+                    })}
                   </LineChart>
                 ) : (
                   <BarChart data={type === "bar100" ? stacked100 : pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
@@ -1409,9 +1552,11 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
                     <Tooltip formatter={(v) => type === "bar100" ? (v == null ? "N/A" : `${v.toFixed(1)}%`) : fmtMetricVal(v, pivot.metricDef.unit)}
                       contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    {pivot.series.map((sd) => (
+                    {effectiveSeries.map((sd) => (
                       <Bar key={sd.key} dataKey={sd.label} fill={sd.color} radius={type === "bar100" ? 0 : [3, 3, 0, 0]}
-                        stackId={type === "bar100" ? "s" : undefined} />
+                        stackId={type === "bar100" ? "s" : undefined}>
+                        {showLabels && <LabelList dataKey={sd.label} content={(props) => <ChartBarLabel {...props} color={sd.color} metricDef={pivot.metricDef} isBar100={type === "bar100"} />} />}
+                      </Bar>
                     ))}
                   </BarChart>
                 )}
