@@ -642,7 +642,7 @@ function isCellEligible(cells, key) {
   return getCellValue(cells, key) > 0;
 }
 
-function buildProposedByShape(poolCells, shapeMetas) {
+function buildProposedByShape(poolCells, shapeMetas, pooledMetrics) {
   const result = {};
   for (const meta of shapeMetas) {
     const rDom = meta.rowDomain.length > 0 ? meta.rowDomain : ['*'];
@@ -651,7 +651,14 @@ function buildProposedByShape(poolCells, shapeMetas) {
     for (const rv of rDom)
       for (const cv of cDom) {
         const ck = `${rv}|${cv}`;
-        sc[ck] = poolCells[`${meta.id}|${ck}`] === true ? 1 : 0;
+        const pk = `${meta.id}|${ck}`;
+        // Cells with no data are not in pooledMetrics; preserve original eligibility
+        // rather than forcing ineligible, which would corrupt the Cineminha visually.
+        if (pooledMetrics && !(pk in pooledMetrics)) {
+          sc[ck] = isCellEligible(meta.originalCells || {}, ck) ? 1 : 0;
+        } else {
+          sc[ck] = poolCells[pk] === true ? 1 : 0;
+        }
       }
     result[meta.id] = sc;
   }
@@ -1471,7 +1478,7 @@ export default function App() {
           pooledMetrics, frontier, scenarios, mixCats, shapeMetas,
           baselineApprovalRate,
           activeCard:        'melhorEficiencia',
-          proposedByShape:   buildProposedByShape(initPt?.cells || {}, shapeMetas),
+          proposedByShape:   buildProposedByShape(initPt?.cells || {}, shapeMetas, pooledMetrics),
           sliderApprovalIdx: initIdx,
           sliderInadReal:    maxInadReal || 0.2,
           sliderInadInf:     maxInadInf  || 0.2,
@@ -7252,7 +7259,7 @@ export default function App() {
           const idx = frontier.indexOf(pt);
           setJohnnyModal(m => ({
             ...m, activeCard: card || 'personalizado',
-            proposedByShape:   buildProposedByShape(pt.cells, m.shapeMetas),
+            proposedByShape:   buildProposedByShape(pt.cells, m.shapeMetas, m.pooledMetrics),
             sliderApprovalIdx: idx >= 0 ? idx : m.sliderApprovalIdx,
             sliderInadReal:    pt.inadReal     ?? m.maxInadReal,
             sliderInadInf:     pt.inadInferida ?? m.maxInadInf,
@@ -7263,7 +7270,7 @@ export default function App() {
           if (!pt) return;
           setJohnnyModal(m => ({
             ...m, activeCard: 'personalizado',
-            proposedByShape:   buildProposedByShape(pt.cells, m.shapeMetas),
+            proposedByShape:   buildProposedByShape(pt.cells, m.shapeMetas, m.pooledMetrics),
             sliderApprovalIdx: idx,
           }));
         };
@@ -7279,7 +7286,7 @@ export default function App() {
           const idx = frontier.indexOf(best);
           setJohnnyModal(m => ({
             ...m, activeCard: 'personalizado',
-            proposedByShape:   buildProposedByShape(best.cells, m.shapeMetas),
+            proposedByShape:   buildProposedByShape(best.cells, m.shapeMetas, m.pooledMetrics),
             sliderApprovalIdx: idx >= 0 ? idx : m.sliderApprovalIdx,
             [type==='real' ? 'sliderInadReal' : 'sliderInadInf']: val,
           }));
