@@ -113,6 +113,30 @@ O `incrementalResult` e o `simulationOverlay` já carregam esses dados. A Sessã
 
 ---
 
+### DEC-AW-007: Cenário = aba de canvas viva (não snapshot)
+
+**Decisão:** o "Cenário" da Sessão 5 é uma **aba de canvas viva e editável**, não um snapshot congelado. O usuário duplica a aba do Canvas (cada aba é uma política independente), renomeia, e edita livremente. O Dashboard centraliza os resultados de todas as abas marcadas, usando o **nome da aba** como nome do cenário.
+
+**Modelo de estado (não-invasivo):** `shapes`/`conns` continuam sendo o **working copy do canvas ativo** — todo o código atual do canvas (refs espelho, undo/redo, autoLayout, drag) permanece intacto. Um novo store `canvases: {[id]: {id, name, shapes, conns, includeInDashboard}}` + `activeCanvasId` guarda as demais abas. Ao trocar de aba: persiste `shapes`/`conns` no canvas atual e carrega os do alvo. Undo/redo são escopados por canvas.
+
+**Compartilhamento:** `csvStore` (datasets) e `cinemaLibrary` permanecem estado único no topo do `App` — **compartilhados por todas as abas**. Duplicar uma aba não duplica dados nem biblioteca. A reconciliação de dataset (`onImportConfirm`) passa a fazer fan-out para **todos** os canvases.
+
+**Opt-in por aba:** cada canvas tem `includeInDashboard` (toggle na aba). Só as abas marcadas viram cenário no Dashboard. O canvas primário nasce incluído (não quebra o fluxo atual de cenário único); abas de rascunho podem ficar de fora.
+
+**Justificativa:** o modelo vivo entrega "Cenário A vs B vs C" como abas editáveis lado a lado — muito mais útil que snapshots frozen para iteração de política. O working-copy do ativo evita reescrever as ~7900 linhas do canvas.
+
+---
+
+### DEC-AW-008: KPI compara dois cenários selecionáveis (A vs B)
+
+**Decisão:** com N cenários, o KPI card deixa de ter baseline fixa AS IS vs Simulado. Ganha dois seletores — **Baseline (A)** e **Comparação (B)** — que aceitam qualquer cenário registrado, incluindo AS IS. O número grande é B; o delta é `B − A`, colorido por `GOOD_WHEN_LOWER`.
+
+**Default:** A = AS IS, B = primeiro cenário de canvas (preserva a leitura atual "Simulado vs AS IS").
+
+**Justificativa:** "Cenário A vs Cenário B" é o caso de uso executivo central de múltiplos cenários; amarrar em AS IS vs Simulado perderia a comparação entre políticas alternativas.
+
+---
+
 ## Tipos de gráfico (escopo das 5 sessões)
 
 | Tipo | Sessão | Caso de uso principal |
@@ -235,16 +259,59 @@ activeTab: "analysis" | "canvas"            // aba ativa
 
 ---
 
-### Sessão 5 — Motor de N cenários
+### Sessão 5 — Motor de N cenários (multi-canvas)
+
+> **Reformulação (ver DEC-AW-007):** o conceito original era salvar snapshots do canvas como Cenário A/B/C. A reformulação entrega **abas de canvas vivas e editáveis** — cada aba é uma política independente, o Dashboard centraliza as abas marcadas (opt-in) usando o nome da aba como nome do cenário. Datasets e biblioteca de Cineminha são compartilhados entre todas as abas.
+
+Pelo porte da refatoração multi-canvas, a Sessão 5 é **fatiada em 3 sub-sessões**. A Sub-sessão 5A é a "Entrega 1" (infraestrutura, sem tocar no Dashboard); 5B + 5C compõem a "Entrega 2" (pipeline N-cenários + KPI/export), entregues como dois prompts para manter os diffs revisáveis.
+
+---
+
+#### Sub-sessão 5A — Infraestrutura multi-canvas (Entrega 1)
+
+**Escopo:** somente o Canvas e a barra de abas. **Não toca no Dashboard** — o pipeline analítico continua usando só o canvas ativo (comportamento atual preservado).
 
 **Entrega:**
-- Conceito de "Cenário" como entidade nomeada: salvar o estado atual do canvas como Cenário A, B, C...
-- `analyticsScenarios` registra cada cenário com `{id, nome, decisionCol}`
-- Worker emite colunas `__DECISAO_CENARIO_A`, `__DECISAO_CENARIO_B`... no dataset analítico
-- Gráficos da Sessão 2/3 passam a listar cenários como opção de série — sem código novo nos componentes
-- Export: dataset original + todas as colunas de cenário como CSV/XLSX
+- Estado `canvases: {[id]: {id, name, shapes, conns, includeInDashboard}}` + `activeCanvasId`. `shapes`/`conns` permanecem como working copy do canvas ativo (DEC-AW-007). Ref espelho `canvasesR`/`activeCanvasIdR`.
+- Troca de aba: ao sair, persiste `shapes`/`conns` no canvas; ao entrar, carrega os do alvo. Undo/redo (`undoStackR`/`redoStackR`) resetam/escopam por canvas.
+- Barra de abas (rodapé esquerdo): aba **Dashboard** fixa + N abas de canvas. Ações: **novo canvas** (vazio), **duplicar** (clona shapes/conns com IDs regenerados), **renomear** (duplo-clique), **excluir** (com guarda do último canvas).
+- Toggle **opt-in `includeInDashboard`** por aba (ex.: ícone 📊 na aba).
+- Reconciliação de dataset (`onImportConfirm`) faz fan-out para **todos** os canvases, não só o ativo.
+- Persistência em `localStorage` (`aw_canvases_v1`): canvases, nomes, flags e `activeCanvasId`.
 
-**Destrava:** o prometido "Cenário A vs B vs C no mesmo gráfico" e a exportação completa para análise externa.
+**Destrava:** o usuário monta e mantém múltiplas versões de política lado a lado.
+
+**Riscos:** regeneração de IDs na duplicação (evitar colisão); escopo de undo/redo; migração do estado antigo (canvas único → primeiro canvas do store).
+
+---
+
+#### Sub-sessão 5B — Pipeline N-cenários no worker (Entrega 2, parte 1)
+
+**Escopo:** worker + dataset analítico. Os componentes de gráfico **não mudam** (DEC-AW-004 — cenário já é série no `pivotWidget`).
+
+**Entrega:**
+- `COMPUTE_ANALYTICS_DATASET` passa a receber **todos os canvases marcados** (`includeInDashboard`), não `{shapes, conns}` de um só.
+- `computeAnalyticsDataset` roda `computeSimulatedDecisions` por canvas e faz **join por `(csvId, rowIdx)`** (datasets compartilhados ⇒ agrupamentos idênticos). Emite uma coluna `__DECISAO_<canvasId>` por canvas + `__DECISAO_AS_IS` **única e global**.
+- `scenarios` = `[{id:'as_is', nome:'AS IS', ...}]` + um `{id, nome:<nome da aba>, decisionCol}` por canvas marcado.
+- `lensPopulations` por canvas: mover o cálculo para o worker (ou computar por canvas na main thread) — cada canvas pode ter lenses próprios.
+- Validar (sem código novo) que line/bar/bar100 listam todos os cenários como série e ciclam `SCENARIO_COLORS`.
+- Otimização: cache de overlay por canvas via hash de `shapes/conns` para não reprocessar canvases intocados ao editar um só.
+
+**Destrava:** "Cenário A vs B vs C no mesmo gráfico".
+
+**Riscos:** custo de recomputar M canvases por edição (mitigado pelo cache); lens populations por canvas; auto-init do layout (`analyticsLayout`) com >2 cenários.
+
+---
+
+#### Sub-sessão 5C — KPI A vs B + Export (Entrega 2, parte 2)
+
+**Entrega:**
+- `KpiCard` (DEC-AW-008): seletores **Baseline (A)** e **Comparação (B)** aceitando qualquer cenário (incl. AS IS); número grande = B, delta = `B − A` colorido por `GOOD_WHEN_LOWER`. Default A=AS IS, B=primeiro canvas. Persistir A/B no `WidgetConfig`.
+- Export: dataset largo (dimensões + métricas intrínsecas + **todas** as colunas de decisão por cenário + AS IS) como CSV (e, se viável, XLSX) — abrível no Excel com cenários lado a lado.
+
+**Destrava:** indicador executivo comparando duas políticas quaisquer + exportação completa para análise externa.
+
+**Riscos:** retrocompatibilidade do `WidgetConfig` de KPI antigo (sem A/B) — migrar no load.
 
 ---
 
@@ -260,3 +327,41 @@ relevante antes de propor.
 ```
 
 O CLAUDE.md e este arquivo são carregados automaticamente no início de cada sessão — o contexto de decisões e schema estará disponível sem precisar colar a conversa.
+
+### Propostas de prompt — Sessão 5 (multi-canvas)
+
+**Sub-sessão 5A — Infraestrutura multi-canvas:**
+
+```
+Vamos à Sub-sessão 5A do Analytics Workspace (infraestrutura multi-canvas),
+conforme docs/wiki/Epicos-AnalyticsWorkspace.md (DEC-AW-007). Implemente o
+store `canvases` + `activeCanvasId` mantendo `shapes`/`conns` como working copy
+do canvas ativo, a barra de abas com novo/duplicar/renomear/excluir, o toggle
+opt-in `includeInDashboard`, undo/redo escopado por canvas, fan-out da
+reconciliação de CSV e persistência em localStorage (`aw_canvases_v1`).
+NÃO toque no Dashboard nesta sub-sessão. Releia o épico e o código antes de propor.
+```
+
+**Sub-sessão 5B — Pipeline N-cenários no worker:**
+
+```
+Vamos à Sub-sessão 5B do Analytics Workspace (pipeline N-cenários),
+conforme docs/wiki/Epicos-AnalyticsWorkspace.md (DEC-AW-003/004/007). A 5A já
+entregou o multi-canvas. Faça `COMPUTE_ANALYTICS_DATASET` receber todos os
+canvases marcados, computar overlay por canvas, fazer join por (csvId,rowIdx),
+emitir uma coluna de decisão por canvas + AS IS global, e registrar `scenarios`
+com o nome de cada aba. Resolva lensPopulations por canvas e valide que os
+gráficos listam todos os cenários como série sem código novo. Releia o épico e
+o código antes de propor.
+```
+
+**Sub-sessão 5C — KPI A vs B + Export:**
+
+```
+Vamos à Sub-sessão 5C do Analytics Workspace (KPI A vs B + export),
+conforme docs/wiki/Epicos-AnalyticsWorkspace.md (DEC-AW-008). A 5B já entregou o
+pipeline N-cenários. Dê ao KpiCard os seletores Baseline (A) e Comparação (B)
+aceitando qualquer cenário (incl. AS IS), persistidos no WidgetConfig, e
+implemente o export do dataset largo (dimensões + métricas + todas as colunas de
+cenário) como CSV. Releia o épico e o código antes de propor.
+```
