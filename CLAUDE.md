@@ -55,6 +55,9 @@ AppCreditoSimulador/
 - `lensPopulations`: populações filtradas por cada lens — `{[lensId]: {[csvId]: boolean[]}}`
 - `cinemaLibrary`: biblioteca de configurações de Cineminha salvas localmente — `array`
 - `businessWidget`: widget de impacto de negócio flutuante — `{visible, x, y, w, h}`
+- `activeTab`: aba ativa — `"analysis" | "canvas"`
+- `analyticsDataset`: dataset analítico largo cacheado do worker (`COMPUTE_ANALYTICS_DATASET`) — `null | AnalyticsDataset`
+- `analyticsLayout`: gráficos do dashboard da aba Análise — `WidgetConfig[]` (ver Analytics Workspace)
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -293,7 +296,16 @@ Segunda aba da aplicação (`activeTab: "analysis" | "canvas"`, padrão `analysi
 
 - **Pipeline (DEC-AW-002)**: worker emite `analyticsDataset` (formato largo, DEC-AW-003) via `COMPUTE_ANALYTICS_DATASET`, debounced junto com a simulação; cada gráfico faz pivot client-side.
 - **Tipo `temporal` (DEC-AW-005)**: marcado no Passo 2 do wizard (toggle de 3 estados Categórica → Ordinal → ⏱ Temporal, grava `columnTypes[col]='temporal'`). `parseTemporalKey(str)` deriva a chave de ordenação cronológica.
-- **Sessão 1**: `AnalysisTab` renderiza um gráfico de linha fixo (Recharts, DEC-AW-001) — Taxa de Aprovação ao longo do tempo, séries AS IS vs Simulado (DEC-AW-006), eixo X = 1ª coluna temporal.
+- **Sessão 1**: pipeline ponta a ponta com um gráfico de linha fixo (Recharts, DEC-AW-001).
+- **Sessão 2 — Builder configurável**: gráficos de linha configuráveis + painel de campos arrastáveis.
+  - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type:"line", config:{title, xDimension, metric, serieBy}}`. Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
+  - **`AnalysisTab`**: layout em 2 colunas — área de gráficos (scroll) + `FieldPanel` à direita. Header com botão **+ Adicionar gráfico**. Funções: `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`.
+  - **`FieldPanel({analyticsDataset})`**: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) — dimensões (temporais ⏱ primeiro, depois categóricas; `kind:'dim'`) e métricas (`kind:'metric'`).
+  - **`AnalyticsWidget({widget, analyticsDataset, onConfigChange, onDelete})`**: card com título editável, botão remover, barra de 3 `FieldWell` (Eixo X, Métrica, Série) e `LineChart`. Pivot memoizado por `[analyticsDataset, xDimension, metric, serieBy]`.
+  - **`FieldWell`**: poço de campo = drop zone (valida `kind` via `accept`) + `<select>` fallback. Destaca ao arrastar por cima.
+  - **`pivotWidget(ds, config)`**: pivot client-side genérico → `{state, data, series, metricDef, xCol, truncated}`. `serieBy`: `__cenario__` (AS IS vs Simulado), `__none__` (linha única Simulado), ou nome de dimensão (quebra por valores distintos com cenário Simulado implícito, teto `MAX_SERIES=12`). Eixo X temporal ordena via `parseTemporalKey`; senão numérico/A-Z.
+  - **`computeWidgetMetric(rows, metricId, decisionCol)`**: agrega 1 métrica sobre linhas (formato largo) replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`). Métricas: `approvalRate`, `inadReal`, `inadInferida` (pct), `qty`, `approvedQty` (qty).
+  - **`fmtMetricVal(v, unit)`**: formata `qty` via `fmtQty`, demais como `XX.XX%`.
 
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos

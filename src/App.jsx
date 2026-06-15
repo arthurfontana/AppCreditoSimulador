@@ -863,104 +863,350 @@ function SimIndicators({ simResult, csvStore, incrementalResult }) {
   );
 }
 
-// ── AnalysisTab — Analytics Workspace (Sessão 1: gráfico de linha fixo) ───────
+// ── Analytics Workspace (Sessão 2: builder configurável) ─────────────────────
 const SCENARIO_COLORS = ["#94a3b8", "#2563eb", "#16a34a", "#d97706", "#9333ea"];
+const SERIE_COLORS = ["#2563eb", "#16a34a", "#d97706", "#9333ea", "#dc2626", "#0891b2", "#db2777", "#65a30d", "#7c3aed", "#ea580c", "#0d9488", "#be123c"];
+const MAX_SERIES = 12; // teto de séries ao quebrar por dimensão categórica
+const AW_DRAG_MIME = "application/aw-field";
 
-function AnalysisTab({ analyticsDataset }) {
-  const pivot = useMemo(() => {
-    if (!analyticsDataset) return { state: "no_data" };
-    const { rows, temporalColumns, scenarios } = analyticsDataset;
-    const xCol = temporalColumns?.[0];
-    if (!xCol) return { state: "no_temporal" };
+// Sentinelas de "série por": cenário (AS IS vs Simulado) ou nenhuma (linha única).
+const SERIE_CENARIO = "__cenario__";
+const SERIE_NONE = "__none__";
 
-    const buckets = new Map(); // xVal -> { [scenarioId]: {appr, total} }
-    for (const r of rows) {
-      const xv = String(r[xCol] ?? "").trim();
-      if (!xv) continue;
-      if (!buckets.has(xv)) buckets.set(xv, {});
-      const b = buckets.get(xv);
-      for (const sc of scenarios) {
-        if (!b[sc.id]) b[sc.id] = { appr: 0, total: 0 };
-        b[sc.id].total += r.qty || 0;
-        if (r[sc.decisionCol] === "APROVADO") b[sc.id].appr += r.qty || 0;
-      }
+// Agrega uma métrica sobre um conjunto de linhas (formato largo) para uma coluna de decisão.
+// Replica a semântica do motor: numeradores/denominadores acumulados apenas sobre aprovados.
+function computeWidgetMetric(rows, metricId, decisionCol) {
+  let total = 0, appr = 0, inadR = 0, altas = 0, inadI = 0, altasInf = 0;
+  for (const r of rows) {
+    const q = r.qty || 0;
+    total += q;
+    if (r[decisionCol] === "APROVADO") {
+      appr += q;
+      inadR += r.inadRRaw || 0;
+      altas += r.qtdAltas || 0;
+      inadI += r.inadIRaw || 0;
+      altasInf += r.qtdAltasInfer || 0;
     }
-    if (buckets.size === 0) return { state: "empty" };
+  }
+  switch (metricId) {
+    case "approvalRate": return total > 0 ? (appr / total) * 100 : null;
+    case "inadReal":     return altas > 0 ? (inadR / altas) * 100 : null;
+    case "inadInferida": return altasInf > 0 ? (inadI / altasInf) * 100 : (appr > 0 ? (inadI / appr) * 100 : null);
+    case "qty":          return total;
+    case "approvedQty":  return appr;
+    default:             return null;
+  }
+}
 
-    const sortedKeys = [...buckets.keys()].sort((a, b) => {
+const fmtMetricVal = (v, unit) => v == null ? "N/A" : unit === "qty" ? fmtQty(v) : `${v.toFixed(2)}%`;
+
+// Pivot client-side: dataset largo + config → série tidy {data, series, metricDef, xCol}.
+function pivotWidget(ds, config) {
+  if (!ds) return { state: "no_data" };
+  const { rows, scenarios, metrics, temporalColumns } = ds;
+  const xCol = config.xDimension;
+  if (!xCol) return { state: "no_x" };
+  const metricDef = metrics.find(m => m.id === config.metric) || metrics[0];
+  if (!metricDef) return { state: "no_metric" };
+  const serieBy = config.serieBy || SERIE_CENARIO;
+
+  // Define as séries.
+  let seriesDefs;
+  if (serieBy === SERIE_CENARIO) {
+    seriesDefs = scenarios.map((s, i) => ({ key: s.id, label: s.nome, decisionCol: s.decisionCol, color: SCENARIO_COLORS[i % SCENARIO_COLORS.length] }));
+  } else {
+    // Quebra por dimensão categórica usando o cenário Simulado implícito.
+    const simCol = (scenarios.find(s => s.id === "simulado") || scenarios[scenarios.length - 1]).decisionCol;
+    if (serieBy === SERIE_NONE) {
+      seriesDefs = [{ key: "simulado", label: "Simulado", decisionCol: simCol, color: SCENARIO_COLORS[1] }];
+    } else {
+      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort((a, b) => {
+        const na = parseFloat(a), nb = parseFloat(b);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return a.localeCompare(b, "pt-BR");
+      });
+      const capped = distinct.slice(0, MAX_SERIES);
+      seriesDefs = capped.map((v, i) => ({ key: v, label: v, decisionCol: simCol, filterCol: serieBy, filterVal: v, color: SERIE_COLORS[i % SERIE_COLORS.length] }));
+    }
+  }
+
+  // Buckets do eixo X.
+  const xBuckets = new Map();
+  for (const r of rows) {
+    const xv = String(r[xCol] ?? "").trim();
+    if (!xv) continue;
+    if (!xBuckets.has(xv)) xBuckets.set(xv, []);
+    xBuckets.get(xv).push(r);
+  }
+  if (xBuckets.size === 0) return { state: "empty" };
+
+  const isTemporal = (temporalColumns || []).includes(xCol);
+  const sortedKeys = [...xBuckets.keys()].sort((a, b) => {
+    if (isTemporal) {
       const ka = parseTemporalKey(a), kb = parseTemporalKey(b);
       if (ka != null && kb != null) return ka - kb;
       if (ka != null) return -1;
       if (kb != null) return 1;
-      return a.localeCompare(b);
-    });
-    const data = sortedKeys.map((xv) => {
-      const b = buckets.get(xv);
-      const row = { x: xv };
-      for (const sc of scenarios) {
-        const m = b[sc.id];
-        row[sc.nome] = m && m.total > 0 ? (m.appr / m.total) * 100 : null;
-      }
-      return row;
-    });
-    return { state: "ok", data, scenarios, xCol };
-  }, [analyticsDataset]);
+    }
+    const na = parseFloat(a), nb = parseFloat(b);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.localeCompare(b, "pt-BR");
+  });
 
-  const EmptyState = ({ icon, title, hint }) => (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#94a3b8", textAlign: "center", padding: 40 }}>
+  const data = sortedKeys.map((xv) => {
+    const bucketRows = xBuckets.get(xv);
+    const row = { x: xv };
+    for (const sd of seriesDefs) {
+      const subset = sd.filterCol ? bucketRows.filter(r => String(r[sd.filterCol] ?? "").trim() === sd.filterVal) : bucketRows;
+      row[sd.label] = computeWidgetMetric(subset, metricDef.id, sd.decisionCol);
+    }
+    return row;
+  });
+  return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated: serieBy !== SERIE_CENARIO && serieBy !== SERIE_NONE && seriesDefs.length >= MAX_SERIES };
+}
+
+// Estado vazio reutilizável.
+function AWEmptyState({ icon, title, hint }) {
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#94a3b8", textAlign: "center", padding: 40, minHeight: 240 }}>
       <div style={{ fontSize: 48, marginBottom: 14, opacity: 0.7 }}>{icon}</div>
       <div style={{ fontSize: 15, fontWeight: 600, color: "#475569", marginBottom: 6 }}>{title}</div>
       <div style={{ fontSize: 13, maxWidth: 420, lineHeight: 1.5 }}>{hint}</div>
     </div>
   );
+}
+
+// ── FieldPanel — campos arrastáveis (dimensões + métricas), estilo Power BI ───
+function FieldPanel({ analyticsDataset }) {
+  const dims = analyticsDataset?.dimensions || [];
+  const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
+  const metrics = analyticsDataset?.metrics || [];
+  // Temporais primeiro, depois categóricas (A-Z).
+  const orderedDims = [...dims].sort((a, b) => {
+    const ta = temporalCols.has(a), tb = temporalCols.has(b);
+    if (ta !== tb) return ta ? -1 : 1;
+    return a.localeCompare(b, "pt-BR");
+  });
+
+  const startDrag = (e, kind, id) => {
+    e.dataTransfer.setData(AW_DRAG_MIME, JSON.stringify({ kind, id }));
+    e.dataTransfer.effectAllowed = "copy";
+  };
+
+  const chip = (label, icon, bg, border, color, kind, id) => (
+    <div key={`${kind}-${id}`} draggable onDragStart={(e) => startDrag(e, kind, id)}
+      style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 9px", borderRadius: 8,
+        border: `1.5px solid ${border}`, background: bg, marginBottom: 4, cursor: "grab", userSelect: "none",
+        fontSize: 12, fontWeight: 500, color }}>
+      <span style={{ fontSize: 12 }}>{icon}</span>
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      <span style={{ fontSize: 13, opacity: 0.45 }}>⠿</span>
+    </div>
+  );
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "auto", background: "#f8fafc" }}>
-      <div style={{ padding: "20px 28px 12px", flexShrink: 0 }}>
-        <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>Dashboard</h1>
-        <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
-          Dashboards sobre os resultados da simulação · AS IS vs Simulado
-        </p>
+    <div style={{ width: 220, flexShrink: 0, borderLeft: "1px solid #e2e8f0", background: "#fff", overflowY: "auto", padding: "16px 14px" }}>
+      <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Dimensões</p>
+      {orderedDims.length > 0 ? orderedDims.map(d =>
+        temporalCols.has(d)
+          ? chip(d, "⏱", "#eef2ff", "#c7d2fe", "#4338ca", "dim", d)
+          : chip(d, "▦", "#f1f5f9", "#e2e8f0", "#475569", "dim", d)
+      ) : <div style={{ fontSize: 11.5, color: "#cbd5e1", padding: "4px 2px" }}>—</div>}
+
+      <p style={{ fontSize: 11, color: "#94a3b8", margin: "16px 0 8px", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Métricas</p>
+      {metrics.length > 0 ? metrics.map(m =>
+        chip(m.label, "Σ", "#ecfdf5", "#bbf7d0", "#15803d", "metric", m.id)
+      ) : <div style={{ fontSize: 11.5, color: "#cbd5e1", padding: "4px 2px" }}>—</div>}
+
+      <p style={{ fontSize: 10.5, color: "#cbd5e1", marginTop: 18, lineHeight: 1.5 }}>
+        Arraste uma dimensão para o Eixo X ou a Série de um gráfico. Métricas vão para o campo Métrica.
+      </p>
+    </div>
+  );
+}
+
+// ── FieldWell — poço de campo (drop zone + select) de um gráfico ──────────────
+function FieldWell({ icon, label, accept, value, displayValue, options, onChange }) {
+  const [over, setOver] = useState(false);
+  const onDrop = (e) => {
+    e.preventDefault();
+    setOver(false);
+    try {
+      const payload = JSON.parse(e.dataTransfer.getData(AW_DRAG_MIME));
+      if (payload && payload.kind === accept) onChange(payload.id);
+    } catch { /* ignore */ }
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+      <span style={{ fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5 }}>{icon} {label}</span>
+      <div
+        onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+        onDragLeave={() => setOver(false)}
+        onDrop={onDrop}
+        style={{ position: "relative", borderRadius: 8, border: over ? "1.5px dashed #3b82f6" : "1.5px solid #e2e8f0",
+          background: over ? "#eff6ff" : "#f8fafc", transition: "all .12s" }}>
+        <select value={value ?? ""} onChange={(e) => onChange(e.target.value || null)}
+          style={{ width: "100%", padding: "6px 8px", borderRadius: 8, border: "none", background: "transparent",
+            fontSize: 12, color: displayValue ? "#1e293b" : "#94a3b8", fontWeight: 500, fontFamily: "inherit",
+            outline: "none", cursor: "pointer", appearance: "none", boxSizing: "border-box" }}>
+          {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </div>
+    </div>
+  );
+}
+
+// ── AnalyticsWidget — um gráfico configurável ─────────────────────────────────
+function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onDelete }) {
+  const cfg = widget.config;
+  const pivot = useMemo(() => pivotWidget(analyticsDataset, cfg),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [analyticsDataset, cfg.xDimension, cfg.metric, cfg.serieBy]);
+
+  const dims = analyticsDataset?.dimensions || [];
+  const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
+  const metrics = analyticsDataset?.metrics || [];
+  const orderedDims = [...dims].sort((a, b) => {
+    const ta = temporalCols.has(a), tb = temporalCols.has(b);
+    if (ta !== tb) return ta ? -1 : 1;
+    return a.localeCompare(b, "pt-BR");
+  });
+
+  const xOptions = [{ value: "", label: "— escolher —" }, ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d }))];
+  const metricOptions = metrics.map(m => ({ value: m.id, label: m.label }));
+  const serieOptions = [
+    { value: SERIE_CENARIO, label: "Cenário (AS IS vs Simulado)" },
+    { value: SERIE_NONE, label: "Nenhuma (linha única)" },
+    ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
+  ];
+
+  const set = (patch) => onConfigChange(widget.id, patch);
+  const isPct = pivot.metricDef?.unit !== "qty";
+
+  return (
+    <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "14px 16px 12px", marginBottom: 18 }}>
+      {/* Título editável + remover */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <input value={cfg.title} onChange={(e) => set({ title: e.target.value })}
+          placeholder="Título do gráfico"
+          style={{ flex: 1, fontSize: 14, fontWeight: 600, color: "#1e293b", border: "1px solid transparent",
+            borderRadius: 7, padding: "4px 7px", background: "transparent", fontFamily: "inherit", outline: "none", minWidth: 0 }}
+          onFocus={(e) => { e.target.style.borderColor = "#e2e8f0"; e.target.style.background = "#f8fafc"; }}
+          onBlur={(e) => { e.target.style.borderColor = "transparent"; e.target.style.background = "transparent"; }} />
+        <button onClick={() => onDelete(widget.id)} title="Remover gráfico"
+          style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
+            color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
       </div>
 
-      {pivot.state === "no_data" ? (
-        <EmptyState icon="📊" title="Nenhum dado de simulação ainda"
-          hint="Importe um CSV com a Decisão AS IS configurada e monte um fluxo no Canvas. Quando a simulação rodar, os gráficos aparecem aqui." />
-      ) : pivot.state === "no_temporal" ? (
-        <EmptyState icon="⏱" title="Nenhuma coluna temporal definida"
-          hint="No Passo 2 do wizard de importação, marque a coluna de data/tempo como ⏱ Temporal para habilitar a evolução cronológica." />
+      {/* Barra de configuração — poços de campo */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9" }}>
+        <FieldWell icon="📅" label="Eixo X" accept="dim" value={cfg.xDimension} displayValue={cfg.xDimension}
+          options={xOptions} onChange={(v) => set({ xDimension: v })} />
+        <FieldWell icon="Σ" label="Métrica" accept="metric" value={cfg.metric} displayValue={cfg.metric}
+          options={metricOptions} onChange={(v) => set({ metric: v || metrics[0]?.id })} />
+        <FieldWell icon="🎨" label="Série" accept="dim" value={cfg.serieBy} displayValue
+          options={serieOptions} onChange={(v) => set({ serieBy: v || SERIE_CENARIO })} />
+      </div>
+
+      {/* Gráfico ou estado vazio */}
+      {pivot.state === "no_x" ? (
+        <AWEmptyState icon="📐" title="Escolha o Eixo X"
+          hint="Arraste uma dimensão para o campo Eixo X (temporais ⏱ habilitam evolução cronológica)." />
       ) : pivot.state === "empty" ? (
-        <EmptyState icon="📉" title="Sem valores temporais para agrupar"
-          hint="A coluna temporal não tem valores preenchidos nas linhas da base." />
-      ) : (
-        <div style={{ padding: "8px 28px 28px" }}>
-          <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "18px 18px 12px", maxWidth: 1000 }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 14, paddingLeft: 6 }}>
-              <span style={{ fontSize: 14, fontWeight: 600, color: "#1e293b" }}>Taxa de Aprovação ao longo do tempo</span>
-              <span style={{ fontSize: 11, color: "#94a3b8" }}>· por {pivot.xCol}</span>
-            </div>
-            <div style={{ width: "100%", height: 360 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
-                  <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
-                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" unit="%" domain={[0, 100]} />
-                  <Tooltip
-                    formatter={(v) => (v == null ? "N/A" : `${v.toFixed(2)}%`)}
-                    contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }}
-                  />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  {pivot.scenarios.map((sc, i) => (
-                    <Line key={sc.id} type="monotone" dataKey={sc.nome}
-                      stroke={SCENARIO_COLORS[i % SCENARIO_COLORS.length]} strokeWidth={2.5}
-                      dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
-                  ))}
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+        <AWEmptyState icon="📉" title="Sem valores para agrupar"
+          hint="A dimensão escolhida não tem valores preenchidos nas linhas da base." />
+      ) : pivot.state === "ok" ? (
+        <>
+          <div style={{ width: "100%", height: 320 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+                <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
+                <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
+                  unit={isPct ? "%" : ""} domain={isPct ? [0, 100] : ["auto", "auto"]} />
+                <Tooltip
+                  formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
+                  contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                {pivot.series.map((sd) => (
+                  <Line key={sd.key} type="monotone" dataKey={sd.label}
+                    stroke={sd.color} strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
           </div>
+          {pivot.truncated && (
+            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6, paddingLeft: 6 }}>
+              Mostrando as primeiras {MAX_SERIES} séries.
+            </div>
+          )}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+// ── AnalysisTab — página da aba Análise ───────────────────────────────────────
+function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) {
+  const dims = analyticsDataset?.dimensions || [];
+  const temporalCols = analyticsDataset?.temporalColumns || [];
+
+  const makeWidget = (title) => ({
+    id: uid(), type: "line",
+    config: { title, xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_CENARIO },
+  });
+
+  // Auto-init: ao chegar o primeiro dataset com layout vazio, cria o gráfico padrão (Sessão 1).
+  useEffect(() => {
+    if (!analyticsDataset) return;
+    setAnalyticsLayout(prev => prev.length === 0 ? [makeWidget("Taxa de Aprovação ao longo do tempo")] : prev);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analyticsDataset]);
+
+  const addWidget = () => setAnalyticsLayout(prev => [...prev, makeWidget("Novo gráfico")]);
+  const removeWidget = (id) => setAnalyticsLayout(prev => prev.filter(w => w.id !== id));
+  const changeConfig = (id, patch) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, config: { ...w.config, ...patch } } : w));
+
+  const hasData = !!analyticsDataset;
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row", overflow: "hidden", background: "#f8fafc" }}>
+      {/* Área de gráficos */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+        <div style={{ padding: "20px 28px 12px", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>Dashboard</h1>
+            <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
+              Construa análises sobre os resultados da simulação · AS IS vs Simulado
+            </p>
+          </div>
+          {hasData && (
+            <button onClick={addWidget}
+              style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                border: "1px solid #2563eb", background: "#2563eb", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+              <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> Adicionar gráfico
+            </button>
+          )}
         </div>
-      )}
+
+        {!hasData ? (
+          <AWEmptyState icon="📊" title="Nenhum dado de simulação ainda"
+            hint="Importe um CSV com a Decisão AS IS configurada e monte um fluxo no Canvas. Quando a simulação rodar, os gráficos aparecem aqui." />
+        ) : analyticsLayout.length === 0 ? (
+          <AWEmptyState icon="➕" title="Nenhum gráfico"
+            hint="Clique em “+ Adicionar gráfico” para começar a montar seu dashboard." />
+        ) : (
+          <div style={{ padding: "8px 28px 28px", maxWidth: 1100 }}>
+            {analyticsLayout.map(w => (
+              <AnalyticsWidget key={w.id} widget={w} analyticsDataset={analyticsDataset}
+                onConfigChange={changeConfig} onDelete={removeWidget} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Painel de campos */}
+      {hasData && <FieldPanel analyticsDataset={analyticsDataset} />}
     </div>
   );
 }
@@ -982,6 +1228,7 @@ export default function App() {
   // Analytics Workspace
   const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
+  const [analyticsLayout, setAnalyticsLayout] = useState([]); // WidgetConfig[] — gráficos do dashboard
   const [activeCell, setActiveCell] = useState(null);   // {shapeId,csvId,ri,ci}
   // Credit simulator state
   const [editConn,   setEditConn]   = useState(null);   // {id, val} — edição de label de conexão
@@ -4089,7 +4336,7 @@ export default function App() {
 
 
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
-      {activeTab==="analysis" && <AnalysisTab analyticsDataset={analyticsDataset} />}
+      {activeTab==="analysis" && <AnalysisTab analyticsDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} />}
 
       {/* ═══════════════ CANVAS PANE ═══════════════ */}
       <div style={{display:activeTab==="canvas"?"flex":"none",flex:1,minHeight:0,width:"100%",overflow:"hidden",position:"relative"}}>
