@@ -67,6 +67,7 @@ AppCreditoSimulador/
 | `inadReal`     | ⚠️   | Inad. Real         | Inadimplência histórica observada                |
 | `inadInferida` | 🎯   | Inad. Inferida     | Inadimplência estimada para aprovados            |
 | `mixRisco`     | 🎨   | Mix de Risco       | Segmento/categoria de risco (usado no Johnny)    |
+| `temporal`     | ⏱   | Data/Tempo         | Coluna de data — eixo cronológico na aba Análise |
 
 ### Shape: `decision` (losango)
 ```js
@@ -265,6 +266,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult`; responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
 | `COMPUTE_JOHNNY` | `{shapes}` | Roda `computeJohnnyData`; responde com `JOHNNY_RESULT` |
+| `COMPUTE_ANALYTICS_DATASET` | `{shapes, conns, lensPopulations}` | Roda `computeAnalyticsDataset` (Analytics Workspace); responde com `ANALYTICS_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -273,6 +275,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `OVERLAY_RESULT` | `{overlay, incrementalResult}` |
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
+| `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo (DEC-AW-003): `{rows, dimensions, temporalColumns, metrics, scenarios}` |
 
 ### Funções no worker
 - `runSimulation(shapes, conns, csvStore)`: percorre todas as linhas de todos os CSVs pelo grafo, acumula métricas e retorna `SimulationResult`
@@ -282,6 +285,15 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `buildParetoFrontier(cellMetrics)`: fronteira Pareto greedy (sort por `inadInferida` crescente)
 - `extractScenarios(frontier)`: `{conservador, balanceado, melhorEficiencia, expansao}` — `melhorEficiencia` é o joelho da curva
 - `computeJohnnyData(shapes, csvStore)`: agrupa métricas de **todos** os Cineminhas em pool único, gera fronteira Pareto global com suporte a ordinalidade
+- `computeAnalyticsDataset(shapes, conns, csvStore, lensPopulations)`: reusa `computeSimulatedDecisions` e emite o dataset analítico **largo** (uma linha por agrupamento: dimensões + métricas intrínsecas + `__DECISAO_AS_IS`/`__DECISAO_SIMULADO`) — ver Analytics Workspace
+
+## Analytics Workspace (aba Análise)
+
+Segunda aba da aplicação (`activeTab: "analysis" | "canvas"`, padrão `analysis`) — builder de dashboards sobre os resultados da simulação. Ver `docs/wiki/Epicos-AnalyticsWorkspace.md`.
+
+- **Pipeline (DEC-AW-002)**: worker emite `analyticsDataset` (formato largo, DEC-AW-003) via `COMPUTE_ANALYTICS_DATASET`, debounced junto com a simulação; cada gráfico faz pivot client-side.
+- **Tipo `temporal` (DEC-AW-005)**: marcado no Passo 2 do wizard (toggle de 3 estados Categórica → Ordinal → ⏱ Temporal, grava `columnTypes[col]='temporal'`). `parseTemporalKey(str)` deriva a chave de ordenação cronológica.
+- **Sessão 1**: `AnalysisTab` renderiza um gráfico de linha fixo (Recharts, DEC-AW-001) — Taxa de Aprovação ao longo do tempo, séries AS IS vs Simulado (DEC-AW-006), eixo X = 1ª coluna temporal.
 
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos

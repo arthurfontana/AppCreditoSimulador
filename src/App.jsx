@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -152,6 +153,7 @@ const COL_TYPES = [
   { value:"inadReal",      icon:"⚠️", label:"Inad. Real",        shortLabel:"Inad.R"   },
   { value:"inadInferida",  icon:"🎯", label:"Inad. Inferida",    shortLabel:"Inad.I"   },
   { value:"mixRisco",      icon:"🎨", label:"Mix de Risco",       shortLabel:"Mix"      },
+  { value:"temporal",      icon:"⏱", label:"Data/Tempo",         shortLabel:"Data"     },
 ];
 
 const DELIMITERS = [
@@ -165,6 +167,22 @@ const VAR_TYPES = [
   { value:"ordinal",     label:"Ordinal",    icon:"📶" },
   { value:"categorical", label:"Categórica", icon:"🏷️" },
 ];
+
+// Parse a temporal cell value into a sortable numeric key (UTC ms), or null if
+// unparseable. Supports ISO (YYYY-MM-DD / YYYY-MM), BR (DD/MM/YYYY), compact
+// (YYYYMMDD), and a Date.parse fallback. Used to order the X axis chronologically.
+function parseTemporalKey(str) {
+  const s = String(str ?? "").trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?$/);          // YYYY-MM-DD / YYYY-MM
+  if (m) return Date.UTC(+m[1], +m[2] - 1, m[3] ? +m[3] : 1);
+  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);                  // DD/MM/YYYY
+  if (m) { let y = +m[3]; if (y < 100) y += 2000; return Date.UTC(y, +m[2] - 1, +m[1]); }
+  m = s.match(/^(\d{4})(\d{2})(\d{2})?$/);                               // YYYYMMDD / YYYYMM
+  if (m) return Date.UTC(+m[1], +m[2] - 1, m[3] ? +m[3] : 1);
+  const t = Date.parse(s);
+  return isNaN(t) ? null : t;
+}
 
 // Heuristics: infer whether a column is likely ordinal or categorical
 function suggestVarType(colName, values) {
@@ -845,6 +863,108 @@ function SimIndicators({ simResult, csvStore, incrementalResult }) {
   );
 }
 
+// ── AnalysisTab — Analytics Workspace (Sessão 1: gráfico de linha fixo) ───────
+const SCENARIO_COLORS = ["#94a3b8", "#2563eb", "#16a34a", "#d97706", "#9333ea"];
+
+function AnalysisTab({ analyticsDataset }) {
+  const pivot = useMemo(() => {
+    if (!analyticsDataset) return { state: "no_data" };
+    const { rows, temporalColumns, scenarios } = analyticsDataset;
+    const xCol = temporalColumns?.[0];
+    if (!xCol) return { state: "no_temporal" };
+
+    const buckets = new Map(); // xVal -> { [scenarioId]: {appr, total} }
+    for (const r of rows) {
+      const xv = String(r[xCol] ?? "").trim();
+      if (!xv) continue;
+      if (!buckets.has(xv)) buckets.set(xv, {});
+      const b = buckets.get(xv);
+      for (const sc of scenarios) {
+        if (!b[sc.id]) b[sc.id] = { appr: 0, total: 0 };
+        b[sc.id].total += r.qty || 0;
+        if (r[sc.decisionCol] === "APROVADO") b[sc.id].appr += r.qty || 0;
+      }
+    }
+    if (buckets.size === 0) return { state: "empty" };
+
+    const sortedKeys = [...buckets.keys()].sort((a, b) => {
+      const ka = parseTemporalKey(a), kb = parseTemporalKey(b);
+      if (ka != null && kb != null) return ka - kb;
+      if (ka != null) return -1;
+      if (kb != null) return 1;
+      return a.localeCompare(b);
+    });
+    const data = sortedKeys.map((xv) => {
+      const b = buckets.get(xv);
+      const row = { x: xv };
+      for (const sc of scenarios) {
+        const m = b[sc.id];
+        row[sc.nome] = m && m.total > 0 ? (m.appr / m.total) * 100 : null;
+      }
+      return row;
+    });
+    return { state: "ok", data, scenarios, xCol };
+  }, [analyticsDataset]);
+
+  const EmptyState = ({ icon, title, hint }) => (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#94a3b8", textAlign: "center", padding: 40 }}>
+      <div style={{ fontSize: 48, marginBottom: 14, opacity: 0.7 }}>{icon}</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: "#475569", marginBottom: 6 }}>{title}</div>
+      <div style={{ fontSize: 13, maxWidth: 420, lineHeight: 1.5 }}>{hint}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "auto", background: "#f8fafc" }}>
+      <div style={{ padding: "20px 28px 12px", flexShrink: 0 }}>
+        <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>Análise</h1>
+        <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
+          Dashboards sobre os resultados da simulação · AS IS vs Simulado
+        </p>
+      </div>
+
+      {pivot.state === "no_data" ? (
+        <EmptyState icon="📊" title="Nenhum dado de simulação ainda"
+          hint="Importe um CSV com a Decisão AS IS configurada e monte um fluxo no Canvas. Quando a simulação rodar, os gráficos aparecem aqui." />
+      ) : pivot.state === "no_temporal" ? (
+        <EmptyState icon="⏱" title="Nenhuma coluna temporal definida"
+          hint="No Passo 2 do wizard de importação, marque a coluna de data/tempo como ⏱ Temporal para habilitar a evolução cronológica." />
+      ) : pivot.state === "empty" ? (
+        <EmptyState icon="📉" title="Sem valores temporais para agrupar"
+          hint="A coluna temporal não tem valores preenchidos nas linhas da base." />
+      ) : (
+        <div style={{ padding: "8px 28px 28px" }}>
+          <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "18px 18px 12px", maxWidth: 1000 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 14, paddingLeft: 6 }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#1e293b" }}>Taxa de Aprovação ao longo do tempo</span>
+              <span style={{ fontSize: 11, color: "#94a3b8" }}>· por {pivot.xCol}</span>
+            </div>
+            <div style={{ width: "100%", height: 360 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+                  <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
+                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" unit="%" domain={[0, 100]} />
+                  <Tooltip
+                    formatter={(v) => (v == null ? "N/A" : `${v.toFixed(2)}%`)}
+                    contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  {pivot.scenarios.map((sc, i) => (
+                    <Line key={sc.id} type="monotone" dataKey={sc.nome}
+                      stroke={SCENARIO_COLORS[i % SCENARIO_COLORS.length]} strokeWidth={2.5}
+                      dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [shapes, setShapes] = useState([]);
@@ -859,6 +979,9 @@ export default function App() {
   // CSV state
   const [csvStore,   setCsvStore]   = useState({});     // {[csvId]: {name,headers,rows,columnTypes}}
   const [wizard,     setWizard]     = useState(null);   // null | wizard obj
+  // Analytics Workspace
+  const [activeTab,  setActiveTab]  = useState("analysis"); // "analysis" | "canvas"
+  const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
   const [activeCell, setActiveCell] = useState(null);   // {shapeId,csvId,ri,ci}
   // Credit simulator state
   const [editConn,   setEditConn]   = useState(null);   // {id, val} — edição de label de conexão
@@ -953,6 +1076,8 @@ export default function App() {
       } else if (msgType === 'OVERLAY_RESULT') {
         setSimulationOverlay(e.data.overlay);
         setIncrementalResult(e.data.incrementalResult);
+      } else if (msgType === 'ANALYTICS_RESULT') {
+        setAnalyticsDataset(e.data.dataset);
       } else if (msgType === 'OPTIM_RESULT') {
         const { shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf } = e.data;
         if (pendingOptimShapeIdRef.current !== shapeId) return;
@@ -1063,6 +1188,17 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'COMPUTE_OVERLAY', shapes: shapesR.current, conns: connsR.current, lensPopulations: lensPopulationsR.current });
     }, 300);
     return () => clearTimeout(simOverlayDebounceRef.current);
+  }, [shapes, conns, csvStore, lensPopulations]);
+
+  // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
+  // Recomputado pelo worker quando a simulação muda; cacheado em analyticsDataset.
+  const analyticsDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(analyticsDebounceRef.current);
+    analyticsDebounceRef.current = setTimeout(() => {
+      workerRef.current?.postMessage({ type: 'COMPUTE_ANALYTICS_DATASET', shapes: shapesR.current, conns: connsR.current, lensPopulations: lensPopulationsR.current });
+    }, 300);
+    return () => clearTimeout(analyticsDebounceRef.current);
   }, [shapes, conns, csvStore, lensPopulations]);
 
   // ── Feature 6: Reprocessamento Incremental de Indicadores ──────
@@ -3940,7 +4076,7 @@ export default function App() {
   // JSX
   // ────────────────────────────────────────────────────────────────────────────
   return (
-    <div style={{display:"flex",width:"100%",height:"100vh",overflow:"hidden",fontFamily:"'DM Sans',system-ui,sans-serif",background:"#f1f5f9"}}>
+    <div style={{display:"flex",flexDirection:"column",width:"100%",height:"100vh",overflow:"hidden",fontFamily:"'DM Sans',system-ui,sans-serif",background:"#f1f5f9"}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap');
         *{box-sizing:border-box;margin:0;padding:0;}
@@ -3950,6 +4086,29 @@ export default function App() {
         .wbz:active{transform:scale(.93);}
         @media(max-width:560px){.wbl{display:none!important;}}
       `}</style>
+
+      {/* ═══════════════ TAB BAR ═══════════════ */}
+      <div style={{display:"flex",alignItems:"flex-end",gap:2,background:"#e2e8f0",borderBottom:"1px solid #cbd5e1",padding:"6px 10px 0",flexShrink:0,height:38}}>
+        {[{id:"analysis",label:"Análise",icon:"📊"},{id:"canvas",label:"Canvas",icon:"🗺️"}].map(t=>{
+          const active = activeTab===t.id;
+          return (
+            <button key={t.id} onClick={()=>setActiveTab(t.id)}
+              style={{display:"flex",alignItems:"center",gap:6,padding:"7px 18px",border:"1px solid",
+                borderColor:active?"#cbd5e1":"transparent",borderBottom:active?"1px solid #fff":"1px solid transparent",
+                background:active?"#fff":"transparent",color:active?"#1e293b":"#64748b",
+                borderTopLeftRadius:9,borderTopRightRadius:9,cursor:"pointer",fontSize:13,
+                fontWeight:active?600:500,fontFamily:"inherit",marginBottom:-1,transition:"all .12s"}}>
+              <span style={{fontSize:14}}>{t.icon}</span>{t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
+      {activeTab==="analysis" && <AnalysisTab analyticsDataset={analyticsDataset} />}
+
+      {/* ═══════════════ CANVAS PANE ═══════════════ */}
+      <div style={{display:activeTab==="canvas"?"flex":"none",flex:1,minHeight:0,width:"100%",overflow:"hidden",position:"relative"}}>
 
       {/* ═══════════════ CANVAS AREA ═══════════════ */}
       <div style={{flex:1,position:"relative",overflow:"hidden"}}>
@@ -6216,15 +6375,30 @@ export default function App() {
                           </div>
                           <div style={{maxHeight:220,overflowY:"auto"}}>
                             {filterCols.map((colName,i)=>{
-                              const varType = (wizard.varTypes||{})[colName] || "categorical";
+                              const isTemporal = (wizard.columnTypes||{})[colName] === 'temporal';
+                              const varType = isTemporal ? 'temporal' : ((wizard.varTypes||{})[colName] || "categorical");
+                              const cycle = { categorical:'ordinal', ordinal:'temporal', temporal:'categorical' };
+                              const cycleType = () => setWizard(w=>{
+                                const next = cycle[varType];
+                                const newCols = {...(w.columnTypes||{})};
+                                const newVars = {...(w.varTypes||{})};
+                                if (next === 'temporal') { newCols[colName] = 'temporal'; }
+                                else { if (newCols[colName] === 'temporal') delete newCols[colName]; newVars[colName] = next; }
+                                return {...w, columnTypes:newCols, varTypes:newVars};
+                              });
+                              const st = varType==='temporal'
+                                ? {border:'#0891b2',bg:'#ecfeff',color:'#0e7490',label:'⏱ Temporal'}
+                                : varType==='ordinal'
+                                ? {border:'#7c3aed',bg:'#f5f3ff',color:'#7c3aed',label:'📶 Ordinal'}
+                                : {border:'#e2e8f0',bg:'#f8fafc',color:'#64748b',label:'🏷️ Categ.'};
                               return (
                                 <div key={colName} style={{display:"grid",gridTemplateColumns:"1fr 120px",alignItems:"center",padding:"8px 14px",borderBottom:i<filterCols.length-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
                                   <span style={{fontSize:12.5,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",paddingRight:8}} title={colName}>{colName}</span>
                                   <div style={{display:"flex",justifyContent:"center"}}>
                                     <button
-                                      onClick={()=>setWizard(w=>({...w,varTypes:{...(w.varTypes||{}),[colName]:varType==="ordinal"?"categorical":"ordinal"}}))}
-                                      style={{padding:"4px 14px",borderRadius:20,border:`1.5px solid ${varType==="ordinal"?"#7c3aed":"#e2e8f0"}`,background:varType==="ordinal"?"#f5f3ff":"#f8fafc",color:varType==="ordinal"?"#7c3aed":"#64748b",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",transition:"all .12s"}}>
-                                      {varType==="ordinal"?"📶 Ordinal":"🏷️ Categ."}
+                                      onClick={cycleType}
+                                      style={{padding:"4px 14px",borderRadius:20,border:`1.5px solid ${st.border}`,background:st.bg,color:st.color,fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",transition:"all .12s"}}>
+                                      {st.label}
                                     </button>
                                   </div>
                                 </div>
@@ -6233,7 +6407,7 @@ export default function App() {
                           </div>
                         </div>
                         <p style={{fontSize:10.5,color:"#94a3b8",marginTop:8,lineHeight:1.5}}>
-                          <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco (ex: score, faixa) · <strong>Categórica</strong> = sem ordem definida
+                          <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco (ex: score, faixa) · <strong>Categórica</strong> = sem ordem definida · <strong style={{color:"#0e7490"}}>⏱ Temporal</strong> = data/tempo (eixo cronológico na Análise)
                         </p>
                       </div>
                     )}
@@ -7546,6 +7720,7 @@ export default function App() {
           </div>
         );
       })()}
+      </div>{/* ── fim CANVAS PANE ── */}
     </div>
   );
 }
