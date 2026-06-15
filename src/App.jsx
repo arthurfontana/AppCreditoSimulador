@@ -1382,10 +1382,54 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
   );
 }
 
+// ── Multi-canvas store helpers (DEC-AW-007) ─────────────────────────────────
+const CANVAS_STORAGE_KEY = 'aw_canvases_v1';
+
+// Cached init — parsed once, shared by canvases / activeCanvasId / shapes / conns initializers
+let _canvasInitCache = null;
+function _initCanvasStore() {
+  if (_canvasInitCache) return _canvasInitCache;
+  try {
+    const s = localStorage.getItem(CANVAS_STORAGE_KEY);
+    if (s) {
+      const p = JSON.parse(s);
+      if (p?.canvases && p?.activeCanvasId && p.canvases[p.activeCanvasId]) {
+        _canvasInitCache = { canvases: p.canvases, activeCanvasId: p.activeCanvasId };
+        return _canvasInitCache;
+      }
+    }
+  } catch {}
+  const id = uid();
+  _canvasInitCache = {
+    canvases: { [id]: { id, name: 'Canvas 1', shapes: [], conns: [], includeInDashboard: true } },
+    activeCanvasId: id,
+  };
+  return _canvasInitCache;
+}
+
+// Clones shapes + conns replacing all IDs — used in canvas duplication
+function cloneCanvasWithNewIds(shapes, conns) {
+  const idMap = {};
+  for (const s of shapes) idMap[s.id] = uid();
+  const newShapes = shapes.map(s => ({ ...s, id: idMap[s.id] }));
+  const newConns  = conns.map(c => ({
+    ...c, id: uid(),
+    from: idMap[c.from] ?? c.from,
+    to:   idMap[c.to]   ?? c.to,
+  }));
+  return { newShapes, newConns };
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [shapes, setShapes] = useState([]);
-  const [conns,   setConns]   = useState([]);
+  const [shapes, setShapes] = useState(() => {
+    const init = _initCanvasStore();
+    return init.canvases[init.activeCanvasId]?.shapes ?? [];
+  });
+  const [conns,   setConns]   = useState(() => {
+    const init = _initCanvasStore();
+    return init.canvases[init.activeCanvasId]?.conns ?? [];
+  });
   const [tool,       setTool]       = useState("hand");
   const [sel,        setSel]        = useState(null);
   const [fromId,     setFromId]     = useState(null);
@@ -1400,6 +1444,12 @@ export default function App() {
   const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
   const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = localStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
+  // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
+  const [canvases, setCanvases] = useState(() => _initCanvasStore().canvases);
+  const [activeCanvasId, setActiveCanvasId] = useState(() => _initCanvasStore().activeCanvasId);
+  const [renamingCanvasId, setRenamingCanvasId] = useState(null); // id being renamed inline
+  const [renameValue, setRenameValue] = useState('');
+  const [canvasTabMenu, setCanvasTabMenu] = useState(null); // null | {canvasId, x, y}
   const [activeCell, setActiveCell] = useState(null);   // {shapeId,csvId,ri,ci}
   // Credit simulator state
   const [editConn,   setEditConn]   = useState(null);   // {id, val} — edição de label de conexão
@@ -1478,6 +1528,8 @@ export default function App() {
   const lensModalR    = useRef(lensModal);  useEffect(()=>{lensModalR.current=lensModal},  [lensModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
+  const canvasesR       = useRef(canvases);        useEffect(()=>{canvasesR.current=canvases},         [canvases]);
+  const activeCanvasIdR = useRef(activeCanvasId);  useEffect(()=>{activeCanvasIdR.current=activeCanvasId},[activeCanvasId]);
   const bwDragR = useRef(null);
 
   // ── Web Worker — simulation off the main thread ───────────────
@@ -1621,6 +1673,20 @@ export default function App() {
 
   // Persiste layout do dashboard no localStorage para sobreviver a reloads (Sessão 4).
   useEffect(() => { localStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
+
+  // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
+  useEffect(() => {
+    try {
+      const toSave = {
+        canvases: {
+          ...canvases,
+          [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
+        },
+        activeCanvasId,
+      };
+      localStorage.setItem(CANVAS_STORAGE_KEY, JSON.stringify(toSave));
+    } catch {}
+  }, [shapes, conns, canvases, activeCanvasId]);
 
   // ── Feature 6: Reprocessamento Incremental de Indicadores ──────
   // incrementalResult: null | {baseline, simulated, impacted}
@@ -1964,6 +2030,97 @@ export default function App() {
     setConns(snap.conns);
     setSel(null); setMultiSel(new Set());
   }, []); // eslint-disable-line
+
+  // ── Multi-canvas operations (Sub-sessão 5A) ──────────────────────
+  const switchCanvas = useCallback((targetId) => {
+    const curId = activeCanvasIdR.current;
+    if (targetId === curId) return;
+    // Persist current working copy before leaving
+    setCanvases(prev => ({
+      ...prev,
+      [curId]: { ...prev[curId], shapes: shapesR.current, conns: connsR.current },
+    }));
+    const target = canvasesR.current[targetId];
+    setShapes(target?.shapes ?? []);
+    setConns(target?.conns ?? []);
+    // Undo/redo scoped per canvas — reset on switch
+    setUndoStack([]);
+    setRedoStack([]);
+    setSel(null);
+    setMultiSel(new Set());
+    setActiveCanvasId(targetId);
+  }, []); // eslint-disable-line
+
+  const createCanvas = useCallback(() => {
+    const id = uid();
+    const curId = activeCanvasIdR.current;
+    const idx = Object.keys(canvasesR.current).length + 1;
+    setCanvases(prev => ({
+      ...prev,
+      [curId]: { ...prev[curId], shapes: shapesR.current, conns: connsR.current },
+      [id]: { id, name: `Canvas ${idx}`, shapes: [], conns: [], includeInDashboard: false },
+    }));
+    setShapes([]); setConns([]);
+    setUndoStack([]); setRedoStack([]);
+    setSel(null); setMultiSel(new Set());
+    setActiveCanvasId(id);
+    setActiveTab('canvas');
+  }, []); // eslint-disable-line
+
+  const duplicateCanvas = useCallback((sourceId) => {
+    const source = canvasesR.current[sourceId];
+    if (!source) return;
+    const id = uid();
+    const curId = activeCanvasIdR.current;
+    // Use working copy for the active canvas (may be ahead of stored state)
+    const srcShapes = sourceId === curId ? shapesR.current : source.shapes;
+    const srcConns  = sourceId === curId ? connsR.current  : source.conns;
+    const { newShapes, newConns } = cloneCanvasWithNewIds(srcShapes, srcConns);
+    setCanvases(prev => ({
+      ...prev,
+      [curId]: { ...prev[curId], shapes: shapesR.current, conns: connsR.current },
+      [id]: { id, name: `${source.name} (cópia)`, shapes: newShapes, conns: newConns, includeInDashboard: false },
+    }));
+    setShapes(newShapes); setConns(newConns);
+    setUndoStack([]); setRedoStack([]);
+    setSel(null); setMultiSel(new Set());
+    setActiveCanvasId(id);
+    setActiveTab('canvas');
+  }, []); // eslint-disable-line
+
+  const deleteCanvas = useCallback((id) => {
+    const keys = Object.keys(canvasesR.current);
+    if (keys.length <= 1) return; // guard: cannot delete last canvas
+    const curId = activeCanvasIdR.current;
+    const remaining = keys.filter(k => k !== id);
+    const newActiveId = id === curId ? remaining[0] : curId;
+    const newCanvases = {};
+    for (const k of remaining) {
+      newCanvases[k] = canvasesR.current[k];
+    }
+    // Persist active working copy if we're not deleting it
+    if (id !== curId) {
+      newCanvases[curId] = { ...newCanvases[curId], shapes: shapesR.current, conns: connsR.current };
+    }
+    setCanvases(newCanvases);
+    if (id === curId) {
+      const target = newCanvases[newActiveId];
+      setShapes(target?.shapes ?? []);
+      setConns(target?.conns ?? []);
+      setUndoStack([]); setRedoStack([]);
+      setSel(null); setMultiSel(new Set());
+      setActiveCanvasId(newActiveId);
+      setActiveTab('canvas');
+    }
+  }, []); // eslint-disable-line
+
+  const renameCanvas = useCallback((id, name) => {
+    setCanvases(prev => ({ ...prev, [id]: { ...prev[id], name: name.trim() || prev[id].name } }));
+  }, []);
+
+  const toggleCanvasInDashboard = useCallback((id) => {
+    setCanvases(prev => ({ ...prev, [id]: { ...prev[id], includeInDashboard: !prev[id].includeInDashboard } }));
+  }, []);
 
   const deleteSelected = useCallback(() => {
     const ids = multiSelR.current.size > 0 ? [...multiSelR.current] : (selR.current ? [selR.current] : []);
@@ -2617,6 +2774,52 @@ export default function App() {
 
       return [...reconciledShapes, csvNode, ...panelNodes];
     });
+
+    // Fan-out reconciliation to all OTHER canvases (Sub-sessão 5A)
+    {
+      const curId = activeCanvasIdR.current;
+      const currentStoreKeys = new Set(Object.keys(csvStoreR.current));
+      const reconcileForCanvas = (shapes_) => shapes_.map(s => {
+        if (s.type === "decision") {
+          if (!s.variableCol) return s;
+          if (s.csvId === csvId) return s;
+          if (s.csvId && currentStoreKeys.has(s.csvId)) return s;
+          const mh = normMap[normalizeColName(s.variableCol)];
+          if (mh) return {...s, csvId, variableCol: mh};
+          return s;
+        }
+        if (s.type === "cineminha") {
+          let upd = {...s}; let ch = false;
+          if (s.rowVar && !currentStoreKeys.has(s.rowVar.csvId) && s.rowVar.csvId !== csvId) {
+            const m = normMap[normalizeColName(s.rowVar.col)];
+            if (m) { upd.rowVar = {col:m, csvId}; ch = true; }
+          }
+          if (s.colVar && !currentStoreKeys.has(s.colVar.csvId) && s.colVar.csvId !== csvId) {
+            const m = normMap[normalizeColName(s.colVar.col)];
+            if (m) { upd.colVar = {col:m, csvId}; ch = true; }
+          }
+          if (!ch) return s;
+          if (upd.rowVar) { const ci=headers.indexOf(upd.rowVar.col); if(ci>=0){const vals=[...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];upd.rowDomain=sortDomain(vals);} }
+          if (upd.colVar) { const ci=headers.indexOf(upd.colVar.col); if(ci>=0){const vals=[...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];upd.colDomain=sortDomain(vals);} }
+          const rDom=upd.rowDomain.length>0?upd.rowDomain:['*']; const cDom=upd.colDomain.length>0?upd.colDomain:['*'];
+          const nc={}; for(const rv of rDom) for(const cv of cDom){const k=`${rv}|${cv}`;nc[k]=getCellValue(s.cells,k);}
+          upd.cells=nc; const {w:nw,h:nh}=computeCinemaSize(upd.rowDomain,upd.colDomain); upd.w=nw; upd.h=nh;
+          return upd;
+        }
+        return s;
+      });
+      setCanvases(prev => {
+        let changed = false;
+        const next = {...prev};
+        for (const [cId, canvas] of Object.entries(next)) {
+          if (cId === curId) continue;
+          const rec = reconcileForCanvas(canvas.shapes);
+          next[cId] = {...canvas, shapes: rec};
+          changed = true;
+        }
+        return changed ? next : prev;
+      });
+    }
 
     setSel(nodeId); setWizard(null); setImportWarn(null);
   };
@@ -8127,22 +8330,105 @@ export default function App() {
       })()}
       </div>{/* ── fim CANVAS PANE ── */}
 
-      {/* ═══════════════ TAB BAR (BOTTOM LEFT) ═══════════════ */}
-      <div style={{display:"flex",alignItems:"flex-start",gap:2,background:"#e2e8f0",borderTop:"1px solid #cbd5e1",padding:"0 10px 0",flexShrink:0,alignSelf:"flex-start"}}>
-        {[{id:"canvas",label:"Canvas",icon:"🗺️"},{id:"analysis",label:"Dashboard",icon:"📊"}].map(t=>{
-          const active = activeTab===t.id;
+      {/* ═══════════════ TAB BAR (BOTTOM LEFT) — multi-canvas ═══════════════ */}
+      <div style={{display:"flex",alignItems:"flex-start",gap:2,background:"#e2e8f0",borderTop:"1px solid #cbd5e1",padding:"0 8px 0",flexShrink:0,alignSelf:"flex-start",overflowX:"auto",maxWidth:"100%"}}>
+
+        {/* Dashboard tab — fixed */}
+        {(()=>{
+          const active=activeTab==="analysis";
           return (
-            <button key={t.id} onClick={()=>setActiveTab(t.id)}
-              style={{display:"flex",alignItems:"center",gap:6,padding:"7px 18px",border:"1px solid",
+            <button onClick={()=>setActiveTab("analysis")}
+              style={{display:"flex",alignItems:"center",gap:6,padding:"7px 16px",border:"1px solid",flexShrink:0,
                 borderColor:active?"#cbd5e1":"transparent",borderTop:active?"1px solid #e2e8f0":"1px solid transparent",
                 background:active?"#fff":"transparent",color:active?"#1e293b":"#64748b",
                 borderBottomLeftRadius:9,borderBottomRightRadius:9,cursor:"pointer",fontSize:13,
                 fontWeight:active?600:500,fontFamily:"inherit",marginTop:-1,transition:"all .12s"}}>
-              <span style={{fontSize:14}}>{t.icon}</span>{t.label}
+              <span style={{fontSize:14}}>📊</span>Dashboard
             </button>
           );
+        })()}
+
+        {/* Canvas tabs */}
+        {Object.values(canvases).map(canvas=>{
+          const active=activeTab==="canvas"&&activeCanvasId===canvas.id;
+          const isRen=renamingCanvasId===canvas.id;
+          const tabBorder={border:"1px solid",borderColor:active?"#cbd5e1":"transparent",borderTop:active?"1px solid #e2e8f0":"1px solid transparent"};
+          return (
+            <div key={canvas.id} style={{display:"flex",alignItems:"stretch",flexShrink:0}}>
+              <button
+                onClick={()=>{switchCanvas(canvas.id);setActiveTab("canvas");}}
+                onDoubleClick={()=>{setRenamingCanvasId(canvas.id);setRenameValue(canvas.name);}}
+                style={{display:"flex",alignItems:"center",gap:5,padding:"7px 8px 7px 14px",...tabBorder,borderRight:"none",
+                  borderBottomLeftRadius:9,background:active?"#fff":"transparent",color:active?"#1e293b":"#64748b",
+                  cursor:"pointer",fontSize:13,fontWeight:active?600:500,fontFamily:"inherit",marginTop:-1,transition:"all .12s"}}>
+                {isRen
+                  ? <input autoFocus value={renameValue} onChange={e=>setRenameValue(e.target.value)}
+                      onBlur={()=>{renameCanvas(canvas.id,renameValue);setRenamingCanvasId(null);}}
+                      onKeyDown={e=>{
+                        if(e.key==="Enter"){renameCanvas(canvas.id,renameValue);setRenamingCanvasId(null);}
+                        if(e.key==="Escape")setRenamingCanvasId(null);
+                        e.stopPropagation();
+                      }}
+                      onClick={e=>e.stopPropagation()}
+                      style={{border:"1px solid #93c5fd",borderRadius:4,padding:"1px 4px",fontSize:13,
+                        fontFamily:"inherit",outline:"none",width:Math.max(60,renameValue.length*8)}}/>
+                  : <span style={{maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{canvas.name}</span>
+                }
+              </button>
+              {/* Accessory strip: dashboard toggle + context menu */}
+              <div style={{display:"flex",alignItems:"center",gap:1,padding:"0 5px",...tabBorder,borderLeft:"none",
+                borderBottomRightRadius:9,background:active?"#fff":"transparent",marginTop:-1}}>
+                <span
+                  title={canvas.includeInDashboard?"Incluído no Dashboard (clique para excluir)":"Excluído do Dashboard (clique para incluir)"}
+                  onClick={e=>{e.stopPropagation();toggleCanvasInDashboard(canvas.id);}}
+                  style={{fontSize:11,cursor:"pointer",opacity:canvas.includeInDashboard?.9:.25,
+                    padding:"1px 2px",borderRadius:3,lineHeight:1,transition:"opacity .15s",userSelect:"none"}}>📊</span>
+                <span
+                  title="Mais ações"
+                  onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setCanvasTabMenu({canvasId:canvas.id,x:r.left,y:r.bottom+2});}}
+                  style={{fontSize:13,fontWeight:700,cursor:"pointer",opacity:.45,padding:"1px 3px",
+                    borderRadius:3,lineHeight:1,userSelect:"none",letterSpacing:1}}>⋮</span>
+              </div>
+            </div>
+          );
         })}
+
+        {/* New canvas (+) */}
+        <button onClick={createCanvas} title="Novo canvas vazio"
+          style={{display:"flex",alignItems:"center",padding:"7px 10px",border:"none",background:"transparent",
+            color:"#94a3b8",cursor:"pointer",fontSize:18,lineHeight:1,flexShrink:0,marginTop:0}}
+          onMouseEnter={e=>e.currentTarget.style.color="#2563eb"}
+          onMouseLeave={e=>e.currentTarget.style.color="#94a3b8"}>+</button>
       </div>
+
+      {/* Context menu for canvas tabs */}
+      {canvasTabMenu && createPortal(
+        <>
+          <div style={{position:"fixed",inset:0,zIndex:9000}} onClick={()=>setCanvasTabMenu(null)}/>
+          <div style={{position:"fixed",top:canvasTabMenu.y,left:canvasTabMenu.x,background:"#fff",
+            borderRadius:10,border:"1px solid #e2e8f0",boxShadow:"0 8px 24px rgba(0,0,0,.12)",
+            minWidth:160,zIndex:9001,overflow:"hidden"}}>
+            {[
+              {label:"✏️  Renomear",action:()=>{setRenamingCanvasId(canvasTabMenu.canvasId);setRenameValue(canvasesR.current[canvasTabMenu.canvasId]?.name??'');setCanvasTabMenu(null);}},
+              {label:"⧉  Duplicar", action:()=>{duplicateCanvas(canvasTabMenu.canvasId);setCanvasTabMenu(null);}},
+              {label:"🗑  Excluir",  action:()=>{deleteCanvas(canvasTabMenu.canvasId);setCanvasTabMenu(null);},danger:true},
+            ].map(item=>{
+              const disabled=item.danger&&Object.keys(canvases).length<=1;
+              return (
+                <button key={item.label} onClick={disabled?undefined:item.action}
+                  style={{display:"block",width:"100%",padding:"10px 16px",border:"none",background:"transparent",
+                    cursor:disabled?"not-allowed":"pointer",fontSize:13,fontFamily:"inherit",
+                    color:item.danger?(disabled?"#fca5a5":"#dc2626"):"#1e293b",
+                    textAlign:"left",opacity:disabled?.5:1}}
+                  onMouseEnter={e=>{if(!disabled)e.currentTarget.style.background="#f8fafc";}}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                >{item.label}</button>
+              );
+            })}
+          </div>
+        </>,
+        document.body
+      )}
     </div>
   );
 }

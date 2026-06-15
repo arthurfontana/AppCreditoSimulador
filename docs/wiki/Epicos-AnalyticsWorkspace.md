@@ -267,7 +267,7 @@ Pelo porte da refatoração multi-canvas, a Sessão 5 é **fatiada em 3 sub-sess
 
 ---
 
-#### Sub-sessão 5A — Infraestrutura multi-canvas (Entrega 1)
+#### Sub-sessão 5A — Infraestrutura multi-canvas (Entrega 1) ✅ ENTREGUE
 
 **Escopo:** somente o Canvas e a barra de abas. **Não toca no Dashboard** — o pipeline analítico continua usando só o canvas ativo (comportamento atual preservado).
 
