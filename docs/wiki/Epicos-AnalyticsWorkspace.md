@@ -198,13 +198,14 @@ activeTab: "analysis" | "canvas"            // aba ativa
 
 ---
 
-### Sessão 2 — Builder configurável
+### Sessão 2 — Builder configurável ✅ ENTREGUE
 
 **Entrega:**
-- Painel lateral de campos (dimensões e métricas) na aba Análise, estilo Power BI
-- Gráfico de linha torna-se **configurável**: arrasta campo para eixo X, seleciona métrica, seleciona dimensão de série
-- Suporte a múltiplos componentes na página (botão "+ Adicionar gráfico")
-- Pivot client-side memoizado por config do componente
+- Painel lateral de campos (dimensões e métricas) na aba Análise, estilo Power BI — `FieldPanel`, chips arrastáveis (HTML5 drag, MIME `application/aw-field`); dimensões temporais ⏱ primeiro
+- Gráfico de linha torna-se **configurável**: arrasta campo para eixo X (drop zone) ou série; seleciona métrica e dimensão de série via `FieldWell` (drop zone + select) — componente `AnalyticsWidget`
+- Suporte a múltiplos componentes na página (botão "+ Adicionar gráfico"), cada um com título editável e botão remover; estado em `analyticsLayout: WidgetConfig[]`
+- Pivot client-side memoizado por config do componente — `pivotWidget(ds, config)` + `computeWidgetMetric(rows, metricId, decisionCol)`, memo por `[analyticsDataset, xDimension, metric, serieBy]`
+- `serieBy`: cenário (AS IS vs Simulado), nenhuma (linha única), ou quebra por dimensão categórica (teto 12 séries, cenário Simulado implícito)
 
 **Destrava:** usuário passa a construir suas próprias análises sem código novo.
 
