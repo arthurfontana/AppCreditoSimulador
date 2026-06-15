@@ -8491,7 +8491,7 @@ export default function App() {
                     padding:"1px 2px",borderRadius:3,lineHeight:1,transition:"opacity .15s",userSelect:"none"}}>📊</span>
                 <span
                   title="Mais ações"
-                  onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setCanvasTabMenu({canvasId:canvas.id,x:r.left,y:r.bottom+2});}}
+                  onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();const menuH=136;const flipUp=window.innerHeight-r.bottom<menuH+8;setCanvasTabMenu({canvasId:canvas.id,x:r.left,flipUp,y:flipUp?r.top-menuH-2:r.bottom+2});}}
                   style={{fontSize:13,fontWeight:700,cursor:"pointer",opacity:.45,padding:"1px 3px",
                     borderRadius:3,lineHeight:1,userSelect:"none",letterSpacing:1}}>⋮</span>
               </div>
@@ -8512,7 +8512,8 @@ export default function App() {
         <>
           <div style={{position:"fixed",inset:0,zIndex:9000}} onClick={()=>setCanvasTabMenu(null)}/>
           <div style={{position:"fixed",top:canvasTabMenu.y,left:canvasTabMenu.x,background:"#fff",
-            borderRadius:10,border:"1px solid #e2e8f0",boxShadow:"0 8px 24px rgba(0,0,0,.12)",
+            borderRadius:10,border:"1px solid #e2e8f0",
+            boxShadow:canvasTabMenu.flipUp?"0 -8px 24px rgba(0,0,0,.12)":"0 8px 24px rgba(0,0,0,.12)",
             minWidth:160,zIndex:9001,overflow:"hidden"}}>
             {[
               {label:"✏️  Renomear",action:()=>{setRenamingCanvasId(canvasTabMenu.canvasId);setRenameValue(canvasesR.current[canvasTabMenu.canvasId]?.name??'');setCanvasTabMenu(null);}},
