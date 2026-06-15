@@ -740,17 +740,42 @@ function computeJohnnyData(shapes, csvStore) {
 // the original dimensions + intrinsic metrics + one decision column per scenario.
 const ANALYTICS_METRIC_TYPES = new Set(['qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida', 'mixRisco']);
 
-function computeAnalyticsDataset(shapes, conns, csvStore, lensPopulations) {
-  const overlay = computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations);
-  if (!overlay) return null;
+// Overlay (decisão simulada por csvId+rowIdx) de um canvas, memoizado por hash de
+// shapes/conns/lensPopulations + versão do csvStore (5B — evita reprocessar canvases intocados).
+function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations) {
+  const key = csvStoreVersion + '|' + JSON.stringify(shapes) + '|' + JSON.stringify(conns) + '|' + JSON.stringify(lensPopulations || {});
+  const hit = analyticsOverlayCache[canvasId];
+  if (hit && hit.key === key) return hit.overlay;
+  const overlay = computeSimulatedDecisions(shapes, conns, workerCsvStore, lensPopulations);
+  analyticsOverlayCache[canvasId] = { key, overlay };
+  return overlay;
+}
+
+// Dataset analítico largo (DEC-AW-003) com N cenários (DEC-AW-004/007).
+// canvasInputs: [{id, nome, shapes, conns, lensPopulations}] — uma aba marcada por cenário.
+// Métricas intrínsecas vêm do agrupamento (uma vez); cada canvas emite sua coluna de decisão,
+// unidas por (csvId, rowIdx) — datasets compartilhados ⇒ agrupamentos idênticos entre cenários.
+function computeAnalyticsDataset(canvasInputs, csvStore) {
+  const inputs = Array.isArray(canvasInputs) ? canvasInputs : [];
+
+  // Poda entradas de canvases que não estão mais marcados (evita crescimento do cache).
+  const liveIds = new Set(inputs.map(ci => ci.id));
+  for (const k of Object.keys(analyticsOverlayCache)) if (!liveIds.has(k)) delete analyticsOverlayCache[k];
+
+  const canvasScenarios = inputs.map(ci => ({
+    id: ci.id,
+    nome: ci.nome,
+    decisionCol: `__DECISAO_${ci.id}`,
+    overlay: cachedCanvasOverlay(ci.id, ci.shapes, ci.conns, ci.lensPopulations),
+  }));
 
   const dimensionSet = new Set();
   const temporalSet = new Set();
   const rows = [];
 
-  for (const [csvId, { rowDecisions }] of Object.entries(overlay)) {
-    const csv = csvStore[csvId];
-    if (!csv) continue;
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    if (dOrigIdx < 0) continue; // só datasets com AS IS configurado são analíticos
     const types = csv.columnTypes || {};
     const getIdx = (type) => {
       const col = Object.entries(types).find(([, t]) => t === type)?.[0];
@@ -772,9 +797,7 @@ function computeAnalyticsDataset(shapes, conns, csvStore, lensPopulations) {
     }
     const dimIdx = dimCols.map(h => csv.headers.indexOf(h));
 
-    for (const rd of rowDecisions) {
-      const row = csv.rows[rd.rowIdx];
-      if (!row) continue;
+    csv.rows.forEach((row, rowIdx) => {
       const out = {};
       for (let i = 0; i < dimCols.length; i++) out[dimCols[i]] = row[dimIdx[i]] ?? '';
       out.qty           = qtyIdx        >= 0 ? (parseFloat(row[qtyIdx])        || 0) : 1;
@@ -782,10 +805,15 @@ function computeAnalyticsDataset(shapes, conns, csvStore, lensPopulations) {
       out.qtdAltasInfer = altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0;
       out.inadRRaw      = inadRIdx      >= 0 ? (parseFloat(row[inadRIdx])      || 0) : 0;
       out.inadIRaw      = inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0;
-      out.__DECISAO_AS_IS    = rd.decisaoOriginal || '';
-      out.__DECISAO_SIMULADO = rd.decisaoSimulada || '';
+      const asIs = row[dOrigIdx] ?? '';
+      out.__DECISAO_AS_IS = asIs; // AS IS único e global
+      // Join por (csvId, rowIdx): cada canvas marcado contribui sua coluna de decisão.
+      for (const cs of canvasScenarios) {
+        const rd = cs.overlay?.[csvId]?.rowDecisions?.[rowIdx];
+        out[cs.decisionCol] = rd ? rd.decisaoSimulada : asIs;
+      }
       rows.push(out);
-    }
+    });
   }
 
   if (rows.length === 0) return null;
@@ -802,20 +830,23 @@ function computeAnalyticsDataset(shapes, conns, csvStore, lensPopulations) {
       { id: 'approvedQty',  label: 'Vol. Aprovado',     unit: 'qty' },
     ],
     scenarios: [
-      { id: 'as_is',    nome: 'AS IS',    decisionCol: '__DECISAO_AS_IS' },
-      { id: 'simulado', nome: 'Simulado', decisionCol: '__DECISAO_SIMULADO' },
+      { id: 'as_is', nome: 'AS IS', decisionCol: '__DECISAO_AS_IS' },
+      ...canvasScenarios.map(cs => ({ id: cs.id, nome: cs.nome, decisionCol: cs.decisionCol })),
     ],
   };
 }
 
 // ── Worker state ─────────────────────────────────────────────────────────────
 let workerCsvStore = {};
+let csvStoreVersion = 0;             // bump a cada UPDATE_CSV_STORE — invalida caches de overlay
+const analyticsOverlayCache = {};    // {[canvasId]: {key, overlay}} — cache por canvas (5B)
 
 self.onmessage = (e) => {
   const { type } = e.data;
 
   if (type === 'UPDATE_CSV_STORE') {
     workerCsvStore = e.data.csvStore;
+    csvStoreVersion++;
     return;
   }
 
@@ -844,7 +875,7 @@ self.onmessage = (e) => {
   }
 
   if (type === 'COMPUTE_ANALYTICS_DATASET') {
-    const dataset = computeAnalyticsDataset(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
+    const dataset = computeAnalyticsDataset(e.data.canvases, workerCsvStore);
     self.postMessage({ type: 'ANALYTICS_RESULT', dataset });
     return;
   }
