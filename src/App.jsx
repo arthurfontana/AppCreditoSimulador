@@ -1144,8 +1144,15 @@ export default function App() {
       }
     } else {
       setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
-      const {x:ox,y:oy}=vpR.current;
-      dragR.current={type:"pan",sx,sy,ox,oy};
+      if (curTool==="select") {
+        const [wx,wy]=toWorld(sx,sy);
+        setMultiSel(new Set());
+        setSelRect(null);
+        dragR.current={type:"selRect",sx,sy,wx,wy};
+      } else {
+        const {x:ox,y:oy}=vpR.current;
+        dragR.current={type:"pan",sx,sy,ox,oy};
+      }
     }
   },[]); // eslint-disable-line
 
@@ -1163,11 +1170,13 @@ export default function App() {
     if (Math.abs(dx)>5||Math.abs(dy)>5){movedR.current=true;setHint(null);clearTimeout(longTimer.current);}
     if (dr.type==="pan"){const ox=dr.ox,oy=dr.oy;setVp(v=>({...v,x:ox+dx,y:oy+dy}));}
     else if(dr.type==="shape"){const id=dr.id,offX=dr.offX,offY=dr.offY,{x:vx,y:vy,s}=vpR.current,wx=(sx-vx)/s,wy=(sy-vy)/s;setShapes(p=>p.map(sh=>sh.id===id?{...sh,x:wx-offX,y:wy-offY}:sh));}
+    else if(dr.type==="selRect"){const[wx,wy]=toWorld(sx,sy);const rect={x1:dr.wx,y1:dr.wy,x2:wx,y2:wy};setSelRect(rect);const rx1=Math.min(rect.x1,rect.x2),ry1=Math.min(rect.y1,rect.y2),rx2=Math.max(rect.x1,rect.x2),ry2=Math.max(rect.y1,rect.y2);setMultiSel(new Set(shapesR.current.filter(s=>s.type!=="frame"&&s.x<rx2&&s.x+s.w>rx1&&s.y<ry2&&s.y+s.h>ry1).map(s=>s.id)));}
   },[]); // eslint-disable-line
 
   const onTouchEnd = useCallback((e) => {
     e.preventDefault(); clearTimeout(longTimer.current); setHint(null);
     const moved=movedR.current,dr=dragR.current,curTool=toolR.current;
+    if(dr?.type==="selRect") setSelRect(null);
     if (!moved && dr) {
       if (dr.type==="tap-connect"){const sid=dr.id,fid=fromIdR.current;if(!fid){setFromId(sid);}else if(fid!==sid){if(!connsR.current.some(c=>c.from===fid&&c.to===sid))setConns(p=>[...p,{id:uid(),from:fid,to:sid}]);setFromId(null);}}
       if (dr.type==="pan"&&curTool!=="hand"&&curTool!=="select"&&curTool!=="connect"){const{x:vx,y:vy,s}=vpR.current,wx=(dr.sx-vx)/s,wy=(dr.sy-vy)/s;if(curTool==="cineminha"){createCinemaNode(wx,wy,'eligibility');}else if(curTool==="decision_lens"){createLensNode(wx,wy);}else if(curTool==="frame"){const id=uid();setShapes(p=>[...p,{id,type:"frame",x:wx-160,y:wy-120,w:320,h:240,label:"Frame",color:"rgba(219,234,254,0.25)"}]);setSel(id);}else{const id=uid();const isTerminal=curTool==="approved"||curTool==="rejected"||curTool==="as_is";const nw=isTerminal?120:SW,nh=isTerminal?44:SH;const lbl=curTool==="approved"?"Aprovado":curTool==="rejected"?"Reprovado":curTool==="as_is"?"AS IS":"";setShapes(p=>[...p,{id,type:curTool,x:wx-nw/2,y:wy-nh/2,w:nw,h:nh,label:lbl,color:"#ffffff"}]);setSel(id);}}
