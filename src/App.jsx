@@ -917,7 +917,7 @@ function AnalysisTab({ analyticsDataset }) {
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "auto", background: "#f8fafc" }}>
       <div style={{ padding: "20px 28px 12px", flexShrink: 0 }}>
-        <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>Análise</h1>
+        <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>Dashboard</h1>
         <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
           Dashboards sobre os resultados da simulação · AS IS vs Simulado
         </p>
@@ -980,7 +980,7 @@ export default function App() {
   const [csvStore,   setCsvStore]   = useState({});     // {[csvId]: {name,headers,rows,columnTypes}}
   const [wizard,     setWizard]     = useState(null);   // null | wizard obj
   // Analytics Workspace
-  const [activeTab,  setActiveTab]  = useState("analysis"); // "analysis" | "canvas"
+  const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
   const [activeCell, setActiveCell] = useState(null);   // {shapeId,csvId,ri,ci}
   // Credit simulator state
@@ -4087,22 +4087,6 @@ export default function App() {
         @media(max-width:560px){.wbl{display:none!important;}}
       `}</style>
 
-      {/* ═══════════════ TAB BAR ═══════════════ */}
-      <div style={{display:"flex",alignItems:"flex-end",gap:2,background:"#e2e8f0",borderBottom:"1px solid #cbd5e1",padding:"6px 10px 0",flexShrink:0,height:38}}>
-        {[{id:"analysis",label:"Análise",icon:"📊"},{id:"canvas",label:"Canvas",icon:"🗺️"}].map(t=>{
-          const active = activeTab===t.id;
-          return (
-            <button key={t.id} onClick={()=>setActiveTab(t.id)}
-              style={{display:"flex",alignItems:"center",gap:6,padding:"7px 18px",border:"1px solid",
-                borderColor:active?"#cbd5e1":"transparent",borderBottom:active?"1px solid #fff":"1px solid transparent",
-                background:active?"#fff":"transparent",color:active?"#1e293b":"#64748b",
-                borderTopLeftRadius:9,borderTopRightRadius:9,cursor:"pointer",fontSize:13,
-                fontWeight:active?600:500,fontFamily:"inherit",marginBottom:-1,transition:"all .12s"}}>
-              <span style={{fontSize:14}}>{t.icon}</span>{t.label}
-            </button>
-          );
-        })}
-      </div>
 
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
       {activeTab==="analysis" && <AnalysisTab analyticsDataset={analyticsDataset} />}
@@ -7721,6 +7705,23 @@ export default function App() {
         );
       })()}
       </div>{/* ── fim CANVAS PANE ── */}
+
+      {/* ═══════════════ TAB BAR (BOTTOM LEFT) ═══════════════ */}
+      <div style={{display:"flex",alignItems:"flex-start",gap:2,background:"#e2e8f0",borderTop:"1px solid #cbd5e1",padding:"0 10px 0",flexShrink:0,alignSelf:"flex-start"}}>
+        {[{id:"canvas",label:"Canvas",icon:"🗺️"},{id:"analysis",label:"Dashboard",icon:"📊"}].map(t=>{
+          const active = activeTab===t.id;
+          return (
+            <button key={t.id} onClick={()=>setActiveTab(t.id)}
+              style={{display:"flex",alignItems:"center",gap:6,padding:"7px 18px",border:"1px solid",
+                borderColor:active?"#cbd5e1":"transparent",borderTop:active?"1px solid #e2e8f0":"1px solid transparent",
+                background:active?"#fff":"transparent",color:active?"#1e293b":"#64748b",
+                borderBottomLeftRadius:9,borderBottomRightRadius:9,cursor:"pointer",fontSize:13,
+                fontWeight:active?600:500,fontFamily:"inherit",marginTop:-1,transition:"all .12s"}}>
+              <span style={{fontSize:14}}>{t.icon}</span>{t.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
