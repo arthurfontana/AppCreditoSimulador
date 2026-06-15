@@ -248,12 +248,14 @@ activeTab: "analysis" | "canvas"            // aba ativa
 
 ---
 
-### Sessão 4 — Layout livre e persistência
+### Sessão 4 — Layout livre e persistência ✅ ENTREGUE
 
 **Entrega:**
-- Arrastar, redimensionar e reposicionar componentes na página de análise
-- Persistência do layout em `localStorage` (sobrevive a reload)
-- Reutiliza o padrão do `businessWidget` (arrastável por handle) como base
+- Posicionamento absolutamente livre dos widgets via `position:absolute` + scroll no canvas da aba Dashboard
+- Drag por handle `⠿` + resize com 8 handles N/S/E/W/NE/NW/SE/SW — implementados em `startWidgetInteract` via `mousemove`/`mouseup` no `window`
+- `canvasH`/`canvasW` calculados dinamicamente pelo bounding box dos widgets (scroll cresce com o conteúdo)
+- Persistência em `localStorage` via `aw_layout_v1` — sobrevive a reload
+- `layoutRef` espelho para evitar closure stale nos listeners de drag/resize
 
 **Destrava:** o dashboard vira um artefato salvo, não reconstruído a cada sessão.
 
@@ -365,3 +367,17 @@ aceitando qualquer cenário (incl. AS IS), persistidos no WidgetConfig, e
 implemente o export do dataset largo (dimensões + métricas + todas as colunas de
 cenário) como CSV. Releia o épico e o código antes de propor.
 ```
+
+---
+
+## Referência rápida — estado de entrega
+
+| Sessão | Status | Resumo |
+|--------|--------|--------|
+| 1 — Pipeline ponta a ponta | ✅ | Worker → dataset → gráfico de linha fixo |
+| 2 — Builder configurável | ✅ | FieldPanel, AnalyticsWidget, pivotWidget, múltiplos gráficos |
+| 3 — Tipos de gráfico | ✅ | bar, bar100, KPI card |
+| 4 — Layout livre + persistência | ✅ | Drag/resize livre, localStorage aw_layout_v1 |
+| 5A — Infra multi-canvas | ⏳ | Store canvases, abas, opt-in, undo escopado |
+| 5B — Pipeline N-cenários | ⏳ | Worker multi-canvas, join por rowIdx, scenarios dinâmicos |
+| 5C — KPI A vs B + Export | ⏳ | Seletores de cenário no KPI, export CSV |
