@@ -971,7 +971,14 @@ export function pivotWidget(ds, config) {
   // Define as séries.
   let seriesDefs;
   if (serieBy === SERIE_CENARIO) {
-    seriesDefs = scenarios.map((s, i) => ({ key: s.id, label: s.nome, decisionCol: s.decisionCol, color: SCENARIO_COLORS[i % SCENARIO_COLORS.length] }));
+    const activeIds = config.activeScenarios;
+    const visScenarios = (activeIds && activeIds.length > 0)
+      ? scenarios.filter(s => activeIds.includes(s.id))
+      : scenarios;
+    seriesDefs = visScenarios.map((s) => {
+      const origIdx = scenarios.indexOf(s);
+      return { key: s.id, label: s.nome, decisionCol: s.decisionCol, color: SCENARIO_COLORS[origIdx % SCENARIO_COLORS.length] };
+    });
   } else {
     // Quebra por dimensão categórica usando o cenário Simulado implícito.
     const simCol = (scenarios.find(s => s.id === "simulado") || scenarios[scenarios.length - 1]).decisionCol;
@@ -1206,7 +1213,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
   const isKpi = type === "kpi";
   const pivot = useMemo(() => isKpi ? { state: "kpi" } : pivotWidget(analyticsDataset, cfg),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [analyticsDataset, isKpi, cfg.xDimension, cfg.metric, cfg.serieBy]);
+    [analyticsDataset, isKpi, cfg.xDimension, cfg.metric, cfg.serieBy, cfg.activeScenarios]);
 
   // Barra 100% empilhada: normaliza cada bucket do eixo X para somar 100%.
   const stacked100 = useMemo(() => {
@@ -1226,6 +1233,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
   const metrics = analyticsDataset?.metrics || [];
+  const allScenarios = analyticsDataset?.scenarios || [];
   const orderedDims = [...dims].sort((a, b) => {
     const ta = temporalCols.has(a), tb = temporalCols.has(b);
     if (ta !== tb) return ta ? -1 : 1;
@@ -1280,6 +1288,33 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
             options={serieOptions} onChange={(v) => set({ serieBy: v || SERIE_CENARIO })} />
         )}
       </div>
+
+      {/* Chips de cenário — visíveis quando a série está em modo Cenário */}
+      {!isKpi && allScenarios.length > 1 && (cfg.serieBy == null || cfg.serieBy === SERIE_CENARIO) && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, flexShrink: 0 }}>
+          {allScenarios.map((s) => {
+            const active = cfg.activeScenarios == null || cfg.activeScenarios.includes(s.id);
+            return (
+              <span key={s.id} onClick={() => {
+                const allIds = allScenarios.map(x => x.id);
+                const current = cfg.activeScenarios ?? allIds;
+                if (active && current.length <= 1) return;
+                const next = active ? current.filter(x => x !== s.id) : [...current, s.id];
+                set({ activeScenarios: next.length === allIds.length ? null : next });
+              }} style={{
+                padding: "3px 10px", borderRadius: 12, fontSize: 11, cursor: "pointer",
+                border: `1px solid ${active ? "#0891b2" : "#e2e8f0"}`,
+                background: active ? "#ecfeff" : "#fff",
+                color: active ? "#0891b2" : "#94a3b8",
+                transition: "all .1s", userSelect: "none",
+                fontWeight: active ? 500 : 400,
+              }}>
+                {s.nome}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {/* Gráfico ou estado vazio */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -2164,7 +2199,7 @@ export default function App() {
     setCanvases(prev => ({
       ...prev,
       [curId]: { ...prev[curId], shapes: shapesR.current, conns: connsR.current },
-      [id]: { id, name: `Canvas ${idx}`, shapes: [], conns: [], includeInDashboard: false },
+      [id]: { id, name: `Canvas ${idx}`, shapes: [], conns: [], includeInDashboard: true },
     }));
     setShapes([]); setConns([]);
     setUndoStack([]); setRedoStack([]);
@@ -2185,7 +2220,7 @@ export default function App() {
     setCanvases(prev => ({
       ...prev,
       [curId]: { ...prev[curId], shapes: shapesR.current, conns: connsR.current },
-      [id]: { id, name: `${source.name} (cópia)`, shapes: newShapes, conns: newConns, includeInDashboard: false },
+      [id]: { id, name: `${source.name} (cópia)`, shapes: newShapes, conns: newConns, includeInDashboard: true },
     }));
     setShapes(newShapes); setConns(newConns);
     setUndoStack([]); setRedoStack([]);
