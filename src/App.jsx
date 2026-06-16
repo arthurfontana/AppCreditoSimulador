@@ -958,7 +958,7 @@ export function computeWidgetMetric(rows, metricId, decisionCol) {
   }
 }
 
-const fmtMetricVal = (v, unit) => v == null ? "N/A" : unit === "qty" ? fmtQty(v) : `${v.toFixed(2)}%`;
+const fmtMetricVal = (v, unit) => v == null ? "N/A" : unit === "qty" ? fmtQty(v) : `${v.toFixed(1)}%`;
 
 // Pivot client-side: dataset largo + config → série tidy {data, series, metricDef, xCol}.
 export function pivotWidget(ds, config) {
@@ -1097,21 +1097,34 @@ function ChartBarLabel({ x, y, width, height, value, color, metricDef, isBar100 
   );
 }
 
-// Rótulo customizado para pontos de linha: badge colorido acima do ponto.
-function ChartLineLabel({ x, y, value, color, metricDef }) {
+// Rótulo customizado para pontos de linha: texto puro com outline branco e posição inteligente.
+// Sem fundo colorido para não tapar a linha. Posição acima/abaixo baseada em extremos locais
+// e índice de série (séries pares acima, ímpares abaixo) para reduzir sobreposição.
+function ChartLineLabel({ x, y, value, color, metricDef, index, seriesIndex, allData, seriesKey }) {
   if (value == null) return null;
   const text = fmtMetricVal(value, metricDef?.unit);
-  const textColor = getContrastColor(color || "#2563eb");
-  const labelW = Math.max(34, text.length * 6.2 + 12);
-  const labelH = 17;
-  const lx = (x || 0) - labelW / 2;
-  const ly = (y || 0) - labelH - 6;
+
+  const prev = (allData && index > 0) ? allData[index - 1]?.[seriesKey] : null;
+  const next = (allData && index != null && index < allData.length - 1) ? allData[index + 1]?.[seriesKey] : null;
+
+  let above;
+  if (prev != null && next != null) {
+    if (value >= prev && value >= next) above = false; // pico local → rótulo abaixo
+    else if (value <= prev && value <= next) above = true; // vale local → rótulo acima
+    else above = (seriesIndex ?? 0) % 2 === 0;
+  } else {
+    above = (seriesIndex ?? 0) % 2 === 0;
+  }
+
+  const cy = y || 0;
+  const ly = above ? cy - 10 : cy + 14;
+
   return (
-    <g>
-      <rect x={lx} y={ly} width={labelW} height={labelH} fill={color} rx={3} opacity={0.93} />
-      <text x={x || 0} y={ly + labelH / 2} textAnchor="middle" dominantBaseline="middle"
-        fill={textColor} fontSize={10} fontFamily="inherit" fontWeight={500}>{text}</text>
-    </g>
+    <text x={x || 0} y={ly} textAnchor="middle" dominantBaseline="middle"
+      fill={color} fontSize={9.5} fontFamily="inherit" fontWeight={700}
+      stroke="#ffffff" strokeWidth={3} paintOrder="stroke">
+      {text}
+    </text>
   );
 }
 
@@ -1577,7 +1590,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
             <div style={{ width: "100%", flex: 1, minHeight: 200 }}>
               <ResponsiveContainer width="100%" height="100%">
                 {type === "line" ? (
-                  <LineChart data={pivot.data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                  <LineChart data={pivot.data} margin={{ top: showLabels ? 22 : 8, right: 24, bottom: 8, left: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                     <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
                     <YAxis tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
@@ -1585,7 +1598,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
                     <Tooltip formatter={(v) => fmtMetricVal(v, pivot.metricDef.unit)}
                       contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    {effectiveSeries.map((sd) => {
+                    {effectiveSeries.map((sd, si) => {
                       const st = styles[sd.key] || {};
                       const strokeW = st.strokeWidth ?? 2.5;
                       const strokeDash = st.strokeDasharray && st.strokeDasharray !== "0" ? st.strokeDasharray : undefined;
@@ -1593,7 +1606,7 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
                         <Line key={sd.key} type="monotone" dataKey={sd.label}
                           stroke={sd.color} strokeWidth={strokeW} strokeDasharray={strokeDash}
                           dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls>
-                          {showLabels && <LabelList dataKey={sd.label} content={(props) => <ChartLineLabel {...props} color={sd.color} metricDef={pivot.metricDef} />} />}
+                          {showLabels && <LabelList dataKey={sd.label} content={(props) => <ChartLineLabel {...props} color={sd.color} metricDef={pivot.metricDef} seriesIndex={si} allData={pivot.data} seriesKey={sd.label} />} />}
                         </Line>
                       );
                     })}
