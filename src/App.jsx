@@ -5092,9 +5092,15 @@ export default function App() {
   };
 
   const openJohnnyModal = (shapeIds) => {
-    const targets = shapes.filter(s => shapeIds.includes(s.id) && s.type === 'cineminha');
-    if (targets.length === 0) return;
-    workerRef.current?.postMessage({ type: 'COMPUTE_JOHNNY', shapes: targets });
+    const hasCinemas = shapeIds.some(id => shapesR.current.find(s => s.id === id && s.type === 'cineminha'));
+    if (!hasCinemas) return;
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_JOHNNY',
+      shapes: shapesR.current,
+      cinemaIds: shapeIds,
+      conns: connsR.current,
+      lensPopulations: lensPopulationsR.current,
+    });
   };
 
   const applyJohnnyResult = (proposedByShape) => {
