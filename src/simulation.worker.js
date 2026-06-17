@@ -565,9 +565,126 @@ function extractScenarios(frontier) {
 
 // ── Johnny optimizer ─────────────────────────────────────────────────────────
 
-function computeJohnnyData(shapes, csvStore) {
-  const cinemas = shapes.filter(s => s.type === 'cineminha');
+// Traverses the flow graph and collects, per cineminha, the metrics of rows
+// that actually arrive at each cell via routing (respecting upstream decisions,
+// ports and decision_lens nodes). Designed to be reused by Session C.
+// Returns: { [shapeId]: { [cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix} } }
+function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  const arrivals = {};
+  for (const s of shapes) {
+    if (s.type === 'cineminha') arrivals[s.id] = {};
+  }
+
+  function collectCinemaHits(row, headers, startId) {
+    let cur = startId;
+    const visited = new Set();
+    const hits = [];
+    while (cur) {
+      if (visited.has(cur)) break;
+      visited.add(cur);
+      const node = shapesMap[cur];
+      if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const colIdx = headers.indexOf(node.variableCol);
+        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const rIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const cIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rv   = node.rowVar && rIdx >= 0 ? (row[rIdx] ?? '').trim() : '';
+        const cv   = node.colVar && cIdx >= 0 ? (row[cIdx] ?? '').trim() : '';
+        if (!node.rowVar && !node.colVar) break;
+        const rKey = node.rowVar ? rv : '*';
+        const cKey = node.colVar ? cv : '*';
+        const cellKey = `${rKey}|${cKey}`;
+        if (arrivals[node.id] !== undefined) hits.push({ shapeId: node.id, cellKey });
+        const isEligible = isCellEligible(node.cells, cellKey);
+        const typeCfg = getCinemaType(node.cinemaType);
+        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
+        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        const passes = rowMatchesLensRules(row, headers, node.rules || []);
+        if (!passes) break;
+        const edges = out[cur] || [];
+        if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || [];
+        if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else break;
+    }
+    return hits;
+  }
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const getColIdx = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx      = getColIdx('qty');
+    const altasIdx    = getColIdx('qtdAltas');
+    const altasInfIdx = getColIdx('qtdAltasInfer');
+    const inadRIdx    = getColIdx('inadReal');
+    const inadIIdx    = getColIdx('inadInferida');
+    const mixIdx      = getColIdx('mixRisco');
+
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+
+    for (const row of csv.rows) {
+      const qty      = qtyIdx      >= 0 ? (parseFloat(row[qtyIdx])      || 0) : 1;
+      const altas    = altasIdx    >= 0 ? (parseFloat(row[altasIdx])    || 0) : 0;
+      const altasInf = altasInfIdx >= 0 ? (parseFloat(row[altasInfIdx]) || 0) : 0;
+      const inadR    = inadRIdx    >= 0 ? (parseFloat(row[inadRIdx])    || 0) : 0;
+      const inadI    = inadIIdx    >= 0 ? (parseFloat(row[inadIIdx])    || 0) : 0;
+      const mixVal   = mixIdx      >= 0 ? (row[mixIdx] ?? '').toString().trim() : '';
+
+      const hits = collectCinemaHits(row, csv.headers, rootId);
+      for (const { shapeId, cellKey } of hits) {
+        const acc = arrivals[shapeId];
+        if (!acc) continue;
+        if (!acc[cellKey]) acc[cellKey] = { qty: 0, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0, mix: {} };
+        acc[cellKey].qty           += qty;
+        acc[cellKey].qtdAltas      += altas;
+        acc[cellKey].qtdAltasInfer += altasInf;
+        acc[cellKey].inadRRaw      += inadR;
+        acc[cellKey].inadIRaw      += inadI;
+        if (mixVal) acc[cellKey].mix[mixVal] = (acc[cellKey].mix[mixVal] || 0) + qty;
+      }
+    }
+  }
+
+  return arrivals;
+}
+
+function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations) {
+  const cinemaIdSet = new Set(cinemaIds);
+  const cinemas = allShapes.filter(s => cinemaIdSet.has(s.id) && s.type === 'cineminha');
   if (cinemas.length === 0) return null;
+
+  const arrivals = computeCinemaArrivals(allShapes, conns, csvStore, lensPopulations);
 
   const pooledMetrics = {};
   const mixCatsSet = new Set();
@@ -580,58 +697,19 @@ function computeJohnnyData(shapes, csvStore) {
     const csv = csvStore[csvId];
     if (!csv) continue;
 
-    const varTypes  = csv.varTypes      || {};
-    const colTypes  = csv.columnTypes   || {};
+    const varTypes  = csv.varTypes || {};
     const rowIsOrd  = rowVar ? varTypes[rowVar.col] === 'ordinal' : false;
     const colIsOrd  = colVar ? varTypes[colVar.col] === 'ordinal' : false;
     const rDom      = rowDomain?.length > 0 ? rowDomain : ['*'];
     const cDom      = colDomain?.length > 0 ? colDomain : ['*'];
-
-    const getIdx = (type) => {
-      const col = Object.entries(colTypes).find(([, t]) => t === type)?.[0];
-      return col != null ? csv.headers.indexOf(col) : -1;
-    };
-    const rowCI      = rowVar ? csv.headers.indexOf(rowVar.col) : -1;
-    const colCI      = colVar ? csv.headers.indexOf(colVar.col) : -1;
-    const qtyI       = getIdx('qty');
-    const altasI     = getIdx('qtdAltas');
-    const altasInfI  = getIdx('qtdAltasInfer');
-    const inadRI     = getIdx('inadReal');
-    const inadII     = getIdx('inadInferida');
-    const mixI       = getIdx('mixRisco');
-
-    // Accumulate per cell
-    const acc = {};
-    for (const rv of rDom)
-      for (const cv of cDom)
-        acc[`${rv}|${cv}`] = { qty:0, qtdAltas:0, qtdAltasInfer:0, inadRRaw:0, inadIRaw:0, mix:{} };
-
-    for (const row of csv.rows) {
-      const rv  = rowVar && rowCI >= 0 ? (row[rowCI] ?? '').toString().trim() : '*';
-      const cv  = colVar && colCI >= 0 ? (row[colCI] ?? '').toString().trim() : '*';
-      const key = `${rv}|${cv}`;
-      if (!acc[key]) continue;
-      const qty       = qtyI      >= 0 ? (parseFloat(row[qtyI])      || 0) : 1;
-      const altas     = altasI    >= 0 ? (parseFloat(row[altasI])    || 0) : 0;
-      const altasInf  = altasInfI >= 0 ? (parseFloat(row[altasInfI]) || 0) : 0;
-      const inadR     = inadRI    >= 0 ? (parseFloat(row[inadRI])    || 0) : 0;
-      const inadI     = inadII    >= 0 ? (parseFloat(row[inadII])    || 0) : 0;
-      acc[key].qty          += qty;
-      acc[key].qtdAltas     += altas;
-      acc[key].qtdAltasInfer+= altasInf;
-      acc[key].inadRRaw     += inadR;
-      acc[key].inadIRaw     += inadI;
-      if (mixI >= 0) {
-        const mv = (row[mixI] ?? '').toString().trim();
-        if (mv) { acc[key].mix[mv] = (acc[key].mix[mv] || 0) + qty; mixCatsSet.add(mv); }
-      }
-    }
+    const shapeArrivals = arrivals[shape.id] || {};
 
     for (const rv of rDom) {
       for (const cv of cDom) {
         const cellKey = `${rv}|${cv}`;
-        const m = acc[cellKey];
+        const m = shapeArrivals[cellKey];
         if (!m || m.qty === 0) continue;
+        for (const mv of Object.keys(m.mix || {})) if (mv) mixCatsSet.add(mv);
         const rowRank = rowIsOrd && rDom.length > 1 ? rDom.indexOf(rv) / (rDom.length - 1) : 0.5;
         const colRank = colIsOrd && cDom.length > 1 ? cDom.indexOf(cv) / (cDom.length - 1) : 0.5;
         const badness = (rowIsOrd ? rowRank : 0.5) + (colIsOrd ? colRank : 0.5);
@@ -644,7 +722,7 @@ function computeJohnnyData(shapes, csvStore) {
           inadInferida: m.qtdAltasInfer > 0 ? m.inadIRaw / m.qtdAltasInfer
                       : m.qty           > 0 ? m.inadIRaw / m.qty            : null,
           badness, rowRank, colRank,
-          mixBreakdown: m.mix,
+          mixBreakdown: m.mix || {},
         };
         totalQty += m.qty;
       }
@@ -881,7 +959,8 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_JOHNNY') {
-    const result = computeJohnnyData(e.data.shapes, workerCsvStore);
+    const { shapes, cinemaIds, conns = [], lensPopulations = {} } = e.data;
+    const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations);
     if (!result) { self.postMessage({ type: 'JOHNNY_RESULT', error: 'no_data' }); return; }
     self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
@@ -900,6 +979,7 @@ function __setWorkerCsvStoreForTest(store) { workerCsvStore = store || {}; csvSt
 export {
   computeAnalyticsDataset,
   computeSimulatedDecisions,
+  computeCinemaArrivals,
   buildFlowGraph,
   __setWorkerCsvStoreForTest,
 };
