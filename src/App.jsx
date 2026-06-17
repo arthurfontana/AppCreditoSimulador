@@ -1981,6 +1981,9 @@ export default function App() {
           maxInadReal:       maxInadReal || 0.2,
           maxInadInf:        maxInadInf  || 0.2,
           activeShapePreview: shapeMetas[0]?.id || null,
+          riskLevels:    Object.fromEntries(shapeMetas.map((m, i) => [m.id, i + 1])),
+          hierarchyMode: 'cascata',
+          inadMetric:    'inferida',
         });
       }
     };
@@ -7910,6 +7913,7 @@ export default function App() {
           baselineApprovalRate, activeCard, proposedByShape,
           sliderApprovalIdx, sliderInadReal, sliderInadInf,
           maxInadReal, maxInadInf, activeShapePreview,
+          riskLevels, hierarchyMode, inadMetric,
         } = johnnyModal;
 
         const totalQty  = frontier[frontier.length-1]?.totalQty || 0;
@@ -8147,6 +8151,48 @@ export default function App() {
                 <div style={{width:220,flexShrink:0,borderRight:"1px solid #f1f5f9",
                   padding:"16px 16px",display:"flex",flexDirection:"column",gap:12,overflowY:"auto"}}>
                   <div style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em"}}>
+                    Configuração
+                  </div>
+
+                  {/* Hierarchy mode */}
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:"#1e293b",marginBottom:5}}>Modo de Hierarquia</div>
+                    <div style={{display:"flex",borderRadius:7,overflow:"hidden",border:"1px solid #e2e8f0",width:"100%"}}>
+                      {[['cascata','🔗 Cascata'],['independente','⊕ Independente']].map(([val,lbl])=>(
+                        <button key={val}
+                          onClick={()=>setJohnnyModal(m=>({...m,hierarchyMode:val}))}
+                          style={{flex:1,padding:"5px 4px",fontSize:10,fontWeight:hierarchyMode===val?700:500,
+                            fontFamily:"inherit",cursor:"pointer",border:"none",
+                            background:hierarchyMode===val?"#f59e0b":"#fff",
+                            color:hierarchyMode===val?"#fff":"#64748b",
+                            transition:"background .12s,color .12s"}}>
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Inad metric toggle */}
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:"#1e293b",marginBottom:5}}>Métrica de Inad.</div>
+                    <div style={{display:"flex",borderRadius:7,overflow:"hidden",border:"1px solid #e2e8f0",width:"100%"}}>
+                      {[['inferida','🎯 Inferida'],['real','⚠ Real']].map(([val,lbl])=>(
+                        <button key={val}
+                          onClick={()=>setJohnnyModal(m=>({...m,inadMetric:val}))}
+                          style={{flex:1,padding:"5px 4px",fontSize:10,fontWeight:inadMetric===val?700:500,
+                            fontFamily:"inherit",cursor:"pointer",border:"none",
+                            background:inadMetric===val?"#8b5cf6":"#fff",
+                            color:inadMetric===val?"#fff":"#64748b",
+                            transition:"background .12s,color .12s"}}>
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{height:1,background:"#f1f5f9"}}/>
+
+                  <div style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em"}}>
                     Simulação
                   </div>
 
@@ -8214,12 +8260,14 @@ export default function App() {
                     ))}
                   </div>
 
-                  {/* Monotonicity note */}
+                  {/* Mode note */}
                   <div style={{fontSize:9.5,color:"#92400e",background:"#fff7ed",borderRadius:8,
                     padding:"7px 10px",border:"1px solid #fed7aa",lineHeight:1.5}}>
-                    <strong>Ordenação monotônica</strong><br/>
-                    Células inseridas da melhor para pior posição na matriz (badness posicional).
-                    Colunas ordinais respeitam a sequência dos eixos.
+                    <strong>{hierarchyMode==='cascata'?'🔗 Cascata':'⊕ Independente'}</strong><br/>
+                    {hierarchyMode==='cascata'
+                      ? 'Região aprovada de nível menor contém a de nível maior (aninhamento obrigatório).'
+                      : 'Cineminhas otimizados sem restrição entre si (pool independente).'}
+                    {' '}<strong>{inadMetric==='inferida'?'Inad. Inferida':'Inad. Real'}</strong> guia a ordenação.
                   </div>
                 </div>
 
@@ -8318,7 +8366,7 @@ export default function App() {
                     <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"inherit"}}>
                       <thead>
                         <tr style={{background:"#f8fafc"}}>
-                          {["Cineminha","Vol. Pool","Original","Proposta","Elegíveis","Alterações"].map(h=>(
+                          {["Cineminha","Risco","Vol. Pool","Original","Proposta","Elegíveis","Alterações"].map(h=>(
                             <th key={h} style={{padding:"6px 10px",textAlign:"left",fontWeight:600,color:"#64748b",
                               borderBottom:"2px solid #e2e8f0",whiteSpace:"nowrap",fontSize:10.5}}>{h}</th>
                           ))}
@@ -8332,6 +8380,18 @@ export default function App() {
                               transition:"background .1s"}}>
                             <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",color:"#1e293b",fontWeight:500}}>
                               {meta.label||'Cineminha'}
+                            </td>
+                            <td style={{padding:"4px 10px",borderBottom:"1px solid #f1f5f9"}}
+                              onClick={e=>e.stopPropagation()}>
+                              <input type="number" min={1} step={1}
+                                value={riskLevels[meta.id]??1}
+                                onChange={e=>{
+                                  const v = Math.max(1, parseInt(e.target.value)||1);
+                                  setJohnnyModal(m=>({...m,riskLevels:{...m.riskLevels,[meta.id]:v}}));
+                                }}
+                                style={{width:48,padding:"2px 5px",fontSize:11,fontWeight:700,
+                                  border:"1px solid #e2e8f0",borderRadius:5,fontFamily:"inherit",
+                                  textAlign:"center",color:"#7c3aed",background:"#f5f3ff"}}/>
                             </td>
                             <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",color:"#64748b"}}>{fmtQty(vol)}</td>
                             <td style={{padding:"6px 10px",borderBottom:"1px solid #f1f5f9",color:"#64748b"}}>{Math.round(origRate*100)}%</td>
