@@ -49,7 +49,7 @@ AppCreditoSimulador/
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha (single) — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, matrixZoom, matrixPanX, matrixPanY}`
-- `johnnyModal`: otimizador multi-cineminha — `null | {pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, activeCard, proposedByShape, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf}`
+- `johnnyModal`: otimizador multi-cineminha — `null | {pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, activeCard, proposedByShape, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, activeShapePreview, riskLevels, hierarchyMode, inadMetric}`
 - `lensModal`: modal de edição do Decision Lens — `null | {shapeId, rules, population}`
 - `incrementalResult`: resultado comparativo AS IS vs. simulado — `null | {baseline, simulated, impacted}`
 - `simulationOverlay`: mapa de decisões por linha — `null | {[csvId]: {rowDecisions, summaryStats}}`
@@ -472,6 +472,10 @@ Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otim
   sliderInadInf,
   maxInadReal,
   maxInadInf,
+  activeShapePreview,   // id do cineminha selecionado no preview de células
+  riskLevels,           // {[shapeId]: number} — nível de risco manual (DEC-JO-002); maior = mais restritivo; default = ordem dos selecionados (1,2,3...)
+  hierarchyMode,        // 'cascata'|'independente' (DEC-JO-003); default 'cascata'
+  inadMetric,           // 'inferida'|'real' (DEC-JO-004); default 'inferida'
 }
 ```
 
