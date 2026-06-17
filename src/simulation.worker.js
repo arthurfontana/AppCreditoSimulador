@@ -565,9 +565,131 @@ function extractScenarios(frontier) {
 
 // ── Johnny optimizer ─────────────────────────────────────────────────────────
 
-function computeJohnnyData(shapes, csvStore) {
-  const cinemas = shapes.filter(s => s.type === 'cineminha');
+// Roteia cada linha de cada CSV pelo grafo de fluxo (mesma lógica do motor de
+// simulação: buildFlowGraph + traverseRow) e registra, para cada linha, EM QUAL
+// CÉLULA de QUAL CINEMINHA ela cai. Uma linha só conta para um cineminha se de
+// fato chega nele percorrendo o grafo — respeitando losangos de decisão e
+// decision_lens a montante. (DEC-JO-001, Sessão A)
+//
+// Retorna o mapa reutilizável (também consumido pela Sessão C — greedy com
+// precedência):
+//   { [shapeId]: { [cellKey]: { qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix } } }
+function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
+  const hasLens = lensPopulations && Object.keys(lensPopulations).length > 0;
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  const arrivals = {}; // {[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}
+
+  // Percorre uma linha pelo grafo, acumulando a chegada em cada cineminha visitado
+  // ANTES de aplicar a elegibilidade (a célula registra a chegada; a elegibilidade
+  // apenas decide por qual porta a linha continua).
+  function traverseRow(row, headers, startId, m) {
+    let cur = startId; const visited = new Set();
+    while (cur) {
+      if (visited.has(cur)) return;
+      visited.add(cur);
+      const node = shapesMap[cur]; if (!node) return;
+      if (TERM.has(node.type)) return;
+      if (node.type === 'decision') {
+        const colIdx = headers.indexOf(node.variableCol);
+        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) return;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const rowI = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const colI = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rowVal = node.rowVar && rowI >= 0 ? (row[rowI] ?? '').trim() : '';
+        const colVal = node.colVar && colI >= 0 ? (row[colI] ?? '').trim() : '';
+        if (!node.rowVar && !node.colVar) return;
+        const rKey = node.rowVar ? rowVal : '*';
+        const cKey = node.colVar ? colVal : '*';
+        const cellKey = `${rKey}|${cKey}`;
+        // registra a chegada nesta célula
+        if (!arrivals[cur]) arrivals[cur] = {};
+        let cell = arrivals[cur][cellKey];
+        if (!cell) cell = arrivals[cur][cellKey] = { qty:0, qtdAltas:0, qtdAltasInfer:0, inadRRaw:0, inadIRaw:0, mix:{} };
+        cell.qty           += m.qty;
+        cell.qtdAltas      += m.qtdAltas;
+        cell.qtdAltasInfer += m.qtdAltasInfer;
+        cell.inadRRaw      += m.inadR;
+        cell.inadIRaw      += m.inadI;
+        if (m.mixVal) cell.mix[m.mixVal] = (cell.mix[m.mixVal] || 0) + m.qty;
+        // roteia pela elegibilidade da célula
+        const isEligible = isCellEligible(node.cells, cellKey);
+        const typeCfg = getCinemaType(node.cinemaType);
+        const match = (out[cur] || []).find(e => e.label === (isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label));
+        if (!match) return;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        if (!rowMatchesLensRules(row, headers, node.rules || [])) return;
+        const edges = out[cur] || []; if (edges.length === 0) return;
+        cur = edges[0].to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || []; if (edges.length === 0) return;
+        cur = edges[0].to;
+      } else return;
+    }
+  }
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const getIdx = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col != null ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx        = getIdx('qty');
+    const altasIdx      = getIdx('qtdAltas');
+    const altasInferIdx = getIdx('qtdAltasInfer');
+    const inadRIdx      = getIdx('inadReal');
+    const inadIIdx      = getIdx('inadInferida');
+    const mixIdx        = getIdx('mixRisco');
+
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision') return d.csvId === csvId;
+      if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+
+    csv.rows.forEach((row, rowIdx) => {
+      // Mesma semântica contrafactual do COMPUTE_OVERLAY: com lenses presentes,
+      // só a população-alvo é mutável (e portanto considerada como chegada).
+      const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
+      if (!isMutable) return;
+      traverseRow(row, csv.headers, rootId, {
+        qty:           qtyIdx        >= 0 ? (parseFloat(row[qtyIdx])        || 0) : 1,
+        qtdAltas:      altasIdx      >= 0 ? (parseFloat(row[altasIdx])      || 0) : 0,
+        qtdAltasInfer: altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0,
+        inadR:         inadRIdx      >= 0 ? (parseFloat(row[inadRIdx])      || 0) : 0,
+        inadI:         inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0,
+        mixVal:        mixIdx        >= 0 ? (row[mixIdx] ?? '').toString().trim() : '',
+      });
+    });
+  }
+
+  return arrivals;
+}
+
+function computeJohnnyData(shapes, conns, csvStore, lensPopulations, selectedIds) {
+  const selectedSet = new Set(selectedIds || []);
+  const cinemas = shapes.filter(s =>
+    s.type === 'cineminha' && (selectedSet.size === 0 || selectedSet.has(s.id))
+  );
   if (cinemas.length === 0) return null;
+
+  // População FILTRADA: métricas por célula só das linhas que chegam a cada
+  // cineminha percorrendo o grafo (não a base completa). (DEC-JO-001)
+  const arrivals = computeCinemaArrivals(shapes, conns, csvStore, lensPopulations);
 
   const pooledMetrics = {};
   const mixCatsSet = new Set();
@@ -581,61 +703,23 @@ function computeJohnnyData(shapes, csvStore) {
     if (!csv) continue;
 
     const varTypes  = csv.varTypes      || {};
-    const colTypes  = csv.columnTypes   || {};
     const rowIsOrd  = rowVar ? varTypes[rowVar.col] === 'ordinal' : false;
     const colIsOrd  = colVar ? varTypes[colVar.col] === 'ordinal' : false;
     const rDom      = rowDomain?.length > 0 ? rowDomain : ['*'];
     const cDom      = colDomain?.length > 0 ? colDomain : ['*'];
 
-    const getIdx = (type) => {
-      const col = Object.entries(colTypes).find(([, t]) => t === type)?.[0];
-      return col != null ? csv.headers.indexOf(col) : -1;
-    };
-    const rowCI      = rowVar ? csv.headers.indexOf(rowVar.col) : -1;
-    const colCI      = colVar ? csv.headers.indexOf(colVar.col) : -1;
-    const qtyI       = getIdx('qty');
-    const altasI     = getIdx('qtdAltas');
-    const altasInfI  = getIdx('qtdAltasInfer');
-    const inadRI     = getIdx('inadReal');
-    const inadII     = getIdx('inadInferida');
-    const mixI       = getIdx('mixRisco');
-
-    // Accumulate per cell
-    const acc = {};
-    for (const rv of rDom)
-      for (const cv of cDom)
-        acc[`${rv}|${cv}`] = { qty:0, qtdAltas:0, qtdAltasInfer:0, inadRRaw:0, inadIRaw:0, mix:{} };
-
-    for (const row of csv.rows) {
-      const rv  = rowVar && rowCI >= 0 ? (row[rowCI] ?? '').toString().trim() : '*';
-      const cv  = colVar && colCI >= 0 ? (row[colCI] ?? '').toString().trim() : '*';
-      const key = `${rv}|${cv}`;
-      if (!acc[key]) continue;
-      const qty       = qtyI      >= 0 ? (parseFloat(row[qtyI])      || 0) : 1;
-      const altas     = altasI    >= 0 ? (parseFloat(row[altasI])    || 0) : 0;
-      const altasInf  = altasInfI >= 0 ? (parseFloat(row[altasInfI]) || 0) : 0;
-      const inadR     = inadRI    >= 0 ? (parseFloat(row[inadRI])    || 0) : 0;
-      const inadI     = inadII    >= 0 ? (parseFloat(row[inadII])    || 0) : 0;
-      acc[key].qty          += qty;
-      acc[key].qtdAltas     += altas;
-      acc[key].qtdAltasInfer+= altasInf;
-      acc[key].inadRRaw     += inadR;
-      acc[key].inadIRaw     += inadI;
-      if (mixI >= 0) {
-        const mv = (row[mixI] ?? '').toString().trim();
-        if (mv) { acc[key].mix[mv] = (acc[key].mix[mv] || 0) + qty; mixCatsSet.add(mv); }
-      }
-    }
+    const cellArrivals = arrivals[shape.id] || {};
 
     for (const rv of rDom) {
       for (const cv of cDom) {
         const cellKey = `${rv}|${cv}`;
-        const m = acc[cellKey];
+        const m = cellArrivals[cellKey];
         if (!m || m.qty === 0) continue;
         const rowRank = rowIsOrd && rDom.length > 1 ? rDom.indexOf(rv) / (rDom.length - 1) : 0.5;
         const colRank = colIsOrd && cDom.length > 1 ? cDom.indexOf(cv) / (cDom.length - 1) : 0.5;
         const badness = (rowIsOrd ? rowRank : 0.5) + (colIsOrd ? colRank : 0.5);
         const pk = `${shape.id}|${cellKey}`;
+        for (const mv of Object.keys(m.mix || {})) mixCatsSet.add(mv);
         pooledMetrics[pk] = {
           shapeId: shape.id, cellKey, rowVal: rv, colVal: cv,
           qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer,
@@ -644,7 +728,7 @@ function computeJohnnyData(shapes, csvStore) {
           inadInferida: m.qtdAltasInfer > 0 ? m.inadIRaw / m.qtdAltasInfer
                       : m.qty           > 0 ? m.inadIRaw / m.qty            : null,
           badness, rowRank, colRank,
-          mixBreakdown: m.mix,
+          mixBreakdown: { ...m.mix },
         };
         totalQty += m.qty;
       }
@@ -881,7 +965,7 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_JOHNNY') {
-    const result = computeJohnnyData(e.data.shapes, workerCsvStore);
+    const result = computeJohnnyData(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations, e.data.shapeIds);
     if (!result) { self.postMessage({ type: 'JOHNNY_RESULT', error: 'no_data' }); return; }
     self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
@@ -900,6 +984,8 @@ function __setWorkerCsvStoreForTest(store) { workerCsvStore = store || {}; csvSt
 export {
   computeAnalyticsDataset,
   computeSimulatedDecisions,
+  computeCinemaArrivals,
+  computeJohnnyData,
   buildFlowGraph,
   __setWorkerCsvStoreForTest,
 };

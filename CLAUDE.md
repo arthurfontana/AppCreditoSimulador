@@ -287,7 +287,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `RUN_SIMULATION` | `{shapes, conns}` | Roda `runSimulation` e responde com `SIMULATION_RESULT` |
 | `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult`; responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
-| `COMPUTE_JOHNNY` | `{shapes}` | Roda `computeJohnnyData`; responde com `JOHNNY_RESULT` |
+| `COMPUTE_JOHNNY` | `{shapes, conns, shapeIds, lensPopulations}` | Roda `computeJohnnyData` sobre o **grafo de fluxo completo** (`shapes`/`conns`); `shapeIds` = cineminhas selecionados que entram no pool; `lensPopulations` = população-alvo. Agrega cada cineminha só sobre as linhas que de fato chegam nele pelo fluxo (DEC-JO-001, Sessão A). Responde com `JOHNNY_RESULT` |
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns, lensPopulations}]` — abas marcadas (cenários, 5B). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
 
 ### Mensagens de saída
@@ -306,7 +306,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `computeCellMetrics(shape, csvStore)`: agrega métricas por célula do Cineminha
 - `buildParetoFrontier(cellMetrics)`: fronteira Pareto greedy (sort por `inadInferida` crescente)
 - `extractScenarios(frontier)`: `{conservador, balanceado, melhorEficiencia, expansao}` — `melhorEficiencia` é o joelho da curva
-- `computeJohnnyData(shapes, csvStore)`: agrupa métricas de **todos** os Cineminhas em pool único, gera fronteira Pareto global com suporte a ordinalidade
+- `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: roteia cada linha pelo grafo (reusa `buildFlowGraph` + `traverseRow`) e registra em qual célula de qual cineminha ela cai → mapa `{ [shapeId]: { [cellKey]: { qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix } } }`. Uma linha só conta para um cineminha se de fato chega nele (respeita losangos de decisão e `decision_lens` a montante). Mapa reutilizável pela Sessão C (greedy com precedência) (DEC-JO-001)
+- `computeJohnnyData(shapes, conns, csvStore, lensPopulations, selectedIds)`: chama `computeCinemaArrivals` e agrupa as métricas das **populações filtradas** dos cineminhas em `selectedIds` em pool único, gera fronteira Pareto global com suporte a ordinalidade. Antes (bug DEC-JO-001) lia `csv.rows` inteiro por cineminha, ignorando o fluxo
 - `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo** (dimensões + métricas intrínsecas + `__DECISAO_AS_IS` global + uma coluna `__DECISAO_<canvasId>` por cenário); `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
 - `cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations)`: overlay por canvas memoizado por hash de `shapes`/`conns`/`lensPopulations` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só)
 
@@ -446,10 +447,11 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 ## Otimizador Multi-Cineminha — Johnny (`johnnyModal`)
 
 ### Ativação
-Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otimização Johnny (N)**. Dispara `COMPUTE_JOHNNY` no worker com os shapes selecionados.
+Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otimização Johnny (N)**. Dispara `COMPUTE_JOHNNY` no worker com o grafo de fluxo completo + os ids selecionados + `lensPopulations`.
 
 ### Algoritmo
-1. **Pool de métricas**: agrega células de **todos** os Cineminhas selecionados em um único espaço
+0. **Chegadas pelo fluxo (DEC-JO-001)**: `computeCinemaArrivals` roteia cada linha pelo grafo e agrega cada cineminha só sobre as linhas que de fato chegam nele (respeitando losangos e `decision_lens` a montante) — não sobre a base completa
+1. **Pool de métricas**: agrega as células das populações **filtradas** dos Cineminhas selecionados em um único espaço
 2. **Badness**: células de variáveis ordinais recebem `badness = rowRank + colRank` (0=melhor, 2=pior); variáveis categóricas têm `badness = 0.5 + 0.5`
 3. **Fronteira Pareto**: sort por `badness` crescente + `inadInferida` crescente; greedy acumulando células; produz fronteira global
 4. **Mix de risco**: se coluna `mixRisco` presente, acumula distribuição por categoria de risco por ponto da fronteira

@@ -189,11 +189,18 @@ Losango RISCO_CIDADE
 
 ### Plano de implementação (sessões)
 
-| Sessão | Escopo | Cobre |
-|--------|--------|-------|
-| **A** | População consolidada do fluxo | DEC-JO-001 (Problema 1) |
-| **B** | UI do modal: nível de risco, toggle de métrica, seletor de modo | DEC-JO-002, parte de DEC-JO-003/004 |
-| **C** | Algoritmo greedy com precedência (Cascata/Independente) | DEC-JO-003, DEC-JO-004 (Problema 2) |
+| Sessão | Escopo | Cobre | Status |
+|--------|--------|-------|--------|
+| **A** | População consolidada do fluxo | DEC-JO-001 (Problema 1) | ✅ implementada |
+| **B** | UI do modal: nível de risco, toggle de métrica, seletor de modo | DEC-JO-002, parte de DEC-JO-003/004 | pendente |
+| **C** | Algoritmo greedy com precedência (Cascata/Independente) | DEC-JO-003, DEC-JO-004 (Problema 2) | pendente |
+
+#### Sessão A — implementação (entregue)
+
+- **`computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`** (worker): roteia cada linha pelo grafo (reusa `buildFlowGraph` + uma variante instrumentada de `traverseRow`) e registra **em qual célula de qual cineminha** ela cai, retornando o mapa reutilizável `{ [shapeId]: { [cellKey]: { qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix } } }`. A chegada é registrada **antes** de aplicar a elegibilidade da célula (a elegibilidade só decide a porta de saída). Respeita losangos e `decision_lens` a montante; com lenses presentes, só a população-alvo (`isMutable`) conta — igual ao `COMPUTE_OVERLAY`. Este é exatamente o mapa que a Sessão C (greedy com precedência) vai consumir.
+- **`computeJohnnyData(shapes, conns, csvStore, lensPopulations, selectedIds)`**: passa a **consumir** o mapa de chegadas em vez de varrer `csv.rows`; `selectedIds` delimita os cineminhas do pool. O algoritmo de ordenação (`badness`) permanece inalterado (Sessão C).
+- **`COMPUTE_JOHNNY`** agora recebe `{shapes, conns, shapeIds, lensPopulations}` (antes só `{shapes}`); `openJohnnyModal` envia o grafo completo + ids selecionados + `lensPopulations`.
+- **Critério de aceite atendido:** 3 cineminhas G4-Alto/Neutro/Baixo (mesmos eixos) passam a exibir métricas por célula **diferentes** entre si (`tests/johnny.test.js`).
 
 ### Estado do modal (alvo)
 

@@ -5094,7 +5094,16 @@ export default function App() {
   const openJohnnyModal = (shapeIds) => {
     const targets = shapes.filter(s => shapeIds.includes(s.id) && s.type === 'cineminha');
     if (targets.length === 0) return;
-    workerRef.current?.postMessage({ type: 'COMPUTE_JOHNNY', shapes: targets });
+    // Envia o grafo completo (shapes + conns) + a população filtrada (lensPopulations)
+    // para que o worker agregue cada cineminha só sobre as linhas que de fato chegam
+    // nele pelo fluxo. shapeIds delimita quais cineminhas entram no pool. (DEC-JO-001)
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_JOHNNY',
+      shapes: shapesR.current,
+      conns: connsR.current,
+      shapeIds: targets.map(s => s.id),
+      lensPopulations: lensPopulationsR.current,
+    });
   };
 
   const applyJohnnyResult = (proposedByShape) => {
