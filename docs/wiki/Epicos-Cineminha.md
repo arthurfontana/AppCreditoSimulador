@@ -189,11 +189,11 @@ Losango RISCO_CIDADE
 
 ### Plano de implementação (sessões)
 
-| Sessão | Escopo | Cobre |
-|--------|--------|-------|
-| **A** | População consolidada do fluxo | DEC-JO-001 (Problema 1) |
-| **B** | UI do modal: nível de risco, toggle de métrica, seletor de modo | DEC-JO-002, parte de DEC-JO-003/004 |
-| **C** | Algoritmo greedy com precedência (Cascata/Independente) | DEC-JO-003, DEC-JO-004 (Problema 2) |
+| Sessão | Escopo | Cobre | Status |
+|--------|--------|-------|--------|
+| **A** | População consolidada do fluxo | DEC-JO-001 (Problema 1) | ✅ Entregue |
+| **B** | UI do modal: nível de risco, toggle de métrica, seletor de modo | DEC-JO-002, parte de DEC-JO-003/004 | ✅ Entregue |
+| **C** | Algoritmo greedy com precedência (Cascata/Independente) | DEC-JO-003, DEC-JO-004 (Problema 2) | ✅ Entregue |
 
 ### Estado do modal (alvo)
 
@@ -207,3 +207,23 @@ johnnyModal = {
 ```
 
 **Pré-condição do aninhamento (Cascata):** os Cineminhas de níveis adjacentes devem compartilhar eixos/domínios para que o casamento de células `(i,j)` seja bem definido. Quando os domínios divergem, as arestas de aninhamento valem apenas para os `cellKey` coincidentes.
+
+### Implementação Sessão C
+
+`computeJohnnyData` aceita agora `riskLevels`, `hierarchyMode` e `inadMetric` como parâmetros. O algoritmo de fronteira foi substituído:
+
+**Grafo de precedência (`requires[pk]`):**
+- **(a) Monotonicidade interna** por eixo ordinal: `(i,j)` ∈ Cineminha K exige `(i-1,j)` e `(i,j-1)` no mesmo K.
+- **(b) Aninhamento Cascata** (quando `hierarchyMode === 'cascata'`): `(i,j)` no nível L exige `(i,j)` no nível L−1 (riskLevel menor = mais seguro). Casamento por `cellKey` — domínios não precisam ser idênticos, só as células coincidentes criam aresta.
+
+**Greedy:**
+- Células sem predecessores pendentes formam o conjunto `liberatedSet`.
+- A cada passo, elege a célula liberada de menor **inadimplência suavizada** (`inadMetric` selecionável); desempate por `qty` desc.
+- Suavização bayesiana com `SHRINK_K = 10%` do volume médio do pool — impede que ruído amostral de células pequenas antecedam células seguras reais.
+- Fallback (sem dados de inad): rank por nível (`riskLevel * 1e6`) + posição ordinal interna.
+- Abre a célula eleita, atualiza acumuladores, libera dependentes cujo contador de predecessores pendentes chega a zero.
+
+**Recomputo automático da curva:**
+- Toggles `hierarchyMode`/`inadMetric` chamam `recomputeJohnny({...override})` imediatamente (auto-recompute).
+- Input `riskLevel` dispara `recomputeJohnny()` via `onBlur`, usando o padrão de updater funcional do React para garantir que o valor recém-digitado já esteja na state antes do envio ao worker.
+- Ref `johnnyModalR` adicionado para acesso sem closure stale nas funções fora do ciclo de render.
