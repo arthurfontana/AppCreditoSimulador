@@ -213,7 +213,7 @@ AppCreditoSimulador/
 ### Padrão de refs
 Toda variável de estado crítica tem um ref espelho para uso em event listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atualizado imediatamente.
 
-Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `lensPopulationsR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
+Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `lensPopulationsR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
 
 ## Reorganização Automática (Auto Layout)
 
@@ -287,7 +287,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `RUN_SIMULATION` | `{shapes, conns}` | Roda `runSimulation` e responde com `SIMULATION_RESULT` |
 | `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult`; responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
-| `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, lensPopulations}` | Roda `computeCinemaArrivals` + `computeJohnnyData`; responde com `JOHNNY_RESULT` |
+| `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, lensPopulations, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns, lensPopulations}]` — abas marcadas (cenários, 5B). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
 
 ### Mensagens de saída
@@ -306,8 +306,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `computeCellMetrics(shape, csvStore)`: agrega métricas por célula do Cineminha
 - `buildParetoFrontier(cellMetrics)`: fronteira Pareto greedy (sort por `inadInferida` crescente)
 - `extractScenarios(frontier)`: `{conservador, balanceado, melhorEficiencia, expansao}` — `melhorEficiencia` é o joelho da curva
-- `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante); função reutilizável pela Sessão C
-- `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations)`: agrupa métricas de **todos** os Cineminhas selecionados (`cinemaIds`) usando `computeCinemaArrivals` (populações filtradas pelo grafo), gera fronteira Pareto global com suporte a ordinalidade
+- `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante)
+- `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
 - `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo** (dimensões + métricas intrínsecas + `__DECISAO_AS_IS` global + uma coluna `__DECISAO_<canvasId>` por cenário); `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
 - `cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations)`: overlay por canvas memoizado por hash de `shapes`/`conns`/`lensPopulations` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só)
 
@@ -449,11 +449,11 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 ### Ativação
 Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otimização Johnny (N)**. Dispara `COMPUTE_JOHNNY` no worker com todos os shapes do canvas, os IDs dos cineminhas selecionados, as conexões e as `lensPopulations`.
 
-### Algoritmo
-1. **Pool de métricas**: agrega células de **todos** os Cineminhas selecionados em um único espaço
-2. **Badness**: células de variáveis ordinais recebem `badness = rowRank + colRank` (0=melhor, 2=pior); variáveis categóricas têm `badness = 0.5 + 0.5`
-3. **Fronteira Pareto**: sort por `badness` crescente + `inadInferida` crescente; greedy acumulando células; produz fronteira global
-4. **Mix de risco**: se coluna `mixRisco` presente, acumula distribuição por categoria de risco por ponto da fronteira
+### Algoritmo (Sessão C — DEC-JO-003/004)
+1. **Pool de métricas**: agrega células de **todos** os Cineminhas selecionados via `computeCinemaArrivals` (populações filtradas pelo grafo de fluxo)
+2. **Grafo de precedência**: (a) monotonicidade interna por eixo ordinal — `(i,j)` exige `(i-1,j)` e `(i,j-1)` no mesmo Cineminha; (b) aninhamento de cascata — `(i,j)` no nível L exige `(i,j)` no nível L−1 (mais seguro, `hierarchyMode='cascata'`); modo `independente` usa só (a)
+3. **Greedy com precedência**: a cada passo, entre as células **liberadas** (precedências satisfeitas), abre a de menor inadimplência suavizada (`inadMetric`: inferida ou real); desempate por `qty` desc; suavização bayesiana (shrinkage em direção à média do pool) com `SHRINK_K = 10%` do volume médio — evita inversões por ruído amostral; fallback sem inad: rank hierárquico de nível + posição ordinal interna
+4. **Mix de risco**: se coluna `mixRisco` presente, acumula distribuição por categoria por ponto da fronteira
 5. **Scenarios**: `{conservador, melhorEficiencia, expansao}` via joelho da curva
 
 ### Estado `johnnyModal`

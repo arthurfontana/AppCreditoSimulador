@@ -1914,6 +1914,7 @@ export default function App() {
   const undoStackR    = useRef(undoStack);  useEffect(()=>{undoStackR.current=undoStack},  [undoStack]);
   const redoStackR    = useRef(redoStack);  useEffect(()=>{redoStackR.current=redoStack},  [redoStack]);
   const lensModalR    = useRef(lensModal);  useEffect(()=>{lensModalR.current=lensModal},  [lensModal]);
+  const johnnyModalR  = useRef(johnnyModal);useEffect(()=>{johnnyModalR.current=johnnyModal},[johnnyModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const canvasesR       = useRef(canvases);        useEffect(()=>{canvasesR.current=canvases},         [canvases]);
@@ -1970,21 +1971,23 @@ export default function App() {
                 baselineApprovalRate, maxInadReal, maxInadInf } = e.data;
         const initPt = scenarios?.melhorEficiencia || frontier[Math.floor(frontier.length / 2)];
         const initIdx = Math.max(0, frontier.indexOf(initPt));
-        setJohnnyModal({
+        // Preserve user-set riskLevels/hierarchyMode/inadMetric on recalculation;
+        // use defaults only on fresh open (modal was null).
+        setJohnnyModal(prev => ({
           pooledMetrics, frontier, scenarios, mixCats, shapeMetas,
           baselineApprovalRate,
-          activeCard:        'melhorEficiencia',
-          proposedByShape:   buildProposedByShape(initPt?.cells || {}, shapeMetas, pooledMetrics),
-          sliderApprovalIdx: initIdx,
-          sliderInadReal:    maxInadReal || 0.2,
-          sliderInadInf:     maxInadInf  || 0.2,
-          maxInadReal:       maxInadReal || 0.2,
-          maxInadInf:        maxInadInf  || 0.2,
-          activeShapePreview: shapeMetas[0]?.id || null,
-          riskLevels:    Object.fromEntries(shapeMetas.map((m, i) => [m.id, i + 1])),
-          hierarchyMode: 'cascata',
-          inadMetric:    'inferida',
-        });
+          activeCard:         'melhorEficiencia',
+          proposedByShape:    buildProposedByShape(initPt?.cells || {}, shapeMetas, pooledMetrics),
+          sliderApprovalIdx:  initIdx,
+          sliderInadReal:     maxInadReal || 0.2,
+          sliderInadInf:      maxInadInf  || 0.2,
+          maxInadReal:        maxInadReal || 0.2,
+          maxInadInf:         maxInadInf  || 0.2,
+          activeShapePreview: prev?.activeShapePreview ?? (shapeMetas[0]?.id || null),
+          riskLevels:    prev?.riskLevels    ?? Object.fromEntries(shapeMetas.map((m, i) => [m.id, i + 1])),
+          hierarchyMode: prev?.hierarchyMode ?? 'cascata',
+          inadMetric:    prev?.inadMetric    ?? 'inferida',
+        }));
       }
     };
     return () => worker.terminate();
@@ -5097,12 +5100,34 @@ export default function App() {
   const openJohnnyModal = (shapeIds) => {
     const hasCinemas = shapeIds.some(id => shapesR.current.find(s => s.id === id && s.type === 'cineminha'));
     if (!hasCinemas) return;
+    const cur = johnnyModalR.current;
     workerRef.current?.postMessage({
       type: 'COMPUTE_JOHNNY',
       shapes: shapesR.current,
       cinemaIds: shapeIds,
       conns: connsR.current,
       lensPopulations: lensPopulationsR.current,
+      // Pass user settings if they're already configured (re-open with same cinemas)
+      riskLevels:    cur?.riskLevels    || null,
+      hierarchyMode: cur?.hierarchyMode || 'cascata',
+      inadMetric:    cur?.inadMetric    || 'inferida',
+    });
+  };
+
+  // Re-sends COMPUTE_JOHNNY with current modal settings + optional overrides.
+  // Used when the user changes hierarchyMode, inadMetric or riskLevels.
+  const recomputeJohnny = (overrides = {}) => {
+    const cur = johnnyModalR.current;
+    if (!cur) return;
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_JOHNNY',
+      shapes: shapesR.current,
+      cinemaIds: cur.shapeMetas.map(m => m.id),
+      conns: connsR.current,
+      lensPopulations: lensPopulationsR.current,
+      riskLevels:    overrides.riskLevels    ?? cur.riskLevels,
+      hierarchyMode: overrides.hierarchyMode ?? cur.hierarchyMode,
+      inadMetric:    overrides.inadMetric    ?? cur.inadMetric,
     });
   };
 
@@ -8160,7 +8185,7 @@ export default function App() {
                     <div style={{display:"flex",borderRadius:7,overflow:"hidden",border:"1px solid #e2e8f0",width:"100%"}}>
                       {[['cascata','🔗 Cascata'],['independente','⊕ Independente']].map(([val,lbl])=>(
                         <button key={val}
-                          onClick={()=>setJohnnyModal(m=>({...m,hierarchyMode:val}))}
+                          onClick={()=>{setJohnnyModal(m=>({...m,hierarchyMode:val}));recomputeJohnny({hierarchyMode:val});}}
                           style={{flex:1,padding:"5px 4px",fontSize:10,fontWeight:hierarchyMode===val?700:500,
                             fontFamily:"inherit",cursor:"pointer",border:"none",
                             background:hierarchyMode===val?"#f59e0b":"#fff",
@@ -8178,7 +8203,7 @@ export default function App() {
                     <div style={{display:"flex",borderRadius:7,overflow:"hidden",border:"1px solid #e2e8f0",width:"100%"}}>
                       {[['inferida','🎯 Inferida'],['real','⚠ Real']].map(([val,lbl])=>(
                         <button key={val}
-                          onClick={()=>setJohnnyModal(m=>({...m,inadMetric:val}))}
+                          onClick={()=>{setJohnnyModal(m=>({...m,inadMetric:val}));recomputeJohnny({inadMetric:val});}}
                           style={{flex:1,padding:"5px 4px",fontSize:10,fontWeight:inadMetric===val?700:500,
                             fontFamily:"inherit",cursor:"pointer",border:"none",
                             background:inadMetric===val?"#8b5cf6":"#fff",
@@ -8389,6 +8414,10 @@ export default function App() {
                                   const v = Math.max(1, parseInt(e.target.value)||1);
                                   setJohnnyModal(m=>({...m,riskLevels:{...m.riskLevels,[meta.id]:v}}));
                                 }}
+                                onBlur={()=>setJohnnyModal(cur=>{
+                                  if(cur)workerRef.current?.postMessage({type:'COMPUTE_JOHNNY',shapes:shapesR.current,cinemaIds:cur.shapeMetas.map(m=>m.id),conns:connsR.current,lensPopulations:lensPopulationsR.current,riskLevels:cur.riskLevels,hierarchyMode:cur.hierarchyMode,inadMetric:cur.inadMetric});
+                                  return cur;
+                                })}
                                 style={{width:48,padding:"2px 5px",fontSize:11,fontWeight:700,
                                   border:"1px solid #e2e8f0",borderRadius:5,fontFamily:"inherit",
                                   textAlign:"center",color:"#7c3aed",background:"#f5f3ff"}}/>

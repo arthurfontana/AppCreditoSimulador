@@ -679,29 +679,43 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
   return arrivals;
 }
 
-function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations) {
+// DEC-JO-004: greedy com restrição de precedência (Sessão C).
+// riskLevels: {[shapeId]: number} — maior = mais restritivo (DEC-JO-002)
+// hierarchyMode: 'cascata'|'independente' (DEC-JO-003)
+// inadMetric: 'inferida'|'real' (DEC-JO-004)
+function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric) {
   const cinemaIdSet = new Set(cinemaIds);
   const cinemas = allShapes.filter(s => cinemaIdSet.has(s.id) && s.type === 'cineminha');
   if (cinemas.length === 0) return null;
 
   const arrivals = computeCinemaArrivals(allShapes, conns, csvStore, lensPopulations);
 
+  // Collect ordinal info per cineminha (needed for precedence and fallback rank)
+  const cinemaOrdInfo = {};
+  for (const shape of cinemas) {
+    const csvId = shape.rowVar?.csvId || shape.colVar?.csvId;
+    const csv = csvStore[csvId || ''] || {};
+    const varTypes = csv.varTypes || {};
+    cinemaOrdInfo[shape.id] = {
+      rowIsOrd: shape.rowVar ? varTypes[shape.rowVar.col] === 'ordinal' : false,
+      colIsOrd: shape.colVar ? varTypes[shape.colVar.col] === 'ordinal' : false,
+      rDom: shape.rowDomain?.length > 0 ? shape.rowDomain : ['*'],
+      cDom: shape.colDomain?.length > 0 ? shape.colDomain : ['*'],
+    };
+  }
+
   const pooledMetrics = {};
   const mixCatsSet = new Set();
   let totalQty = 0;
 
   for (const shape of cinemas) {
-    const { rowVar, colVar, rowDomain, colDomain } = shape;
+    const { rowVar, colVar } = shape;
     const csvId = rowVar?.csvId || colVar?.csvId;
     if (!csvId) continue;
     const csv = csvStore[csvId];
     if (!csv) continue;
 
-    const varTypes  = csv.varTypes || {};
-    const rowIsOrd  = rowVar ? varTypes[rowVar.col] === 'ordinal' : false;
-    const colIsOrd  = colVar ? varTypes[colVar.col] === 'ordinal' : false;
-    const rDom      = rowDomain?.length > 0 ? rowDomain : ['*'];
-    const cDom      = colDomain?.length > 0 ? colDomain : ['*'];
+    const { rDom, cDom } = cinemaOrdInfo[shape.id];
     const shapeArrivals = arrivals[shape.id] || {};
 
     for (const rv of rDom) {
@@ -710,9 +724,6 @@ function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulation
         const m = shapeArrivals[cellKey];
         if (!m || m.qty === 0) continue;
         for (const mv of Object.keys(m.mix || {})) if (mv) mixCatsSet.add(mv);
-        const rowRank = rowIsOrd && rDom.length > 1 ? rDom.indexOf(rv) / (rDom.length - 1) : 0.5;
-        const colRank = colIsOrd && cDom.length > 1 ? cDom.indexOf(cv) / (cDom.length - 1) : 0.5;
-        const badness = (rowIsOrd ? rowRank : 0.5) + (colIsOrd ? colRank : 0.5);
         const pk = `${shape.id}|${cellKey}`;
         pooledMetrics[pk] = {
           shapeId: shape.id, cellKey, rowVal: rv, colVal: cv,
@@ -721,7 +732,6 @@ function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulation
           inadReal:     m.qtdAltas      > 0 ? m.inadRRaw / m.qtdAltas      : null,
           inadInferida: m.qtdAltasInfer > 0 ? m.inadIRaw / m.qtdAltasInfer
                       : m.qty           > 0 ? m.inadIRaw / m.qty            : null,
-          badness, rowRank, colRank,
           mixBreakdown: m.mix || {},
         };
         totalQty += m.qty;
@@ -731,32 +741,120 @@ function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulation
 
   if (totalQty === 0) return null;
 
-  // Sort: badness asc, then inadInferida asc, then qty desc
-  const sorted = Object.entries(pooledMetrics)
-    .map(([pk, m]) => ({ pk, ...m }))
-    .filter(c => c.qty > 0)
-    .sort((a, b) => {
-      const bd = a.badness - b.badness;
-      if (Math.abs(bd) > 1e-9) return bd;
-      const ai = a.inadInferida ?? Infinity, bi = b.inadInferida ?? Infinity;
-      const id = ai - bi;
-      if (Math.abs(id) > 1e-9) return id;
-      return b.qty - a.qty;
-    });
+  // ── Greedy com precedência (DEC-JO-003, DEC-JO-004) ─────────────────────────
+  const _inadMetric    = inadMetric    || 'inferida';
+  const _hierarchyMode = hierarchyMode || 'cascata';
+  const _riskLevels    = riskLevels    || Object.fromEntries(cinemas.map((s, i) => [s.id, i + 1]));
 
-  // Build frontier (greedy from best → worst badness)
+  const allCells = Object.entries(pooledMetrics).map(([pk, m]) => ({ pk, ...m }));
+  const cellByPk = Object.fromEntries(allCells.map(c => [c.pk, c]));
+
+  // Suavização bayesiana: shrinkage em direção à média do pool — evita que células de
+  // baixo volume (ruído amostral) furem a fila por inadimplência aparentemente baixa.
+  let poolInadRaw = 0, poolDen = 0;
+  for (const c of allCells) {
+    if (_inadMetric === 'real') { poolInadRaw += c.inadRRaw || 0; poolDen += c.qtdAltas || 0; }
+    else { poolInadRaw += c.inadIRaw || 0; poolDen += (c.qtdAltasInfer > 0 ? c.qtdAltasInfer : c.qty) || 0; }
+  }
+  const poolAvgInad = poolDen > 0 ? poolInadRaw / poolDen : 0;
+  const SHRINK_K = Math.max(1, (totalQty / Math.max(1, allCells.length)) * 0.1);
+
+  const smoothedInad = (c) => {
+    if (_inadMetric === 'real') {
+      return ((c.inadRRaw || 0) + poolAvgInad * SHRINK_K) / ((c.qtdAltas || 0) + SHRINK_K);
+    }
+    const den = c.qtdAltasInfer > 0 ? c.qtdAltasInfer : c.qty;
+    return ((c.inadIRaw || 0) + poolAvgInad * SHRINK_K) / ((den || 0) + SHRINK_K);
+  };
+
+  const hasAnyInad = allCells.some(c =>
+    _inadMetric === 'real' ? c.inadReal !== null : c.inadInferida !== null
+  );
+
+  // Fallback (sem inadimplência): rank hierárquico + posição ordinal interna
+  const fallbackRank = (c) => {
+    const level = (_riskLevels[c.shapeId] ?? 1) * 1e6;
+    const { rDom, cDom } = cinemaOrdInfo[c.shapeId] || { rDom: ['*'], cDom: ['*'] };
+    const ri = rDom.indexOf(c.rowVal), ci2 = cDom.indexOf(c.colVal);
+    return level + (ri >= 0 ? ri : 0) * 1000 + (ci2 >= 0 ? ci2 : 0);
+  };
+
+  // ── Grafo de precedência ────────────────────────────────────────────────────
+  // requires[pk] = Set de pks que devem ser abertos antes de pk
+  const requires   = Object.fromEntries(allCells.map(c => [c.pk, new Set()]));
+  const dependents = Object.fromEntries(allCells.map(c => [c.pk, []]));
+
+  // (a) Monotonicidade interna por eixo ordinal: (i,j) exige (i-1,j) e (i,j-1)
+  for (const shape of cinemas) {
+    const { rowIsOrd, colIsOrd, rDom, cDom } = cinemaOrdInfo[shape.id];
+    for (let ri = 0; ri < rDom.length; ri++) {
+      for (let ci = 0; ci < cDom.length; ci++) {
+        const pk = `${shape.id}|${rDom[ri]}|${cDom[ci]}`;
+        if (!requires[pk]) continue;
+        if (rowIsOrd && ri > 0) {
+          const predPk = `${shape.id}|${rDom[ri - 1]}|${cDom[ci]}`;
+          if (requires[predPk]) { requires[pk].add(predPk); dependents[predPk].push(pk); }
+        }
+        if (colIsOrd && ci > 0) {
+          const predPk = `${shape.id}|${rDom[ri]}|${cDom[ci - 1]}`;
+          if (requires[predPk]) { requires[pk].add(predPk); dependents[predPk].push(pk); }
+        }
+      }
+    }
+  }
+
+  // (b) Aninhamento entre níveis (modo Cascata): (i,j) no nível L exige (i,j) no nível L-1
+  if (_hierarchyMode === 'cascata') {
+    const sortedByLevel = [...cinemas].sort((a, b) => (_riskLevels[a.id] ?? 1) - (_riskLevels[b.id] ?? 1));
+    // Lookup: shapeId → cellKey → pk
+    const bySId = {};
+    for (const c of allCells) {
+      if (!bySId[c.shapeId]) bySId[c.shapeId] = {};
+      bySId[c.shapeId][c.cellKey] = c.pk;
+    }
+    for (let k = 1; k < sortedByLevel.length; k++) {
+      const prevMap = bySId[sortedByLevel[k - 1].id] || {};
+      const curMap  = bySId[sortedByLevel[k].id]     || {};
+      for (const [cellKey, pk] of Object.entries(curMap)) {
+        const predPk = prevMap[cellKey];
+        if (predPk && requires[pk] && requires[predPk] !== undefined && !requires[pk].has(predPk)) {
+          requires[pk].add(predPk);
+          dependents[predPk].push(pk);
+        }
+      }
+    }
+  }
+
+  // ── Greedy: a cada passo, entre as células LIBERADAS abre a de menor inad ───
+  const remaining    = Object.fromEntries(allCells.map(c => [c.pk, requires[c.pk].size]));
+  const liberatedSet = new Set(allCells.filter(c => remaining[c.pk] === 0).map(c => c.pk));
+
   const frontier = [{
     cells: {}, approvalRate: 0, inadReal: null, inadInferida: null,
     totalQty, approvedQty: 0, mixBreakdown: {},
   }];
   let approvedQty = 0, altasSum = 0, inadRSum = 0, inadISum = 0;
   const curCells = {}, curMix = {};
-  for (const c of sorted) {
-    approvedQty += c.qty; altasSum += c.qtdAltas;
-    inadRSum += c.inadRRaw; inadISum += c.inadIRaw;
-    curCells[c.pk] = true;
-    for (const [mv, mq] of Object.entries(c.mixBreakdown || {}))
+
+  while (liberatedSet.size > 0) {
+    // Encontra a célula liberada de menor inadimplência (desempate: maior qty)
+    let best = null, bestScore = Infinity, bestQty = -1;
+    for (const pk of liberatedSet) {
+      const c = cellByPk[pk];
+      const score = hasAnyInad ? smoothedInad(c) : fallbackRank(c);
+      if (score < bestScore || (score === bestScore && c.qty > bestQty)) {
+        best = c; bestScore = score; bestQty = c.qty;
+      }
+    }
+    if (!best) break;
+
+    liberatedSet.delete(best.pk);
+    approvedQty += best.qty; altasSum += best.qtdAltas;
+    inadRSum += best.inadRRaw; inadISum += best.inadIRaw;
+    curCells[best.pk] = true;
+    for (const [mv, mq] of Object.entries(best.mixBreakdown || {}))
       curMix[mv] = (curMix[mv] || 0) + mq;
+
     frontier.push({
       cells: { ...curCells },
       approvalRate: approvedQty / totalQty,
@@ -765,6 +863,12 @@ function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulation
       totalQty, approvedQty,
       mixBreakdown: { ...curMix },
     });
+
+    // Libera dependentes cujas precedências estão agora satisfeitas
+    for (const depPk of (dependents[best.pk] || [])) {
+      remaining[depPk]--;
+      if (remaining[depPk] === 0) liberatedSet.add(depPk);
+    }
   }
 
   // Scenarios (knee algorithm)
@@ -959,8 +1063,8 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_JOHNNY') {
-    const { shapes, cinemaIds, conns = [], lensPopulations = {} } = e.data;
-    const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations);
+    const { shapes, cinemaIds, conns = [], lensPopulations = {}, riskLevels, hierarchyMode, inadMetric } = e.data;
+    const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric);
     if (!result) { self.postMessage({ type: 'JOHNNY_RESULT', error: 'no_data' }); return; }
     self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
