@@ -1,11 +1,12 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~8434 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~8939 linhas)
 - Sem CSS externo — tudo inline styles
 - SVG puro para o canvas; matrizes interativas via `foreignObject` (sem biblioteca de diagramas)
 - **Recharts** para gráficos na aba Dashboard (exceção pontual ao ADR-003 — ver `DEC-AW-001`)
 - Web Worker (`src/simulation.worker.js`) para cálculos pesados fora da thread principal
+- **Vitest** para testes unitários (`tests/analytics.test.js`, config em `vitest.config.js`)
 
 ## O que é
 Whiteboard interativo + simulador de regras de crédito. O usuário carrega um CSV sumarizado, classifica colunas, arrasta variáveis de decisão para o canvas como losangos ou matrizes cruzadas (Cineminha) e monta um fluxo de política de crédito. O painel de simulação exibe taxa de aprovação e indicadores de inadimplência em tempo real, comparando com a política atual (AS IS).
@@ -15,9 +16,11 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ```
 AppCreditoSimulador/
 ├── src/
-│   ├── App.jsx                   # Componente único — ~7974 linhas
+│   ├── App.jsx                   # Componente único — ~8939 linhas
 │   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny
 │   └── main.jsx                  # Entry point React
+├── tests/
+│   └── analytics.test.js         # Testes unitários Vitest: analytics, KPI, pivot, cloneCanvas
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
 │   └── wiki/                     # Documentação sincronizada com GitHub Wiki
@@ -35,6 +38,7 @@ AppCreditoSimulador/
 │   ├── build-release.yml         # Build automático em push para main → commit em release/
 │   └── sync-wiki.yml             # Sincroniza docs/wiki/ com o GitHub Wiki
 ├── vite.config.js                # Build config + injeção de metadados de build
+├── vitest.config.js              # Config separada para testes (sem defines de build do Vite)
 ├── package.json
 └── index.html
 ```
@@ -62,6 +66,10 @@ AppCreditoSimulador/
 - `canvases`: store multi-canvas (Sub-sessão 5A, DEC-AW-007) — `{[id]: {id, name, shapes, conns, includeInDashboard}}`; `shapes`/`conns` são o **working copy** do canvas ativo
 - `activeCanvasId`: ID do canvas ativo
 - `renamingCanvasId` / `renameValue` / `canvasTabMenu`: estado UI da barra de abas de canvas
+- `hoveredConn` / `hoveredConnPos`: seta sob o cursor + coordenadas `{x,y}` para tooltip de preview
+- `enableDynThickness`: toggle de espessura dinâmica de seta proporcional ao volume — `boolean`
+- `showEdgeVol` / `showEdgeInadReal` / `showEdgeInadInf`: toggles de exibição dos chips de métricas nas setas — `boolean` (todos `true` por padrão)
+- `cinemaDropdownOpen` / `cinemaDropdownPos`: dropdown flutuante para escolha de tipo ao criar Cineminha
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -168,8 +176,9 @@ AppCreditoSimulador/
 - `applyOptimResult(shapeId, proposedCells)`: escreve `proposedCells` de volta no Cineminha e fecha o modal
 - `openJohnnyModal(shapeIds)`: dispara `COMPUTE_JOHNNY` no worker → abre modal multi-cineminha
 - `applyJohnnyResult(proposedByShape)`: aplica células propostas a múltiplos Cineminhas
+- `duplicateCanvas(sourceId)`: clona shapes + conns de um canvas via `cloneCanvasWithNewIds`, insere como nova aba
 - `autoLayout()`: reorganização inteligente do canvas (botão **⊹ Reorganizar**) — ver seção "Reorganização Automática (Auto Layout)"
-- `renderConn(conn)`: renderiza seta com label no ponto médio da bezier
+- `renderConn(conn)`: renderiza seta com label no ponto médio da bezier; espessura dinâmica quando `enableDynThickness`; tooltip ao hover via `hoveredConn`
 - `renderCSVNode(shape)`: tabela interativa minimizável no canvas
 - `renderCinemaNode(shape)`: matriz interativa — estado vazio (ícone), 1D ou 2D via `foreignObject`
 - `renderDecisionLensNode(shape)`: nó de filtro de população com contagem de linhas afetadas
@@ -180,9 +189,12 @@ AppCreditoSimulador/
 - `SimIndicators`: exibe indicadores de simulação na sidebar direita — mostra resultado atual + comparativo com baseline AS IS quando disponível (`incrementalResult`)
 - `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
-- `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
+- `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`), controles de eixo Y (`yMin`/`yMax`), painel de estilos de série (`SeriesStylePanel`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
 - `KpiCard({analyticsDataset, metricId, kpiA, kpiB, onChange})`: indicador pontual comparando dois cenários (DEC-AW-008) — seletores Baseline (A) e Comparação (B) aceitam qualquer cenário (incl. AS IS); valor grande = B, baseline = A, delta `B − A` colorido pela direção da métrica (`GOOD_WHEN_LOWER`). A/B persistidos em `config.kpiA`/`kpiB`; default via `resolveKpiScenarios`
 - `FieldWell`: drop zone para campos — valida `kind` via `accept`; destaca ao arrastar por cima
+- `SeriesStylePanel({series, isLine, seriesStyles, onChange})`: painel colapsável de personalização de cor e espessura por série — acessível via botão 🎨 no header do `AnalyticsWidget`; persiste estilos em `config.seriesStyles`
+- `ChartLineLabel({x, y, value, color, metricDef, index, seriesIndex, allData, seriesKey})`: label inteligente para pontos de linha — evita colisão entre séries adjacentes e formata o valor via `fmtMetricVal`
+- `ChartBarLabel({x, y, width, height, value, color, metricDef, isBar100})`: label para barras — usa `getContrastColor` para cor de texto legível sobre a barra
 
 ### Helpers globais (fora do componente)
 - `sortDomain(values)`: ordena domínio — numérico crescente ou A-Z (locale pt-BR)
@@ -209,11 +221,14 @@ AppCreditoSimulador/
 - `resolveKpiScenarios(scenarios, kpiA, kpiB)`: resolve os cenários Baseline (A) e Comparação (B) do KPI a partir dos ids salvos no `WidgetConfig`, com fallback retrocompatível (A=AS IS, B=1º canvas; DEC-AW-008)
 - `buildAnalyticsCSV(ds)` / `exportAnalyticsDatasetCSV(ds)`: serializa/baixa o dataset analítico largo como CSV (dimensões + métricas intrínsecas + uma coluna de decisão por cenário, incl. AS IS), com BOM e escape RFC 4180 — abrível no Excel (5C)
 - `computeWidgetMetric(rows, metricId, decisionCol)`: agrega 1 métrica sobre linhas do dataset largo, replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`)
+- `cloneCanvasWithNewIds(shapes, conns)`: clona shapes e conns gerando novos IDs sem colisão, remapeando `from`/`to` das conexões — usado em `duplicateCanvas` (Sessão 5A); **exportada** para testes
+- `lerpColor(a, b, t)`: interpolação linear de cores hex; `inadColor(t)` deriva cor verde→amarelo→vermelho para visualização de inadimplência nos chips de métricas de arestas
+- `getContrastColor(hex)`: retorna `"#fff"` ou `"#222"` dependendo da luminância relativa da cor de fundo — usado nos labels de barras
 
 ### Padrão de refs
 Toda variável de estado crítica tem um ref espelho para uso em event listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atualizado imediatamente.
 
-Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `lensPopulationsR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
+Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `lensPopulationsR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`, `showEdgeVolR`, `showEdgeInadRealR`, `showEdgeInadInfR`.
 
 ## Reorganização Automática (Auto Layout)
 
@@ -310,6 +325,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
 - `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo** (dimensões + métricas intrínsecas + `__DECISAO_AS_IS` global + uma coluna `__DECISAO_<canvasId>` por cenário); `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
 - `cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations)`: overlay por canvas memoizado por hash de `shapes`/`conns`/`lensPopulations` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só)
+- `__setWorkerCsvStoreForTest(store)`: **somente para testes** — injeta um `csvStore` mock no worker sem mensagem `postMessage`; exportada condicionalmente (`export { __setWorkerCsvStoreForTest }`)
 
 ## Analytics Workspace (aba Dashboard)
 
@@ -319,7 +335,9 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
 - **Tipo `temporal` (DEC-AW-005)**: marcado no Passo 2 do wizard (toggle de 3 estados Categórica → Ordinal → ⏱ Temporal, grava `columnTypes[col]='temporal'`). `parseTemporalKey(str)` deriva a chave de ordenação cronológica.
 - **Sessão 1** (entregue): pipeline ponta a ponta com um gráfico de linha fixo (Recharts, DEC-AW-001).
 - **Sessão 2** (entregue): builder de dashboard configurável — gráficos de linha configuráveis + painel de campos arrastáveis.
-  - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type, x, y, w, h, config:{title, xDimension, metric, serieBy, kpiA?, kpiB?}}` (`kpiA`/`kpiB` só nos cards `kpi`, 5C). Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
+  - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type, x, y, w, h, config:{title, xDimension, metric, serieBy, kpiA?, kpiB?, yMin?, yMax?, seriesStyles?}}`. Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
+  - **`yMin` / `yMax`** (número ou `null`): define o domínio do eixo Y do gráfico; `null` = automático. Controles de texto no header do `AnalyticsWidget` + botão "redefinir".
+  - **`seriesStyles`**: `{[serieKey]: {color?: string, strokeWidth?: number}}` — personalização de cor e espessura por série, editado via `SeriesStylePanel`.
   - **`AnalysisTab`**: layout em 2 colunas — área de gráficos (scroll) + `FieldPanel` à direita. Header com botão **+ Adicionar gráfico**. Funções: `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`.
   - **`FieldPanel`**: chips arrastáveis — dimensões (temporais ⏱ primeiro, depois categóricas; `kind:'dim'`) e métricas (`kind:'metric'`). MIME `application/aw-field`.
   - **`AnalyticsWidget`**: card com título editável, botão remover, barra de 3 `FieldWell` (Eixo X, Métrica, Série) e `LineChart`. Pivot memoizado por `[analyticsDataset, xDimension, metric, serieBy]`.
@@ -333,6 +351,12 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   - **`bar100`**: normaliza cada bucket do eixo X para somar 100% (memo `stacked100` derivado do pivot), `<Bar stackId>`, eixo Y `[0,100]%`; poço de série rotulado "Composição".
   - **`kpi`**: ignora Eixo X/Série, usa só a Métrica + seletores Baseline (A)/Comparação (B) (5C, DEC-AW-008); `KpiCard` computa A e B sobre todas as linhas via `computeWidgetMetric`; valor grande = B + baseline A + delta `B − A` (pp/qty) colorido por `GOOD_WHEN_LOWER` (`inadReal`/`inadInferida` = menor é melhor). A/B persistidos em `config.kpiA`/`kpiB`; export do dataset largo via **⬇ Exportar CSV** no header.
   - **Constantes**: `CHART_TYPES`, `GOOD_WHEN_LOWER`.
+- **Sessão 4** (entregue): persistência do layout no `localStorage`.
+  - `analyticsLayout` persistido em `'aw_layout_v1'` via `useEffect` — sobrevive a reloads.
+  - Canvas store (`canvases` + `activeCanvasId`) persistido em `'aw_canvases_v1'` (`CANVAS_STORAGE_KEY`) — restaurado no `useState` inicial via `_initCanvasStore()`.
+- **Sessão 5A** (entregue): infraestrutura multi-canvas — duplicação de abas via `cloneCanvasWithNewIds`.
+- **Sessão 5B** (entregue): pipeline N-cenários — `computeAnalyticsDataset` no worker recebe array de canvases e emite dataset com uma coluna de decisão por aba marcada.
+- **Sessão 5C** (entregue): KPI A vs B configurável — `resolveKpiScenarios`, `buildAnalyticsCSV`, export via `exportAnalyticsDatasetCSV`.
 
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos
@@ -553,6 +577,27 @@ Header do painel direito — ao lado do título "Painel".
 ### Release local
 A pasta `release/` contém o build compilado. O usuário pode abrir `release/index.html` diretamente no navegador ou usar `release/iniciar.bat` no Windows — sem servidor necessário.
 
+## Testes unitários
+
+- **Framework**: Vitest com ambiente jsdom (`vitest.config.js` separado do `vite.config.js` para não injetar defines de build)
+- **Arquivo**: `tests/analytics.test.js`
+- **Cobertura**: Sessões 5A/5B/5C do Analytics Workspace + revalidação de métricas e pivot (Sessões 2/3)
+
+### Suites
+| Suite | O que testa |
+|-------|------------|
+| `5A · cloneCanvasWithNewIds` | Regeneração de IDs sem colisão, remapeamento de `from`/`to`, preservação de topologia |
+| `5B · computeAnalyticsDataset` | Pipeline N-cenários no worker: dimensões, métricas intrínsecas, join AS IS + cenário, caso sem canvases |
+| `computeWidgetMetric` | Cálculo de `approvalRate`, `qty`, `approvedQty`, `inadReal` por coluna de decisão |
+| `pivotWidget` | Pivot por cenário, ordenação temporal de eixo X, estado `no_x` |
+| `5C · resolveKpiScenarios` | Default A/B, ids salvos, fallback com cenário removido, cenário único |
+| `5C · buildAnalyticsCSV` | Header, valores por linha, escape RFC 4180, dataset vazio |
+
+### Notas para testes
+- `__setWorkerCsvStoreForTest` deve ser chamado no `beforeEach` quando o worker precisa de um csvStore mock
+- `vitest.config.js` usa `plugins: [react()]` mas **não** define `__BUILD_*__` — os guards `typeof __BUILD_*__ !== "undefined"` em `App.jsx` cobrem essa ausência
+- Funções testáveis são exportadas via `export function` (não `export default`) em `App.jsx` e `simulation.worker.js`
+
 ## Suporte a Touch / Mobile
 
 - Pan e zoom com gesto de pinch (dois dedos) via `touchstart`/`touchmove`
@@ -578,10 +623,11 @@ npm install       # instalar dependências
 npm run dev       # servidor de desenvolvimento (Vite)
 npm run build     # build de produção → dist/
 npm run preview   # preview do build de produção
+npm test          # roda testes unitários com vitest (tests/analytics.test.js)
 ```
 
 ## Branch de desenvolvimento atual
-`claude/claude-md-docs-eweh6s`
+`claude/claude-md-docs-lotn54`
 
 ## Roadmap futuro (não implementado)
 
@@ -590,5 +636,5 @@ npm run preview   # preview do build de produção
 - **Fronteira Pareto multi-dimensional**: 3D (aprovação × inad.real × inad.inferida)
 - **Decision Lens — modo incremental**: comparação visual linha a linha das decisões mudadas
 - **Exportação**: JSON canônico da política para importação em motor de decisão em produção; exportação do canvas como PNG/SVG
-- **Persistência**: auto-save no `localStorage`; export/import de sessão como `.credito.json`
+- **Persistência completa**: export/import de sessão completa (canvas + csvStore) como `.credito.json` — layout do dashboard e canvases já são persistidos no `localStorage` (ver Sessão 4)
 - **Cálculo de delta marginal**: "adicionar esta célula muda aprovação em +X pp e inad em +Y pp"
