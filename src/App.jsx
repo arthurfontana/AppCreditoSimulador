@@ -683,6 +683,23 @@ function isCellEligible(cells, key) {
   return getCellValue(cells, key) > 0;
 }
 
+// Resolve quais valores de um domínio devem ser exibidos num nó ("Configurar nó").
+// cfg === null/undefined → modo automático (só valores com volume > 0 no contexto
+// atual; fallback para o domínio completo se nada chega ainda — ex.: nó sem upstream).
+// cfg === string[] → modo manual (exibe exatamente esses, na ordem do domínio).
+// Em ambos os modos, se o resultado ficar vazio cai para o domínio completo, para
+// nunca renderizar um nó sem nenhuma linha/coluna/port.
+function effectiveDomain(fullDomain, cfg, counts) {
+  if (Array.isArray(cfg)) {
+    const set = new Set(cfg);
+    const filtered = fullDomain.filter(v => set.has(v));
+    return filtered.length > 0 ? filtered : fullDomain;
+  }
+  if (!counts) return fullDomain;
+  const withVol = fullDomain.filter(v => (counts[v] || 0) > 0);
+  return withVol.length > 0 ? withVol : fullDomain;
+}
+
 function buildProposedByShape(poolCells, shapeMetas, pooledMetrics) {
   const result = {};
   for (const meta of shapeMetas) {
@@ -1935,6 +1952,7 @@ export default function App() {
       } else if (msgType === 'OVERLAY_RESULT') {
         setSimulationOverlay(e.data.overlay);
         setIncrementalResult(e.data.incrementalResult);
+        setNodeArrivals(e.data.nodeArrivals || {});
       } else if (msgType === 'ANALYTICS_RESULT') {
         setAnalyticsDataset(e.data.dataset);
       } else if (msgType === 'OPTIM_RESULT') {
@@ -2045,6 +2063,27 @@ export default function App() {
   // ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ──────
   // simulationOverlay: null | {[csvId]: {rowDecisions, summaryStats}}
   const [simulationOverlay, setSimulationOverlay] = useState(null);
+  // Contagem reativa de registros que chegam a cada nó por valor de domínio
+  // (computada no worker junto do overlay). Alimenta o "Configurar nó" e o filtro
+  // de exibição de domínios (modo automático). {[nodeId]: {val|row|col: {[v]:qty}}}
+  const [nodeArrivals, setNodeArrivals] = useState({});
+  // Modal "Configurar nó": null | {shapeId, draft:{val?|row?|col?: null|string[]}}
+  const [domainModal, setDomainModal] = useState(null);
+
+  // Ports de losangos que não devem ser renderizados dado o domínio efetivo do nó
+  // (não-destrutivo: o port/conn continua existindo e roteando na simulação).
+  const hiddenPortIds = useMemo(() => {
+    const hidden = new Set();
+    for (const s of shapes) {
+      if (s.type !== 'decision') continue;
+      const portConns = conns.filter(c => c.from === s.id);
+      const fullVals = portConns.map(c => c.label);
+      const visible = new Set(effectiveDomain(fullVals, s.visibleVals, nodeArrivals[s.id]?.val));
+      for (const c of portConns) if (!visible.has(c.label)) hidden.add(c.to);
+    }
+    return hidden;
+  }, [shapes, conns, nodeArrivals]);
+
   const simOverlayDebounceRef = useRef(null);
   useEffect(() => {
     clearTimeout(simOverlayDebounceRef.current);
@@ -3948,6 +3987,25 @@ export default function App() {
     setLensModal(null);
   }, []); // eslint-disable-line
 
+  // ── Configurar nó (domínio exibido) ───────────────────────────
+  const openDomainModal = useCallback((shapeId) => {
+    const s = shapesR.current.find(x => x.id === shapeId);
+    if (!s) return;
+    if (s.type === 'decision')       setDomainModal({ shapeId, draft: { val: s.visibleVals ?? null } });
+    else if (s.type === 'cineminha') setDomainModal({ shapeId, draft: { row: s.visibleRow ?? null, col: s.visibleCol ?? null } });
+  }, []); // eslint-disable-line
+
+  const applyDomainConfig = useCallback((shapeId, draft) => {
+    pushHistory();
+    setShapes(prev => prev.map(s => {
+      if (s.id !== shapeId) return s;
+      if (s.type === 'decision')  return { ...s, visibleVals: draft.val ?? null };
+      if (s.type === 'cineminha') return { ...s, visibleRow: draft.row ?? null, visibleCol: draft.col ?? null };
+      return s;
+    }));
+    setDomainModal(null);
+  }, []); // eslint-disable-line
+
   // ── assignCinemaVar ───────────────────────────────────────────
   const assignCinemaVar = useCallback((shapeIdOrIds, col, csvId, axis) => {
     pushHistory();
@@ -4120,6 +4178,7 @@ export default function App() {
 
   // ── Render: connection (adaptive routing) ─────────────────────
   const renderConn = (conn) => {
+    if (hiddenPortIds.has(conn.from) || hiddenPortIds.has(conn.to)) return null; // port escondido em "Configurar nó"
     const from=shapes.find(s=>s.id===conn.from), to=shapes.find(s=>s.id===conn.to);
     if (!from||!to) return null;
     const [fx,fy]=ctr(from), [tx,ty]=ctr(to);
@@ -4488,8 +4547,11 @@ export default function App() {
     }
 
     // ── Matrix state (1D or 2D) ──
-    const rDom = rowDomain.length>0 ? rowDomain : ['*'];
-    const cDom = colDomain.length>0 ? colDomain : ['*'];
+    // Domínios efetivos: filtra linhas/colunas por "Configurar nó" (modo manual)
+    // ou pelo que efetivamente chega ao nó (modo automático). cells permanece intacto.
+    const arr = nodeArrivals[id];
+    const rDom = rowVar ? effectiveDomain(rowDomain, shape.visibleRow, arr?.row) : ['*'];
+    const cDom = colVar ? effectiveDomain(colDomain, shape.visibleCol, arr?.col) : ['*'];
     const show2D = rowVar && colVar;
     // Header colors per type
     const hdrBg   = isOffer ? '#ecfeff' : '#eef2ff';
@@ -4752,6 +4814,7 @@ export default function App() {
 
   // ── Render: regular shape ─────────────────────────────────────
   const renderShape = (shape) => {
+    if (shape.type==="port" && hiddenPortIds.has(shape.id)) return null; // domínio filtrado em "Configurar nó"
     if (shape.type==="frame")         return null; // rendered separately in lower layer
     if (shape.type==="csv")           return renderCSVNode(shape);
     if (shape.type==="simPanel")      return renderSimPanel(shape);
@@ -5361,6 +5424,13 @@ export default function App() {
                   whiteSpace:"nowrap",fontWeight:selShape.resultVar ? 700 : 500}}>
                 {selShape.resultVar ? `⊞ ${trunc(selShape.resultVar.col,10)}` : "⊞ Resultado"}
               </button>
+              <button onClick={()=>openDomainModal(sel)}
+                title="Escolher quais valores de linha/coluna aparecem neste Cineminha"
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #e2e8f0",background:"#fff",
+                  color:"#64748b",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                ⚙ Domínio
+              </button>
               <button onClick={()=>openOptimModal(sel)}
                 style={{padding:"5px 14px",borderRadius:7,border:`1px solid ${selCfg.badgeBg}`,background:selCfg.badgeBg,
                   color:selCfg.badgeFg,cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
@@ -5416,6 +5486,21 @@ export default function App() {
                 color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                 whiteSpace:"nowrap",fontWeight:700}}>
               ⚡ Otimização Johnny ({multiSel.size})
+            </button>
+          </div>
+        )}
+
+        {/* Decision (losango) toolbar — shows when a single decision is selected */}
+        {selShape?.type==='decision'&&multiSel.size<=1&&(
+          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
+            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+            border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
+            <button onClick={()=>openDomainModal(sel)}
+              title="Escolher quais valores aparecem como saídas deste losango"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fde68a",background:"#fffbeb",
+                color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              ⚙ Domínio
             </button>
           </div>
         )}
@@ -6066,6 +6151,114 @@ export default function App() {
 
       {/* ═══════════════ AXIS SELECTION MODAL (Cineminha) ═══════════ */}
       {/* ═══════════════ DECISION LENS MODAL ═══════════════ */}
+      {domainModal&&(()=>{
+        const shape = shapes.find(s => s.id === domainModal.shapeId);
+        if (!shape) return null;
+        const draft = domainModal.draft;
+
+        // Define as seções (eixos) conforme o tipo de nó
+        const sections = [];
+        if (shape.type === 'decision') {
+          const full = conns.filter(c => c.from === shape.id).map(c => c.label);
+          sections.push({ axis: 'val', title: shape.variableCol || shape.label || 'Saídas', full, counts: nodeArrivals[shape.id]?.val || {} });
+        } else if (shape.type === 'cineminha') {
+          if (shape.rowVar) sections.push({ axis: 'row', title: `Linhas · ${shape.rowVar.col}`, full: shape.rowDomain || [], counts: nodeArrivals[shape.id]?.row || {} });
+          if (shape.colVar) sections.push({ axis: 'col', title: `Colunas · ${shape.colVar.col}`, full: shape.colDomain || [], counts: nodeArrivals[shape.id]?.col || {} });
+        }
+
+        const setAxisCfg = (axis, val) => setDomainModal(m => m ? { ...m, draft: { ...m.draft, [axis]: val } } : m);
+        const toggleVal = (axis, full, counts, value) => {
+          const cur = new Set(effectiveDomain(full, draft[axis], counts));
+          if (cur.has(value)) cur.delete(value); else cur.add(value);
+          setAxisCfg(axis, full.filter(v => cur.has(v)));
+        };
+        const setOnlyVolume = (axis, on, full, counts) => setAxisCfg(axis, on ? null : effectiveDomain(full, null, counts));
+
+        return (
+          <div onMouseDown={()=>setDomainModal(null)}
+            style={{position:"fixed",inset:0,zIndex:4000,background:"rgba(15,23,42,.45)",
+              display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+            <div onMouseDown={e=>e.stopPropagation()}
+              style={{width:440,maxHeight:"82vh",display:"flex",flexDirection:"column",
+                background:"#fff",borderRadius:14,boxShadow:"0 20px 60px rgba(0,0,0,.25)",overflow:"hidden"}}>
+              {/* Header */}
+              <div style={{padding:"16px 20px",borderBottom:"1px solid #e2e8f0"}}>
+                <div style={{fontSize:15,fontWeight:700,color:"#1e293b"}}>⚙ Configurar nó</div>
+                <div style={{fontSize:11.5,color:"#94a3b8",marginTop:2}}>
+                  {trunc(shape.label||(shape.type==='decision'?'Decisão':'Cineminha'),40)} — escolha quais valores exibir
+                </div>
+              </div>
+
+              {/* Body */}
+              <div style={{padding:"6px 20px 12px",overflow:"auto"}}>
+                {sections.length===0&&(
+                  <div style={{padding:"24px 0",textAlign:"center",color:"#94a3b8",fontSize:12.5}}>
+                    Atribua uma variável a este nó primeiro.
+                  </div>
+                )}
+                {sections.map(({axis,title,full,counts})=>{
+                  const isAuto  = !Array.isArray(draft[axis]);
+                  const visible = new Set(effectiveDomain(full, draft[axis], counts));
+                  return (
+                    <div key={axis} style={{marginTop:14}}>
+                      <div style={{fontSize:11,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:.4,marginBottom:6}}>
+                        {trunc(title,40)}
+                      </div>
+                      {/* Auto toggle */}
+                      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"6px 8px",
+                        background:isAuto?"#eff6ff":"#f8fafc",borderRadius:8,border:`1px solid ${isAuto?"#bfdbfe":"#e2e8f0"}`,marginBottom:6}}>
+                        <input type="checkbox" checked={isAuto}
+                          onChange={e=>setOnlyVolume(axis, e.target.checked, full, counts)}
+                          style={{cursor:"pointer"}}/>
+                        <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>Mostrar apenas valores com volume</span>
+                      </label>
+                      {/* Value list */}
+                      <div style={{maxHeight:220,overflow:"auto",border:"1px solid #e2e8f0",borderRadius:8}}>
+                        {full.length===0&&(
+                          <div style={{padding:"10px 12px",fontSize:12,color:"#94a3b8"}}>Sem domínio.</div>
+                        )}
+                        {full.map((v,i)=>{
+                          const cnt = counts[v] || 0;
+                          const checked = visible.has(v);
+                          return (
+                            <label key={v}
+                              style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",
+                                borderTop:i>0?"1px solid #f1f5f9":"none",
+                                background:checked?"#fff":"#fafafa",opacity:cnt>0?1:.6}}>
+                              <input type="checkbox" checked={checked}
+                                onChange={()=>toggleVal(axis, full, counts, v)} style={{cursor:"pointer"}}/>
+                              <span style={{flex:1,fontSize:12.5,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                                {v}
+                              </span>
+                              <span style={{fontSize:11,fontWeight:600,color:cnt>0?"#0891b2":"#cbd5e1",
+                                fontVariantNumeric:"tabular-nums"}}>{fmtQty(cnt)}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Footer */}
+              <div style={{padding:"12px 20px",borderTop:"1px solid #e2e8f0",display:"flex",gap:8,justifyContent:"flex-end"}}>
+                <button onClick={()=>setDomainModal(null)}
+                  style={{padding:"7px 16px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    color:"#64748b",cursor:"pointer",fontSize:12.5,fontFamily:"inherit",fontWeight:600}}>
+                  Cancelar
+                </button>
+                <button onClick={()=>applyDomainConfig(domainModal.shapeId, domainModal.draft)}
+                  style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#3b82f6",
+                    color:"#fff",cursor:"pointer",fontSize:12.5,fontFamily:"inherit",fontWeight:700}}>
+                  Aplicar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {lensModal&&(()=>{
         const { shapeId, rules, population } = lensModal;
 

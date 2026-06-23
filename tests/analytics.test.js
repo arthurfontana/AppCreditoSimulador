@@ -8,6 +8,7 @@ import {
 } from '../src/App.jsx';
 import {
   computeAnalyticsDataset,
+  computeNodeArrivals,
   __setWorkerCsvStoreForTest,
 } from '../src/simulation.worker.js';
 
@@ -241,5 +242,78 @@ describe('5C · buildAnalyticsCSV', () => {
   it('retorna null para dataset vazio', () => {
     expect(buildAnalyticsCSV(null)).toBeNull();
     expect(buildAnalyticsCSV({ rows: [], dimensions: [], scenarios: [] })).toBeNull();
+  });
+});
+
+// ── "Configurar nó" — distinct do que efetivamente chega ──────────────────────
+describe('computeNodeArrivals', () => {
+  // GRUPO tem 2 valores; SCORE varia por grupo (G3 → Com/Sem; G4 → R01/R02).
+  const csvStore = {
+    c: {
+      name: 'base',
+      headers: ['GRUPO', 'SCORE', 'qty'],
+      columnTypes: { GRUPO: 'decision', SCORE: 'decision', qty: 'qty' },
+      rows: [
+        ['G3', 'ComRestritivo', '10'],
+        ['G3', 'SemRestritivo', '20'],
+        ['G4', 'R01', '5'],
+        ['G4', 'R02', '7'],
+      ],
+    },
+  };
+
+  it('um cineminha abaixo de um Decision Lens só recebe os SCORE do grupo filtrado', () => {
+    const shapes = [
+      { id: 'L', type: 'decision_lens', rules: [{ col: 'GRUPO', operator: 'equal', value: 'G3', logic: null }] },
+      { id: 'CIN', type: 'cineminha', cinemaType: 'eligibility',
+        rowVar: { col: 'SCORE', csvId: 'c' }, colVar: null,
+        rowDomain: ['ComRestritivo', 'SemRestritivo', 'R01', 'R02'], colDomain: [], cells: {} },
+      { id: 'elig', type: 'port', label: 'Elegível' },
+      { id: 'nelig', type: 'port', label: 'Não Elegível' },
+      { id: 'AP', type: 'approved' }, { id: 'RJ', type: 'rejected' },
+    ];
+    const conns = [
+      { id: 'a', from: 'L', to: 'CIN' },
+      { id: 'b', from: 'CIN', to: 'elig', label: 'Elegível' },
+      { id: 'c', from: 'CIN', to: 'nelig', label: 'Não Elegível' },
+      { id: 'd', from: 'elig', to: 'AP' }, { id: 'e', from: 'nelig', to: 'RJ' },
+    ];
+    const arr = computeNodeArrivals(shapes, conns, csvStore, {});
+    expect(arr.CIN.row).toEqual({ ComRestritivo: 10, SemRestritivo: 20 });
+    expect(arr.CIN.row.R01).toBeUndefined();
+    expect(arr.CIN.row.R02).toBeUndefined();
+  });
+
+  it('um losango raiz recebe todos os valores do domínio', () => {
+    const shapes = [
+      { id: 'D', type: 'decision', variableCol: 'GRUPO', csvId: 'c' },
+      { id: 'pG3', type: 'port', label: 'G3' }, { id: 'pG4', type: 'port', label: 'G4' },
+      { id: 'AP', type: 'approved' },
+    ];
+    const conns = [
+      { id: 'a', from: 'D', to: 'pG3', label: 'G3' },
+      { id: 'b', from: 'D', to: 'pG4', label: 'G4' },
+      { id: 'c', from: 'pG3', to: 'AP' }, { id: 'd', from: 'pG4', to: 'AP' },
+    ];
+    const arr = computeNodeArrivals(shapes, conns, csvStore, {});
+    expect(arr.D.val).toEqual({ G3: 30, G4: 12 });
+  });
+
+  it('um losango abaixo de um Lens só recebe os valores filtrados', () => {
+    const shapes = [
+      { id: 'L', type: 'decision_lens', rules: [{ col: 'GRUPO', operator: 'equal', value: 'G3', logic: null }] },
+      { id: 'D', type: 'decision', variableCol: 'GRUPO', csvId: 'c' },
+      { id: 'pG3', type: 'port', label: 'G3' }, { id: 'pG4', type: 'port', label: 'G4' },
+      { id: 'AP', type: 'approved' },
+    ];
+    const conns = [
+      { id: 'z', from: 'L', to: 'D' },
+      { id: 'a', from: 'D', to: 'pG3', label: 'G3' },
+      { id: 'b', from: 'D', to: 'pG4', label: 'G4' },
+      { id: 'c', from: 'pG3', to: 'AP' }, { id: 'd', from: 'pG4', to: 'AP' },
+    ];
+    const arr = computeNodeArrivals(shapes, conns, csvStore, {});
+    expect(arr.D.val).toEqual({ G3: 30 });
+    expect(arr.D.val.G4).toBeUndefined();
   });
 });

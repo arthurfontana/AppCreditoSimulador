@@ -679,6 +679,97 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
   return arrivals;
 }
 
+// Para cada nó de fluxo (decision/cineminha), contabiliza quantos registros chegam
+// a ele por valor de domínio da(s) sua(s) variável(is), respeitando o roteamento a
+// montante (losangos, Decision Lens e ports). Usado para o "Configurar nó" do canvas:
+// decisão → { val: {[valor]: qty} }; cineminha → { row: {...}, col: {...} }.
+function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  // Entradas reais do fluxo: nós sem aresta de entrada vinda de outro emissor de
+  // fluxo (port, decision_lens, decision, cineminha). Isso exclui corretamente um
+  // cineminha logo abaixo de um Decision Lens (que conecta direto, sem port).
+  const EMIT = new Set(['port', 'decision_lens', 'decision', 'cineminha']);
+  const nonRoot = new Set(conns.filter(c => EMIT.has(shapesMap[c.from]?.type)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !nonRoot.has(s.id)
+  );
+
+  const result = {};
+  for (const s of shapes) {
+    if (s.type === 'decision')      result[s.id] = { val: {} };
+    else if (s.type === 'cineminha') result[s.id] = { row: {}, col: {} };
+  }
+
+  function walk(row, headers, startId, qty) {
+    let cur = startId;
+    const visited = new Set();
+    while (cur) {
+      if (visited.has(cur)) break;
+      visited.add(cur);
+      const node = shapesMap[cur];
+      if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const colIdx = headers.indexOf(node.variableCol);
+        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        if (result[cur] && val !== '') result[cur].val[val] = (result[cur].val[val] || 0) + qty;
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const rIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const cIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rv = node.rowVar && rIdx >= 0 ? (row[rIdx] ?? '').trim() : '';
+        const cv = node.colVar && cIdx >= 0 ? (row[cIdx] ?? '').trim() : '';
+        if (result[cur]) {
+          if (node.rowVar && rv !== '') result[cur].row[rv] = (result[cur].row[rv] || 0) + qty;
+          if (node.colVar && cv !== '') result[cur].col[cv] = (result[cur].col[cv] || 0) + qty;
+        }
+        if (!node.rowVar && !node.colVar) break;
+        const rKey = node.rowVar ? rv : '*';
+        const cKey = node.colVar ? cv : '*';
+        const cellKey = `${rKey}|${cKey}`;
+        const isEligible = isCellEligible(node.cells, cellKey);
+        const typeCfg = getCinemaType(node.cinemaType);
+        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
+        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        if (!rowMatchesLensRules(row, headers, node.rules || [])) break;
+        const edges = out[cur] || [];
+        if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || [];
+        if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else break;
+    }
+  }
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
+    const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    if (csvRoots.length === 0) continue;
+    for (const row of csv.rows) {
+      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
+      for (const root of csvRoots) walk(row, csv.headers, root.id, qty);
+    }
+  }
+
+  return result;
+}
+
 // DEC-JO-004: greedy com restrição de precedência (Sessão C).
 // riskLevels: {[shapeId]: number} — maior = mais restritivo (DEC-JO-002)
 // hierarchyMode: 'cascata'|'independente' (DEC-JO-003)
@@ -1041,7 +1132,8 @@ function handleMessage(e) {
   if (type === 'COMPUTE_OVERLAY') {
     const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
     const incrementalResult = computeIncrementalResult(overlay, workerCsvStore);
-    self.postMessage({ type: 'OVERLAY_RESULT', overlay, incrementalResult });
+    const nodeArrivals = computeNodeArrivals(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
+    self.postMessage({ type: 'OVERLAY_RESULT', overlay, incrementalResult, nodeArrivals });
     return;
   }
 
@@ -1084,6 +1176,7 @@ export {
   computeAnalyticsDataset,
   computeSimulatedDecisions,
   computeCinemaArrivals,
+  computeNodeArrivals,
   buildFlowGraph,
   __setWorkerCsvStoreForTest,
 };

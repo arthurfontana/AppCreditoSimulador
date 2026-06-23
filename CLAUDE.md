@@ -53,6 +53,8 @@ AppCreditoSimulador/
 - `lensModal`: modal de edição do Decision Lens — `null | {shapeId, rules, population}`
 - `incrementalResult`: resultado comparativo AS IS vs. simulado — `null | {baseline, simulated, impacted}`
 - `simulationOverlay`: mapa de decisões por linha — `null | {[csvId]: {rowDecisions, summaryStats}}`
+- `nodeArrivals`: contagem reativa de registros que chegam a cada nó por valor de domínio (worker, junto do overlay) — `{[nodeId]: {val|row|col: {[valor]: qty}}}` (ver Domínio Exibido)
+- `domainModal`: modal "Configurar nó" (domínio exibido) — `null | {shapeId, draft:{val?|row?|col?: null|string[]}}`
 - `lensPopulations`: populações filtradas por cada lens — `{[lensId]: {[csvId]: boolean[]}}`
 - `cinemaLibrary`: biblioteca de configurações de Cineminha salvas localmente — `array`
 - `businessWidget`: widget de impacto de negócio flutuante — `{visible, x, y, w, h}`
@@ -83,10 +85,13 @@ AppCreditoSimulador/
   label,                    // nome da variável
   variableCol: string,      // nome da coluna no CSV
   csvId: string,            // ID do csvStore associado
+  visibleVals: null|string[], // "Configurar nó": null = automático (só ports cujo
+                              // valor chega ao nó); array = manual (ver Domínio Exibido)
 }
 ```
 - Criado ao arrastar chip de variável para área vazia do canvas
 - Gera ports automáticos (um por valor distinto, máx. 10) com setas rotuladas
+- Ports cujos valores não chegam ao nó são **escondidos** (não-destrutivo) — ver Domínio Exibido
 
 ### Shape: `cineminha`
 ```js
@@ -101,6 +106,8 @@ AppCreditoSimulador/
   cells: { [`${rowVal}|${colVal}`]: boolean },  // true = Elegível (default), false = Não Elegível
   resultVar: null | {col, csvId},       // coluna de resultado para preenchimento automático
   metadata: CinemaMetadata | null,      // metadados de biblioteca (type, identifiers, dimensions, etc.)
+  visibleRow: null|string[],            // "Configurar nó" eixo linha (ver Domínio Exibido)
+  visibleCol: null|string[],            // "Configurar nó" eixo coluna
 }
 ```
 - **Tipo `eligibility`**: ports `"Elegível"` (verde) e `"Não Elegível"` (vermelho)
@@ -285,7 +292,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 |------|---------|-----------|
 | `UPDATE_CSV_STORE` | `{csvStore}` | Atualiza o cache do csvStore no worker (evita re-serialização a cada tick) |
 | `RUN_SIMULATION` | `{shapes, conns}` | Roda `runSimulation` e responde com `SIMULATION_RESULT` |
-| `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult`; responde com `OVERLAY_RESULT` |
+| `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`; responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
 | `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, lensPopulations, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns, lensPopulations}]` — abas marcadas (cenários, 5B). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
@@ -294,7 +301,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | type | payload |
 |------|---------|
 | `SIMULATION_RESULT` | `{result: SimulationResult}` |
-| `OVERLAY_RESULT` | `{overlay, incrementalResult}` |
+| `OVERLAY_RESULT` | `{overlay, incrementalResult, nodeArrivals}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido) |
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo (DEC-AW-003): `{rows, dimensions, temporalColumns, metrics, scenarios}` |
@@ -307,6 +314,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `buildParetoFrontier(cellMetrics)`: fronteira Pareto greedy (sort por `inadInferida` crescente)
 - `extractScenarios(frontier)`: `{conservador, balanceado, melhorEficiencia, expansao}` — `melhorEficiencia` é o joelho da curva
 - `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante)
+- `computeNodeArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o fluxo a partir das entradas reais (in-degree 0 sobre arestas de fluxo — exclui corretamente um cineminha logo abaixo de um Decision Lens) e retorna, por nó, a contagem de registros por valor de domínio: `decision → {val: {[valor]: qty}}`, `cineminha → {row, col}`. Base do "Configurar nó" — ver Domínio Exibido
 - `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
 - `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo** (dimensões + métricas intrínsecas + `__DECISAO_AS_IS` global + uma coluna `__DECISAO_<canvasId>` por cenário); `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
 - `cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations)`: overlay por canvas memoizado por hash de `shapes`/`conns`/`lensPopulations` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só)
@@ -489,6 +497,22 @@ Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otim
 - **Salvar**: toolbar contextual do Cineminha → "Salvar na Biblioteca"
 - **Aplicar**: modal da biblioteca → selecionar entrada → modal de mapeamento de variáveis (`cinemaImportModal`) → aplica `cells` com remapeamento de domínio
 - **Export/Import**: JSON e CSV de lote via `cinemaLibraryModal`
+
+## Domínio Exibido ("Configurar nó")
+
+### Problema
+O distinto do domínio de uma variável era sempre feito sobre a **base completa**, então um losango/Cineminha exibia todos os valores mesmo quando o fluxo a montante (Decision Lens, ports, outro losango) filtra a população. Ex.: variável `Score` que muda por grupo trazia `R01–R24` + `Com/Sem Restritivo` juntos, mesmo chegando só um grupo ao nó.
+
+### Solução
+O domínio completo continua guardado no shape (`rowDomain`/`colDomain`, ports). O que muda é **o que se exibe**, controlado por nó e de forma **não-destrutiva** (nada é apagado; ports/células escondidos continuam roteando na simulação).
+
+- **Contagem reativa**: `computeNodeArrivals` (worker, junto do `COMPUTE_OVERLAY`) devolve `nodeArrivals = {[nodeId]: {val|row|col: {[valor]: qty}}}` — quantos registros chegam a cada nó por valor, respeitando o roteamento a montante. Armazenado no estado `nodeArrivals` (sem ref; usado em render/memo/modal).
+- **Domínio efetivo** (helper global `effectiveDomain(fullDomain, cfg, counts)`):
+  - `cfg === null` → **automático** (default): exibe só valores com `qty > 0`; *fallback* para o domínio completo se nada chega (nó recém-criado/sem upstream), pra nunca renderizar vazio.
+  - `cfg === string[]` → **manual**: exibe exatamente esses (na ordem do domínio); fallback p/ completo se vazio.
+- **Campos no shape**: `decision.visibleVals`, `cineminha.visibleRow`/`visibleCol` (todos `null` por default = automático).
+- **Render**: `renderCinemaNode` usa `effectiveDomain` em `rDom`/`cDom`; ports de losango fora do domínio efetivo entram em `hiddenPortIds` (useMemo) e são pulados em `renderShape`/`renderConn`.
+- **Modal `domainModal`** (`null | {shapeId, draft:{val?|row?|col?: null|string[]}}`): aberto pelo botão **⚙ Domínio** na toolbar contextual do losango e do Cineminha. Lista com check + valor + qtd. que chegou (por valor), multi-seleção, e o toggle **"Mostrar apenas valores com volume"** (= modo automático). Mexer em qualquer check vira modo manual. `applyDomainConfig` grava os campos `visible*` no shape (com `pushHistory`).
 
 ## Decision Lens
 
