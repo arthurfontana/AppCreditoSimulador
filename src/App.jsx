@@ -1989,7 +1989,7 @@ let _canvasInitCache = null;
 function _initCanvasStore() {
   if (_canvasInitCache) return _canvasInitCache;
   try {
-    const s = localStorage.getItem(CANVAS_STORAGE_KEY);
+    const s = sessionStorage.getItem(CANVAS_STORAGE_KEY);
     if (s) {
       const p = JSON.parse(s);
       if (p?.canvases && p?.activeCanvasId && p.canvases[p.activeCanvasId]) {
@@ -2045,7 +2045,7 @@ export default function App() {
   // Analytics Workspace
   const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
-  const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = localStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
+  const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = sessionStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
   // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
   const [canvases, setCanvases] = useState(() => _initCanvasStore().canvases);
   const [activeCanvasId, setActiveCanvasId] = useState(() => _initCanvasStore().activeCanvasId);
@@ -2063,6 +2063,7 @@ export default function App() {
   const [axisModal,  setAxisModal]  = useState(null);   // null | {shapeId, col, csvId}
   const [resultVarModal, setResultVarModal] = useState(null); // null | {shapeId} — modal de seleção de variável de resultado
   const [varSearch,  setVarSearch]  = useState("");     // filtro de busca no painel
+  const [panelCollapsed, setPanelCollapsed] = useState(false); // painel direito colapsado
   const [multiSel,   setMultiSel]   = useState(new Set()); // ids selecionados em grupo
   const [selRect,    setSelRect]    = useState(null);   // {x1,y1,x2,y2} rect de seleção (world coords)
   // Undo / Redo stacks — each entry is { shapes, conns }
@@ -2330,8 +2331,8 @@ export default function App() {
     return () => clearTimeout(analyticsDebounceRef.current);
   }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs, inferenceRef]);
 
-  // Persiste layout do dashboard no localStorage para sobreviver a reloads (Sessão 4).
-  useEffect(() => { localStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
+  // Persiste layout do dashboard na sessionStorage para sobreviver a reloads dentro da mesma sessão.
+  useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
   useEffect(() => {
@@ -2343,7 +2344,7 @@ export default function App() {
         },
         activeCanvasId,
       };
-      localStorage.setItem(CANVAS_STORAGE_KEY, JSON.stringify(toSave));
+      sessionStorage.setItem(CANVAS_STORAGE_KEY, JSON.stringify(toSave));
     } catch {}
   }, [shapes, conns, canvases, activeCanvasId]);
 
@@ -6147,12 +6148,38 @@ export default function App() {
       </div>
 
       {/* ═══════════════ RIGHT PANEL ═══════════════ */}
-      <div style={{width:272,flexShrink:0,background:"#fff",borderLeft:"1px solid #e2e8f0",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <div style={{width:panelCollapsed?28:272,flexShrink:0,background:"#fff",borderLeft:"1px solid #e2e8f0",display:"flex",flexDirection:"column",overflow:"hidden",transition:"width 200ms cubic-bezier(0.4,0,0.2,1)"}}>
+
+        {/* Collapsed strip — only visible when collapsed */}
+        {panelCollapsed && (
+          <div
+            onClick={()=>setPanelCollapsed(false)}
+            title="Expandir painel"
+            style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"pointer",gap:16,
+              background:"#fff",transition:"background .15s",userSelect:"none"}}
+            onMouseEnter={e=>{e.currentTarget.style.background="#f8fafc";}}
+            onMouseLeave={e=>{e.currentTarget.style.background="#fff";}}>
+            <div style={{width:20,height:20,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:6,background:"#eff6ff",color:"#3b82f6",fontSize:12,fontWeight:700}}>‹</div>
+            <div style={{writingMode:"vertical-rl",textOrientation:"mixed",transform:"rotate(180deg)",fontSize:11,fontWeight:600,color:"#94a3b8",letterSpacing:.5,whiteSpace:"nowrap"}}>Painel</div>
+          </div>
+        )}
+
+        {/* Full panel content — hidden when collapsed */}
+        <div style={{display:panelCollapsed?"none":"flex",flexDirection:"column",flex:1,minHeight:0,overflow:"hidden"}}>
+
         {/* Header — fixed */}
         <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
           <div style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",boxShadow:"0 0 0 3px #dbeafe",flexShrink:0}}/>
           <span style={{fontSize:13,fontWeight:600,color:"#1e293b",letterSpacing:.1,flex:1}}>Painel</span>
           <BuildBadge />
+          <button
+            onClick={()=>setPanelCollapsed(true)}
+            title="Ocultar painel"
+            style={{width:22,height:22,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:6,border:"1px solid #e2e8f0",background:"transparent",color:"#94a3b8",cursor:"pointer",fontSize:13,fontWeight:700,lineHeight:1,padding:0,flexShrink:0,transition:"all .15s"}}
+            onMouseEnter={e=>{e.currentTarget.style.background="#f1f5f9";e.currentTarget.style.color="#475569";e.currentTarget.style.borderColor="#cbd5e1";}}
+            onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color="#94a3b8";e.currentTarget.style.borderColor="#e2e8f0";}}>
+            ›
+          </button>
         </div>
 
         {/* Scrollable content area */}
@@ -6448,6 +6475,7 @@ export default function App() {
         )}
 
         </div>{/* end scrollable area */}
+        </div>{/* end full panel content */}
       </div>
 
       {/* ═══════════════ GHOST ELEMENT (panel drag) ═══════════════ */}
