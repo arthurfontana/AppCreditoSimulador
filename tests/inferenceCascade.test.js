@@ -242,3 +242,67 @@ describe('Confiabilidade propagada (Fase 3 / Proposta §4.5, CONTRATO §7)', () 
     expect(res.confiabVolume).toBeNull();
   });
 });
+
+describe('Toggle de peso (Fase 4 / CONTRATO §3.2)', () => {
+  // Controle independente para um weightCol arbitrário (físicos = peso × conv × ...).
+  function controlAggregateCol(weightColName) {
+    const bi = {}; baseHeaders.forEach((h, i) => { bi[h] = i; });
+    let altas = 0, maus = 0;
+    for (const row of baseRows) {
+      const peso = parseInt(row[bi[weightColName]], 10) || 0;
+      const s = normalizeScoreKey(row[bi['SCORE_HVI3']]);
+      const op = String(row[bi['OPERACAO']] ?? '').trim();
+      const g  = String(row[bi['IDENTIFICA_GRUPO_MODELO']] ?? '').trim();
+      const c  = String(row[bi['CANAL_PCO_AJUSTADO']] ?? '').trim();
+      const p =
+        control.maps[4][[s, op, g, c].join('|')] ??
+        control.maps[3][[s, op, g].join('|')]    ??
+        control.maps[2][[s, op].join('|')]       ??
+        control.maps[1][s]                       ?? control.global;
+      altas += peso * p.conv;
+      maus  += peso * p.conv * p.fpd;
+    }
+    return { altas, maus, fpd: altas > 0 ? maus / altas : null };
+  }
+
+  it('resolveWeightCol: weightCol explícito vence; senão modo decide a coluna', async () => {
+    const { resolveWeightCol } = await import('../src/simulation.worker.js');
+    const headers = baseHeaders;
+    // explícito sempre vence
+    expect(resolveWeightCol({ weightCol: 'QTD_ALTAS', weightMode: 'propostas' }, headers, 'QTD_PROPOSTA')).toBe('QTD_ALTAS');
+    // propostas (default) → coluna de volume (qty)
+    expect(resolveWeightCol({ weightMode: 'propostas' }, headers, 'QTD_PROPOSTA')).toBe('QTD_PROPOSTA');
+    expect(resolveWeightCol({}, headers, 'QTD_PROPOSTA')).toBe('QTD_PROPOSTA');
+    // aprovados → heurística acha QTD_APROVADOS
+    expect(resolveWeightCol({ weightMode: 'aprovados' }, headers, 'QTD_PROPOSTA')).toBe('QTD_APROVADOS');
+  });
+
+  it('modo aprovados usa n_aprovados como peso (≠ propostas) e bate o controle', () => {
+    const cfgBase = { source: 'ref', keyMap: KEY_MAP, normalizeScore: true };
+    const csvProp  = { ...makeCsv(true), inferenceConfig: { ...cfgBase, weightMode: 'propostas' } };
+    const csvAprov = { ...makeCsv(true), inferenceConfig: { ...cfgBase, weightMode: 'aprovados' } };
+
+    const rProp  = buildInferenceResolver(csvProp, ref);
+    const rAprov = buildInferenceResolver(csvAprov, ref);
+    let aProp = 0, aAprov = 0;
+    for (const row of baseRows) { aProp += rProp(row).altasInfer; aAprov += rAprov(row).altasInfer; }
+
+    const ctlProp  = controlAggregateCol('QTD_PROPOSTA');
+    const ctlAprov = controlAggregateCol('QTD_APROVADOS');
+    expect(aProp).toBeCloseTo(ctlProp.altas, 4);
+    expect(aAprov).toBeCloseTo(ctlAprov.altas, 4);
+    // Aprovados ⊆ propostas ⇒ menos altas inferidas no modo aprovados.
+    expect(aAprov).toBeLessThan(aProp);
+  });
+
+  it('runSimulation reporta inferenceWeightMode conforme o config', () => {
+    const shapes = [{ id: 'lens', type: 'decision_lens', rules: [] }, { id: 'appr', type: 'approved' }];
+    const conns = [{ id: 'c1', from: 'lens', to: 'appr', label: '' }];
+    const mk = (weightMode) => ({ ...makeCsv(true), inferenceConfig: { source: 'ref', keyMap: KEY_MAP, weightMode, normalizeScore: true } });
+    expect(runSimulation(shapes, conns, { base: mk('propostas') }, ref).inferenceWeightMode).toBe('propostas');
+    expect(runSimulation(shapes, conns, { base: mk('aprovados') }, ref).inferenceWeightMode).toBe('aprovados');
+    // modo columns → null
+    const cols = { ...makeCsv(true), inferenceConfig: { source: 'columns' } };
+    expect(runSimulation(shapes, conns, { base: cols }, ref).inferenceWeightMode).toBeNull();
+  });
+});

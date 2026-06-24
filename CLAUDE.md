@@ -153,7 +153,7 @@ AppCreditoSimulador/
   columnTypes,   // {[colName]: COL_TYPE}
   varTypes,      // {[colName]: 'categorical'|'ordinal'}
   asIsConfig,    // null | { col: string, mapping: {[value]: 'APROVADO'|'REPROVADO'|'IGNORAR'} }
-  inferenceConfig, // { source:'columns'|'ref', keyMap:{[refKeyCol]:baseCol}, weightCol, normalizeScore } — origem da inferência (ver Inferência de Negados)
+  inferenceConfig, // { source:'columns'|'ref', keyMap:{[refKeyCol]:baseCol}, weightCol, weightMode:'propostas'|'aprovados', normalizeScore } — origem da inferência (ver Inferência de Negados)
 }
 ```
 
@@ -188,7 +188,7 @@ AppCreditoSimulador/
 ### Componentes globais (fora do componente principal)
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
 - `SimIndicators`: exibe indicadores de simulação na sidebar direita — mostra resultado atual + comparativo com baseline AS IS quando disponível (`incrementalResult`)
-- `InferenceSignal({source, confiabVolume, scale})`: sinalização da inferência por referência (Fase 3) — selo de origem + indicador "% do volume inferido com confiab ALTA" com alerta quando baixo. Renderizado no `renderSimPanel` e no `businessWidget` (ver Sinalização de Confiabilidade)
+- `InferenceSignal({source, confiabVolume, weightMode, scale})`: sinalização da inferência por referência (Fase 3, refinada na Fase 4) — selo de origem + **selo de base de peso** (⚖️ Propostas/Aprovados/Misto, ver Toggle de Peso) + indicador "% do volume inferido com confiab ALTA" com barra empilhada, **legenda das faixas** e alerta em dois níveis (⚡ atenção 50–80% / ⚠ alerta <50%). Renderizado no `renderSimPanel` e no `businessWidget` (ver Sinalização de Confiabilidade)
 - `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
 - `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
@@ -305,7 +305,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 ### Mensagens de saída
 | type | payload |
 |------|---------|
-| `SIMULATION_RESULT` | `{result: SimulationResult}` — inclui `inferenceSource` e `confiabVolume` (Fase 3) |
+| `SIMULATION_RESULT` | `{result: SimulationResult}` — inclui `inferenceSource` e `confiabVolume` (Fase 3) + `inferenceWeightMode` (Fase 4) |
 | `OVERLAY_RESULT` | `{overlay, incrementalResult, nodeArrivals}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido) |
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
@@ -356,6 +356,7 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   - `inadInferida = ∑ inadIRaw / ∑ qtdAltasInfer` (fallback: `/ approvedQty` se qtdAltasInferSum = 0)
   - `inferenceSource`: `'ref'` se algum dataset usa a Tabela de Inferência, senão `null` (Fase 3)
   - `confiabVolume`: `{ ALTA, MEDIA, BAIXA, GLOBAL }` — altas inferidas acumuladas por faixa de confiab da premissa usada (só em modo `ref`, senão `null`); base do indicador "% do volume inferido com confiab ALTA" (ver Sinalização de Confiabilidade)
+  - `inferenceWeightMode`: `'propostas'|'aprovados'|'misto'|null` — base de peso dos datasets em modo `ref` (Fase 4; `misto` se divergentes); alimenta o selo de peso do `InferenceSignal` (ver Toggle de Peso)
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
 ## Wizard de importação (3 passos)
@@ -531,7 +532,9 @@ Inferida). Em vez de ler colunas prontas da base, deriva conv/fpd por linha via
 **Faseamento — Fase 1 (entregue): carga + estado + mapeamento + config. Fase 2
 (entregue): lookup em cascata + injeção dos físicos no worker + normalização de
 score como chave transitória. Fase 3 (entregue): sinalização de confiabilidade na
-UI (ver Sinalização de Confiabilidade).**
+UI (ver Sinalização de Confiabilidade). Fase 4 (entregue): toggle de peso
+(`n_propostas` ↔ `n_aprovados`), recálculo automático na troca/recarga da referência
+e refinamento visual do selo/alerta (ver Toggle de Peso e ADR DEC-IR-004).**
 
 ### Slot dedicado de import
 - Botão **🧮 Tabela de Inferência** no painel direito (seção Dados), separado do
@@ -563,14 +566,41 @@ Seção **Origem da Inferência** com duas opções:
 - **Tabela de referência**: desabilitada se `!inferenceRef`. Ao escolher, oculta
   os slots 🔮/🎯 e mostra o **mapeamento de chaves** base↔referência (um `select`
   por `keyCol`, pré-preenchido por `normalizeColName`, com override manual) + o
-  seletor de coluna de **peso** (default: a coluna 📊 `qty`).
+  **toggle de peso** (📋 Propostas / ✅ Aprovados, ver Toggle de Peso) + o seletor de
+  coluna de **peso** (default automático pela base de peso escolhida).
+
+### Toggle de Peso (Fase 4 — CONTRATO §3.2)
+Define a **base de volume** do peso usado nos físicos da inferência:
+- **📋 Propostas** (default, `weightMode:'propostas'`): peso = 📊 volume total de
+  propostas (`n_propostas`) — semântica **"abrir para os reprovados"** (quanto de altas
+  e maus apareceria se a política passasse a aprovar aquelas propostas).
+- **✅ Aprovados** (`weightMode:'aprovados'`): peso = volume de aprovados (`n_aprovados`)
+  — semântica **"FPD sobre aprovados"**.
+- Resolução da coluna (worker `resolveWeightCol(cfg, headers, qtyCol)`): `weightCol`
+  explícito **sempre vence** (override avançado); senão modo `aprovados` usa a coluna de
+  aprovados via heurística `findApprovedCol` (`/aprov/i`, excluindo a `qty`), e modo
+  `propostas` usa a 📊 `qty`. O wizard pré-preenche o `weightCol` ao trocar p/ aprovados.
+- `runSimulation` devolve `inferenceWeightMode: 'propostas'|'aprovados'|'misto'|null`
+  (misto = datasets em modo `ref` com bases diferentes); alimenta o selo de peso do
+  `InferenceSignal`. **Não muda a matemática** além da coluna de peso escolhida.
 
 ### `inferenceConfig` (persistido em `csvStore[csvId]`)
-`{ source: 'columns'|'ref', keyMap: {[refKeyCol]: baseCol}, weightCol, normalizeScore }`.
+`{ source: 'columns'|'ref', keyMap: {[refKeyCol]: baseCol}, weightCol, weightMode:'propostas'|'aprovados', normalizeScore }`.
 Gravado no `onImportConfirm` (import novo e edição). `source:'ref'` degrada para
 `'columns'` se a Tabela de Inferência não estiver mais carregada. Restaurado no
-`onEditDataset`. `normalizeScore` (default `true`) liga a normalização de score no
-lookup (§6, abaixo) — checkbox no wizard quando `source==='ref'`.
+`onEditDataset`. `weightMode` (default `'propostas'`) é a base de peso (ver Toggle de
+Peso). `normalizeScore` (default `true`) liga a normalização de score no lookup (§6,
+abaixo) — checkbox no wizard quando `source==='ref'`.
+
+### Troca/recarga da referência com estudo montado (Fase 4 — Proposta §9.4)
+Trocar ou recarregar a Tabela de Inferência **recalcula automaticamente** os estudos
+que a usam (os effects debounced de sim/overlay/analytics têm `inferenceRef` nas deps;
+o worker recebe `UPDATE_INFERENCE_REF` antes do recompute). O `inferenceConfig` de cada
+dataset vive no `csvStore` e é **preservado** — não é tocado ao mexer na referência.
+Remover a referência degrada os estudos em modo `ref` para o comportamento de colunas
+🔮/🎯, mas o `inferenceConfig` fica salvo para retomar ao recarregar. O painel da Tabela
+de Inferência mostra **quantos estudos** usam a referência (e um aviso quando há estudos
+configurados sem referência carregada).
 
 ### Lookup em cascata + físicos (Fase 2 — worker)
 - A `inferenceRef` é espelhada no worker via mensagem **`UPDATE_INFERENCE_REF`**
@@ -585,7 +615,9 @@ lookup (§6, abaixo) — checkbox no wizard quando `source==='ref'`.
   - **cascata** `cascadeLookupPremissa`: desce do nível mais granular (mais chaves)
     ao GLOBAL, para no primeiro `Map` que casar (chave ausente desce naturalmente);
   - **físicos** (CONTRATO §3.2): `altasInfer = peso × conv`, `inadIRaw = peso × conv × fpd`,
-    `peso` = coluna `weightCol` (default 📊 `qty`).
+    `peso` = coluna resolvida por `resolveWeightCol` (`weightCol` explícito → senão a
+    base do `weightMode`: 📊 `qty` em propostas, coluna de aprovados em aprovados — ver
+    Toggle de Peso).
 - O resolvedor alimenta **os acumuladores que já existem** (`qtdAltasInferSum`,
   `inadInferidaSum`) em `runSimulation`, `computeIncrementalResult`,
   `computeCellMetrics`, `computeCinemaArrivals` e `computeAnalyticsDataset` — nenhuma
@@ -617,14 +649,17 @@ premissa colapsada (≠ `ALTA`) — em especial o caso do canal **PAP** (CONTRAT
   **altas inferidas** (`qtdAltasInfer` — mesma grandeza do "volume inferido"). Retorna
   `inferenceSource: 'ref'|null` e `confiabVolume: {...}|null`. Faixa desconhecida cai
   em `GLOBAL` (mais conservador). Nenhum acumulador novo na matemática da inferência.
-- **UI** — componente global `InferenceSignal({ source, confiabVolume, scale })`:
-  renderiza um `<div>` (serve em `foreignObject` do `simPanel` e no `businessWidget`,
-  reaproveitando o fator de escala `scale`). Mostra:
+- **UI** — componente global `InferenceSignal({ source, confiabVolume, weightMode, scale })`
+  (refinado na Fase 4 — Proposta §9.5): renderiza um `<div>` (serve em `foreignObject`
+  do `simPanel` e no `businessWidget`, reaproveitando o fator de escala `scale`). Mostra:
   - **Selo discreto** `🧮 Inferência: Tabela de referência` quando `source === 'ref'`
-    (para não confundir a origem do número).
-  - **Indicador "% do volume inferido com confiab ALTA"** + barra empilhada por faixa.
-    Cor: verde ≥ 80%, âmbar 50–80%, vermelho < 50% (= **alerta**, com aviso textual
-    mencionando o caso PAP e instruindo a ler como estimativa).
+    (para não confundir a origem do número) + **selo de base de peso** `⚖️ Peso:
+    Propostas/Aprovados/Misto` (ver Toggle de Peso).
+  - **Indicador "% do volume inferido com confiab ALTA"** + barra empilhada por faixa +
+    **legenda** das faixas presentes (quando há mais de uma). A cor do indicador e a
+    moldura do card seguem o nível: verde ≥ 80%, âmbar 50–80% (⚡ atenção), vermelho
+    < 50% (⚠ **alerta**). Ambos os níveis colapsados exibem aviso textual mencionando o
+    caso PAP e instruindo a ler como estimativa.
   - Renderizado no `renderSimPanel` e no `businessWidget`, sempre a partir do
     `simResult` (não do `incrementalResult`).
 - **GATE**: `tests/inferenceCascade.test.js` confere o `confiabVolume` agregado de
