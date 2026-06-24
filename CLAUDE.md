@@ -64,6 +64,8 @@ AppCreditoSimulador/
 - `canvases`: store multi-canvas (Sub-sessão 5A, DEC-AW-007) — `{[id]: {id, name, shapes, conns, includeInDashboard}}`; `shapes`/`conns` são o **working copy** do canvas ativo
 - `activeCanvasId`: ID do canvas ativo
 - `renamingCanvasId` / `renameValue` / `canvasTabMenu`: estado UI da barra de abas de canvas
+- `inferenceRef`: tabela de referência de inferência de negados, indexada uma vez na importação (Fase 1; ver Inferência de Negados) — `null | InferenceRefIndex`
+- `infRefError`: erro de importação da Tabela de Inferência — `null | string`
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -151,6 +153,7 @@ AppCreditoSimulador/
   columnTypes,   // {[colName]: COL_TYPE}
   varTypes,      // {[colName]: 'categorical'|'ordinal'}
   asIsConfig,    // null | { col: string, mapping: {[value]: 'APROVADO'|'REPROVADO'|'IGNORAR'} }
+  inferenceConfig, // { source:'columns'|'ref', keyMap:{[refKeyCol]:baseCol}, weightCol } — origem da inferência (Fase 1; ver Inferência de Negados)
 }
 ```
 
@@ -220,7 +223,7 @@ AppCreditoSimulador/
 ### Padrão de refs
 Toda variável de estado crítica tem um ref espelho para uso em event listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atualizado imediatamente.
 
-Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `lensPopulationsR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
+Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `inferenceRefR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `lensPopulationsR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
 
 ## Reorganização Automática (Auto Layout)
 
@@ -513,6 +516,60 @@ O domínio completo continua guardado no shape (`rowDomain`/`colDomain`, ports).
 - **Campos no shape**: `decision.visibleVals`, `cineminha.visibleRow`/`visibleCol` (todos `null` por default = automático).
 - **Render**: `renderCinemaNode` usa `effectiveDomain` em `rDom`/`cDom`; ports de losango fora do domínio efetivo entram em `hiddenPortIds` (useMemo) e são pulados em `renderShape`/`renderConn`.
 - **Modal `domainModal`** (`null | {shapeId, draft:{val?|row?|col?: null|string[]}}`): aberto pelo botão **⚙ Domínio** na toolbar contextual do losango e do Cineminha. Lista com check + valor + qtd. que chegou (por valor), multi-seleção, e o toggle **"Mostrar apenas valores com volume"** (= modo automático). Mexer em qualquer check vira modo manual. `applyDomainConfig` grava os campos `visible*` no shape (com `pushHistory`).
+
+## Inferência de Negados (Tabela de Referência)
+
+Fonte alternativa para os números de inferência (🔮 Conv. Inferida e 🎯 Inad.
+Inferida). Em vez de ler colunas prontas da base, deriva conv/fpd por linha via
+**lookup em cascata** numa tabela de referência gerada no SAS. Fontes de verdade:
+`docs/Proposta-Inferencia-Referencia.md` + `CONTRATO_INFERENCIA.md`.
+
+**Faseamento — Fase 1 (entregue): carga + estado + mapeamento + config.** O
+cálculo (lookup + físicos no worker) é a Fase 2 — ainda não implementado.
+
+### Slot dedicado de import
+- Botão **🧮 Tabela de Inferência** no painel direito (seção Dados), separado do
+  import de base. Parser fixo: delimitador `;`, decimal `.`.
+- **Não** entra no `csvStore`, não vira nó no canvas, não gera chips.
+- `onInferenceRefFileChange` parseia + indexa via `indexInferenceRef` e grava em
+  `inferenceRef` (erros em `infRefError`).
+
+### `indexInferenceRef(headers, rows, name)` (helper global, exportado)
+Indexa o artefato **uma vez**, derivando chaves/níveis **dinamicamente** (nunca
+nomes hardcoded). Retorna o `InferenceRefIndex`:
+```js
+{
+  name, importedAt,
+  keyCols: string[],      // derivado da maior `vars_usadas` (ordem = colapso; última cai primeiro)
+  anchorCol: string,      // keyCols[0] (nunca colapsa)
+  levels: { [nivel]: Map<keyConcat, { conv, fpd, confiab, nAprov, nConv, nMaus }> },
+  global: premissa|null,  // linha GLOBAL
+  levelKeyCount: { [nivel]: number },  // nº de chaves (prefixo de keyCols) por nível
+  rowCount,
+}
+```
+O CSV real tem 4 chaves (`FAIXA_SCORE`, `OPERACAO`, `IDENTIFICA_GRUPO_MODELO`,
+`CANAL_PCO_AJUSTADO`) e 5 níveis (1..4 + GLOBAL). Validado em `tests/inferenceRef.test.js`.
+
+### Seletor de origem no wizard (Passo 2)
+Seção **Origem da Inferência** com duas opções:
+- **Colunas da própria base** (default): mapeia 🔮/🎯 como hoje.
+- **Tabela de referência**: desabilitada se `!inferenceRef`. Ao escolher, oculta
+  os slots 🔮/🎯 e mostra o **mapeamento de chaves** base↔referência (um `select`
+  por `keyCol`, pré-preenchido por `normalizeColName`, com override manual) + o
+  seletor de coluna de **peso** (default: a coluna 📊 `qty`).
+
+### `inferenceConfig` (persistido em `csvStore[csvId]`)
+`{ source: 'columns'|'ref', keyMap: {[refKeyCol]: baseCol}, weightCol }`. Gravado
+no `onImportConfirm` (import novo e edição). `source:'ref'` degrada para
+`'columns'` se a Tabela de Inferência não estiver mais carregada. Restaurado no
+`onEditDataset`. Quando `source==='ref'`, a Fase 2 fará o motor ignorar 🔮/🎯 e
+usar o lookup.
+
+### Restrições respeitadas (Fase 1)
+- Não quebra o fluxo atual de colunas 🔮/🎯 (fonte alternativa, retrocompatível).
+- Não altera domínios de nada.
+- Não implementa o cálculo — só carga, estado, mapeamento e config.
 
 ## Decision Lens
 
