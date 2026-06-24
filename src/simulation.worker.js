@@ -93,7 +93,10 @@ function buildInferenceResolver(csv, inferenceRef) {
     });
     const p = cascadeLookupPremissa(ref, levelOrder, parts);
     const conv = p?.conv || 0, fpd = p?.fpd || 0;
-    return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd };
+    // confiab propagado da premissa usada (Fase 3 / Proposta §4.5, CONTRATO §7):
+    // sinaliza quando uma fatia do estudo herdou premissa colapsada (≠ ALTA).
+    const confiab = (p?.confiab ? String(p.confiab).trim().toUpperCase() : 'GLOBAL') || 'GLOBAL';
+    return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd, confiab };
   };
 }
 
@@ -216,6 +219,11 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
 
   let totalQty = 0, approvedQty = 0, rejectedQty = 0, asIsQty = 0;
   let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
+  // Confiabilidade da inferência por referência (Fase 3): volume inferido (altas)
+  // acumulado por faixa de confiab da premissa usada. Só quando algum dataset está
+  // em modo 'ref'; alimenta o indicador "% do volume inferido com confiab ALTA".
+  let anyRefSource = false;
+  const confiabVolume = { ALTA: 0, MEDIA: 0, BAIXA: 0, GLOBAL: 0 };
 
   for (const [csvId, csv] of Object.entries(csvStore)) {
     const types = csv.columnTypes || {};
@@ -230,6 +238,7 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     const inadInferidaIdx  = colIdx('inadInferida');
     const dOrigIdx         = csv.headers.indexOf('__DECISAO_ORIGINAL');
     const infResolve       = buildInferenceResolver(csv, inferenceRef);
+    if (infResolve) anyRefSource = true;
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
@@ -244,8 +253,8 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
       const qtdAltas     = qtdAltasIdx     >= 0 ? (parseFloat(row[qtdAltasIdx])     || 0) : 0;
       const inadR        = inadRealIdx     >= 0 ? (parseFloat(row[inadRealIdx])     || 0) : 0;
       // 🔮/🎯: das colunas (modo 'columns') ou derivados do lookup em cascata (modo 'ref').
-      let qtdAltasInfer, inadI;
-      if (infResolve) { const r = infResolve(row); qtdAltasInfer = r.altasInfer; inadI = r.inadIRaw; }
+      let qtdAltasInfer, inadI, rowConfiab = null;
+      if (infResolve) { const r = infResolve(row); qtdAltasInfer = r.altasInfer; inadI = r.inadIRaw; rowConfiab = r.confiab; }
       else {
         qtdAltasInfer = qtdAltasInferIdx >= 0 ? (parseFloat(row[qtdAltasInferIdx]) || 0) : 0;
         inadI         = inadInferidaIdx  >= 0 ? (parseFloat(row[inadInferidaIdx])  || 0) : 0;
@@ -265,6 +274,11 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
         qtdAltasInferSum += qtdAltasInfer;
         inadRealSum      += inadR;
         inadInferidaSum  += inadI;
+        // Pondera a confiab pela mesma grandeza do "volume inferido" (altas inferidas).
+        if (rowConfiab !== null && qtdAltasInfer > 0) {
+          if (rowConfiab in confiabVolume) confiabVolume[rowConfiab] += qtdAltasInfer;
+          else confiabVolume.GLOBAL += qtdAltasInfer; // faixa desconhecida → mais conservador
+        }
       } else if (isRejected) rejectedQty += qty;
 
       for (const cid of path) {
@@ -309,6 +323,9 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
     inadReal, inadInferida,
     edgeStats,
+    // Sinalização de origem/confiabilidade da inferência (Fase 3).
+    inferenceSource: anyRefSource ? 'ref' : null,
+    confiabVolume: anyRefSource ? confiabVolume : null,
   };
 }
 
