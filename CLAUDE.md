@@ -153,7 +153,7 @@ AppCreditoSimulador/
   columnTypes,   // {[colName]: COL_TYPE}
   varTypes,      // {[colName]: 'categorical'|'ordinal'}
   asIsConfig,    // null | { col: string, mapping: {[value]: 'APROVADO'|'REPROVADO'|'IGNORAR'} }
-  inferenceConfig, // { source:'columns'|'ref', keyMap:{[refKeyCol]:baseCol}, weightCol } — origem da inferência (Fase 1; ver Inferência de Negados)
+  inferenceConfig, // { source:'columns'|'ref', keyMap:{[refKeyCol]:baseCol}, weightCol, normalizeScore } — origem da inferência (ver Inferência de Negados)
 }
 ```
 
@@ -294,6 +294,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | type | payload | O que faz |
 |------|---------|-----------|
 | `UPDATE_CSV_STORE` | `{csvStore}` | Atualiza o cache do csvStore no worker (evita re-serialização a cada tick) |
+| `UPDATE_INFERENCE_REF` | `{inferenceRef}` | Espelha o índice da Tabela de Inferência no worker (Fase 2); usado pelo lookup em cascata quando `inferenceConfig.source==='ref'` |
 | `RUN_SIMULATION` | `{shapes, conns}` | Roda `runSimulation` e responde com `SIMULATION_RESULT` |
 | `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`; responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
@@ -524,8 +525,9 @@ Inferida). Em vez de ler colunas prontas da base, deriva conv/fpd por linha via
 **lookup em cascata** numa tabela de referência gerada no SAS. Fontes de verdade:
 `docs/Proposta-Inferencia-Referencia.md` + `CONTRATO_INFERENCIA.md`.
 
-**Faseamento — Fase 1 (entregue): carga + estado + mapeamento + config.** O
-cálculo (lookup + físicos no worker) é a Fase 2 — ainda não implementado.
+**Faseamento — Fase 1 (entregue): carga + estado + mapeamento + config. Fase 2
+(entregue): lookup em cascata + injeção dos físicos no worker + normalização de
+score como chave transitória.**
 
 ### Slot dedicado de import
 - Botão **🧮 Tabela de Inferência** no painel direito (seção Dados), separado do
@@ -560,16 +562,46 @@ Seção **Origem da Inferência** com duas opções:
   seletor de coluna de **peso** (default: a coluna 📊 `qty`).
 
 ### `inferenceConfig` (persistido em `csvStore[csvId]`)
-`{ source: 'columns'|'ref', keyMap: {[refKeyCol]: baseCol}, weightCol }`. Gravado
-no `onImportConfirm` (import novo e edição). `source:'ref'` degrada para
+`{ source: 'columns'|'ref', keyMap: {[refKeyCol]: baseCol}, weightCol, normalizeScore }`.
+Gravado no `onImportConfirm` (import novo e edição). `source:'ref'` degrada para
 `'columns'` se a Tabela de Inferência não estiver mais carregada. Restaurado no
-`onEditDataset`. Quando `source==='ref'`, a Fase 2 fará o motor ignorar 🔮/🎯 e
-usar o lookup.
+`onEditDataset`. `normalizeScore` (default `true`) liga a normalização de score no
+lookup (§6, abaixo) — checkbox no wizard quando `source==='ref'`.
 
-### Restrições respeitadas (Fase 1)
+### Lookup em cascata + físicos (Fase 2 — worker)
+- A `inferenceRef` é espelhada no worker via mensagem **`UPDATE_INFERENCE_REF`**
+  (análoga a `UPDATE_CSV_STORE`; o `structured clone` do `postMessage` preserva os
+  `Map`s de `levels`). App reenvia a cada mudança de `inferenceRef`; as três effects
+  debounced (sim/overlay/analytics) incluem `inferenceRef` nas deps para recomputar.
+- **`buildInferenceResolver(csv, inferenceRef)`** (worker): retorna `null` fora do
+  modo `ref` (o chamador lê as colunas 🔮/🎯 como antes — retrocompatível). Em modo
+  `ref`, retorna `(row) => { altasInfer, inadIRaw }`:
+  - monta a chave pelas colunas mapeadas (`keyMap`), aplica `normalizeScoreKey` na
+    âncora (score) quando `normalizeScore !== false`;
+  - **cascata** `cascadeLookupPremissa`: desce do nível mais granular (mais chaves)
+    ao GLOBAL, para no primeiro `Map` que casar (chave ausente desce naturalmente);
+  - **físicos** (CONTRATO §3.2): `altasInfer = peso × conv`, `inadIRaw = peso × conv × fpd`,
+    `peso` = coluna `weightCol` (default 📊 `qty`).
+- O resolvedor alimenta **os acumuladores que já existem** (`qtdAltasInferSum`,
+  `inadInferidaSum`) em `runSimulation`, `computeIncrementalResult`,
+  `computeCellMetrics`, `computeCinemaArrivals` e `computeAnalyticsDataset` — nenhuma
+  agregação nova. As **Regras de Ouro** (CONTRATO §4) valem por construção: somam-se
+  os físicos por linha e o agregador faz `∑inadIRaw / ∑qtdAltasInfer` (nunca divide
+  maus por contagem de aprovados, nunca multiplica somas).
+- **`normalizeScoreKey(s)`**: `R99`/vazio → `R20`, **apenas** como chave transitória
+  de lookup (§6) — nunca muta dado, domínio ou export.
+- Painel/otimizador/dashboard são intocados: só consomem os mesmos acumuladores.
+
+### GATE de aceite (validação numérica)
+`tests/inferenceCascade.test.js` roda a cascata sobre a amostra real
+(`Amostra_Fake.csv` × `INFERENCIA_REF_*.CSV`) e confere o `∑maus/∑altas` agregado
+do resolvedor (e de `runSimulation` aprovando tudo) contra uma cascata de
+**controle reimplementada do zero** lendo as linhas cruas da referência. Valor de
+controle documentado: ∑altas ≈ 418.775, ∑maus ≈ 167.753, **FPD inferida ≈ 40,06%**.
+
+### Restrições respeitadas
 - Não quebra o fluxo atual de colunas 🔮/🎯 (fonte alternativa, retrocompatível).
-- Não altera domínios de nada.
-- Não implementa o cálculo — só carga, estado, mapeamento e config.
+- Não altera domínios, dado exibido nem export — score normalizado só na chave.
 
 ## Decision Lens
 
