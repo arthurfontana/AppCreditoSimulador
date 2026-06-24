@@ -188,6 +188,7 @@ AppCreditoSimulador/
 ### Componentes globais (fora do componente principal)
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
 - `SimIndicators`: exibe indicadores de simulação na sidebar direita — mostra resultado atual + comparativo com baseline AS IS quando disponível (`incrementalResult`)
+- `InferenceSignal({source, confiabVolume, scale})`: sinalização da inferência por referência (Fase 3) — selo de origem + indicador "% do volume inferido com confiab ALTA" com alerta quando baixo. Renderizado no `renderSimPanel` e no `businessWidget` (ver Sinalização de Confiabilidade)
 - `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
 - `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
@@ -304,7 +305,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 ### Mensagens de saída
 | type | payload |
 |------|---------|
-| `SIMULATION_RESULT` | `{result: SimulationResult}` |
+| `SIMULATION_RESULT` | `{result: SimulationResult}` — inclui `inferenceSource` e `confiabVolume` (Fase 3) |
 | `OVERLAY_RESULT` | `{overlay, incrementalResult, nodeArrivals}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido) |
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
@@ -350,9 +351,11 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos
 - `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port pelo `cinemaType`; para nós `decision_lens`, avalia `rules` contra a linha; para nós `as_is`, lê `__DECISAO_ORIGINAL`
 - Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum`, `qtdAltasInferSum` e `inadInferidaSum`
-- Retorna `{ totalQty, approvedQty, rejectedQty, asIsQty, approvalRate, inadReal, inadInferida, edgeStats }`
+- Retorna `{ totalQty, approvedQty, rejectedQty, asIsQty, approvalRate, inadReal, inadInferida, edgeStats, inferenceSource, confiabVolume }`
   - `inadReal = ∑ inadRRaw / ∑ qtdAltas` (null se qtdAltasSum = 0)
   - `inadInferida = ∑ inadIRaw / ∑ qtdAltasInfer` (fallback: `/ approvedQty` se qtdAltasInferSum = 0)
+  - `inferenceSource`: `'ref'` se algum dataset usa a Tabela de Inferência, senão `null` (Fase 3)
+  - `confiabVolume`: `{ ALTA, MEDIA, BAIXA, GLOBAL }` — altas inferidas acumuladas por faixa de confiab da premissa usada (só em modo `ref`, senão `null`); base do indicador "% do volume inferido com confiab ALTA" (ver Sinalização de Confiabilidade)
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
 ## Wizard de importação (3 passos)
@@ -527,7 +530,8 @@ Inferida). Em vez de ler colunas prontas da base, deriva conv/fpd por linha via
 
 **Faseamento — Fase 1 (entregue): carga + estado + mapeamento + config. Fase 2
 (entregue): lookup em cascata + injeção dos físicos no worker + normalização de
-score como chave transitória.**
+score como chave transitória. Fase 3 (entregue): sinalização de confiabilidade na
+UI (ver Sinalização de Confiabilidade).**
 
 ### Slot dedicado de import
 - Botão **🧮 Tabela de Inferência** no painel direito (seção Dados), separado do
@@ -602,6 +606,30 @@ controle documentado: ∑altas ≈ 418.775, ∑maus ≈ 167.753, **FPD inferida 
 ### Restrições respeitadas
 - Não quebra o fluxo atual de colunas 🔮/🎯 (fonte alternativa, retrocompatível).
 - Não altera domínios, dado exibido nem export — score normalizado só na chave.
+
+### Sinalização de Confiabilidade (Fase 3 — Proposta §4.5, CONTRATO §7)
+Sinaliza, **sem mudar a matemática**, quando uma fatia relevante do estudo herdou
+premissa colapsada (≠ `ALTA`) — em especial o caso do canal **PAP** (CONTRATO §7).
+
+- **Worker** (`runSimulation`): `buildInferenceResolver` devolve também o `confiab`
+  (uppercased) da premissa usada por linha. Sobre as linhas **aprovadas** em modo
+  `ref`, acumula `confiabVolume = { ALTA, MEDIA, BAIXA, GLOBAL }` ponderado pelas
+  **altas inferidas** (`qtdAltasInfer` — mesma grandeza do "volume inferido"). Retorna
+  `inferenceSource: 'ref'|null` e `confiabVolume: {...}|null`. Faixa desconhecida cai
+  em `GLOBAL` (mais conservador). Nenhum acumulador novo na matemática da inferência.
+- **UI** — componente global `InferenceSignal({ source, confiabVolume, scale })`:
+  renderiza um `<div>` (serve em `foreignObject` do `simPanel` e no `businessWidget`,
+  reaproveitando o fator de escala `scale`). Mostra:
+  - **Selo discreto** `🧮 Inferência: Tabela de referência` quando `source === 'ref'`
+    (para não confundir a origem do número).
+  - **Indicador "% do volume inferido com confiab ALTA"** + barra empilhada por faixa.
+    Cor: verde ≥ 80%, âmbar 50–80%, vermelho < 50% (= **alerta**, com aviso textual
+    mencionando o caso PAP e instruindo a ler como estimativa).
+  - Renderizado no `renderSimPanel` e no `businessWidget`, sempre a partir do
+    `simResult` (não do `incrementalResult`).
+- **GATE**: `tests/inferenceCascade.test.js` confere o `confiabVolume` agregado de
+  `runSimulation` contra um controle independente (mesmo padrão da FPD). Na amostra
+  real, 100% do volume resolve em `ALTA` (todas as linhas batem no nível 1).
 
 ## Decision Lens
 

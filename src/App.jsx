@@ -859,6 +859,66 @@ function populateCellsFromResultVar(shape, csvStore) {
   return newCells;
 }
 
+// ── Sinalização de inferência por referência (Fase 3 / Proposta §4.5, CONTRATO §7) ──
+// Selo discreto de origem + indicador "% do volume inferido com confiab ALTA" com
+// alerta visual quando uma fatia relevante herdou premissa colapsada (caso PAP §7).
+// Renderiza um <div> — funciona tanto dentro de foreignObject (simPanel) quanto no
+// businessWidget. `scale` reaproveita o fator de escala do contexto (1 = padrão).
+function InferenceSignal({ source, confiabVolume, scale = 1 }) {
+  if (source !== 'ref') return null;
+  const s = (v) => v * scale;
+
+  const BUCKETS = [
+    { key: 'ALTA',   label: 'Alta',   color: '#4ade80' },
+    { key: 'MEDIA',  label: 'Média',  color: '#fbbf24' },
+    { key: 'BAIXA',  label: 'Baixa',  color: '#fb923c' },
+    { key: 'GLOBAL', label: 'Global', color: '#f87171' },
+  ];
+  const cv = confiabVolume || {};
+  const total = BUCKETS.reduce((a, b) => a + (cv[b.key] || 0), 0);
+  const alta = cv.ALTA || 0;
+  const pctAlta = total > 0 ? alta / total : null;
+  // <50% ALTA = alerta (fatia relevante herdou premissa colapsada); 50–80% atenção.
+  const low = pctAlta !== null && pctAlta < 0.5;
+  const mid = pctAlta !== null && pctAlta >= 0.5 && pctAlta < 0.8;
+  const accent = pctAlta === null ? '#64748b' : low ? '#f87171' : mid ? '#fbbf24' : '#4ade80';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: s(6) }}>
+      {/* Selo de origem */}
+      <div title="As taxas de conversão/inadimplência vêm da Tabela de Referência (lookup em cascata), não de colunas da base."
+        style={{ display: 'inline-flex', alignSelf: 'flex-start', alignItems: 'center', gap: s(4), fontSize: s(8), fontWeight: 700, padding: `${s(2)}px ${s(8)}px`, borderRadius: s(20), background: 'rgba(129,140,248,0.15)', color: '#a5b4fc', letterSpacing: '0.03em' }}>
+        🧮 Inferência: Tabela de referência
+      </div>
+
+      {/* Indicador de confiabilidade */}
+      {total > 0 && (
+        <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${low ? 'rgba(248,113,113,0.4)' : 'rgba(255,255,255,0.07)'}`, borderRadius: s(8), padding: `${s(7)}px ${s(9)}px` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: s(5) }}>
+            <span style={{ fontSize: s(8), color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Confiab. da Inferência</span>
+            <span style={{ fontSize: s(14), fontWeight: 800, color: accent, lineHeight: 1 }}>
+              {(pctAlta * 100).toFixed(0)}%<span style={{ fontSize: s(7.5), color: '#64748b', fontWeight: 700, marginLeft: s(3) }}>ALTA</span>
+            </span>
+          </div>
+          {/* Barra empilhada por faixa de confiab */}
+          <div style={{ display: 'flex', height: s(5), borderRadius: s(3), overflow: 'hidden', background: 'rgba(255,255,255,0.05)' }}>
+            {BUCKETS.map(b => {
+              const v = cv[b.key] || 0;
+              if (!(v > 0)) return null;
+              return <div key={b.key} title={`${b.label}: ${(v / total * 100).toFixed(1)}% do volume inferido`} style={{ width: `${(v / total) * 100}%`, background: b.color }} />;
+            })}
+          </div>
+          {low && (
+            <div style={{ fontSize: s(7.5), color: '#fca5a5', marginTop: s(5), lineHeight: 1.35 }}>
+              ⚠ {((1 - pctAlta) * 100).toFixed(0)}% do volume inferido herdou premissa colapsada (≠ ALTA). Cuidado com células de baixa amostra — ex.: canal PAP. Leia o número como estimativa, não como certo.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── SimIndicators — right panel simulation card ───────────────────────────────
 function SimIndicators({ simResult, csvStore, incrementalResult }) {
   const inc = incrementalResult;
@@ -2134,7 +2194,7 @@ export default function App() {
 
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
-  const [simResult, setSimResult] = useState(() => ({ totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{} }));
+  const [simResult, setSimResult] = useState(() => ({ totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{}, inferenceSource:null, confiabVolume:null }));
   // Espelhos para o autoLayout medir os "balões" das arestas sem closure stale.
   const simResultR        = useRef(simResult);        useEffect(()=>{simResultR.current=simResult},               [simResult]);
   const showEdgeVolR      = useRef(showEdgeVol);       useEffect(()=>{showEdgeVolR.current=showEdgeVol},           [showEdgeVol]);
@@ -5197,6 +5257,13 @@ export default function App() {
               </div>
             </div>
 
+            {/* Sinalização de inferência por referência (Fase 3) */}
+            {simResult.inferenceSource === 'ref' && (
+              <div style={{padding:"0 10px 8px",flexShrink:0}}>
+                <InferenceSignal source={simResult.inferenceSource} confiabVolume={simResult.confiabVolume} />
+              </div>
+            )}
+
             {/* Efeito da Mudança */}
             {hasInc && inc.impacted.qty > 0 && (
               <div style={{padding:"7px 10px 10px",borderTop:"1px solid rgba(255,255,255,0.05)",flexShrink:0}}>
@@ -5914,6 +5981,13 @@ export default function App() {
                       <MCard label="Inad. Inferida" value={iiV !== null ? fmtPct(iiV) : '—'} delta={iiDelta} ph={false} sub="∑ Inad.I / Aprov." valColor={inadColor(iiV)} />
                       <MCard label="Vol. Aprovado" value={hasData ? fmtQty(displayResult.approvedQty) : '—'} delta={null} ph={true} sub={hasData ? `${(rate ?? 0).toFixed(1)}% da base` : null} valColor="#e2e8f0" />
                     </div>
+                  </div>
+                )}
+
+                {/* Sinalização de inferência por referência (Fase 3) */}
+                {simResult.inferenceSource === 'ref' && (
+                  <div style={{ padding: `0 ${s(11)}px ${s(8)}px` }}>
+                    <InferenceSignal source={simResult.inferenceSource} confiabVolume={simResult.confiabVolume} scale={sf} />
                   </div>
                 )}
 
