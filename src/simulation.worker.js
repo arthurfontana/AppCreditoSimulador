@@ -57,6 +57,23 @@ function cascadeLookupPremissa(ref, levelOrder, parts) {
   return ref.global || null;
 }
 
+// Heurística de coluna de aprovados (modo de peso 'aprovados', Fase 4) — usada como
+// fallback quando não há `weightCol` explícito. Casa cabeçalhos como QTD_APROVADOS,
+// n_aprovados, etc., excluindo a coluna de volume (📊 qty) para não colidir.
+function findApprovedCol(headers, excludeCol) {
+  return (headers || []).find(h => h !== excludeCol && /aprov/i.test(h)) || null;
+}
+
+// Resolve a coluna de peso (CONTRATO §3.2, toggle Fase 4):
+//   - `weightCol` explícito sempre vence (override avançado);
+//   - modo 'aprovados' ("FPD sobre aprovados") → coluna de aprovados (heurística);
+//   - modo 'propostas' (default, "abrir para reprovados") → 📊 volume total (qty).
+function resolveWeightCol(cfg, headers, qtyCol) {
+  if (cfg?.weightCol) return cfg.weightCol;
+  if (cfg?.weightMode === 'aprovados') return findApprovedCol(headers, qtyCol) || qtyCol;
+  return qtyCol;
+}
+
 // Constrói um resolvedor por-linha para um csv. Retorna null quando o dataset NÃO está
 // em modo 'ref' (o chamador então lê as colunas 🔮/🎯 como hoje — retrocompatível).
 // Em modo 'ref', (row) => { altasInfer, inadIRaw } com os físicos do CONTRATO §3.2:
@@ -70,7 +87,7 @@ function buildInferenceResolver(csv, inferenceRef) {
   const ref = inferenceRef;
   const types = csv.columnTypes || {};
   const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
-  const weightCol = cfg.weightCol || qtyCol;
+  const weightCol = resolveWeightCol(cfg, csv.headers, qtyCol);
   const weightIdx = weightCol ? csv.headers.indexOf(weightCol) : -1;
   const keyMap = cfg.keyMap || {};
   // Índice na base de cada keyCol da referência (na ordem de colapso). -1 = ausente
@@ -223,6 +240,7 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
   // acumulado por faixa de confiab da premissa usada. Só quando algum dataset está
   // em modo 'ref'; alimenta o indicador "% do volume inferido com confiab ALTA".
   let anyRefSource = false;
+  const refWeightModes = new Set(); // modos de peso dos datasets em modo 'ref' (Fase 4)
   const confiabVolume = { ALTA: 0, MEDIA: 0, BAIXA: 0, GLOBAL: 0 };
 
   for (const [csvId, csv] of Object.entries(csvStore)) {
@@ -238,7 +256,7 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     const inadInferidaIdx  = colIdx('inadInferida');
     const dOrigIdx         = csv.headers.indexOf('__DECISAO_ORIGINAL');
     const infResolve       = buildInferenceResolver(csv, inferenceRef);
-    if (infResolve) anyRefSource = true;
+    if (infResolve) { anyRefSource = true; refWeightModes.add(csv.inferenceConfig?.weightMode === 'aprovados' ? 'aprovados' : 'propostas'); }
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
@@ -326,6 +344,8 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     // Sinalização de origem/confiabilidade da inferência (Fase 3).
     inferenceSource: anyRefSource ? 'ref' : null,
     confiabVolume: anyRefSource ? confiabVolume : null,
+    // Base de peso usada na inferência (Fase 4): 'propostas' | 'aprovados' | 'misto'.
+    inferenceWeightMode: anyRefSource ? (refWeightModes.size === 1 ? [...refWeightModes][0] : 'misto') : null,
   };
 }
 
@@ -1299,6 +1319,8 @@ export {
   computeNodeArrivals,
   buildFlowGraph,
   buildInferenceResolver,
+  resolveWeightCol,
+  findApprovedCol,
   normalizeScoreKey,
   __setWorkerCsvStoreForTest,
   __setWorkerInferenceRefForTest,
