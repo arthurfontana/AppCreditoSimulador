@@ -2126,6 +2126,12 @@ export default function App() {
     workerRef.current?.postMessage({ type: 'UPDATE_CSV_STORE', csvStore });
   }, [csvStore]);
 
+  // Espelha a Tabela de Inferência no worker (Fase 2) — análogo ao UPDATE_CSV_STORE.
+  // O structured clone do postMessage preserva os Maps de `inferenceRef.levels`.
+  useEffect(() => {
+    workerRef.current?.postMessage({ type: 'UPDATE_INFERENCE_REF', inferenceRef });
+  }, [inferenceRef]);
+
   // ── Simulation engine (reactive) ──────────────────────────────
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
   const [simResult, setSimResult] = useState(() => ({ totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{} }));
@@ -2141,7 +2147,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'RUN_SIMULATION', shapes: shapesR.current, conns: connsR.current });
     }, 300);
     return () => clearTimeout(simDebounceRef.current);
-  }, [shapes, conns, csvStore]);
+  }, [shapes, conns, csvStore, inferenceRef]);
 
   // ── Engine de População Impactada (Feature 4) ─────────────────
   // lensPopulations: {[lensId]: {[csvId]: boolean[]}} — FLAG_POPULACAO_ALVO por linha
@@ -2198,7 +2204,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'COMPUTE_OVERLAY', shapes: shapesR.current, conns: connsR.current, lensPopulations: lensPopulationsR.current });
     }, 300);
     return () => clearTimeout(simOverlayDebounceRef.current);
-  }, [shapes, conns, csvStore, lensPopulations]);
+  }, [shapes, conns, csvStore, lensPopulations, inferenceRef]);
 
   // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
   // Recomputado pelo worker quando a simulação muda; cacheado em analyticsDataset.
@@ -2230,7 +2236,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'COMPUTE_ANALYTICS_DATASET', canvases: buildAnalyticsCanvasInputs() });
     }, 300);
     return () => clearTimeout(analyticsDebounceRef.current);
-  }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs]);
+  }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs, inferenceRef]);
 
   // Persiste layout do dashboard no localStorage para sobreviver a reloads (Sessão 4).
   useEffect(() => { localStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
@@ -3063,7 +3069,7 @@ export default function App() {
       const text=ev.target.result;
       const {delimiter,confident}=detectDelimiter(text);
       const {decimalSep, confident: decConfident}=detectDecimalSep(text, delimiter);
-      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,inferenceSource:'columns',keyMap:{},weightCol:null});
+      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,inferenceSource:'columns',keyMap:{},weightCol:null,normalizeScore:true});
     };
     reader.readAsText(file);
     e.target.value="";
@@ -3219,7 +3225,7 @@ export default function App() {
 
   const onImportConfirm = () => {
     if (!wizard) return;
-    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId,decimalSep,inferenceSource,keyMap,weightCol}=wizard;
+    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId,decimalSep,inferenceSource,keyMap,weightCol,normalizeScore}=wizard;
 
     // Auto-assign 'decision' to all columns without an explicit type
     const buildFinalTypes = (headers, types) => {
@@ -3231,10 +3237,12 @@ export default function App() {
     // Config de origem da inferência (Fase 1) — persistida por dataset.
     // 'ref' só vale se a Tabela de Inferência ainda está carregada; senão
     // degrada para 'columns' (comportamento atual 🔮/🎯).
+    // `normalizeScore` (Fase 2 §6): aplicar R99/vazio→R20 como chave transitória de
+    // lookup. Default true (fiel ao SAS); nunca muta dado/domínio/export.
     const wantsRef = inferenceSource === 'ref' && !!inferenceRefR.current;
     const inferenceConfig = wantsRef
-      ? { source: 'ref', keyMap: keyMap || {}, weightCol: weightCol || null }
-      : { source: 'columns', keyMap: {}, weightCol: null };
+      ? { source: 'ref', keyMap: keyMap || {}, weightCol: weightCol || null, normalizeScore: normalizeScore !== false }
+      : { source: 'columns', keyMap: {}, weightCol: null, normalizeScore: true };
 
     // ── Edit mode: update existing dataset, no new canvas nodes ──
     if (editCsvId) {
@@ -3453,6 +3461,7 @@ export default function App() {
       inferenceSource: csv.inferenceConfig?.source || 'columns',
       keyMap: csv.inferenceConfig?.keyMap || {},
       weightCol: csv.inferenceConfig?.weightCol || null,
+      normalizeScore: csv.inferenceConfig?.normalizeScore !== false,
     });
   };
 
@@ -7826,8 +7835,23 @@ export default function App() {
                               {allHeaders.map(h=>(<option key={h} value={h}>{h}</option>))}
                             </select>
                           </div>
+                          <label style={{display:"flex",alignItems:"flex-start",gap:9,marginTop:12,paddingTop:12,borderTop:"1px dashed #ddd6fe",cursor:"pointer"}}>
+                            <input
+                              type="checkbox"
+                              checked={wizard.normalizeScore !== false}
+                              onChange={e=>setWizard(w=>({...w,normalizeScore:e.target.checked}))}
+                              style={{accentColor:"#7c3aed",marginTop:2}}/>
+                            <div>
+                              <div style={{fontSize:12,fontWeight:600,color:"#5b21b6"}}>Normalizar score no lookup (R99/vazio → R20)</div>
+                              <div style={{fontSize:10.5,color:"#8b5cf6",lineHeight:1.4}}>
+                                Trata score ausente como a pior faixa, apenas como chave transitória de busca
+                                (fiel ao SAS). Não altera o dado, o domínio nem a exportação.
+                              </div>
+                            </div>
+                          </label>
                           <p style={{fontSize:10,color:"#8b5cf6",marginTop:8,lineHeight:1.4}}>
-                            O cálculo em si (lookup + físicos) chega na próxima fase — aqui só fica registrado o de-para.
+                            As taxas viram físicos por linha: altas = peso × conv; maus = peso × conv × fpd —
+                            agregados como ∑maus / ∑altas (Regras de Ouro do contrato).
                           </p>
                         </div>
                       )}

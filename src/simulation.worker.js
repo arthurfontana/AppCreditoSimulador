@@ -31,6 +31,72 @@ function isCellEligible(cells, key) {
   return getCellValue(cells, key) > 0;
 }
 
+// ── Inferência de negados via Tabela de Referência — lookup em cascata (Fase 2) ──
+// Fonte alternativa para 🔮 Conv. Inferida e 🎯 Inad. Inferida (Proposta §4 /
+// CONTRATO §3). Em vez de ler colunas prontas, deriva conv/fpd por linha via lookup
+// em cascata na inferenceRef e alimenta EXATAMENTE os acumuladores que já existem
+// (qtdAltasInferSum, inadInferidaSum). Nenhuma agregação nova.
+
+// Score vazio / R99 / sem score → R20 (pior faixa), APENAS como chave transitória
+// de lookup (CONTRATO §3.1, Proposta §6). Nunca muta dado, domínio nem export.
+function normalizeScoreKey(s) {
+  const v = String(s ?? '').trim();
+  return (!v || v.toUpperCase() === 'R99') ? 'R20' : v;
+}
+
+// Desce do nível mais granular (mais chaves) ao GLOBAL; para no primeiro que casar.
+function cascadeLookupPremissa(ref, levelOrder, parts) {
+  for (const niv of levelOrder) {
+    const k = ref.levelKeyCount?.[niv] || 0;
+    if (k <= 0) continue;
+    const map = ref.levels?.[niv];
+    if (!map) continue;
+    const hit = map.get(parts.slice(0, k).join('|'));
+    if (hit) return hit;
+  }
+  return ref.global || null;
+}
+
+// Constrói um resolvedor por-linha para um csv. Retorna null quando o dataset NÃO está
+// em modo 'ref' (o chamador então lê as colunas 🔮/🎯 como hoje — retrocompatível).
+// Em modo 'ref', (row) => { altasInfer, inadIRaw } com os físicos do CONTRATO §3.2:
+//   altasInfer = peso × conv ;  inadIRaw = peso × conv × fpd     (peso = coluna de volume)
+// As Regras de Ouro (CONTRATO §4) são satisfeitas POR CONSTRUÇÃO: somam-se os físicos
+// linha a linha; o agregador existente faz ∑inadIRaw / ∑qtdAltasInfer (nunca divide
+// maus por contagem de aprovados, nunca multiplica somas).
+function buildInferenceResolver(csv, inferenceRef) {
+  const cfg = csv?.inferenceConfig;
+  if (!cfg || cfg.source !== 'ref' || !inferenceRef || !inferenceRef.keyCols) return null;
+  const ref = inferenceRef;
+  const types = csv.columnTypes || {};
+  const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
+  const weightCol = cfg.weightCol || qtyCol;
+  const weightIdx = weightCol ? csv.headers.indexOf(weightCol) : -1;
+  const keyMap = cfg.keyMap || {};
+  // Índice na base de cada keyCol da referência (na ordem de colapso). -1 = ausente
+  // → a cascata naturalmente desce de nível (chave vazia não casa nos níveis granulares).
+  const keyBaseIdx = ref.keyCols.map(rk => {
+    const baseCol = keyMap[rk];
+    return baseCol ? csv.headers.indexOf(baseCol) : -1;
+  });
+  // Níveis ordenados do mais granular (mais chaves) ao mais geral.
+  const levelOrder = Object.keys(ref.levels || {})
+    .map(Number)
+    .sort((a, b) => (ref.levelKeyCount?.[b] || 0) - (ref.levelKeyCount?.[a] || 0));
+  const normScore = cfg.normalizeScore !== false; // default: aplicar (fiel ao SAS)
+  return (row) => {
+    const peso = weightIdx >= 0 ? (parseFloat(row[weightIdx]) || 0) : 0;
+    const parts = keyBaseIdx.map((bi, j) => {
+      let v = bi >= 0 ? String(row[bi] ?? '').trim() : '';
+      if (j === 0 && normScore) v = normalizeScoreKey(v); // keyCols[0] = âncora = score
+      return v;
+    });
+    const p = cascadeLookupPremissa(ref, levelOrder, parts);
+    const conv = p?.conv || 0, fpd = p?.fpd || 0;
+    return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd };
+  };
+}
+
 function matchLensRule(cellVal, operator, ruleVal) {
   const cv = String(cellVal ?? '').trim();
   const rv = String(ruleVal ?? '').trim();
@@ -74,7 +140,7 @@ function buildFlowGraph(shapes, conns) {
   return { out, inc };
 }
 
-function runSimulation(shapes, conns, csvStore) {
+function runSimulation(shapes, conns, csvStore, inferenceRef) {
   const { out } = buildFlowGraph(shapes, conns);
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const TERM = new Set(['approved', 'rejected', 'as_is']);
@@ -163,6 +229,7 @@ function runSimulation(shapes, conns, csvStore) {
     const inadRealIdx      = colIdx('inadReal');
     const inadInferidaIdx  = colIdx('inadInferida');
     const dOrigIdx         = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const infResolve       = buildInferenceResolver(csv, inferenceRef);
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
@@ -175,9 +242,14 @@ function runSimulation(shapes, conns, csvStore) {
     for (const row of csv.rows) {
       const qty          = qtyIdx          >= 0 ? (parseFloat(row[qtyIdx])          || 0) : 1;
       const qtdAltas     = qtdAltasIdx     >= 0 ? (parseFloat(row[qtdAltasIdx])     || 0) : 0;
-      const qtdAltasInfer= qtdAltasInferIdx>= 0 ? (parseFloat(row[qtdAltasInferIdx])|| 0) : 0;
       const inadR        = inadRealIdx     >= 0 ? (parseFloat(row[inadRealIdx])     || 0) : 0;
-      const inadI        = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
+      // 🔮/🎯: das colunas (modo 'columns') ou derivados do lookup em cascata (modo 'ref').
+      let qtdAltasInfer, inadI;
+      if (infResolve) { const r = infResolve(row); qtdAltasInfer = r.altasInfer; inadI = r.inadIRaw; }
+      else {
+        qtdAltasInfer = qtdAltasInferIdx >= 0 ? (parseFloat(row[qtdAltasInferIdx]) || 0) : 0;
+        inadI         = inadInferidaIdx  >= 0 ? (parseFloat(row[inadInferidaIdx])  || 0) : 0;
+      }
       totalQty += qty;
       const { result: res, path } = traverseRow(row, csv.headers, rootId);
       let isApproved = res === 'approved', isRejected = res === 'rejected';
@@ -375,7 +447,7 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
   return hasAnyDecisaoCol ? overlay : null;
 }
 
-function computeIncrementalResult(overlay, csvStore) {
+function computeIncrementalResult(overlay, csvStore, inferenceRef) {
   if (!overlay) return null;
 
   const bl  = { approvedQty: 0, rejectedQty: 0, totalQty: 0, qtdAltasSum: 0, qtdAltasInferSum: 0, inadRRaw: 0, inadIRaw: 0 };
@@ -395,15 +467,20 @@ function computeIncrementalResult(overlay, csvStore) {
     const altasInferIdx = getIdx('qtdAltasInfer');
     const inadRIdx      = getIdx('inadReal');
     const inadIIdx      = getIdx('inadInferida');
+    const infResolve    = buildInferenceResolver(csv, inferenceRef);
 
     for (const rd of rowDecisions) {
       const row = csv.rows[rd.rowIdx];
       if (!row) continue;
       const qty        = qtyIdx       >= 0 ? (parseFloat(row[qtyIdx])       || 1) : 1;
       const altas      = altasIdx     >= 0 ? (parseFloat(row[altasIdx])     || 0) : 0;
-      const altasInfer = altasInferIdx>= 0 ? (parseFloat(row[altasInferIdx])|| 0) : 0;
       const inadR      = inadRIdx     >= 0 ? (parseFloat(row[inadRIdx])     || 0) : 0;
-      const inadI      = inadIIdx     >= 0 ? (parseFloat(row[inadIIdx])     || 0) : 0;
+      let altasInfer, inadI;
+      if (infResolve) { const r = infResolve(row); altasInfer = r.altasInfer; inadI = r.inadIRaw; }
+      else {
+        altasInfer = altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0;
+        inadI      = inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0;
+      }
 
       bl.totalQty += qty;
       if (rd.decisaoOriginal === 'APROVADO') {
@@ -460,7 +537,7 @@ function computeIncrementalResult(overlay, csvStore) {
   };
 }
 
-function computeCellMetrics(shape, csvStore) {
+function computeCellMetrics(shape, csvStore, inferenceRef) {
   if (!shape || shape.type !== 'cineminha') return {};
   const { rowVar, colVar, rowDomain, colDomain } = shape;
   const csvId = rowVar?.csvId || colVar?.csvId;
@@ -476,6 +553,7 @@ function computeCellMetrics(shape, csvStore) {
   const colCI = colVar ? csv.headers.indexOf(colVar.col) : -1;
   const qtyI = getIdx('qty'), altasI = getIdx('qtdAltas'), altasInferI = getIdx('qtdAltasInfer');
   const inadRI = getIdx('inadReal'), inadII = getIdx('inadInferida');
+  const infResolve = buildInferenceResolver(csv, inferenceRef);
   const rDom = rowDomain?.length > 0 ? rowDomain : ['*'];
   const cDom = colDomain?.length > 0 ? colDomain : ['*'];
   const acc = {};
@@ -489,9 +567,13 @@ function computeCellMetrics(shape, csvStore) {
     if (!acc[key]) continue;
     const qty        = qtyI       >= 0 ? (parseFloat(row[qtyI])       || 0) : 1;
     const altas      = altasI     >= 0 ? (parseFloat(row[altasI])     || 0) : 0;
-    const altasInfer = altasInferI>= 0 ? (parseFloat(row[altasInferI])|| 0) : 0;
     const inadR      = inadRI     >= 0 ? (parseFloat(row[inadRI])     || 0) : 0;
-    const inadI      = inadII     >= 0 ? (parseFloat(row[inadII])     || 0) : 0;
+    let altasInfer, inadI;
+    if (infResolve) { const r = infResolve(row); altasInfer = r.altasInfer; inadI = r.inadIRaw; }
+    else {
+      altasInfer = altasInferI >= 0 ? (parseFloat(row[altasInferI]) || 0) : 0;
+      inadI      = inadII      >= 0 ? (parseFloat(row[inadII])      || 0) : 0;
+    }
     acc[key].qty          += qty;
     acc[key].qtdAltas     += altas;
     acc[key].qtdAltasInfer+= altasInfer;
@@ -569,7 +651,7 @@ function extractScenarios(frontier) {
 // that actually arrive at each cell via routing (respecting upstream decisions,
 // ports and decision_lens nodes). Designed to be reused by Session C.
 // Returns: { [shapeId]: { [cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix} } }
-function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
+function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferenceRef) {
   const { out } = buildFlowGraph(shapes, conns);
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const TERM = new Set(['approved', 'rejected', 'as_is']);
@@ -643,6 +725,7 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
     const inadRIdx    = getColIdx('inadReal');
     const inadIIdx    = getColIdx('inadInferida');
     const mixIdx      = getColIdx('mixRisco');
+    const infResolve  = buildInferenceResolver(csv, inferenceRef);
 
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision')      return d.csvId === csvId;
@@ -656,9 +739,13 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
     for (const row of csv.rows) {
       const qty      = qtyIdx      >= 0 ? (parseFloat(row[qtyIdx])      || 0) : 1;
       const altas    = altasIdx    >= 0 ? (parseFloat(row[altasIdx])    || 0) : 0;
-      const altasInf = altasInfIdx >= 0 ? (parseFloat(row[altasInfIdx]) || 0) : 0;
       const inadR    = inadRIdx    >= 0 ? (parseFloat(row[inadRIdx])    || 0) : 0;
-      const inadI    = inadIIdx    >= 0 ? (parseFloat(row[inadIIdx])    || 0) : 0;
+      let altasInf, inadI;
+      if (infResolve) { const r = infResolve(row); altasInf = r.altasInfer; inadI = r.inadIRaw; }
+      else {
+        altasInf = altasInfIdx >= 0 ? (parseFloat(row[altasInfIdx]) || 0) : 0;
+        inadI    = inadIIdx    >= 0 ? (parseFloat(row[inadIIdx])    || 0) : 0;
+      }
       const mixVal   = mixIdx      >= 0 ? (row[mixIdx] ?? '').toString().trim() : '';
 
       const hits = collectCinemaHits(row, csv.headers, rootId);
@@ -774,12 +861,12 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
 // riskLevels: {[shapeId]: number} — maior = mais restritivo (DEC-JO-002)
 // hierarchyMode: 'cascata'|'independente' (DEC-JO-003)
 // inadMetric: 'inferida'|'real' (DEC-JO-004)
-function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric) {
+function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric, inferenceRef) {
   const cinemaIdSet = new Set(cinemaIds);
   const cinemas = allShapes.filter(s => cinemaIdSet.has(s.id) && s.type === 'cineminha');
   if (cinemas.length === 0) return null;
 
-  const arrivals = computeCinemaArrivals(allShapes, conns, csvStore, lensPopulations);
+  const arrivals = computeCinemaArrivals(allShapes, conns, csvStore, lensPopulations, inferenceRef);
 
   // Collect ordinal info per cineminha (needed for precedence and fallback rank)
   const cinemaOrdInfo = {};
@@ -1028,7 +1115,7 @@ function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations, csvStore)
 // canvasInputs: [{id, nome, shapes, conns, lensPopulations}] — uma aba marcada por cenário.
 // Métricas intrínsecas vêm do agrupamento (uma vez); cada canvas emite sua coluna de decisão,
 // unidas por (csvId, rowIdx) — datasets compartilhados ⇒ agrupamentos idênticos entre cenários.
-function computeAnalyticsDataset(canvasInputs, csvStore) {
+function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
   const inputs = Array.isArray(canvasInputs) ? canvasInputs : [];
 
   // Poda entradas de canvases que não estão mais marcados (evita crescimento do cache).
@@ -1059,6 +1146,7 @@ function computeAnalyticsDataset(canvasInputs, csvStore) {
     const altasInferIdx = getIdx('qtdAltasInfer');
     const inadRIdx      = getIdx('inadReal');
     const inadIIdx      = getIdx('inadInferida');
+    const infResolve    = buildInferenceResolver(csv, inferenceRef);
 
     // Dimensions: every non-metric, non-internal column.
     const dimCols = csv.headers.filter(h =>
@@ -1075,9 +1163,12 @@ function computeAnalyticsDataset(canvasInputs, csvStore) {
       for (let i = 0; i < dimCols.length; i++) out[dimCols[i]] = row[dimIdx[i]] ?? '';
       out.qty           = qtyIdx        >= 0 ? (parseFloat(row[qtyIdx])        || 0) : 1;
       out.qtdAltas      = altasIdx      >= 0 ? (parseFloat(row[altasIdx])      || 0) : 0;
-      out.qtdAltasInfer = altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0;
       out.inadRRaw      = inadRIdx      >= 0 ? (parseFloat(row[inadRIdx])      || 0) : 0;
-      out.inadIRaw      = inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0;
+      if (infResolve) { const r = infResolve(row); out.qtdAltasInfer = r.altasInfer; out.inadIRaw = r.inadIRaw; }
+      else {
+        out.qtdAltasInfer = altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0;
+        out.inadIRaw      = inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0;
+      }
       const asIs = row[dOrigIdx] ?? '';
       out.__DECISAO_AS_IS = asIs; // AS IS único e global
       // Join por (csvId, rowIdx): cada canvas marcado contribui sua coluna de decisão.
@@ -1112,6 +1203,7 @@ function computeAnalyticsDataset(canvasInputs, csvStore) {
 // ── Worker state ─────────────────────────────────────────────────────────────
 let workerCsvStore = {};
 let csvStoreVersion = 0;             // bump a cada UPDATE_CSV_STORE — invalida caches de overlay
+let workerInferenceRef = null;       // índice da Tabela de Inferência (UPDATE_INFERENCE_REF)
 const analyticsOverlayCache = {};    // {[canvasId]: {key, overlay}} — cache por canvas (5B)
 
 function handleMessage(e) {
@@ -1123,15 +1215,22 @@ function handleMessage(e) {
     return;
   }
 
+  // Tabela de Inferência (Fase 2) — análogo a UPDATE_CSV_STORE. O structured clone
+  // do postMessage preserva os Maps de `levels`, então o índice chega íntegro.
+  if (type === 'UPDATE_INFERENCE_REF') {
+    workerInferenceRef = e.data.inferenceRef || null;
+    return;
+  }
+
   if (type === 'RUN_SIMULATION') {
-    const result = runSimulation(e.data.shapes, e.data.conns, workerCsvStore);
+    const result = runSimulation(e.data.shapes, e.data.conns, workerCsvStore, workerInferenceRef);
     self.postMessage({ type: 'SIMULATION_RESULT', result });
     return;
   }
 
   if (type === 'COMPUTE_OVERLAY') {
     const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
-    const incrementalResult = computeIncrementalResult(overlay, workerCsvStore);
+    const incrementalResult = computeIncrementalResult(overlay, workerCsvStore, workerInferenceRef);
     const nodeArrivals = computeNodeArrivals(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
     self.postMessage({ type: 'OVERLAY_RESULT', overlay, incrementalResult, nodeArrivals });
     return;
@@ -1139,7 +1238,7 @@ function handleMessage(e) {
 
   if (type === 'COMPUTE_OPTIM') {
     const { shape } = e.data;
-    const cellMetrics = computeCellMetrics(shape, workerCsvStore);
+    const cellMetrics = computeCellMetrics(shape, workerCsvStore, workerInferenceRef);
     const frontier    = buildParetoFrontier(cellMetrics);
     const scenarios   = extractScenarios(frontier);
     const maxInadReal = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadReal     ?? 0));
@@ -1149,14 +1248,14 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_ANALYTICS_DATASET') {
-    const dataset = computeAnalyticsDataset(e.data.canvases, workerCsvStore);
+    const dataset = computeAnalyticsDataset(e.data.canvases, workerCsvStore, workerInferenceRef);
     self.postMessage({ type: 'ANALYTICS_RESULT', dataset });
     return;
   }
 
   if (type === 'COMPUTE_JOHNNY') {
     const { shapes, cinemaIds, conns = [], lensPopulations = {}, riskLevels, hierarchyMode, inadMetric } = e.data;
-    const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric);
+    const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric, workerInferenceRef);
     if (!result) { self.postMessage({ type: 'JOHNNY_RESULT', error: 'no_data' }); return; }
     self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
@@ -1171,12 +1270,19 @@ if (typeof self !== 'undefined' && typeof self.postMessage === 'function') {
 
 // Permite que o csvStore do worker seja semeado em testes (em produção vem de UPDATE_CSV_STORE).
 function __setWorkerCsvStoreForTest(store) { workerCsvStore = store || {}; csvStoreVersion++; }
+function __setWorkerInferenceRefForTest(ref) { workerInferenceRef = ref || null; }
 
 export {
+  runSimulation,
+  computeIncrementalResult,
+  computeCellMetrics,
   computeAnalyticsDataset,
   computeSimulatedDecisions,
   computeCinemaArrivals,
   computeNodeArrivals,
   buildFlowGraph,
+  buildInferenceResolver,
+  normalizeScoreKey,
   __setWorkerCsvStoreForTest,
+  __setWorkerInferenceRefForTest,
 };
