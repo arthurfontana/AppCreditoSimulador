@@ -61,6 +61,7 @@ AppCreditoSimulador/
 - `activeTab`: aba ativa — `"analysis" | "canvas"` (padrão `"canvas"` — aba exibida no label como "Dashboard")
 - `analyticsDataset`: dataset analítico largo cacheado do worker (`COMPUTE_ANALYTICS_DATASET`) — `null | AnalyticsDataset`
 - `analyticsLayout`: gráficos do dashboard da aba Análise — `WidgetConfig[]` (ver Analytics Workspace)
+- `analyticsGroupings`: agrupamentos (dimensões derivadas) reutilizáveis nos gráficos — `Grouping[]` (ver Agrupamentos). `groupedDataset` (useMemo) = `analyticsDataset` enriquecido por `applyGroupingsToDataset` — é o que a aba Dashboard consome
 - `canvases`: store multi-canvas (Sub-sessão 5A, DEC-AW-007) — `{[id]: {id, name, shapes, conns, includeInDashboard}}`; `shapes`/`conns` são o **working copy** do canvas ativo
 - `activeCanvasId`: ID do canvas ativo
 - `renamingCanvasId` / `renameValue` / `canvasTabMenu`: estado UI da barra de abas de canvas
@@ -347,6 +348,41 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   - **`kpi`**: ignora Eixo X/Série, usa só a Métrica + seletores Baseline (A)/Comparação (B) (5C, DEC-AW-008); `KpiCard` computa A e B sobre todas as linhas via `computeWidgetMetric`; valor grande = B + baseline A + delta `B − A` (pp/qty) colorido por `GOOD_WHEN_LOWER` (`inadReal`/`inadInferida` = menor é melhor). A/B persistidos em `config.kpiA`/`kpiB`; export do dataset largo via **⬇ Exportar CSV** no header.
   - **Constantes**: `CHART_TYPES`, `GOOD_WHEN_LOWER`.
 
+### Agrupamentos (dimensões derivadas)
+
+Permitem colapsar uma dimensão de alta cardinalidade (ex.: Faixa Score R01–R20)
+em poucas faixas, **criadas uma vez e reutilizáveis em qualquer gráfico** (Eixo X,
+Série ou KPI), no export CSV e salvas no projeto. Implementação 100% client-side
+(não toca o worker).
+
+- **Estado** `analyticsGroupings: Grouping[]` em `App.jsx` (sessionStorage
+  `aw_groupings_v1` + `.credito.json`). Cada `Grouping`:
+  `{id, name, source, buckets:[{id, label, values:string[]}], unmatched:'other'|'keep', otherLabel}`.
+  `name` é a chave/rótulo da dimensão derivada (não pode colidir com dimensão real
+  nem com outro agrupamento). `source` é a dimensão-base.
+- **`applyGroupingsToDataset(ds, groupings)`** (helper global exportado): enriquece o
+  dataset largo adicionando uma coluna por agrupamento (`out[name] = rótulo do bucket`,
+  ou `otherLabel`/valor original para não atribuídos), registra a ordem dos buckets em
+  `ds.dimensionOrders[name]` e marca as derivadas em `ds.groupedDimensions`. Pura/no-op
+  se não houver agrupamentos válidos. Memoizada em `groupedDataset` no `App`; a aba
+  Dashboard consome `groupedDataset`, mas o `GroupingModal` recebe o `analyticsDataset`
+  cru como `baseDataset` (lista de dimensões-base e valores distintos).
+- **`pivotWidget`** respeita `ds.dimensionOrders` ao ordenar buckets do Eixo X e das
+  séries (via `makeCmp`) — assim "R01–R05 < R06–R10 < … < Outros" não vira ordenação
+  alfabética. Sem `dimensionOrders`, mantém o comportamento numérico/A-Z anterior.
+- **Helpers**: `distinctDimValues(ds, col)` (valores distintos ordenados),
+  `autoBuckets(sortedValues, size)` (fatia em faixas de N rotuladas "primeiro–último").
+- **UX** — `GroupingModal` (aberto pela seção **Agrupamentos** do `FieldPanel`, botões
+  **+ Novo**/✎/✕): nome + dimensão-base + **Gerar faixas** automáticas (tamanho N) +
+  edição manual de grupos (renomear/adicionar/remover) + atribuição valor→grupo via
+  `<select>` + política de valores fora dos grupos (reunir em "Outros" / manter
+  original). Os agrupamentos aparecem como chips 🧩 arrastáveis no `FieldPanel` e com
+  prefixo 🧩 nos seletores de Eixo X/Série. Renomear migra as referências
+  (`xDimension`/`serieBy`) dos gráficos existentes.
+- **Testes**: `tests/analytics.test.js` cobre `autoBuckets`, `distinctDimValues`,
+  `applyGroupingsToDataset` (rótulos, ordem, modo keep, colisão de nome, base ausente,
+  no-op) e o uso da derivada como Eixo X no `pivotWidget`.
+
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos
 - `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port pelo `cinemaType`; para nós `decision_lens`, avalia `rules` contra a linha; para nós `as_is`, lê `__DECISAO_ORIGINAL`
@@ -532,7 +568,8 @@ exatamente de onde parou.
 - **`saveProject()`**: mescla a working copy do canvas ativo de volta em `canvases`
   (igual ao effect da `sessionStorage`) e baixa um snapshot `{schemaVersion:"2.0",
   kind:"credito-project", activeTab, viewport, canvases, activeCanvasId, csvStore,
-  inferenceRef, analyticsLayout, cinemaLibrary, businessWidget, preferences}`.
+  inferenceRef, analyticsLayout, analyticsGroupings, cinemaLibrary, businessWidget,
+  preferences}`.
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
 - **`loadProject(data)`** / **`onProjectFileChange`**: valida `kind:"credito-project"`,
   sobe o contador `_id` (varre shapes/conns/ids de todos os canvas) p/ evitar colisão,
