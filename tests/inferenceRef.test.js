@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { indexInferenceRef } from '../src/App.jsx';
+import { indexInferenceRef, serializeInferenceRef, deserializeInferenceRef } from '../src/App.jsx';
 
 // Parser mínimo para o artefato real (delimitador ';', sem campos com aspas).
 function parseSemicolon(text) {
@@ -52,5 +52,25 @@ describe('indexInferenceRef — artefato real (4 chaves, 5 níveis)', () => {
     expect(typeof g.fpd).toBe('number');
     expect(g.conv).toBeGreaterThan(0);
     expect(g.nAprov).toBeGreaterThan(0);
+  });
+
+  // Salvar/Abrir Projeto: o índice tem Maps em `levels`, que JSON não
+  // serializa. As helpers convertem para arrays e reconstroem os Maps.
+  it('round-trip JSON via serialize/deserialize preserva os níveis (Maps)', () => {
+    const restored = deserializeInferenceRef(JSON.parse(JSON.stringify(serializeInferenceRef(ref))));
+    expect(restored.keyCols).toEqual(ref.keyCols);
+    expect(restored.anchorCol).toBe(ref.anchorCol);
+    expect(restored.levelKeyCount).toEqual(ref.levelKeyCount);
+    expect(restored.global).toEqual(ref.global);
+    // os níveis voltam como Map e preservam as entradas
+    expect(restored.levels[4] instanceof Map).toBe(true);
+    expect(restored.levels[4].has('R20')).toBe(true);
+    expect(restored.levels[1].get('R01|FIXA|G1 - CLIENTE RELACION BOM|DIGITAL'))
+      .toEqual(ref.levels[1].get('R01|FIXA|G1 - CLIENTE RELACION BOM|DIGITAL'));
+  });
+
+  it('serialize/deserialize de null retorna null', () => {
+    expect(serializeInferenceRef(null)).toBeNull();
+    expect(deserializeInferenceRef(null)).toBeNull();
   });
 });

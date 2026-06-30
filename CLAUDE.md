@@ -522,6 +522,32 @@ O domínio completo continua guardado no shape (`rowDomain`/`colDomain`, ports).
 - **Render**: `renderCinemaNode` usa `effectiveDomain` em `rDom`/`cDom`; ports de losango fora do domínio efetivo entram em `hiddenPortIds` (useMemo) e são pulados em `renderShape`/`renderConn`.
 - **Modal `domainModal`** (`null | {shapeId, draft:{val?|row?|col?: null|string[]}}`): aberto pelo botão **⚙ Domínio** na toolbar contextual do losango e do Cineminha. Lista com check + valor + qtd. que chegou (por valor), multi-seleção, e o toggle **"Mostrar apenas valores com volume"** (= modo automático). Mexer em qualquer check vira modo manual. `applyDomainConfig` grava os campos `visible*` no shape (com `pushHistory`).
 
+## Salvar / Abrir Projeto (`.credito.json`)
+
+Botões **💾 Salvar Projeto** e **📁 Abrir Projeto** na seção **Projeto** (topo do
+painel direito). Persistência completa do estudo num único arquivo
+`.credito.json` (download/upload local, sem servidor), para o usuário retomar
+exatamente de onde parou.
+
+- **`saveProject()`**: mescla a working copy do canvas ativo de volta em `canvases`
+  (igual ao effect da `sessionStorage`) e baixa um snapshot `{schemaVersion:"2.0",
+  kind:"credito-project", activeTab, viewport, canvases, activeCanvasId, csvStore,
+  inferenceRef, analyticsLayout, cinemaLibrary, businessWidget, preferences}`.
+  `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
+- **`loadProject(data)`** / **`onProjectFileChange`**: valida `kind:"credito-project"`,
+  sobe o contador `_id` (varre shapes/conns/ids de todos os canvas) p/ evitar colisão,
+  restaura todo o estado, reseta seleção/edição e os stacks de undo/redo (que são por
+  canvas e ficariam inconsistentes após trocar todos os canvas). Os effects de
+  `csvStore`/`inferenceRef` reenviam `UPDATE_CSV_STORE`/`UPDATE_INFERENCE_REF` ao worker.
+- **`serializeInferenceRef` / `deserializeInferenceRef`** (helpers globais exportados):
+  `inferenceRef.levels` é `{[nivel]: Map}` — JSON não serializa `Map`, então converte
+  para arrays de entradas na exportação e reconstrói os `Map`s na carga. Round-trip
+  coberto em `tests/inferenceRef.test.js`.
+
+Difere do **Exportar/Importar Fluxo** (seção Fluxo), que salva só o canvas ativo
+(shapes/conns + opcionalmente csvStore) — o Projeto salva *tudo* (todas as abas,
+bases, inferência, dashboard, biblioteca e preferências).
+
 ## Inferência de Negados (Tabela de Referência)
 
 Fonte alternativa para os números de inferência (🔮 Conv. Inferida e 🎯 Inad.
@@ -766,5 +792,5 @@ npm run preview   # preview do build de produção
 - **Fronteira Pareto multi-dimensional**: 3D (aprovação × inad.real × inad.inferida)
 - **Decision Lens — modo incremental**: comparação visual linha a linha das decisões mudadas
 - **Exportação**: JSON canônico da política para importação em motor de decisão em produção; exportação do canvas como PNG/SVG
-- **Persistência**: auto-save no `localStorage`; export/import de sessão como `.credito.json`
+- **Persistência**: export/import de projeto como `.credito.json` ✅ (ver "Salvar / Abrir Projeto"); falta auto-save no `localStorage`
 - **Cálculo de delta marginal**: "adicionar esta célula muda aprovação em +X pp e inad em +Y pp"

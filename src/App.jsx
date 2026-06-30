@@ -465,6 +465,27 @@ export function indexInferenceRef(headers, rows, name) {
   };
 }
 
+// ── Serialização do índice de inferência (Salvar/Abrir Projeto) ──────────────
+// `inferenceRef.levels` é `{[nivel]: Map}` — JSON não serializa Map, então
+// convertemos para arrays de entradas na exportação e reconstruímos na carga.
+export function serializeInferenceRef(ref) {
+  if (!ref) return null;
+  const levels = {};
+  for (const [niv, map] of Object.entries(ref.levels || {})) {
+    levels[niv] = map instanceof Map ? Array.from(map.entries()) : map;
+  }
+  return { ...ref, levels };
+}
+
+export function deserializeInferenceRef(ser) {
+  if (!ser) return null;
+  const levels = {};
+  for (const [niv, entries] of Object.entries(ser.levels || {})) {
+    levels[niv] = entries instanceof Map ? entries : new Map(entries || []);
+  }
+  return { ...ser, levels };
+}
+
 function sortDomain(values) {
   const allNum = values.length > 0 && values.every(v => v !== "" && !isNaN(parseFloat(v)) && isFinite(Number(v)));
   return allNum
@@ -2142,6 +2163,7 @@ export default function App() {
   // ── Refs ──────────────────────────────────────────────────────
   const svgRef        = useRef(null);
   const fileInputRef  = useRef(null);
+  const projectInputRef = useRef(null);
   const infRefInputRef = useRef(null);
   const dragR         = useRef(null);
   const pinchR        = useRef(null);
@@ -3766,6 +3788,108 @@ export default function App() {
         validateAndImportFlow(data);
       } catch {
         setImportError("Arquivo inválido: não foi possível ler o JSON. Verifique se o arquivo não está corrompido.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  // ── Salvar / Abrir Projeto completo ───────────────────────────
+  // Snapshot integral do estudo: todos os canvas (abas), todas as bases,
+  // a Tabela de Inferência, os gráficos do Dashboard, a biblioteca de
+  // Cineminhas, o widget de negócio e as preferências de visualização —
+  // de modo que o usuário retome exatamente de onde parou.
+  const saveProject = () => {
+    // Mescla a working copy do canvas ativo de volta no store (igual ao
+    // effect de persistência da sessionStorage).
+    const mergedCanvases = {
+      ...canvases,
+      [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
+    };
+    const payload = {
+      schemaVersion: "2.0",
+      kind: "credito-project",
+      generatedAt: new Date().toISOString(),
+      activeTab,
+      viewport: vp,
+      canvases: mergedCanvases,
+      activeCanvasId,
+      csvStore,
+      inferenceRef: serializeInferenceRef(inferenceRef),
+      analyticsLayout,
+      cinemaLibrary,
+      businessWidget,
+      preferences: {
+        enableDynThickness,
+        showEdgeVol,
+        showEdgeInadReal,
+        showEdgeInadInf,
+      },
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `projeto_credito_${new Date().toISOString().slice(0,10)}.credito.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const loadProject = (data) => {
+    if (!data || data.kind !== "credito-project" || !data.canvases || typeof data.canvases !== "object") {
+      setImportError("Arquivo inválido: não é um projeto salvo por este sistema (.credito.json).");
+      return;
+    }
+    const canv = data.canvases;
+    const actId = (data.activeCanvasId && canv[data.activeCanvasId]) ? data.activeCanvasId : Object.keys(canv)[0];
+    if (!actId || !canv[actId]) {
+      setImportError("Arquivo inválido: projeto sem canvas ativo.");
+      return;
+    }
+    // Sobe o contador de IDs para evitar colisão com novos elementos —
+    // varre todos os shapes/conns de todos os canvas + os IDs de canvas.
+    const allIds = Object.keys(canv);
+    for (const c of Object.values(canv)) {
+      (c.shapes || []).forEach(s => allIds.push(s.id));
+      (c.conns  || []).forEach(cn => allIds.push(cn.id));
+    }
+    const maxNum = Math.max(0, ...allIds.map(id => parseInt(String(id).replace(/\D/g, ''))).filter(n => !isNaN(n)));
+    if (maxNum >= _id) _id = maxNum + 1;
+
+    setCanvases(canv);
+    setActiveCanvasId(actId);
+    setShapes(canv[actId].shapes || []);
+    setConns(canv[actId].conns || []);
+    setCsvStore(data.csvStore || {});
+    setInferenceRef(deserializeInferenceRef(data.inferenceRef));
+    setInfRefError(null);
+    setAnalyticsLayout(Array.isArray(data.analyticsLayout) ? data.analyticsLayout : []);
+    setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
+    if (data.businessWidget) setBusinessWidget(data.businessWidget);
+    if (data.viewport) setVp(data.viewport);
+    if (data.activeTab) setActiveTab(data.activeTab);
+    const pref = data.preferences || {};
+    if (typeof pref.enableDynThickness === 'boolean') setEnableDynThickness(pref.enableDynThickness);
+    if (typeof pref.showEdgeVol === 'boolean') setShowEdgeVol(pref.showEdgeVol);
+    if (typeof pref.showEdgeInadReal === 'boolean') setShowEdgeInadReal(pref.showEdgeInadReal);
+    if (typeof pref.showEdgeInadInf === 'boolean') setShowEdgeInadInf(pref.showEdgeInadInf);
+    // Limpa estado transitório de seleção/edição e o histórico (que é por
+    // canvas e ficaria inconsistente após substituir todos os canvas).
+    setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
+    setMultiSel(new Set()); setSelRect(null);
+    setUndoStack([]); setRedoStack([]);
+    setImportError(null);
+    setImportWarn(null);
+  };
+
+  const onProjectFileChange = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        loadProject(JSON.parse(ev.target.result));
+      } catch {
+        setImportError("Arquivo inválido: não foi possível ler o projeto. Verifique se o arquivo não está corrompido.");
       }
     };
     reader.readAsText(file);
@@ -6293,6 +6417,26 @@ export default function App() {
 
         {/* Scrollable content area */}
         <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column"}}>
+
+        {/* Salvar / Abrir Projeto completo */}
+        <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
+          <p style={{fontSize:11,color:"#94a3b8",marginBottom:10,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Projeto</p>
+          <button onClick={saveProject}
+            title="Salvar todo o estudo num arquivo .credito.json — abas, bases, Tabela de Inferência, gráficos do Dashboard, biblioteca e preferências — para retomar exatamente de onde parou"
+            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"11px 14px",borderRadius:10,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:13.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+            onMouseEnter={e=>{e.currentTarget.style.background="#15803d";}}
+            onMouseLeave={e=>{e.currentTarget.style.background="#16a34a";}}>
+            <span style={{fontSize:17}}>💾</span> Salvar Projeto
+          </button>
+          <button onClick={()=>projectInputRef.current?.click()}
+            title="Abrir um projeto salvo (.credito.json) — substitui o estudo atual"
+            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #86efac",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",transition:"all .15s",marginTop:8}}
+            onMouseEnter={e=>{e.currentTarget.style.background="#dcfce7";e.currentTarget.style.borderColor="#4ade80";}}
+            onMouseLeave={e=>{e.currentTarget.style.background="#f0fdf4";e.currentTarget.style.borderColor="#86efac";}}>
+            <span style={{fontSize:16}}>📁</span> Abrir Projeto
+          </button>
+          <input ref={projectInputRef} type="file" accept=".json,.credito.json,application/json" style={{display:"none"}} onChange={onProjectFileChange}/>
+        </div>
 
         {/* Importar CSV button */}
         <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
