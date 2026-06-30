@@ -58,7 +58,21 @@ jobs:
             echo "Nenhuma mudança na release/, pulando commit."
           else
             git commit -m "chore: atualiza build local [skip ci]"
-            git push origin main
+
+            # main pode ter avançado enquanto o build rodava (PRs em sequência).
+            # Tenta rebasear e empurrar de novo até conseguir (race de fast-forward).
+            for i in 1 2 3 4 5; do
+              if git push origin main; then
+                echo "Push concluído na tentativa $i."
+                break
+              fi
+              echo "Push rejeitado (tentativa $i). Rebaseando sobre origin/main..."
+              git pull --rebase origin main
+              if [ "$i" = "5" ]; then
+                echo "Falha ao empurrar release/ após 5 tentativas."
+                exit 1
+              fi
+            done
           fi
 
       - name: Empacotar release/ em ZIP
