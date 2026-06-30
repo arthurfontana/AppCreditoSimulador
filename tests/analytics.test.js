@@ -5,6 +5,9 @@ import {
   resolveKpiScenarios,
   buildAnalyticsCSV,
   cloneCanvasWithNewIds,
+  applyGroupingsToDataset,
+  autoBuckets,
+  distinctDimValues,
 } from '../src/App.jsx';
 import {
   computeAnalyticsDataset,
@@ -315,5 +318,94 @@ describe('computeNodeArrivals', () => {
     const arr = computeNodeArrivals(shapes, conns, csvStore, {});
     expect(arr.D.val).toEqual({ G3: 30 });
     expect(arr.D.val.G4).toBeUndefined();
+  });
+});
+
+// ── Agrupamentos (dimensões derivadas) ────────────────────────────────────────
+describe('Agrupamentos · autoBuckets', () => {
+  it('fatia a lista ordenada em faixas de tamanho N rotuladas "primeiro–último"', () => {
+    const vals = ['R01', 'R02', 'R03', 'R04', 'R05'];
+    const b = autoBuckets(vals, 2);
+    expect(b.map(x => x.label)).toEqual(['R01–R02', 'R03–R04', 'R05']);
+    expect(b[0].values).toEqual(['R01', 'R02']);
+    expect(b[2].values).toEqual(['R05']);
+  });
+  it('rótulo de faixa única não usa traço', () => {
+    expect(autoBuckets(['A', 'B'], 1).map(x => x.label)).toEqual(['A', 'B']);
+  });
+  it('tamanho mínimo 1 (valores inválidos caem para 1)', () => {
+    expect(autoBuckets(['A', 'B'], 0)).toHaveLength(2);
+  });
+});
+
+describe('Agrupamentos · distinctDimValues', () => {
+  it('retorna valores distintos ordenados, ignorando vazios', () => {
+    const ds = { rows: [{ s: 'R02' }, { s: 'R10' }, { s: 'R02' }, { s: '' }, { s: 'R01' }] };
+    expect(distinctDimValues(ds, 's')).toEqual(['R01', 'R02', 'R10']);
+  });
+});
+
+describe('Agrupamentos · applyGroupingsToDataset', () => {
+  const base = () => ({
+    rows: [
+      { s: 'R01', qty: 10 }, { s: 'R02', qty: 10 }, { s: 'R10', qty: 10 }, { s: 'R20', qty: 10 },
+    ],
+    dimensions: ['s'],
+    temporalColumns: [],
+    metrics: [],
+    scenarios: [],
+  });
+  const grouping = {
+    id: 'g1', name: 'Faixa (agrup.)', source: 's',
+    buckets: [
+      { id: 'b1', label: 'Baixo', values: ['R01', 'R02'] },
+      { id: 'b2', label: 'Alto', values: ['R10'] },
+    ],
+    unmatched: 'other', otherLabel: 'Outros',
+  };
+
+  it('adiciona uma coluna derivada com o rótulo do bucket por linha', () => {
+    const ds = applyGroupingsToDataset(base(), [grouping]);
+    expect(ds.rows.map(r => r['Faixa (agrup.)'])).toEqual(['Baixo', 'Baixo', 'Alto', 'Outros']);
+    expect(ds.dimensions).toContain('Faixa (agrup.)');
+    expect(ds.groupedDimensions).toContain('Faixa (agrup.)');
+  });
+
+  it('registra a ordem dos buckets (com Outros ao fim) em dimensionOrders', () => {
+    const ds = applyGroupingsToDataset(base(), [grouping]);
+    expect(ds.dimensionOrders['Faixa (agrup.)']).toEqual(['Baixo', 'Alto', 'Outros']);
+  });
+
+  it('modo "keep" mantém o valor original para os não atribuídos', () => {
+    const ds = applyGroupingsToDataset(base(), [{ ...grouping, unmatched: 'keep' }]);
+    expect(ds.rows.map(r => r['Faixa (agrup.)'])).toEqual(['Baixo', 'Baixo', 'Alto', 'R20']);
+  });
+
+  it('ignora agrupamento cujo nome colide com dimensão real', () => {
+    const ds = applyGroupingsToDataset(base(), [{ ...grouping, name: 's' }]);
+    expect(ds.groupedDimensions || []).not.toContain('s');
+  });
+
+  it('ignora agrupamento cuja base não existe mais', () => {
+    const ds = applyGroupingsToDataset(base(), [{ ...grouping, source: 'inexistente' }]);
+    expect(ds.dimensions).toEqual(['s']);
+  });
+
+  it('é no-op (retorna o mesmo ds) quando não há agrupamentos válidos', () => {
+    const b = base();
+    expect(applyGroupingsToDataset(b, [])).toBe(b);
+    expect(applyGroupingsToDataset(null, [grouping])).toBeNull();
+  });
+
+  it('a dimensão derivada é usável como Eixo X no pivot, na ordem dos buckets', () => {
+    const ds = applyGroupingsToDataset({
+      ...base(),
+      scenarios: [{ id: 'as_is', nome: 'AS IS', decisionCol: 'd' }],
+      metrics: [{ id: 'qty', label: 'Vol', unit: 'qty' }],
+      rows: base().rows.map(r => ({ ...r, d: 'APROVADO' })),
+    }, [grouping]);
+    const piv = pivotWidget(ds, { xDimension: 'Faixa (agrup.)', metric: 'qty', serieBy: '__none__' });
+    expect(piv.state).toBe('ok');
+    expect(piv.data.map(d => d.x)).toEqual(['Baixo', 'Alto', 'Outros']);
   });
 });

@@ -1241,6 +1241,28 @@ export function pivotWidget(ds, config) {
   if (!metricDef) return { state: "no_metric" };
   const serieBy = config.serieBy || SERIE_CENARIO;
 
+  // Comparador de valores de uma dimensão. Dimensões agrupadas (derivadas) carregam
+  // uma ordem explícita de buckets em ds.dimensionOrders — respeitada aqui para que
+  // "R01-R05 < R06-R10 < … < Outros" não vire ordenação alfabética/numérica crua.
+  const dimOrders = ds.dimensionOrders || {};
+  const makeCmp = (col) => {
+    const ord = dimOrders[col];
+    if (ord && ord.length) {
+      const idx = new Map(ord.map((v, i) => [v, i]));
+      return (a, b) => {
+        const ia = idx.has(a) ? idx.get(a) : Infinity;
+        const ib = idx.has(b) ? idx.get(b) : Infinity;
+        if (ia !== ib) return ia - ib;
+        return a.localeCompare(b, "pt-BR");
+      };
+    }
+    return (a, b) => {
+      const na = parseFloat(a), nb = parseFloat(b);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      return a.localeCompare(b, "pt-BR");
+    };
+  };
+
   // Modo especial: cenários no eixo X (cada aba = um bucket X).
   if (xCol === XDIM_CENARIO) {
     const activeIds = config.activeScenarios;
@@ -1255,11 +1277,7 @@ export function pivotWidget(ds, config) {
     if (serieBy === SERIE_NONE || serieBy === SERIE_CENARIO) {
       seriesDefs = [{ key: "valor", label: metricDef.label, color: SCENARIO_COLORS[1] }];
     } else {
-      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort((a, b) => {
-        const na = parseFloat(a), nb = parseFloat(b);
-        if (!isNaN(na) && !isNaN(nb)) return na - nb;
-        return a.localeCompare(b, "pt-BR");
-      });
+      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort(makeCmp(serieBy));
       const capped = distinct.slice(0, MAX_SERIES);
       truncated = capped.length >= MAX_SERIES && distinct.length > MAX_SERIES;
       seriesDefs = capped.map((v, i) => ({ key: v, label: v, filterCol: serieBy, filterVal: v, color: SERIE_COLORS[i % SERIE_COLORS.length] }));
@@ -1293,11 +1311,7 @@ export function pivotWidget(ds, config) {
     if (serieBy === SERIE_NONE) {
       seriesDefs = [{ key: "simulado", label: "Simulado", decisionCol: simCol, color: SCENARIO_COLORS[1] }];
     } else {
-      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort((a, b) => {
-        const na = parseFloat(a), nb = parseFloat(b);
-        if (!isNaN(na) && !isNaN(nb)) return na - nb;
-        return a.localeCompare(b, "pt-BR");
-      });
+      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort(makeCmp(serieBy));
       const capped = distinct.slice(0, MAX_SERIES);
       seriesDefs = capped.map((v, i) => ({ key: v, label: v, decisionCol: simCol, filterCol: serieBy, filterVal: v, color: SERIE_COLORS[i % SERIE_COLORS.length] }));
     }
@@ -1314,6 +1328,7 @@ export function pivotWidget(ds, config) {
   if (xBuckets.size === 0) return { state: "empty" };
 
   const isTemporal = (temporalColumns || []).includes(xCol);
+  const xCmp = makeCmp(xCol);
   const sortedKeys = [...xBuckets.keys()].sort((a, b) => {
     if (isTemporal) {
       const ka = parseTemporalKey(a), kb = parseTemporalKey(b);
@@ -1321,9 +1336,7 @@ export function pivotWidget(ds, config) {
       if (ka != null) return -1;
       if (kb != null) return 1;
     }
-    const na = parseFloat(a), nb = parseFloat(b);
-    if (!isNaN(na) && !isNaN(nb)) return na - nb;
-    return a.localeCompare(b, "pt-BR");
+    return xCmp(a, b);
   });
 
   const data = sortedKeys.map((xv) => {
@@ -1336,6 +1349,92 @@ export function pivotWidget(ds, config) {
     return row;
   });
   return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated: serieBy !== SERIE_CENARIO && serieBy !== SERIE_NONE && seriesDefs.length >= MAX_SERIES };
+}
+
+// ── Agrupamentos (dimensões derivadas) ───────────────────────────────────────
+// Um agrupamento colapsa os valores de uma dimensão-base (ex.: FAIXA_SCORE R01–R20)
+// em poucos buckets reutilizáveis. Vira uma dimensão derivada usável em qualquer
+// gráfico (Eixo X / Série / KPI), no export CSV e salva no projeto.
+const GROUPING_OTHER_DEFAULT = "Outros";
+
+// Ordena valores distintos de uma coluna (numérico crescente, senão A-Z pt-BR).
+function sortDistinctValues(values) {
+  return [...values].sort((a, b) => {
+    const na = parseFloat(a), nb = parseFloat(b);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return String(a).localeCompare(String(b), "pt-BR");
+  });
+}
+
+// Valores distintos de uma dimensão a partir das linhas do dataset (ordenados).
+export function distinctDimValues(ds, col) {
+  if (!ds || !col) return [];
+  const set = new Set();
+  for (const r of ds.rows) { const v = String(r[col] ?? "").trim(); if (v) set.add(v); }
+  return sortDistinctValues([...set]);
+}
+
+// Gera buckets automaticamente: fatia a lista ordenada de valores em grupos de
+// `size` valores consecutivos, rotulando cada faixa como "primeiro–último".
+export function autoBuckets(sortedValues, size) {
+  const n = Math.max(1, Math.floor(size) || 1);
+  const out = [];
+  for (let i = 0; i < sortedValues.length; i += n) {
+    const slice = sortedValues.slice(i, i + n);
+    const label = slice.length === 1 ? slice[0] : `${slice[0]}–${slice[slice.length - 1]}`;
+    out.push({ id: uid(), label, values: slice });
+  }
+  return out;
+}
+
+// Aplica os agrupamentos ao dataset largo: adiciona uma coluna derivada por
+// agrupamento (chave = nome do agrupamento), registra a ordem dos buckets em
+// `dimensionOrders` e marca as derivadas em `groupedDimensions`. Pura/memoizável.
+export function applyGroupingsToDataset(ds, groupings) {
+  if (!ds) return ds;
+  const realDims = new Set(ds.dimensions || []);
+  const seen = new Set();
+  const valid = (groupings || []).filter(g => {
+    if (!g || !g.name || !g.source) return false;
+    if (!realDims.has(g.source)) return false;        // base sumiu da base atual
+    if (realDims.has(g.name)) return false;            // não sobrescreve coluna real
+    if (seen.has(g.name)) return false;                // nomes duplicados — 1º vence
+    seen.add(g.name);
+    return true;
+  });
+  if (valid.length === 0) return ds;
+
+  const augmenters = valid.map(g => {
+    const map = new Map();
+    for (const b of (g.buckets || [])) for (const v of (b.values || [])) map.set(String(v), b.label);
+    const keepOriginal = g.unmatched === "keep";
+    const otherLabel = keepOriginal ? null : (g.otherLabel || GROUPING_OTHER_DEFAULT);
+    const order = (g.buckets || []).map(b => b.label);
+    if (otherLabel && !order.includes(otherLabel)) order.push(otherLabel);
+    return { key: g.name, source: g.source, map, otherLabel, order };
+  });
+
+  const rows = ds.rows.map(r => {
+    const out = { ...r };
+    for (const a of augmenters) {
+      const sv = String(r[a.source] ?? "").trim();
+      const lbl = a.map.get(sv);
+      out[a.key] = lbl != null ? lbl : (a.otherLabel != null ? a.otherLabel : sv);
+    }
+    return out;
+  });
+
+  const dimensions = [...(ds.dimensions || [])];
+  const dimensionOrders = { ...(ds.dimensionOrders || {}) };
+  const groupedDimensions = [...(ds.groupedDimensions || [])];
+  for (const a of augmenters) {
+    if (!dimensions.includes(a.key)) dimensions.push(a.key);
+    if (!groupedDimensions.includes(a.key)) groupedDimensions.push(a.key);
+    // Mantém só os labels efetivamente presentes nas linhas, preservando a ordem.
+    const present = new Set(rows.map(r => r[a.key]));
+    dimensionOrders[a.key] = a.order.filter(l => present.has(l));
+  }
+  return { ...ds, rows, dimensions, dimensionOrders, groupedDimensions };
 }
 
 // Calcula cor de texto com contraste WCAG sobre um fundo hex.
@@ -1467,12 +1566,14 @@ function AWEmptyState({ icon, title, hint }) {
 }
 
 // ── FieldPanel — campos arrastáveis (dimensões + métricas), estilo Power BI ───
-function FieldPanel({ analyticsDataset }) {
+function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGrouping, onDeleteGrouping }) {
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
+  const groupedSet = new Set(analyticsDataset?.groupedDimensions || []);
   const metrics = analyticsDataset?.metrics || [];
+  // Dimensões "reais" (exclui as derivadas, que ganham seção própria).
   // Temporais primeiro, depois categóricas (A-Z).
-  const orderedDims = [...dims].sort((a, b) => {
+  const orderedDims = [...dims].filter(d => !groupedSet.has(d)).sort((a, b) => {
     const ta = temporalCols.has(a), tb = temporalCols.has(b);
     if (ta !== tb) return ta ? -1 : 1;
     return a.localeCompare(b, "pt-BR");
@@ -1494,6 +1595,21 @@ function FieldPanel({ analyticsDataset }) {
     </div>
   );
 
+  // Chip de agrupamento (derivado): arrastável + botões editar/remover.
+  const groupingChip = (g) => (
+    <div key={`grp-${g.id}`} draggable onDragStart={(e) => startDrag(e, "dim", g.name)}
+      style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 8px", borderRadius: 8,
+        border: "1.5px solid #ddd6fe", background: "#f5f3ff", marginBottom: 4, cursor: "grab", userSelect: "none",
+        fontSize: 12, fontWeight: 500, color: "#6d28d9" }}>
+      <span style={{ fontSize: 12 }}>🧩</span>
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${g.name} · base: ${g.source}`}>{g.name}</span>
+      <button onClick={() => onEditGrouping && onEditGrouping(g.id)} title="Editar agrupamento"
+        style={{ border: "none", background: "transparent", color: "#7c3aed", cursor: "pointer", fontSize: 12, padding: "0 2px", lineHeight: 1 }}>✎</button>
+      <button onClick={() => onDeleteGrouping && onDeleteGrouping(g.id)} title="Remover agrupamento"
+        style={{ border: "none", background: "transparent", color: "#a78bfa", cursor: "pointer", fontSize: 12, padding: "0 2px", lineHeight: 1 }}>✕</button>
+    </div>
+  );
+
   return (
     <div style={{ width: 220, flexShrink: 0, borderLeft: "1px solid #e2e8f0", background: "#fff", overflowY: "auto", padding: "16px 14px" }}>
       <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Dimensões</p>
@@ -1503,6 +1619,17 @@ function FieldPanel({ analyticsDataset }) {
           ? chip(d, "⏱", "#eef2ff", "#c7d2fe", "#4338ca", "dim", d)
           : chip(d, "▦", "#f1f5f9", "#e2e8f0", "#475569", "dim", d)
       ) : <div style={{ fontSize: 11.5, color: "#cbd5e1", padding: "4px 2px" }}>—</div>}
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "16px 0 8px" }}>
+        <p style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Agrupamentos</p>
+        <button onClick={() => onNewGrouping && onNewGrouping()} title="Criar agrupamento de uma dimensão"
+          style={{ border: "1px solid #ddd6fe", background: "#f5f3ff", color: "#7c3aed", cursor: "pointer",
+            fontSize: 11, fontWeight: 600, borderRadius: 7, padding: "2px 8px", fontFamily: "inherit" }}>+ Novo</button>
+      </div>
+      {groupings.length > 0 ? groupings.map(groupingChip)
+        : <div style={{ fontSize: 10.5, color: "#cbd5e1", padding: "2px", lineHeight: 1.5 }}>
+            Agrupe valores de uma dimensão (ex.: Faixa Score R01–R20 em poucas faixas) para reusar em qualquer gráfico.
+          </div>}
 
       <p style={{ fontSize: 11, color: "#94a3b8", margin: "16px 0 8px", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Métricas</p>
       {metrics.length > 0 ? metrics.map(m =>
@@ -1665,30 +1792,35 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
 
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
+  const groupedCols = new Set(analyticsDataset?.groupedDimensions || []);
   const metrics = analyticsDataset?.metrics || [];
   const allScenarios = analyticsDataset?.scenarios || [];
+  // Reais primeiro (temporais antes), depois as derivadas (agrupamentos) ao fim.
   const orderedDims = [...dims].sort((a, b) => {
+    const ga = groupedCols.has(a), gb = groupedCols.has(b);
+    if (ga !== gb) return ga ? 1 : -1;
     const ta = temporalCols.has(a), tb = temporalCols.has(b);
     if (ta !== tb) return ta ? -1 : 1;
     return a.localeCompare(b, "pt-BR");
   });
+  const dimLabel = (d) => groupedCols.has(d) ? `🧩 ${d}` : (temporalCols.has(d) ? `⏱ ${d}` : d);
 
   const xIsCenario = cfg.xDimension === XDIM_CENARIO;
   const xOptions = [
     { value: "", label: "— escolher —" },
     { value: XDIM_CENARIO, label: "🎬 Cenários (abas)" },
-    ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
+    ...orderedDims.map(d => ({ value: d, label: dimLabel(d) })),
   ];
   const metricOptions = metrics.map(m => ({ value: m.id, label: m.label }));
   const serieOptions = xIsCenario
     ? [
       { value: SERIE_NONE, label: "Nenhuma (linha única)" },
-      ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
+      ...orderedDims.map(d => ({ value: d, label: dimLabel(d) })),
     ]
     : [
       { value: SERIE_CENARIO, label: "Cenário (todas as abas)" },
       { value: SERIE_NONE, label: "Nenhuma (linha única)" },
-      ...orderedDims.map(d => ({ value: d, label: temporalCols.has(d) ? `⏱ ${d}` : d })),
+      ...orderedDims.map(d => ({ value: d, label: dimLabel(d) })),
     ];
 
   const set = (patch) => onConfigChange(widget.id, patch);
@@ -1922,8 +2054,177 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
   );
 }
 
+// ── GroupingModal — editor de agrupamento (dimensão derivada) ─────────────────
+function GroupingModal({ draft, baseDataset, existingNames, onSave, onClose }) {
+  const [name, setName]           = useState(draft.name || "");
+  const [source, setSource]       = useState(draft.source || "");
+  const [buckets, setBuckets]     = useState(() => (draft.buckets || []).map(b => ({ id: b.id || uid(), label: b.label, values: [...(b.values || [])] })));
+  const [unmatched, setUnmatched] = useState(draft.unmatched || "other");
+  const [otherLabel, setOtherLabel] = useState(draft.otherLabel || GROUPING_OTHER_DEFAULT);
+  const [autoSize, setAutoSize]   = useState(5);
+
+  // Dimensões-base candidatas: só dimensões reais (não derivadas, não o eixo Cenário).
+  const sourceDims = (baseDataset?.dimensions || []).filter(d => !(baseDataset?.groupedDimensions || []).includes(d));
+  const temporalCols = new Set(baseDataset?.temporalColumns || []);
+  const distinct = useMemo(() => distinctDimValues(baseDataset, source), [baseDataset, source]);
+
+  const v2b = useMemo(() => { const m = {}; for (const b of buckets) for (const v of b.values) m[v] = b.id; return m; }, [buckets]);
+  const unassigned = distinct.filter(v => !v2b[v]);
+
+  const changeSource = (s) => { setSource(s); setBuckets([]); };
+  const applyAuto = () => setBuckets(autoBuckets(distinct, autoSize));
+  const addBucket = () => setBuckets(prev => [...prev, { id: uid(), label: `Grupo ${prev.length + 1}`, values: [] }]);
+  const renameBucket = (id, label) => setBuckets(prev => prev.map(b => b.id === id ? { ...b, label } : b));
+  const removeBucket = (id) => setBuckets(prev => prev.filter(b => b.id !== id));
+  const assignValue = (val, bucketId) => setBuckets(prev =>
+    prev.map(b => ({ ...b, values: b.values.filter(v => v !== val) }))
+        .map(b => (bucketId && b.id === bucketId) ? { ...b, values: [...b.values, val] } : b));
+
+  const nameTrim = name.trim();
+  const labels = buckets.map(b => b.label.trim());
+  const dupLabel = labels.some((l, i) => l && labels.indexOf(l) !== i);
+  const emptyLabel = buckets.some(b => !b.label.trim());
+  const filledBuckets = buckets.filter(b => b.values.length > 0);
+  let error = null;
+  if (!nameTrim) error = "Dê um nome ao agrupamento.";
+  else if (existingNames.has(nameTrim)) error = "Já existe uma dimensão ou agrupamento com esse nome.";
+  else if (!source) error = "Escolha a dimensão-base.";
+  else if (filledBuckets.length === 0) error = "Atribua valores a pelo menos um grupo.";
+  else if (emptyLabel) error = "Todo grupo precisa de um nome.";
+  else if (dupLabel) error = "Há grupos com nomes repetidos.";
+
+  const save = () => {
+    if (error) return;
+    onSave({
+      id: draft.id, name: nameTrim, source,
+      buckets: buckets.filter(b => b.values.length > 0).map(b => ({ id: b.id, label: b.label.trim(), values: b.values })),
+      unmatched, otherLabel: otherLabel.trim() || GROUPING_OTHER_DEFAULT,
+    });
+  };
+
+  const selStyle = { padding: "5px 7px", borderRadius: 7, border: "1px solid #e2e8f0", background: "#f8fafc",
+    fontSize: 12, color: "#1e293b", fontFamily: "inherit", outline: "none", cursor: "pointer" };
+  const inStyle = { padding: "7px 9px", borderRadius: 8, border: "1px solid #e2e8f0", background: "#fff",
+    fontSize: 13, color: "#1e293b", fontFamily: "inherit", outline: "none", boxSizing: "border-box" };
+
+  return (
+    <div onMouseDown={onClose} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", zIndex: 9000,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div onMouseDown={(e) => e.stopPropagation()} style={{ width: 560, maxWidth: "100%", maxHeight: "90vh", background: "#fff",
+        borderRadius: 16, boxShadow: "0 20px 60px rgba(0,0,0,.3)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 20px", borderBottom: "1px solid #eef2f7" }}>
+          <span style={{ fontSize: 18 }}>🧩</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#1e293b" }}>{draft.id ? "Editar agrupamento" : "Novo agrupamento"}</div>
+            <div style={{ fontSize: 11.5, color: "#94a3b8" }}>Colapse valores de uma dimensão em poucas faixas reutilizáveis.</div>
+          </div>
+          <button onClick={onClose} style={{ border: "none", background: "transparent", color: "#94a3b8", cursor: "pointer", fontSize: 18, lineHeight: 1 }}>✕</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b" }}>Nome do agrupamento</span>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Faixa Score (agrupada)" style={inStyle} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b" }}>Dimensão-base</span>
+              <select value={source} onChange={(e) => changeSource(e.target.value)} style={{ ...inStyle, cursor: "pointer", appearance: "auto" }}>
+                <option value="">— escolher —</option>
+                {sourceDims.map(d => <option key={d} value={d}>{temporalCols.has(d) ? `⏱ ${d}` : d}</option>)}
+              </select>
+            </label>
+          </div>
+
+          {source && (
+            <>
+              {/* Auto-faixas */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: "#f8fafc", border: "1px solid #f1f5f9", borderRadius: 10, padding: "10px 12px" }}>
+                <span style={{ fontSize: 12, color: "#475569" }}>Agrupar automaticamente em faixas de</span>
+                <input type="number" min={1} value={autoSize} onChange={(e) => setAutoSize(Math.max(1, Number(e.target.value) || 1))}
+                  style={{ ...selStyle, width: 56, textAlign: "right" }} />
+                <span style={{ fontSize: 12, color: "#475569" }}>valores ({distinct.length} no total)</span>
+                <button onClick={applyAuto} style={{ ...selStyle, background: "#ede9fe", border: "1px solid #ddd6fe", color: "#6d28d9", fontWeight: 600 }}>Gerar faixas</button>
+              </div>
+
+              {/* Grupos */}
+              <div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>Grupos</span>
+                  <button onClick={addBucket} style={{ ...selStyle, padding: "3px 9px", fontWeight: 600, color: "#475569" }}>+ Adicionar grupo</button>
+                </div>
+                {buckets.length === 0
+                  ? <div style={{ fontSize: 12, color: "#94a3b8", padding: "6px 2px" }}>Gere faixas automaticamente ou adicione grupos manualmente.</div>
+                  : <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {buckets.map((b, i) => (
+                        <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ width: 10, height: 10, borderRadius: 3, background: SERIE_COLORS[i % SERIE_COLORS.length], flexShrink: 0 }} />
+                          <input value={b.label} onChange={(e) => renameBucket(b.id, e.target.value)}
+                            style={{ ...inStyle, flex: 1, padding: "5px 8px", fontSize: 12.5 }} />
+                          <span style={{ fontSize: 11, color: "#94a3b8", width: 54, textAlign: "right" }}>{b.values.length} val.</span>
+                          <button onClick={() => removeBucket(b.id)} title="Remover grupo"
+                            style={{ border: "none", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 13 }}>✕</button>
+                        </div>
+                      ))}
+                    </div>}
+              </div>
+
+              {/* Atribuição de valores */}
+              <div>
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Valores {unassigned.length > 0 && <span style={{ color: "#d97706", fontWeight: 500 }}>· {unassigned.length} sem grupo</span>}
+                </span>
+                <div style={{ marginTop: 6, maxHeight: 220, overflowY: "auto", border: "1px solid #eef2f7", borderRadius: 10 }}>
+                  {distinct.map((v, i) => (
+                    <div key={v} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px",
+                      borderTop: i === 0 ? "none" : "1px solid #f1f5f9", background: v2b[v] ? "#fff" : "#fffbeb" }}>
+                      <span style={{ flex: 1, fontSize: 12.5, color: "#334155", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                      <select value={v2b[v] || ""} onChange={(e) => assignValue(v, e.target.value)} style={{ ...selStyle, minWidth: 150 }}>
+                        <option value="">— sem grupo —</option>
+                        {buckets.map(b => <option key={b.id} value={b.id}>{b.label || "(sem nome)"}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Valores fora dos grupos */}
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 11.5, color: "#64748b" }}>Valores sem grupo:</span>
+                {[["other", "Reunir em um grupo"], ["keep", "Manter valor original"]].map(([id, lbl]) => (
+                  <label key={id} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+                    <input type="radio" checked={unmatched === id} onChange={() => setUnmatched(id)} />
+                    {lbl}
+                  </label>
+                ))}
+                {unmatched === "other" && (
+                  <input value={otherLabel} onChange={(e) => setOtherLabel(e.target.value)} placeholder={GROUPING_OTHER_DEFAULT}
+                    style={{ ...inStyle, padding: "5px 8px", fontSize: 12.5, width: 130 }} />
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 20px", borderTop: "1px solid #eef2f7" }}>
+          <span style={{ flex: 1, fontSize: 12, color: error ? "#d97706" : "#94a3b8" }}>{error || "Pronto para salvar."}</span>
+          <button onClick={onClose} style={{ ...selStyle, padding: "7px 14px", color: "#475569" }}>Cancelar</button>
+          <button onClick={save} disabled={!!error}
+            style={{ padding: "7px 16px", borderRadius: 8, border: "none", fontFamily: "inherit", fontSize: 13, fontWeight: 600,
+              cursor: error ? "not-allowed" : "pointer", background: error ? "#e2e8f0" : "#7c3aed", color: error ? "#94a3b8" : "#fff" }}>
+            {draft.id ? "Salvar" : "Criar agrupamento"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── AnalysisTab — página da aba Análise ───────────────────────────────────────
-function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) {
+function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyticsLayout, groupings, setGroupings }) {
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = analyticsDataset?.temporalColumns || [];
 
@@ -1946,6 +2247,36 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
   const removeWidget = (id) => setAnalyticsLayout(prev => prev.filter(w => w.id !== id));
   const changeConfig = (id, patch) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, config: { ...w.config, ...patch } } : w));
   const changeType = (id, type) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, type } : w));
+
+  // ── Agrupamentos (dimensões derivadas) ──────────────────────────────────────
+  const [editingGrouping, setEditingGrouping] = useState(null); // null | draft
+  const newGrouping = () => setEditingGrouping({ id: null, name: "", source: "", buckets: [], unmatched: "other", otherLabel: GROUPING_OTHER_DEFAULT });
+  const editGrouping = (id) => { const g = groupings.find(x => x.id === id); if (g) setEditingGrouping({ ...g }); };
+  const deleteGrouping = (id) => setGroupings(prev => prev.filter(g => g.id !== id));
+  const saveGrouping = (g) => {
+    const isNew = !g.id;
+    const withId = isNew ? { ...g, id: uid() } : g;
+    // Renomeou? Migra as referências (Eixo X / Série) dos gráficos existentes.
+    if (!isNew) {
+      const prevName = groupings.find(x => x.id === g.id)?.name;
+      if (prevName && prevName !== g.name) {
+        setAnalyticsLayout(prev => prev.map(w => {
+          const c = w.config; let nc = c;
+          if (c.xDimension === prevName) nc = { ...nc, xDimension: g.name };
+          if (c.serieBy === prevName) nc = { ...nc, serieBy: g.name };
+          return nc === c ? w : { ...w, config: nc };
+        }));
+      }
+    }
+    setGroupings(prev => isNew ? [...prev, withId] : prev.map(x => x.id === g.id ? withId : x));
+    setEditingGrouping(null);
+  };
+  // Nomes já em uso (dimensões reais + outros agrupamentos) — bloqueia colisão.
+  const existingNames = useMemo(() => {
+    const real = (baseDataset?.dimensions || []).filter(d => !(baseDataset?.groupedDimensions || []).includes(d));
+    const others = groupings.filter(g => !editingGrouping || g.id !== editingGrouping.id).map(g => g.name);
+    return new Set([...real, ...others]);
+  }, [baseDataset, groupings, editingGrouping]);
 
   const hasData = !!analyticsDataset;
 
@@ -2036,7 +2367,14 @@ function AnalysisTab({ analyticsDataset, analyticsLayout, setAnalyticsLayout }) 
       </div>
 
       {/* Painel de campos */}
-      {hasData && <FieldPanel analyticsDataset={analyticsDataset} />}
+      {hasData && <FieldPanel analyticsDataset={analyticsDataset} groupings={groupings}
+        onNewGrouping={newGrouping} onEditGrouping={editGrouping} onDeleteGrouping={deleteGrouping} />}
+
+      {/* Modal de agrupamento */}
+      {editingGrouping && (
+        <GroupingModal draft={editingGrouping} baseDataset={baseDataset} existingNames={existingNames}
+          onSave={saveGrouping} onClose={() => setEditingGrouping(null)} />
+      )}
     </div>
   );
 }
@@ -2108,6 +2446,9 @@ export default function App() {
   const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
   const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = sessionStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
+  const [analyticsGroupings, setAnalyticsGroupings] = useState(() => { try { const s = sessionStorage.getItem('aw_groupings_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // Grouping[] — dimensões derivadas reutilizáveis
+  // Dataset enriquecido com as dimensões derivadas (agrupamentos) — consumido pela aba Dashboard.
+  const groupedDataset = useMemo(() => applyGroupingsToDataset(analyticsDataset, analyticsGroupings), [analyticsDataset, analyticsGroupings]);
   // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
   const [canvases, setCanvases] = useState(() => _initCanvasStore().canvases);
   const [activeCanvasId, setActiveCanvasId] = useState(() => _initCanvasStore().activeCanvasId);
@@ -2396,6 +2737,7 @@ export default function App() {
 
   // Persiste layout do dashboard na sessionStorage para sobreviver a reloads dentro da mesma sessão.
   useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
+  useEffect(() => { sessionStorage.setItem('aw_groupings_v1', JSON.stringify(analyticsGroupings)); }, [analyticsGroupings]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
   useEffect(() => {
@@ -3817,6 +4159,7 @@ export default function App() {
       csvStore,
       inferenceRef: serializeInferenceRef(inferenceRef),
       analyticsLayout,
+      analyticsGroupings,
       cinemaLibrary,
       businessWidget,
       preferences: {
@@ -3864,6 +4207,7 @@ export default function App() {
     setInferenceRef(deserializeInferenceRef(data.inferenceRef));
     setInfRefError(null);
     setAnalyticsLayout(Array.isArray(data.analyticsLayout) ? data.analyticsLayout : []);
+    setAnalyticsGroupings(Array.isArray(data.analyticsGroupings) ? data.analyticsGroupings : []);
     setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
     if (data.businessWidget) setBusinessWidget(data.businessWidget);
     if (data.viewport) setVp(data.viewport);
@@ -5712,7 +6056,7 @@ export default function App() {
 
 
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
-      {activeTab==="analysis" && <AnalysisTab analyticsDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} />}
+      {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} />}
 
       {/* ═══════════════ CANVAS PANE ═══════════════ */}
       <div style={{display:activeTab==="canvas"?"flex":"none",flex:1,minHeight:0,width:"100%",overflow:"hidden",position:"relative"}}>
