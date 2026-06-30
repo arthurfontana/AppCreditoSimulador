@@ -302,6 +302,45 @@ function parseCSV(text, delimiter, hasHeader) {
   return { headers, rows };
 }
 
+// Versão assíncrona/chunked de parseCSV — cede a thread principal a cada lote
+// de linhas (setTimeout 0) para não congelar a UI em bases grandes, e reporta
+// progresso via onProgress(linhasProcessadas, total). Usada no carregamento
+// de CSV (onFileChange/reparseWizardFile) para alimentar o modal de progresso.
+function parseCSVAsync(text, delimiter, hasHeader, onProgress) {
+  return new Promise((resolve, reject) => {
+    try {
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      if (!lines.length) { resolve({ headers: [], rows: [] }); return; }
+      const split = (line) => {
+        const res = []; let f = "", q = false;
+        for (let i = 0; i < line.length; i++) {
+          const c = line[i];
+          if (c === '"') q = !q;
+          else if (c === delimiter && !q) { res.push(f.trim()); f = ""; }
+          else f += c;
+        }
+        res.push(f.trim());
+        return res;
+      };
+      const first = split(lines[0]);
+      const headers = hasHeader ? first : first.map((_,i)=>`Coluna ${i+1}`);
+      const dataLines = hasHeader ? lines.slice(1) : lines;
+      const total = dataLines.length;
+      const rows = new Array(total);
+      const CHUNK = 3000;
+      let i = 0;
+      const step = () => {
+        const end = Math.min(i + CHUNK, total);
+        for (; i < end; i++) rows[i] = split(dataLines[i]);
+        if (onProgress) onProgress(i, total);
+        if (i < total) setTimeout(step, 0);
+        else resolve({ headers, rows });
+      };
+      step();
+    } catch (err) { reject(err); }
+  });
+}
+
 const tDist = (t) => { const dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY; return Math.sqrt(dx*dx+dy*dy); };
 const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
 // Estimativa de largura do label da seta (DM Sans ~11px) — usada para
@@ -2039,6 +2078,8 @@ export default function App() {
   // CSV state
   const [csvStore,   setCsvStore]   = useState({});     // {[csvId]: {name,headers,rows,columnTypes}}
   const [wizard,     setWizard]     = useState(null);   // null | wizard obj
+  const [importLoading, setImportLoading] = useState(null); // null | {phase:'reading'|'parsing', pct, filename} — progresso de carga/parse de CSV
+  const [csvImportError, setCsvImportError] = useState(null); // string | null — erro ao carregar/processar uma base CSV
   // Inferência de negados — Tabela de Referência (Fase 1, slot dedicado)
   const [inferenceRef, setInferenceRef] = useState(null); // null | índice da tabela (ver indexInferenceRef / Proposta §4.1)
   const [infRefError,  setInfRefError]  = useState(null); // string | null — erro de importação da tabela de referência
@@ -3157,15 +3198,66 @@ export default function App() {
   // ── CSV import ────────────────────────────────────────────────
   const onFileChange = (e) => {
     const file=e.target.files[0]; if (!file) return;
+    e.target.value="";
+    setCsvImportError(null);
+    setImportLoading({phase:'reading', pct:0, filename:file.name});
     const reader=new FileReader();
-    reader.onload=(ev)=>{
-      const text=ev.target.result;
-      const {delimiter,confident}=detectDelimiter(text);
-      const {decimalSep, confident: decConfident}=detectDecimalSep(text, delimiter);
-      setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,inferenceSource:'columns',keyMap:{},weightCol:null,weightMode:'propostas',normalizeScore:true});
+    reader.onerror=()=>{
+      setImportLoading(null);
+      setCsvImportError(`Não foi possível ler o arquivo "${file.name}". Verifique se ele não está corrompido, vazio ou aberto em outro programa.`);
+    };
+    reader.onprogress=(ev)=>{
+      if (ev.lengthComputable) setImportLoading(l=>l&&({...l,pct:Math.round((ev.loaded/ev.total)*30)}));
+    };
+    reader.onload=async(ev)=>{
+      try {
+        const text=ev.target.result;
+        if (!text || !text.trim()) {
+          setImportLoading(null);
+          setCsvImportError(`O arquivo "${file.name}" está vazio.`);
+          return;
+        }
+        const {delimiter,confident}=detectDelimiter(text);
+        const {decimalSep, confident: decConfident}=detectDecimalSep(text, delimiter);
+        setImportLoading(l=>l&&({...l,phase:'parsing',pct:35}));
+        const {headers, rows} = await parseCSVAsync(text, delimiter, true, (done,total)=>{
+          setImportLoading(l=>l&&({...l,pct:35+Math.round((done/Math.max(total,1))*60)}));
+        });
+        if (!headers.length || !rows.length) {
+          setImportLoading(null);
+          setCsvImportError(`Não foi possível identificar colunas em "${file.name}" com o delimitador detectado ("${delimiter}"). Verifique se o arquivo é um CSV válido.`);
+          return;
+        }
+        setImportLoading(null);
+        setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,inferenceSource:'columns',keyMap:{},weightCol:null,weightMode:'propostas',normalizeScore:true,parsedHeaders:headers,parsedRows:rows,parsedDelimiter:delimiter,parsedHasHeader:true});
+      } catch (err) {
+        setImportLoading(null);
+        setCsvImportError(`Falha ao processar "${file.name}": ${err?.message || err}`);
+      }
     };
     reader.readAsText(file);
-    e.target.value="";
+  };
+
+  // Reprocessa o arquivo bruto com novo delimitador/cabeçalho sem travar a UI
+  // (chunked via parseCSVAsync) — usado pelos seletores do Passo 1 do wizard.
+  // Mostra o mesmo modal de progresso da carga inicial; só atualiza
+  // delimiter/hasHeader no wizard quando o reparse termina.
+  const reparseWizardFile = (patch) => {
+    if (!wizard) return;
+    if (wizard.editCsvId) { setWizard(w => w ? {...w, ...patch} : w); return; }
+    const nextDelimiter = 'delimiter' in patch ? patch.delimiter : wizard.delimiter;
+    const nextHasHeader = 'hasHeader' in patch ? patch.hasHeader : wizard.hasHeader;
+    const { filename, rawText } = wizard;
+    setImportLoading({phase:'parsing', pct:5, filename});
+    parseCSVAsync(rawText, nextDelimiter, nextHasHeader, (done,total)=>{
+      setImportLoading(l=>l&&({...l,pct:5+Math.round((done/Math.max(total,1))*90)}));
+    }).then(({headers,rows})=>{
+      setImportLoading(null);
+      setWizard(w2=>w2?{...w2,...patch,parsedHeaders:headers,parsedRows:rows,parsedDelimiter:nextDelimiter,parsedHasHeader:nextHasHeader}:w2);
+    }).catch(err=>{
+      setImportLoading(null);
+      setCsvImportError(`Falha ao reprocessar "${filename}": ${err?.message||err}`);
+    });
   };
 
   // ── Import da Tabela de Inferência (slot dedicado — Fase 1) ──
@@ -3376,7 +3468,12 @@ export default function App() {
       return;
     }
 
-    const {headers, rows: rawRows}=parseCSV(rawText,delimiter,hasHeader);
+    // Reusa o parse já cacheado pelo wizard (onFileChange/reparseWizardFile)
+    // quando ele bate com o delimiter/hasHeader atuais — evita reparsear a
+    // base inteira de novo só para confirmar a importação.
+    const {headers, rows: rawRows} = (wizard.parsedHeaders && wizard.parsedDelimiter===delimiter && wizard.parsedHasHeader===hasHeader)
+      ? {headers: wizard.parsedHeaders, rows: wizard.parsedRows}
+      : parseCSV(rawText,delimiter,hasHeader);
     const rows = normalizeDecimalSep(rawRows, decimalSep || '.');
 
     pushHistory();
@@ -3535,7 +3632,7 @@ export default function App() {
     for (const h of csv.headers) {
       if (!varTypes[h]) {
         const ci = csv.headers.indexOf(h);
-        const vals = csv.rows.map(r => r[ci] ?? '').filter(Boolean);
+        const vals = csv.rows.slice(0, 1000).map(r => r[ci] ?? '').filter(Boolean);
         varTypes[h] = suggestVarType(h, vals);
       }
     }
@@ -4400,15 +4497,27 @@ export default function App() {
   },[]); // eslint-disable-line
 
   // ── Wizard preview ────────────────────────────────────────────
-  const wizardPreview = wizard
-    ? (wizard.editCsvId
-        ? (() => { const csv = csvStore[wizard.editCsvId]; return csv ? {headers: csv.headers, rows: csv.rows} : null; })()
-        : parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader))
-    : null;
+  // Memoizado: antes este bloco rodava parseCSV() (parse da base inteira) a
+  // cada render do App — qualquer setState em qualquer parte do componente
+  // (debounce da simulação, hover, etc.) reparseava o arquivo inteiro de novo,
+  // o que travava a aba em bases grandes ("Página sem resposta"). Agora só
+  // reparseia quando algo relevante muda, e prioriza o cache populado por
+  // onFileChange/reparseWizardFile (parse assíncrono/chunked) em vez de
+  // reparsear de forma síncrona.
+  const editingCsv = wizard?.editCsvId ? csvStore[wizard.editCsvId] : null;
+  const wizardPreview = useMemo(() => {
+    if (!wizard) return null;
+    if (wizard.editCsvId) return editingCsv ? { headers: editingCsv.headers, rows: editingCsv.rows } : null;
+    if (wizard.parsedHeaders && wizard.parsedDelimiter === wizard.delimiter && wizard.parsedHasHeader === wizard.hasHeader) {
+      return { headers: wizard.parsedHeaders, rows: wizard.parsedRows };
+    }
+    return parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader);
+  }, [wizard?.rawText, wizard?.delimiter, wizard?.hasHeader, wizard?.editCsvId, wizard?.parsedHeaders, wizard?.parsedRows, wizard?.parsedDelimiter, wizard?.parsedHasHeader, editingCsv]);
 
-  const libWizardPreview = libWizard
-    ? parseCSV(libWizard.rawText, libWizard.delimiter, libWizard.hasHeader)
-    : null;
+  const libWizardPreview = useMemo(() => {
+    if (!libWizard) return null;
+    return parseCSV(libWizard.rawText, libWizard.delimiter, libWizard.hasHeader);
+  }, [libWizard?.rawText, libWizard?.delimiter, libWizard?.hasHeader]);
 
   // ── Analytics color scale ─────────────────────────────────────
   const edgeColorScale = useMemo(() => {
@@ -7723,6 +7832,45 @@ export default function App() {
         </div>
       )}
 
+      {/* ═══════════════ CSV IMPORT LOADING MODAL ═══════════════ */}
+      {importLoading && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.5)",backdropFilter:"blur(4px)",zIndex:2100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <style>{"@keyframes csvSpin{to{transform:rotate(360deg)}}"}</style>
+          <div style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:380,boxShadow:"0 24px 80px rgba(0,0,0,.25)",padding:"30px 32px",display:"flex",flexDirection:"column",gap:16,alignItems:"center",textAlign:"center"}}>
+            <div style={{width:38,height:38,borderRadius:"50%",border:"3.5px solid #dbeafe",borderTopColor:"#2563eb",animation:"csvSpin .8s linear infinite"}}/>
+            <div>
+              <h3 style={{fontSize:14,fontWeight:700,color:"#1e293b",marginBottom:3}}>
+                {importLoading.phase==='reading' ? "Lendo arquivo…" : "Processando linhas da base…"}
+              </h3>
+              <p style={{fontSize:12,color:"#64748b"}}>{importLoading.filename}</p>
+            </div>
+            <div style={{width:"100%",height:8,borderRadius:6,background:"#f1f5f9",overflow:"hidden"}}>
+              <div style={{height:"100%",borderRadius:6,background:"#2563eb",width:`${Math.min(100,Math.max(0,importLoading.pct||0))}%`,transition:"width .15s ease"}}/>
+            </div>
+            <p style={{fontSize:11.5,color:"#94a3b8"}}>{Math.min(100,Math.max(0,importLoading.pct||0))}%</p>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════ CSV IMPORT ERROR MODAL ═══════════════ */}
+      {csvImportError && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:2100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:440,boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:40,height:40,borderRadius:12,background:"#fee2e2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⚠</div>
+              <div>
+                <h3 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>Erro ao Carregar Base</h3>
+                <p style={{fontSize:12.5,color:"#64748b",lineHeight:1.5}}>{csvImportError}</p>
+              </div>
+            </div>
+            <button onClick={()=>setCsvImportError(null)}
+              style={{alignSelf:"flex-end",padding:"9px 22px",borderRadius:9,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>
+              Entendido
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ═══════════════ IMPORT WIZARD MODAL ═══════════════ */}
       {wizard && (
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -7760,7 +7908,7 @@ export default function App() {
                     <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
                       {DELIMITERS.map(d=>(
                         <label key={d.value} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",borderRadius:9,border:`1.5px solid ${wizard.delimiter===d.value?"#3b82f6":"#e2e8f0"}`,background:wizard.delimiter===d.value?"#eff6ff":"#fafafa",cursor:"pointer",fontSize:13,color:wizard.delimiter===d.value?"#1d4ed8":"#475569",fontWeight:wizard.delimiter===d.value?600:400,transition:"all .12s"}}>
-                          <input type="radio" name="delim" value={d.value} checked={wizard.delimiter===d.value} onChange={()=>setWizard(w=>({...w,delimiter:d.value}))} style={{accentColor:"#3b82f6"}}/>
+                          <input type="radio" name="delim" value={d.value} checked={wizard.delimiter===d.value} onChange={()=>reparseWizardFile({delimiter:d.value})} style={{accentColor:"#3b82f6"}}/>
                           {d.label}
                         </label>
                       ))}
@@ -7786,7 +7934,7 @@ export default function App() {
                   {/* Header row */}
                   <div style={{marginBottom:20}}>
                     <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
-                      <input type="checkbox" checked={wizard.hasHeader} onChange={e=>setWizard(w=>({...w,hasHeader:e.target.checked}))} style={{width:16,height:16,accentColor:"#3b82f6"}}/>
+                      <input type="checkbox" checked={wizard.hasHeader} onChange={e=>reparseWizardFile({hasHeader:e.target.checked})} style={{width:16,height:16,accentColor:"#3b82f6"}}/>
                       <span style={{fontSize:13,color:"#1e293b",fontWeight:500}}>Primeira linha como cabeçalho</span>
                     </label>
                   </div>
@@ -8169,7 +8317,9 @@ export default function App() {
                     const varSuggestions = {};
                     for (const h of headers) {
                       const ci = headers.indexOf(h);
-                      const vals = rows.map(r => r[ci] ?? '').filter(Boolean);
+                      // suggestVarType só amostra os 200 primeiros valores — limitar aqui
+                      // evita percorrer a base inteira (×colunas) só para sugerir o tipo.
+                      const vals = rows.slice(0, 1000).map(r => r[ci] ?? '').filter(Boolean);
                       varSuggestions[h] = suggestVarType(h, vals);
                     }
                     const metricSuggestions = suggestMetricColumns(headers);
