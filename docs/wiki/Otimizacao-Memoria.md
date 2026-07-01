@@ -4,8 +4,8 @@ Plano de engenharia para permitir carregar bases sumarizadas **por dia** com
 ~1MM de linhas / ~130MB sem estourar a memória da aba do Chrome
 (erro *"Out of memory"*).
 
-> **Status:** planejado. Dividido em 3 fases independentes e incrementais.
-> Cada fase é entregável sozinha e verificável contra a suíte de testes.
+> **Status:** Fases 0, 1 e 2 **entregues**. Dividido em 3 fases independentes e
+> incrementais. Cada fase é entregável sozinha e verificável contra a suíte de testes.
 
 ---
 
@@ -140,31 +140,62 @@ o `parseFloat` por tick: `runSimulation`, `computeSimulatedDecisions`,
 
 ---
 
-## Fase 2 — Transferência sem cópia para o worker
+## Fase 2 — Transferência sem cópia para o worker ✅ (entregue)
 
 **Objetivo:** eliminar a segunda cópia da base (o clone do `postMessage`).
 
 **Escopo:** protocolo de mensagens entre `src/App.jsx` e
-`src/simulation.worker.js` (`UPDATE_CSV_STORE` e retornos que carregam dataset).
+`src/simulation.worker.js` (`UPDATE_CSV_STORE`), a alocação colunar em
+`src/columnar.js` e os headers de isolamento em `vite.config.js`.
 
-**O que fazer:**
-- Enviar os buffers colunares (`ArrayBuffer` de cada coluna) como
-  **transferables** no `postMessage` (2º argumento), em vez de deixar o structured
-  clone copiar — ou avaliar `SharedArrayBuffer` se a base precisar ser lida por
-  main e worker simultaneamente.
-- Cuidar do *ownership*: um `ArrayBuffer` transferido fica **neutralizado** no lado
-  que enviou. Definir claramente quem é dono (provavelmente o worker vira dono da
-  base; a main mantém só o que precisa para render) ou usar `SharedArrayBuffer`
-  para leitura compartilhada.
-- Revisar `ANALYTICS_RESULT` e demais retornos grandes para também transferir
-  buffers em vez de clonar.
+**Decisão de design — `SharedArrayBuffer`, não transferables.** A base é lida pelos
+**dois lados** (a main renderiza preview/domínios/export/reconciliação em ~134 call
+sites via accessor; o worker roda a simulação). Um `ArrayBuffer` **transferido** fica
+**neutralizado** no remetente — então transferir a base para o worker tiraria o acesso
+da main. Por isso seguimos a alternativa recomendada aqui: **leitura compartilhada via
+`SharedArrayBuffer`**. Quando o contexto é *cross-origin isolated*, os typed arrays
+colunares são alocados sobre `SharedArrayBuffer`; o structured clone do `postMessage`
+**compartilha** essa memória por referência (não copia SAB), então main e worker leem
+os mesmos bytes sem duplicar a base. O worker é **read-only** → sem write race.
 
-**Critérios de aceite:**
-- Pico de memória durante `UPDATE_CSV_STORE` não duplica a base.
-- Simulação/overlay/analytics continuam corretos (GATE + analytics passam).
-- Sem *race*: nenhum acesso a buffer neutralizado (transferido) do lado errado.
+**O que foi feito:**
+- `src/columnar.js`: `sharedBuffersAvailable()` (feature-detect por
+  `crossOriginIsolated`), alocadores `allocF64`/`allocI32` (SAB quando disponível,
+  senão `ArrayBuffer` comum) usados em `buildColumnar` e `deserializeColumns`,
+  `isSharedColumnar(csv)` e `buildCsvStoreMessage(csvStore)` — **fonte única** do
+  payload/transfer do `UPDATE_CSV_STORE`.
+- **Ownership:** a lista de *transferables* do `postMessage` é **sempre vazia**, de
+  propósito. Com SAB, compartilha-se (SAB nunca é transferido/neutralizado); sem SAB,
+  deixa-se o clone copiar (a main ainda precisa dos buffers). Em **nenhum** caso um
+  buffer da base é neutralizado — a garantia "nada de acessar buffer neutralizado" vale
+  por construção.
+- `src/App.jsx`: o effect de `UPDATE_CSV_STORE` usa `buildCsvStoreMessage` +
+  `postMessage(payload, transfer)`.
+- `vite.config.js`: headers `Cross-Origin-Opener-Policy: same-origin` +
+  `Cross-Origin-Embedder-Policy: require-corp` em `server`/`preview` para habilitar
+  `crossOriginIsolated` no app servido (todos os assets são bundlados/same-origin, então
+  require-corp não bloqueia nada).
+- **`ANALYTICS_RESULT`:** o dataset largo é um array de **objetos simples** (sem typed
+  arrays), então não há buffer a transferir — vetorizá-lo é otimização futura, fora do
+  escopo desta fase.
 
-**Pré-requisito:** Fase 1 concluída (precisa da base já em `ArrayBuffer`).
+**Degradação graciosa.** Fora de COI (release aberto via `file://`, browser sem os
+headers, ambiente de teste Node/jsdom) `sharedBuffersAvailable()` é `false`: cai em
+`ArrayBuffer` comum e o comportamento é o da Fase 1 (clone via structured clone) —
+correto, só sem o ganho de memória.
+
+**Critérios de aceite (atendidos):**
+- Pico de memória durante `UPDATE_CSV_STORE` não duplica a base (com SAB, memória
+  compartilhada por referência). ✅
+- Simulação/overlay/analytics continuam corretos — GATE (`inferenceCascade`) +
+  `analytics` + `columnar` passam, incluindo `runSimulation` sobre colunas SAB-backed. ✅
+- Sem *race*: nenhum buffer da base é transferido/neutralizado; worker é read-only. ✅
+
+**Testes:** `tests/columnar.test.js` cobre `sharedBuffersAvailable`/alocação condizente,
+`runSimulation` sobre colunas SAB-backed (mesma FPD ≈ 40,06%) e
+`buildCsvStoreMessage` (transfer vazio + base íntegra/legível após montar a mensagem).
+
+**Pré-requisito:** Fase 1 concluída (base já em typed arrays).
 
 ---
 
