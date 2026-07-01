@@ -2,7 +2,9 @@
 cd /d "%~dp0"
 echo Iniciando o AppCredito Simulador...
 echo.
-start "" python -m http.server 8080
+rem serve.py adiciona os headers COOP/COEP -> cross-origin isolation ATIVO,
+rem habilitando o SharedArrayBuffer (a base nao e mais clonada pro worker).
+start "" python serve.py 8080
 timeout /t 2 /nobreak > nul
 start "" "http://localhost:8080"
 echo.
