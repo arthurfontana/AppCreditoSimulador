@@ -1,11 +1,12 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~10260 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~10670 linhas)
 - Sem CSS externo — tudo inline styles
 - SVG puro para o canvas; matrizes interativas via `foreignObject` (sem biblioteca de diagramas)
 - **Recharts** para gráficos na aba Dashboard (exceção pontual ao ADR-003 — ver `DEC-AW-001`)
-- Web Worker (`src/simulation.worker.js`, ~1327 linhas) para cálculos pesados fora da thread principal
+- Web Worker (`src/simulation.worker.js`, ~1357 linhas) para cálculos pesados fora da thread principal
+- **`src/columnar.js`**: módulo de armazenamento colunar do `csvStore` (otimização de memória — Fases 0, 1, 2)
 - **Vitest** para testes (`tests/*.test.js`, jsdom) — `npm test`
 
 ## O que é
@@ -16,11 +17,13 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ```
 AppCreditoSimulador/
 ├── src/
-│   ├── App.jsx                   # Componente único — ~10260 linhas
-│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~1327 linhas)
+│   ├── App.jsx                   # Componente único — ~10670 linhas
+│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~1357 linhas)
+│   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
 │   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget
+│   ├── columnar.test.js          # GATE colunar: accessor, round-trip projeto, SharedArrayBuffer
 │   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
 │   └── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
 ├── docs/
@@ -28,6 +31,7 @@ AppCreditoSimulador/
 │   └── wiki/                     # Documentação sincronizada com GitHub Wiki
 │       ├── Arquitetura.md
 │       ├── Epicos-*.md
+│       ├── Otimizacao-Memoria.md # Plano de otimização de memória para datasets grandes
 │       ├── Roadmap.md
 │       ├── Decisoes.md
 │       └── _Sidebar.md
@@ -156,12 +160,19 @@ AppCreditoSimulador/
 {
   name,          // nome do arquivo
   headers,       // string[] — inclui '__DECISAO_ORIGINAL' se asIsConfig configurado
-  rows,          // string[][] — última coluna é '__DECISAO_ORIGINAL' se configurado
+  // Formato colunar (Fase 1 — substituiu string[][]): typed arrays por coluna
+  columns,       // {[colName]: ColDef} — ver abaixo
+  rowCount,      // número de linhas (inteiro)
+  // NB: `rows: string[][]` não existe mais na forma nativa; aparece só em arquivos
+  // antigos (.credito.json pré-Fase 1) e é migrado por deserializeCsvStore()
   columnTypes,   // {[colName]: COL_TYPE}
   varTypes,      // {[colName]: 'categorical'|'ordinal'}
   asIsConfig,    // null | { col: string, mapping: {[value]: 'APROVADO'|'REPROVADO'|'IGNORAR'} }
   inferenceConfig, // { source:'columns'|'ref', keyMap:{[refKeyCol]:baseCol}, weightCol, weightMode:'propostas'|'aprovados', normalizeScore } — origem da inferência (ver Inferência de Negados)
 }
+// ColDef (em src/columnar.js):
+//   { kind: 'num', data: Float64Array }  — para colunas métricas (qty, qtdAltas, etc.)
+//   { kind: 'dict', dict: string[], codes: Int32Array }  — para dimensões/decisão
 ```
 
 ### Lens Rule
@@ -208,7 +219,7 @@ AppCreditoSimulador/
 - `fmtQty(n)`: formata número como inteiro, `k` ou `M`
 - `fmtPct(v)`: formata ratio como `"XX.XX%"` ou `"N/A"` quando `v === null`
 - `fmtMetricVal(v, unit)`: formata `qty` via `fmtQty`, demais como `XX.XX%` — usado no Analytics Workspace
-- `parseTemporalKey(str)`: converte valor de coluna temporal (ISO, formato BR, compacto, etc.) em milissegundos UTC para ordenação cronológica no eixo X dos gráficos
+- `parseTemporalKey(str)`: converte valor de coluna temporal (ISO, formato BR, compacto, **SAS `DDMONYYYY` como `10MAI2026`**, etc.) em milissegundos UTC para ordenação cronológica no eixo X dos gráficos. Suporta abreviações de mês em PT-BR (MAI, ABR, AGO, SET, OUT, DEZ, FEV) e EN.
 - `computeCellMetrics(shape, csvStore)`: agrega métricas do CSV por célula do Cineminha → `{[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, inadReal, inadInferida}}`
 - `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → array de pontos
 - `extractScenarios(frontier)`: extrai 4 pontos representativos → `{conservador, balanceado, melhorEficiencia, expansao}` onde `melhorEficiencia` é o joelho da curva
@@ -226,7 +237,7 @@ AppCreditoSimulador/
 - `pivotWidget(ds, config)`: pivot client-side genérico → `{state, data, series, metricDef, xCol, truncated}`; usado pelos gráficos do Analytics Workspace
 - `resolveKpiScenarios(scenarios, kpiA, kpiB)`: resolve os cenários Baseline (A) e Comparação (B) do KPI a partir dos ids salvos no `WidgetConfig`, com fallback retrocompatível (A=AS IS, B=1º canvas; DEC-AW-008)
 - `buildAnalyticsCSV(ds)` / `exportAnalyticsDatasetCSV(ds)`: serializa/baixa o dataset analítico largo como CSV (dimensões + métricas intrínsecas + uma coluna de decisão por cenário, incl. AS IS), com BOM e escape RFC 4180 — abrível no Excel (5C)
-- `computeWidgetMetric(rows, metricId, decisionCol)`: agrega 1 métrica sobre linhas do dataset largo, replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`)
+- `computeWidgetMetric(rows, metricId, decisionCol)`: agrega 1 métrica sobre linhas do dataset largo, replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`). Suporta `approvedAltasInfer` (∑ qtdAltasInfer sobre aprovados = Vol. Vendas Inferidas)
 
 ### Padrão de refs
 Toda variável de estado crítica tem um ref espelho para uso em event listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atualizado imediatamente.
@@ -345,7 +356,7 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   - **`AnalyticsWidget`**: card com título editável, botão remover, barra de 3 `FieldWell` (Eixo X, Métrica, Série) e `LineChart`. Pivot memoizado por `[analyticsDataset, xDimension, metric, serieBy]`.
   - **`FieldWell`**: drop zone (valida `kind` via `accept`) + `<select>` fallback. Destaca ao arrastar.
   - **`pivotWidget(ds, config)`**: `serieBy` aceita `__cenario__` (AS IS vs Simulado), `__none__` (linha única Simulado) ou nome de dimensão (série por valores distintos, teto `MAX_SERIES=12`). Eixo X temporal ordena via `parseTemporalKey`; senão numérico/A-Z.
-  - **Métricas disponíveis**: `approvalRate`, `inadReal`, `inadInferida` (pct), `qty`, `approvedQty` (qty).
+  - **Métricas disponíveis**: `approvalRate`, `inadReal`, `inadInferida` (pct), `qty`, `approvedQty`, `approvedAltasInfer` (qty — Vol. Vendas Inferidas).
   - **Tabs de navegação**: barra inferior esquerda com "Canvas" e "Dashboard" — padrão ao carregar é Canvas.
 - **Sessão 3** (entregue): tipos de gráfico — barras, barras 100% empilhadas e KPI card.
   - **`WidgetConfig.type`**: `"line" | "bar" | "bar100" | "kpi"` — seletor segmentado (📈/📊/🧱/🔢) no header do `AnalyticsWidget`; handler `changeType(id, type)` em `AnalysisTab`.
@@ -604,7 +615,7 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"2.1", kind:"credito-project", generatedAt,
+  Monta o snapshot `{schemaVersion:"2.2", kind:"credito-project", generatedAt,
   activeTab, viewport, panelCollapsed, canvases, activeCanvasId, csvStore,
   inferenceRef, analyticsLayout, analyticsGroupings, analyticsPageFilters,
   cinemaLibrary, businessWidget, preferences}`.
@@ -612,6 +623,10 @@ parou.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
   (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
   um Decision Lens recém-criado) não entram no arquivo.**
+  O `csvStore` é serializado via `serializeCsvStore()` (typed arrays → arrays planos)
+  e restaurado via `deserializeCsvStore()` (arrays planos → typed arrays; também aceita
+  o formato legado `rows: string[][]` de projetos anteriores à Fase 1, migrando-os
+  transparentemente).
 - **`saveProject()`** (async): serializa `buildProjectPayload()` e usa o **"Salvar
   como" nativo** (File System Access API `window.showSaveFilePicker`) quando
   disponível — o usuário escolhe pasta e nome, e a escrita via stream (`createWritable`)
@@ -630,6 +645,11 @@ parou.
   `inferenceRef.levels` é `{[nivel]: Map}` — JSON não serializa `Map`, então converte
   para arrays de entradas na exportação e reconstrói os `Map`s na carga. Round-trip
   coberto em `tests/inferenceRef.test.js`.
+- **`serializeCsvStore` / `deserializeCsvStore`** (em `src/columnar.js`, importados em `App.jsx`):
+  Typed arrays (`Float64Array`, `Int32Array`) não são JSON nativo — `serializeCsvStore`
+  converte-os para arrays planos e `deserializeCsvStore` reconstrói os typed arrays
+  (inclusive migrando o formato legado `rows: string[][]` para colunar). Round-trip
+  coberto em `tests/columnar.test.js`.
 
 Difere do **Exportar/Importar Fluxo** (seção Fluxo), que salva só o canvas ativo
 (shapes/conns + opcionalmente csvStore) — o Projeto salva *tudo* (todas as abas,
@@ -652,8 +672,10 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-4. Se o estado for um `Map`/`Set`/tipo não-JSON, adicionar serialize/deserialize
-   dedicados (padrão do `serializeInferenceRef`) e cobrir o round-trip em teste.
+   Versão atual: **`"2.2"`** (bumped na Fase 1 de otimização de memória — `csvStore` colunar).
+4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
+   adicionar serialize/deserialize dedicados (padrão de `serializeInferenceRef` e
+   `serializeCsvStore`/`deserializeCsvStore`) e cobrir o round-trip em teste.
 5. Se também deve sobreviver a reload na mesma sessão, adicionar à
    auto-persistência de `sessionStorage` (ver seção abaixo).
 
@@ -704,6 +726,48 @@ hasHeader, onProgress)` fatia o CSV em lotes, cede a thread principal a cada lot
   (`reading`); `parseCSVAsync` cobre o parse (`parsing`).
 - Usado em `onFileChange` (import inicial) e `reparseWizardFile` (recarga no wizard) —
   ambos mostram o mesmo modal.
+- **Fase 0 (otimização de memória)**: `parseCSVAsync` NÃO materializa mais
+  `text.split(/\r?\n/)` inteiro. Varre o texto por índice (`indexOf('\n')`) e fatia
+  cada linha sob demanda — elimina o pico de RAM do parse (~260MB em bases grandes).
+
+## Otimização de Memória — `src/columnar.js` (Fases 0–3)
+
+Para bases sumarizadas por dia (~1MM linhas / ~130MB), a arquitetura anterior
+mantinha várias cópias completas em `string` na RAM. Ver o plano completo em
+`docs/wiki/Otimizacao-Memoria.md`. **Fases 0, 1, 2, 3 entregues.**
+
+### Fase 0 — Parse sem cópia intermediária
+`parseCSVAsync` varre o texto por índice em vez de `split(/\r?\n/)`. Sem o array
+intermediário de 1MM strings, o pico de RAM do parse cai de ~3× para ~1× o tamanho
+da base.
+
+### Fase 1 — Armazenamento colunar no `csvStore`
+`src/columnar.js` define a estrutura vetorizada e os accessors:
+- Colunas métricas (`METRIC_COL_TYPES = qty, qtdAltas, qtdAltasInfer, inadReal, inadInferida`) → `Float64Array` (números prontos, sem `parseFloat` por tick).
+- Dimensões/decisão/ID → *dictionary encoding* `{dict: string[], codes: Int32Array}` — o dicionário já é a lista de distintos.
+- **Accessors** (uso obrigatório em hot paths — não acessar `csv.rows[r][c]` diretamente):
+  - `rowCount(csv)` — número de linhas
+  - `cellStr(csv, r, c)` — equivalente exato a `row[c]` no legado
+  - `cellNum(csv, r, c)` — valor numérico (retorna `NaN`, não `0`; o call site aplica `|| 0`)
+  - `getRow(csv, r)` — materializa uma linha como `string[]` (uso pontual)
+  - `materializeRows(csv)` — materializa tudo (evitar em hot paths)
+  - `distinctColValues(csv, c)` — distintos não-vazios (O(distintos) em modo colunar)
+- **Persistência**: `serializeCsvStore(store)` / `deserializeCsvStore(store)` — typed arrays ↔ arrays planos para JSON. `deserializeCsvStore` também aceita o formato legado `rows: string[][]` (migração transparente de projetos antigos).
+- **GATE**: `tests/columnar.test.js` verifica equivalência célula a célula com o legado, round-trip de projeto e runSimulation sobre base colunar (mesma FPD ≈ 40,06%).
+
+### Fase 2 — Transferência sem cópia para o worker via `SharedArrayBuffer`
+Quando o contexto é *cross-origin isolated* (`crossOriginIsolated === true`), os
+typed arrays são alocados sobre `SharedArrayBuffer` — o structured clone do
+`postMessage` compartilha a memória por referência em vez de copiar.
+- `sharedBuffersAvailable()` — feature-detect (retorna `false` em `file://`, Node/jsdom, browser sem COI).
+- `buildCsvStoreMessage(csvStore)` — monta `{payload, transfer:[]}`. A lista de transfer é **sempre vazia** (SAB nunca é transferido; `ArrayBuffer` sem COI deixa o clone copiar — a main ainda precisa dos buffers).
+- `vite.config.js`: headers `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp` em `server`/`preview` para habilitar COI.
+- **Ownership**: nenhum buffer da base é neutralizado. Worker é read-only, sem write race.
+
+### Fase 3 — `COMPUTE_ANALYTICS_DATASET` só na aba Dashboard
+O effect que dispara `COMPUTE_ANALYTICS_DATASET` agora só posta a mensagem quando
+`activeTab === 'analysis'`. Editar o canvas na aba Canvas não materializa mais o
+dataset largo (array de objetos simples — ainda não é SAB) a cada tick.
 
 ## Inferência de Negados (Tabela de Referência)
 
@@ -941,7 +1005,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/claude-md-docs-7evqu0`
+`claude/claude-md-docs-7xvd3y`
 
 ## Roadmap futuro (não implementado)
 
