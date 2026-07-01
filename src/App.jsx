@@ -304,13 +304,19 @@ function parseCSV(text, delimiter, hasHeader) {
 
 // Versão assíncrona/chunked de parseCSV — cede a thread principal a cada lote
 // de linhas (setTimeout 0) para não congelar a UI em bases grandes, e reporta
-// progresso via onProgress(linhasProcessadas, total). Usada no carregamento
-// de CSV (onFileChange/reparseWizardFile) para alimentar o modal de progresso.
+// progresso via onProgress(offset, total) (fração consumida do texto). Usada no
+// carregamento de CSV (onFileChange/reparseWizardFile) para alimentar o modal
+// de progresso.
+//
+// Otimização de memória (Fase 0): NÃO materializa `text.split(/\r?\n/)` — esse
+// array de dezenas de milhões de strings dobrava o pico de RAM do parse. Aqui o
+// texto é varrido por índice (`indexOf('\n')`) e cada linha é fatiada/parseada
+// sob demanda, alimentando `rows` diretamente. O único array grande que
+// sobrevive é o próprio `rows` (a saída). A referência ao `text` cru vive só na
+// closure enquanto o parse roda e é solta assim que a Promise resolve.
 function parseCSVAsync(text, delimiter, hasHeader, onProgress) {
   return new Promise((resolve, reject) => {
     try {
-      const lines = text.split(/\r?\n/).filter(l => l.trim());
-      if (!lines.length) { resolve({ headers: [], rows: [] }); return; }
       const split = (line) => {
         const res = []; let f = "", q = false;
         for (let i = 0; i < line.length; i++) {
@@ -322,19 +328,48 @@ function parseCSVAsync(text, delimiter, hasHeader, onProgress) {
         res.push(f.trim());
         return res;
       };
-      const first = split(lines[0]);
+      const len = text.length;
+      let pos = 0;
+      // Avança até a próxima linha não-vazia a partir de `pos`, sem alocar o
+      // array inteiro de linhas. Equivale a `split(/\r?\n/).filter(l=>l.trim())`:
+      // quebra só em '\n', tira um '\r' final (suporta CRLF) e pula linhas em
+      // branco. Retorna o conteúdo cru da linha ou null no fim do texto.
+      const nextLine = () => {
+        while (pos < len) {
+          let nl = text.indexOf('\n', pos);
+          if (nl === -1) nl = len;
+          const start = pos;
+          let end = nl;
+          if (end > start && text.charCodeAt(end - 1) === 13) end--; // \r final
+          pos = nl + 1;
+          if (end > start) {
+            const line = text.slice(start, end);
+            if (line.trim()) return line;
+          }
+        }
+        return null;
+      };
+
+      const firstLine = nextLine();
+      if (firstLine === null) { resolve({ headers: [], rows: [] }); return; }
+      const first = split(firstLine);
       const headers = hasHeader ? first : first.map((_,i)=>`Coluna ${i+1}`);
-      const dataLines = hasHeader ? lines.slice(1) : lines;
-      const total = dataLines.length;
-      const rows = new Array(total);
+      const rows = [];
+      if (!hasHeader) rows.push(first); // sem cabeçalho, a 1ª linha também é dado
+
       const CHUNK = 3000;
-      let i = 0;
+      let finished = false;
       const step = () => {
-        const end = Math.min(i + CHUNK, total);
-        for (; i < end; i++) rows[i] = split(dataLines[i]);
-        if (onProgress) onProgress(i, total);
-        if (i < total) setTimeout(step, 0);
-        else resolve({ headers, rows });
+        let count = 0;
+        while (count < CHUNK) {
+          const line = nextLine();
+          if (line === null) { finished = true; break; }
+          rows.push(split(line));
+          count++;
+        }
+        if (onProgress) onProgress(finished ? len : Math.min(pos, len), len);
+        if (finished) resolve({ headers, rows });
+        else setTimeout(step, 0);
       };
       step();
     } catch (err) { reject(err); }
