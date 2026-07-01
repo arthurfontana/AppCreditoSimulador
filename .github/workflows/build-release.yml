@@ -84,14 +84,22 @@ jobs:
 
       - name: Publicar GitHub Release (latest)
         run: |
-          # Remove release e tag existentes para recriar sempre no mesmo link
-          gh release delete latest --yes 2>/dev/null || true
+          # Remove release e tag existentes (remota E local) para recriar sempre no
+          # mesmo link. Deletar só a remota deixava a tag local vinda do checkout
+          # (fetch-depth: 0) órfã, e o `gh release create` recusava com
+          # "tag latest exists locally but has not been pushed" — causa do padrão
+          # de falha alternada a cada push.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
           git push origin :refs/tags/latest 2>/dev/null || true
+          git tag -d latest 2>/dev/null || true
 
           COMMIT_SHORT=$(git rev-parse --short HEAD)
           BUILD_DATE=$(date -u '+%d/%m/%Y %H:%M UTC')
 
+          # --target ancora a tag no commit atual (HEAD já é o commit da release),
+          # tornando a criação independente de qualquer tag local remanescente.
           gh release create latest \
+            --target "$(git rev-parse HEAD)" \
             --title "Build #${BUILD_NUM} · ${BUILD_DATE}" \
             --notes "## AppCreditoSimulador — distribuição local
 
