@@ -1225,6 +1225,7 @@ export function computeWidgetMetric(rows, metricId, decisionCol) {
     case "inadInferida": return altasInf > 0 ? (inadI / altasInf) * 100 : (appr > 0 ? (inadI / appr) * 100 : null);
     case "qty":          return total;
     case "approvedQty":  return appr;
+    case "approvedAltasInfer": return altasInf;
     default:             return null;
   }
 }

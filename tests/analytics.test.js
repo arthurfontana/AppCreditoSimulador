@@ -165,6 +165,15 @@ describe('computeWidgetMetric', () => {
     // AS IS aprovados: rows 1,3 → (4+3)/(40+30) = 10%
     expect(computeWidgetMetric(ds.rows, 'inadReal', '__DECISAO_AS_IS')).toBeCloseTo(10, 4);
   });
+  it('approvedAltasInfer = ∑qtdAltasInfer só sobre aprovados (vendas inferidas da política)', () => {
+    const rows = [
+      { qty: 100, qtdAltasInfer: 35, __DECISAO_AS_IS: 'APROVADO' },
+      { qty: 50,  qtdAltasInfer: 12, __DECISAO_AS_IS: 'REPROVADO' },
+      { qty: 80,  qtdAltasInfer: 20, __DECISAO_AS_IS: 'APROVADO' },
+    ];
+    // só as linhas aprovadas contribuem: 35 + 20 = 55
+    expect(computeWidgetMetric(rows, 'approvedAltasInfer', '__DECISAO_AS_IS')).toBe(55);
+  });
   it('retorna null quando o denominador é zero', () => {
     const rows = [{ qty: 10, __DECISAO_AS_IS: 'REPROVADO' }];
     expect(computeWidgetMetric(rows, 'approvalRate', '__DECISAO_AS_IS')).toBe(0); // total>0, appr=0 → 0
