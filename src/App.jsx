@@ -3044,11 +3044,15 @@ export default function App() {
   const analyticsDebounceRef = useRef(null);
   useEffect(() => {
     clearTimeout(analyticsDebounceRef.current);
+    // Dataset largo é caro (1 objeto JS por linha × cenário, clonado do worker) — só
+    // vale recomputar enquanto a aba Dashboard está aberta. Editar o canvas com a
+    // aba Canvas ativa não precisa manter esse dataset em dia a cada 300ms.
+    if (activeTab !== 'analysis') return;
     analyticsDebounceRef.current = setTimeout(() => {
       workerRef.current?.postMessage({ type: 'COMPUTE_ANALYTICS_DATASET', canvases: buildAnalyticsCanvasInputs() });
     }, 300);
     return () => clearTimeout(analyticsDebounceRef.current);
-  }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs, inferenceRef]);
+  }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs, inferenceRef, activeTab]);
 
   // Persiste layout do dashboard na sessionStorage para sobreviver a reloads dentro da mesma sessão.
   useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
