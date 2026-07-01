@@ -792,11 +792,15 @@ As Fases 0–3 enxugaram o **estado permanente** (`csvStore` colunar ~100MB), ma
    Ver "Analytics Workspace / Formato colunar do dataset largo". GATE `analytics.test.js`
    revalidado sobre o formato colunar.
 
-> Nota operacional: o `release/iniciar.bat` serve via `python -m http.server`, que **não**
-> manda os headers COOP/COEP — logo `crossOriginIsolated === false` e o SAB da Fase 2 não
-> ativa nesse modo (a base é clonada, ~200MB, tolerável). O dataset analítico da Fase 4
-> **não** depende de COI: usa `ArrayBuffer` transferível, então o ganho vale mesmo no
-> release aberto por `iniciar.bat`.
+> Nota operacional: o `release/iniciar.bat` serve via `python serve.py` (não mais
+> `python -m http.server`). O `serve.py` é um `SimpleHTTPRequestHandler` que injeta os
+> headers `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy:
+> require-corp` — logo `crossOriginIsolated === true` e o SAB da Fase 2 **ativa** também
+> no release local (a base deixa de ser clonada pro worker). Como todos os assets são
+> bundlados na mesma origem, `require-corp` não bloqueia nada. O `build-release.yml`
+> preserva `serve.py` junto do `iniciar.bat` ao recopiar o `dist/`. O dataset analítico
+> da Fase 4 **não** depende de COI (usa `ArrayBuffer` transferível), então já valia
+> mesmo antes; a mudança do `serve.py` beneficia a base colunar (Fase 2).
 
 ## Inferência de Negados (Tabela de Referência)
 
