@@ -1176,7 +1176,19 @@ function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations, csvStore)
   return overlay;
 }
 
-// Dataset analítico largo (DEC-AW-003) com N cenários (DEC-AW-004/007).
+// Campos numéricos (métricas intrínsecas) do dataset largo — viram Float64Array.
+const ANALYTICS_NUM_FIELDS = ['qty', 'qtdAltas', 'inadRRaw', 'qtdAltasInfer', 'inadIRaw'];
+
+// Dataset analítico largo (DEC-AW-003) com N cenários (DEC-AW-004/007), em formato
+// COLUNAR (otimização de memória — Fase 4). Em vez de materializar 1 objeto por linha
+// (~1MM numa base diária, clonado inteiro pra main thread e re-copiado a cada
+// agrupamento — fonte de OOM ao abrir a aba Dashboard), emite:
+//   { rowCount, columns: {[nome]: ColDef}, dimensions, temporalColumns, metrics, scenarios }
+// ColDef: dimensões/decisões → dictionary encoding { kind:'dict', dict, codes:Int32Array };
+//         métricas → { kind:'num', data:Float64Array }. Os ArrayBuffers das colunas são
+// TRANSFERIDOS pra main (zero-cópia, sem depender de crossOriginIsolated) — ver o handler
+// de COMPUTE_ANALYTICS_DATASET. A main lê tudo por accessor (awColStr/awColNum), sem nunca
+// reconstruir objetos por-linha.
 // canvasInputs: [{id, nome, shapes, conns, lensPopulations}] — uma aba marcada por cenário.
 // Métricas intrínsecas vêm do agrupamento (uma vez); cada canvas emite sua coluna de decisão,
 // unidas por (csvId, rowIdx) — datasets compartilhados ⇒ agrupamentos idênticos entre cenários.
@@ -1194,14 +1206,47 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
     overlay: cachedCanvasOverlay(ci.id, ci.shapes, ci.conns, ci.lensPopulations, csvStore),
   }));
 
+  // ── Passo 1: união de dimensões + total de linhas (barato — só headers/tipos) ──
   const dimensionSet = new Set();
   const temporalSet = new Set();
-  const rows = [];
-
+  const csvList = [];
+  let totalN = 0;
   for (const [csvId, csv] of Object.entries(csvStore)) {
     const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
     if (dOrigIdx < 0) continue; // só datasets com AS IS configurado são analíticos
     const types = csv.columnTypes || {};
+    const dimCols = csv.headers.filter(h =>
+      h !== '__DECISAO_ORIGINAL' && !ANALYTICS_METRIC_TYPES.has(types[h] ?? '')
+    );
+    for (const h of dimCols) {
+      dimensionSet.add(h);
+      if ((types[h] ?? '') === 'temporal') temporalSet.add(h);
+    }
+    const n = rowCount(csv);
+    csvList.push({ csvId, csv, dOrigIdx, types, dimCols, n });
+    totalN += n;
+  }
+  if (totalN === 0) return null;
+
+  const dimNames = [...dimensionSet];
+  const decisionColNames = ['__DECISAO_AS_IS', ...canvasScenarios.map(cs => cs.decisionCol)];
+
+  // ── Passo 2: aloca colunas e preenche por índice global ──
+  const numData = {};
+  for (const f of ANALYTICS_NUM_FIELDS) numData[f] = new Float64Array(totalN);
+  const enc = {}; // dict encoders: nome → {dict, dictIndex:Map, codes:Int32Array}
+  for (const name of [...dimNames, ...decisionColNames]) {
+    enc[name] = { dict: [], dictIndex: new Map(), codes: new Int32Array(totalN) };
+  }
+  const putCode = (name, w, val) => {
+    const e = enc[name];
+    let c = e.dictIndex.get(val);
+    if (c === undefined) { c = e.dict.length; e.dict.push(val); e.dictIndex.set(val, c); }
+    e.codes[w] = c;
+  };
+
+  let w = 0;
+  for (const { csvId, csv, dOrigIdx, types, dimCols, n } of csvList) {
     const getIdx = (type) => {
       const col = Object.entries(types).find(([, t]) => t === type)?.[0];
       return col != null ? csv.headers.indexOf(col) : -1;
@@ -1212,45 +1257,42 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
     const inadRIdx      = getIdx('inadReal');
     const inadIIdx      = getIdx('inadInferida');
     const infResolve    = buildInferenceResolver(csv, inferenceRef);
+    const dimIdxMap = {};
+    for (const h of dimCols) dimIdxMap[h] = csv.headers.indexOf(h);
 
-    // Dimensions: every non-metric, non-internal column.
-    const dimCols = csv.headers.filter(h =>
-      h !== '__DECISAO_ORIGINAL' && !ANALYTICS_METRIC_TYPES.has(types[h] ?? '')
-    );
-    for (const h of dimCols) {
-      dimensionSet.add(h);
-      if ((types[h] ?? '') === 'temporal') temporalSet.add(h);
-    }
-    const dimIdx = dimCols.map(h => csv.headers.indexOf(h));
-
-    const nRows = rowCount(csv);
-    for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
-      const out = {};
-      for (let i = 0; i < dimCols.length; i++) out[dimCols[i]] = cellStr(csv, rowIdx, dimIdx[i]) ?? '';
-      out.qty           = qtyIdx        >= 0 ? (cellNum(csv, rowIdx, qtyIdx)        || 0) : 1;
-      out.qtdAltas      = altasIdx      >= 0 ? (cellNum(csv, rowIdx, altasIdx)      || 0) : 0;
-      out.inadRRaw      = inadRIdx      >= 0 ? (cellNum(csv, rowIdx, inadRIdx)      || 0) : 0;
-      if (infResolve) { const r = infResolve(csv, rowIdx); out.qtdAltasInfer = r.altasInfer; out.inadIRaw = r.inadIRaw; }
+    for (let rowIdx = 0; rowIdx < n; rowIdx++, w++) {
+      for (const h of dimNames) {
+        const ci = dimIdxMap[h];
+        putCode(h, w, (ci != null && ci >= 0) ? (cellStr(csv, rowIdx, ci) ?? '') : '');
+      }
+      numData.qty[w]      = qtyIdx   >= 0 ? (cellNum(csv, rowIdx, qtyIdx)   || 0) : 1;
+      numData.qtdAltas[w] = altasIdx >= 0 ? (cellNum(csv, rowIdx, altasIdx) || 0) : 0;
+      numData.inadRRaw[w] = inadRIdx >= 0 ? (cellNum(csv, rowIdx, inadRIdx) || 0) : 0;
+      if (infResolve) { const r = infResolve(csv, rowIdx); numData.qtdAltasInfer[w] = r.altasInfer; numData.inadIRaw[w] = r.inadIRaw; }
       else {
-        out.qtdAltasInfer = altasInferIdx >= 0 ? (cellNum(csv, rowIdx, altasInferIdx) || 0) : 0;
-        out.inadIRaw      = inadIIdx      >= 0 ? (cellNum(csv, rowIdx, inadIIdx)      || 0) : 0;
+        numData.qtdAltasInfer[w] = altasInferIdx >= 0 ? (cellNum(csv, rowIdx, altasInferIdx) || 0) : 0;
+        numData.inadIRaw[w]      = inadIIdx      >= 0 ? (cellNum(csv, rowIdx, inadIIdx)      || 0) : 0;
       }
       const asIs = cellStr(csv, rowIdx, dOrigIdx) ?? '';
-      out.__DECISAO_AS_IS = asIs; // AS IS único e global
+      putCode('__DECISAO_AS_IS', w, asIs); // AS IS único e global
       // Join por (csvId, rowIdx): cada canvas marcado contribui sua coluna de decisão.
       for (const cs of canvasScenarios) {
         const rd = cs.overlay?.[csvId]?.rowDecisions?.[rowIdx];
-        out[cs.decisionCol] = rd ? rd.decisaoSimulada : asIs;
+        putCode(cs.decisionCol, w, rd ? rd.decisaoSimulada : asIs);
       }
-      rows.push(out);
     }
   }
 
-  if (rows.length === 0) return null;
+  const columns = {};
+  for (const name of [...dimNames, ...decisionColNames]) {
+    columns[name] = { kind: 'dict', dict: enc[name].dict, codes: enc[name].codes };
+  }
+  for (const f of ANALYTICS_NUM_FIELDS) columns[f] = { kind: 'num', data: numData[f] };
 
   return {
-    rows,
-    dimensions: [...dimensionSet],
+    rowCount: totalN,
+    columns,
+    dimensions: dimNames,
     temporalColumns: [...temporalSet],
     metrics: [
       { id: 'approvalRate', label: 'Taxa de Aprovação', unit: 'pct' },
@@ -1265,6 +1307,20 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
       ...canvasScenarios.map(cs => ({ id: cs.id, nome: cs.nome, decisionCol: cs.decisionCol })),
     ],
   };
+}
+
+// Lista de ArrayBuffers das colunas do dataset largo — transferíveis (zero-cópia) no
+// postMessage de ANALYTICS_RESULT. Cada coluna tem seu próprio buffer (nunca compartilhado),
+// então a lista é livre de duplicatas. Após a transferência os typed arrays do worker ficam
+// neutralizados — sem problema, o dataset é descartado (não é retido no worker).
+function analyticsDatasetTransfer(dataset) {
+  if (!dataset || !dataset.columns) return [];
+  const transfer = [];
+  for (const col of Object.values(dataset.columns)) {
+    const buf = col.kind === 'num' ? col.data?.buffer : col.codes?.buffer;
+    if (buf) transfer.push(buf);
+  }
+  return transfer;
 }
 
 // ── Worker state ─────────────────────────────────────────────────────────────
@@ -1296,10 +1352,17 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_OVERLAY') {
+    // `overlay` (rowDecisions: 1 objeto por linha, ~1MM numa base diária) é usado só
+    // aqui dentro por computeIncrementalResult e descartado em seguida. Ele NÃO é
+    // enviado à main thread: a main só consome `incrementalResult` (agregados) e
+    // `nodeArrivals`. Antes o overlay ia no postMessage (structured clone = +1MM
+    // objetos na main) e era guardado num estado que ninguém lia — fonte de OOM ao
+    // editar o canvas com base grande. O caminho do Dashboard tem seu próprio overlay
+    // memoizado (cachedCanvasOverlay), independente deste.
     const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
     const incrementalResult = computeIncrementalResult(overlay, workerCsvStore, workerInferenceRef);
     const nodeArrivals = computeNodeArrivals(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
-    self.postMessage({ type: 'OVERLAY_RESULT', overlay, incrementalResult, nodeArrivals });
+    self.postMessage({ type: 'OVERLAY_RESULT', incrementalResult, nodeArrivals });
     return;
   }
 
@@ -1316,7 +1379,9 @@ function handleMessage(e) {
 
   if (type === 'COMPUTE_ANALYTICS_DATASET') {
     const dataset = computeAnalyticsDataset(e.data.canvases, workerCsvStore, workerInferenceRef);
-    self.postMessage({ type: 'ANALYTICS_RESULT', dataset });
+    // Transfere os ArrayBuffers das colunas (zero-cópia) — o dataset largo não é retido
+    // no worker, então neutralizá-los aqui é seguro e evita a cópia do structured clone.
+    self.postMessage({ type: 'ANALYTICS_RESULT', dataset }, analyticsDatasetTransfer(dataset));
     return;
   }
 

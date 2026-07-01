@@ -4,8 +4,13 @@ Plano de engenharia para permitir carregar bases sumarizadas **por dia** com
 ~1MM de linhas / ~130MB sem estourar a memória da aba do Chrome
 (erro *"Out of memory"*).
 
-> **Status:** Fases 0, 1, 2 e 3 **entregues**. Dividido em fases independentes e
+> **Status:** Fases 0, 1, 2, 3 e 4 **entregues**. Dividido em fases independentes e
 > incrementais. Cada fase é entregável sozinha e verificável contra a suíte de testes.
+>
+> **Fase 4 é a que fechou o OOM na prática:** as Fases 0–3 enxugaram o *estado
+> permanente* (`csvStore` colunar), mas o "Out of memory" vinha de **picos transitórios
+> por-linha** — o overlay do Canvas clonado pra main e o dataset analítico largo como
+> array de 1MM objetos. Ver Fase 4 abaixo.
 
 ---
 
@@ -229,9 +234,63 @@ dispara mais o worker nem a cópia de `groupedDataset`.
   `activeTab`).
 - Editar o canvas com a aba Canvas ativa não dispara `COMPUTE_ANALYTICS_DATASET`.
 
-**Não faz parte:** vetorizar o dataset largo em si (typed arrays) — isso reduziria
-ainda mais o pico quando a aba Dashboard *está* aberta; continua como otimização
-futura (ver nota da Fase 2).
+**Não faz parte:** vetorizar o dataset largo em si (typed arrays) — feito na **Fase 4**.
+
+---
+
+## Fase 4 — matar os picos transitórios por-linha ✅ (entregue)
+
+**Diagnóstico:** com Fases 0–3 entregues o `csvStore` já era colunar (~100MB) e o
+"Out of memory" **persistia**, porque o pico não estava no estado permanente — estava
+em **duas estruturas por-linha (~1MM objetos) materializadas a cada tick**, nenhuma
+tocada pelas fases anteriores. Os dois momentos batiam com o relato do usuário
+(Dashboard e edição do Canvas):
+
+### 4a — Overlay do Canvas não é mais clonado pra main
+
+`COMPUTE_OVERLAY` rodava `computeSimulatedDecisions`, que aloca `rowDecisions =
+new Array(nRows)` (1 objeto por linha), e enviava o `overlay` inteiro de volta pela
+`postMessage`. O structured clone materializava **outra** cópia de ~1MM objetos na main
+thread, guardada no estado `simulationOverlay` — que **não era lido em lugar nenhum**
+(o `exportDiagnosticCSV` já nem o recebia). A cada edição do canvas com base grande,
++2×1MM objetos.
+
+- **Correção:** o worker calcula o `incrementalResult` localmente (a partir do overlay
+  transitório) e **descarta** o overlay; `OVERLAY_RESULT` passa a ser
+  `{incrementalResult, nodeArrivals}`. O estado `simulationOverlay` foi **removido**.
+- **Zero mudança de matemática:** o `incrementalResult` é computado exatamente como
+  antes. O caminho do Dashboard tem seu próprio overlay memoizado
+  (`cachedCanvasOverlay`), intocado.
+
+### 4b — Dataset analítico largo vetorizado (colunar) + buffers transferidos
+
+`computeAnalyticsDataset` materializava **1 objeto JS por linha** (~1MM, ×N cenários),
+clonado pra main via `ANALYTICS_RESULT` e **recopiado** por `applyGroupingsToDataset`
+(`ds.rows.map(r => ({...r}))`) sempre que havia agrupamento. Estourava ao abrir a aba
+Dashboard.
+
+- **Correção — formato colunar:** o dataset vira
+  `{rowCount, columns:{[nome]:ColDef}, activeRows?, dimensions, temporalColumns, metrics, scenarios}`,
+  com `ColDef` = dict encoding (dimensões/decisões) ou `Float64Array` (métricas).
+- **Transferência zero-cópia:** os `ArrayBuffer`s das colunas são **transferidos** no
+  `postMessage` do `ANALYTICS_RESULT` (o worker descarta o dataset após enviar). Não
+  depende de `crossOriginIsolated` — funciona no release aberto por `iniciar.bat`.
+- **Consumidores por índice:** `pivotWidget`, `computeWidgetMetric`, filtros,
+  `distinctDimValues`, `applyGroupingsToDataset` e `buildAnalyticsCSV` foram reescritos
+  para iterar por índice via accessors `awColStr`/`awColNum` — nenhum reconstrói objetos
+  por-linha. Agrupamentos **adicionam 1 coluna dict** (~4MB/1MM) em vez de copiar as
+  linhas; filtros produzem uma máscara `activeRows` (`Int32Array`) em vez de subarrays.
+
+**Critérios de aceite (atendidos):**
+- Editar o canvas com base grande não retém mais o overlay por-linha na main. ✅
+- Abrir a aba Dashboard não materializa mais 1MM objetos (worker + main). ✅
+- GATE numérico: `tests/analytics.test.js` revalidado sobre o formato colunar (mesmos
+  valores de `computeWidgetMetric`/`pivotWidget`/`buildAnalyticsCSV`/agrupamentos);
+  `inferenceCascade`/`columnar`/`inferenceRef` inalterados. `npm test` verde (65/65).
+
+**Não faz parte:** alocar o dataset analítico sobre `SharedArrayBuffer` (a transferência
+já resolve a cópia); servir o `release/` com COOP/COEP para reativar o SAB da base
+(Fase 2) — melhoria operacional independente.
 
 ---
 

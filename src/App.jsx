@@ -851,6 +851,24 @@ function exportDiagnosticCSV(shapes, conns, csvStore) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
+// ── Accessors do dataset analítico largo (formato COLUNAR — Otimização de Memória Fase 4) ──
+// O dataset largo deixou de ser um array de 1MM objetos e virou colunar:
+//   ds = { rowCount, columns:{[nome]:ColDef}, activeRows?:Int32Array|null, dimensions,
+//          temporalColumns, metrics, scenarios, dimensionOrders?, groupedDimensions? }
+// ColDef: {kind:'dict', dict:string[], codes:Int32Array} | {kind:'num', data:Float64Array}.
+// `activeRows` = subconjunto de linhas após filtros (null/ausente = todas). Toda leitura por
+// linha passa por estes accessors — nenhum consumidor reconstrói objetos por-linha.
+function awColStr(col, r) {
+  if (!col) return "";
+  if (col.kind === "dict") { const v = col.dict[col.codes[r]]; return v == null ? "" : v; }
+  const n = col.data[r]; return Number.isNaN(n) ? "" : String(n);
+}
+function awColNum(col, r) {
+  if (!col) return 0;
+  if (col.kind === "num") { const n = col.data[r]; return Number.isNaN(n) ? 0 : n; }
+  const p = parseFloat(col.dict[col.codes[r]]); return Number.isNaN(p) ? 0 : p;
+}
+
 // Métricas intrínsecas do agrupamento exportadas no dataset largo (DEC-AW-003).
 const ANALYTICS_EXPORT_METRICS = [
   { key: "qty",           label: "Vol. Propostas" },
@@ -863,20 +881,25 @@ const ANALYTICS_EXPORT_METRICS = [
 // Serializa o dataset analítico largo como CSV: dimensões + métricas intrínsecas +
 // uma coluna de decisão por cenário (AS IS + cada aba marcada). Excel-friendly (5C).
 export function buildAnalyticsCSV(ds) {
-  if (!ds || !Array.isArray(ds.rows) || ds.rows.length === 0) return null;
+  if (!ds || !ds.rowCount || !ds.columns) return null;
   const dimensions = ds.dimensions || [];
   const scenarios = ds.scenarios || [];
+  const cols = ds.columns;
   const esc = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const header = [
     ...dimensions,
     ...ANALYTICS_EXPORT_METRICS.map(m => m.label),
     ...scenarios.map(s => `Decisão · ${s.nome}`),
   ];
-  const lines = ds.rows.map(r => [
-    ...dimensions.map(d => r[d]),
-    ...ANALYTICS_EXPORT_METRICS.map(m => r[m.key]),
-    ...scenarios.map(s => r[s.decisionCol]),
-  ].map(esc).join(","));
+  const N = ds.rowCount;
+  const lines = new Array(N);
+  for (let r = 0; r < N; r++) {
+    lines[r] = [
+      ...dimensions.map(d => awColStr(cols[d], r)),
+      ...ANALYTICS_EXPORT_METRICS.map(m => cols[m.key] ? awColNum(cols[m.key], r) : 0),
+      ...scenarios.map(s => awColStr(cols[s.decisionCol], r)),
+    ].map(esc).join(",");
+  }
   return [header.map(esc).join(","), ...lines].join("\n");
 }
 
@@ -1265,19 +1288,28 @@ const CHART_TYPES = [
 // Métricas em que "menor é melhor" — orienta a cor do delta no KPI.
 const GOOD_WHEN_LOWER = new Set(["inadReal", "inadInferida"]);
 
-// Agrega uma métrica sobre um conjunto de linhas (formato largo) para uma coluna de decisão.
-// Replica a semântica do motor: numeradores/denominadores acumulados apenas sobre aprovados.
-export function computeWidgetMetric(rows, metricId, decisionCol) {
+// Agrega uma métrica sobre um conjunto de linhas (dataset largo COLUNAR) para uma coluna
+// de decisão. Replica a semântica do motor: numeradores/denominadores só sobre aprovados.
+// `indices`: Int32Array|number[]|null — subconjunto de linhas; null = todas as linhas
+// ativas do ds (respeitando ds.activeRows dos filtros).
+export function computeWidgetMetric(ds, indices, metricId, decisionCol) {
+  if (!ds || !ds.columns) return null;
+  const cols = ds.columns;
+  const qtyC = cols.qty, decC = cols[decisionCol];
+  const inadRC = cols.inadRRaw, altasC = cols.qtdAltas, inadIC = cols.inadIRaw, altasInfC = cols.qtdAltasInfer;
+  const act = indices || ds.activeRows || null;
+  const N = act ? act.length : (ds.rowCount || 0);
   let total = 0, appr = 0, inadR = 0, altas = 0, inadI = 0, altasInf = 0;
-  for (const r of rows) {
-    const q = r.qty || 0;
+  for (let i = 0; i < N; i++) {
+    const r = act ? act[i] : i;
+    const q = awColNum(qtyC, r);
     total += q;
-    if (r[decisionCol] === "APROVADO") {
+    if (awColStr(decC, r) === "APROVADO") {
       appr += q;
-      inadR += r.inadRRaw || 0;
-      altas += r.qtdAltas || 0;
-      inadI += r.inadIRaw || 0;
-      altasInf += r.qtdAltasInfer || 0;
+      inadR += awColNum(inadRC, r);
+      altas += awColNum(altasC, r);
+      inadI += awColNum(inadIC, r);
+      altasInf += awColNum(altasInfC, r);
     }
   }
   switch (metricId) {
@@ -1296,12 +1328,31 @@ const fmtMetricVal = (v, unit) => v == null ? "N/A" : unit === "qty" ? fmtQty(v)
 // Pivot client-side: dataset largo + config → série tidy {data, series, metricDef, xCol}.
 export function pivotWidget(ds, config) {
   if (!ds) return { state: "no_data" };
-  const { rows, scenarios, metrics, temporalColumns } = ds;
+  const { scenarios, metrics, temporalColumns } = ds;
   const xCol = config.xDimension;
   if (!xCol) return { state: "no_x" };
   const metricDef = metrics.find(m => m.id === config.metric) || metrics[0];
   if (!metricDef) return { state: "no_metric" };
   const serieBy = config.serieBy || SERIE_CENARIO;
+
+  // Iteração sobre o dataset colunar (respeitando ds.activeRows dos filtros).
+  const cols = ds.columns || {};
+  const act = ds.activeRows || null;
+  const rowStr = (name, r) => awColStr(cols[name], r);
+  // Valores distintos de uma dimensão nas linhas ativas (para séries/eixo por dimensão).
+  const distinctOf = (name) => {
+    const set = new Set();
+    const L = act ? act.length : (ds.rowCount || 0);
+    for (let i = 0; i < L; i++) { const r = act ? act[i] : i; const v = rowStr(name, r).trim(); if (v) set.add(v); }
+    return [...set];
+  };
+  // Lista de índices ativos que satisfazem um predicado (subconjunto para séries).
+  const filterIndices = (pred) => {
+    const out = [];
+    const L = act ? act.length : (ds.rowCount || 0);
+    for (let i = 0; i < L; i++) { const r = act ? act[i] : i; if (pred(r)) out.push(r); }
+    return out;
+  };
 
   // Comparador de valores de uma dimensão. Dimensões agrupadas (derivadas) carregam
   // uma ordem explícita de buckets em ds.dimensionOrders — respeitada aqui para que
@@ -1339,7 +1390,7 @@ export function pivotWidget(ds, config) {
     if (serieBy === SERIE_NONE || serieBy === SERIE_CENARIO) {
       seriesDefs = [{ key: "valor", label: metricDef.label, color: SCENARIO_COLORS[1] }];
     } else {
-      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort(makeCmp(serieBy));
+      const distinct = distinctOf(serieBy).sort(makeCmp(serieBy));
       const capped = distinct.slice(0, MAX_SERIES);
       truncated = capped.length >= MAX_SERIES && distinct.length > MAX_SERIES;
       seriesDefs = capped.map((v, i) => ({ key: v, label: v, filterCol: serieBy, filterVal: v, color: SERIE_COLORS[i % SERIE_COLORS.length] }));
@@ -1348,8 +1399,8 @@ export function pivotWidget(ds, config) {
     const data = visScenarios.map((s) => {
       const row = { x: s.nome };
       for (const sd of seriesDefs) {
-        const subset = sd.filterCol ? rows.filter(r => String(r[sd.filterCol] ?? "").trim() === sd.filterVal) : rows;
-        row[sd.label] = computeWidgetMetric(subset, metricDef.id, s.decisionCol);
+        const subset = sd.filterCol ? filterIndices(r => rowStr(sd.filterCol, r).trim() === sd.filterVal) : null;
+        row[sd.label] = computeWidgetMetric(ds, subset, metricDef.id, s.decisionCol);
       }
       return row;
     });
@@ -1373,19 +1424,25 @@ export function pivotWidget(ds, config) {
     if (serieBy === SERIE_NONE) {
       seriesDefs = [{ key: "simulado", label: "Simulado", decisionCol: simCol, color: SCENARIO_COLORS[1] }];
     } else {
-      const distinct = [...new Set(rows.map(r => String(r[serieBy] ?? "").trim()).filter(Boolean))].sort(makeCmp(serieBy));
+      const distinct = distinctOf(serieBy).sort(makeCmp(serieBy));
       const capped = distinct.slice(0, MAX_SERIES);
       seriesDefs = capped.map((v, i) => ({ key: v, label: v, decisionCol: simCol, filterCol: serieBy, filterVal: v, color: SERIE_COLORS[i % SERIE_COLORS.length] }));
     }
   }
 
-  // Buckets do eixo X.
+  // Buckets do eixo X (por índice de linha — sem materializar objetos).
   const xBuckets = new Map();
-  for (const r of rows) {
-    const xv = String(r[xCol] ?? "").trim();
-    if (!xv) continue;
-    if (!xBuckets.has(xv)) xBuckets.set(xv, []);
-    xBuckets.get(xv).push(r);
+  {
+    const xCC = cols[xCol];
+    const L = act ? act.length : (ds.rowCount || 0);
+    for (let i = 0; i < L; i++) {
+      const r = act ? act[i] : i;
+      const xv = awColStr(xCC, r).trim();
+      if (!xv) continue;
+      let arr = xBuckets.get(xv);
+      if (!arr) { arr = []; xBuckets.set(xv, arr); }
+      arr.push(r);
+    }
   }
   if (xBuckets.size === 0) return { state: "empty" };
 
@@ -1402,11 +1459,11 @@ export function pivotWidget(ds, config) {
   });
 
   const data = sortedKeys.map((xv) => {
-    const bucketRows = xBuckets.get(xv);
+    const bucketRows = xBuckets.get(xv); // array de índices de linha
     const row = { x: xv };
     for (const sd of seriesDefs) {
-      const subset = sd.filterCol ? bucketRows.filter(r => String(r[sd.filterCol] ?? "").trim() === sd.filterVal) : bucketRows;
-      row[sd.label] = computeWidgetMetric(subset, metricDef.id, sd.decisionCol);
+      const subset = sd.filterCol ? bucketRows.filter(r => rowStr(sd.filterCol, r).trim() === sd.filterVal) : bucketRows;
+      row[sd.label] = computeWidgetMetric(ds, subset, metricDef.id, sd.decisionCol);
     }
     return row;
   });
@@ -1430,8 +1487,8 @@ function filterCardActive(card) {
   return Array.isArray(card.selected);
 }
 
-function filterCardMatches(row, card) {
-  const val = String(row[card.dim] ?? "").trim();
+// Avalia um cartão de filtro sobre um valor de dimensão já extraído (string trimada).
+function filterCardMatchesVal(val, card) {
   if (card.mode === "advanced") {
     const rules = card.rules || [];
     if (rules.length === 0) return true;
@@ -1445,11 +1502,26 @@ function filterCardMatches(row, card) {
   return !Array.isArray(card.selected) || card.selected.includes(val);
 }
 
-// Filtra as linhas do dataset largo pelos cartões de filtro ativos (AND entre todos os cartões).
-export function applyAnalyticsFilters(rows, cards) {
+// Filtra as linhas ativas do dataset largo COLUNAR pelos cartões ativos (AND entre eles).
+// Retorna um Int32Array de índices sobreviventes (ou ds.activeRows inalterado se nenhum
+// cartão está ativo). Não copia linhas — só carrega índices.
+export function applyAnalyticsFilters(ds, cards) {
   const active = (cards || []).filter(filterCardActive);
-  if (active.length === 0) return rows;
-  return rows.filter(r => active.every(c => filterCardMatches(r, c)));
+  if (active.length === 0) return ds.activeRows || null;
+  const cols = ds.columns || {};
+  const base = ds.activeRows || null;
+  const N = base ? base.length : (ds.rowCount || 0);
+  const cardCols = active.map(c => cols[c.dim]);
+  const out = [];
+  for (let i = 0; i < N; i++) {
+    const r = base ? base[i] : i;
+    let ok = true;
+    for (let j = 0; j < active.length; j++) {
+      if (!filterCardMatchesVal(awColStr(cardCols[j], r).trim(), active[j])) { ok = false; break; }
+    }
+    if (ok) out.push(r);
+  }
+  return Int32Array.from(out);
 }
 
 // Combina filtro de página + filtro do visual (AND) sobre o dataset largo — o visual
@@ -1459,8 +1531,8 @@ export function applyFiltersToDataset(ds, pageFilters, widgetFilters) {
   if (!ds) return ds;
   const validDims = new Set(ds.dimensions || []);
   const cards = [...(pageFilters || []), ...(widgetFilters || [])].filter(c => c && validDims.has(c.dim));
-  const rows = applyAnalyticsFilters(ds.rows, cards);
-  return rows === ds.rows ? ds : { ...ds, rows };
+  if (cards.filter(filterCardActive).length === 0) return ds;
+  return { ...ds, activeRows: applyAnalyticsFilters(ds, cards) };
 }
 
 // ── Agrupamentos (dimensões derivadas) ───────────────────────────────────────
@@ -1478,11 +1550,19 @@ function sortDistinctValues(values) {
   });
 }
 
-// Valores distintos de uma dimensão a partir das linhas do dataset (ordenados).
+// Valores distintos de uma dimensão do dataset largo COLUNAR (ordenados). Para colunas
+// dict (o caso comum) os distintos SÃO o dicionário — O(distintos) em vez de varrer 1MM.
 export function distinctDimValues(ds, col) {
-  if (!ds || !col) return [];
+  if (!ds || !col || !ds.columns) return [];
+  const c = ds.columns[col];
+  if (!c) return [];
   const set = new Set();
-  for (const r of ds.rows) { const v = String(r[col] ?? "").trim(); if (v) set.add(v); }
+  if (c.kind === "dict") {
+    for (const v of c.dict) { const t = String(v ?? "").trim(); if (t) set.add(t); }
+  } else {
+    const N = ds.rowCount || 0;
+    for (let r = 0; r < N; r++) { const v = awColStr(c, r).trim(); if (v) set.add(v); }
+  }
   return sortDistinctValues([...set]);
 }
 
@@ -1516,37 +1596,40 @@ export function applyGroupingsToDataset(ds, groupings) {
   });
   if (valid.length === 0) return ds;
 
-  const augmenters = valid.map(g => {
+  // Cada agrupamento vira UMA nova coluna dict (codes:Int32Array + dict pequeno), ~4MB
+  // por 1MM de linhas — em vez de copiar 1MM objetos de linha (o que dobrava o dataset).
+  const N = ds.rowCount || 0;
+  const newColumns = { ...(ds.columns || {}) };
+  const dimensions = [...(ds.dimensions || [])];
+  const dimensionOrders = { ...(ds.dimensionOrders || {}) };
+  const groupedDimensions = [...(ds.groupedDimensions || [])];
+
+  for (const g of valid) {
     const map = new Map();
     for (const b of (g.buckets || [])) for (const v of (b.values || [])) map.set(String(v), b.label);
     const keepOriginal = g.unmatched === "keep";
     const otherLabel = keepOriginal ? null : (g.otherLabel || GROUPING_OTHER_DEFAULT);
     const order = (g.buckets || []).map(b => b.label);
     if (otherLabel && !order.includes(otherLabel)) order.push(otherLabel);
-    return { key: g.name, source: g.source, map, otherLabel, order };
-  });
 
-  const rows = ds.rows.map(r => {
-    const out = { ...r };
-    for (const a of augmenters) {
-      const sv = String(r[a.source] ?? "").trim();
-      const lbl = a.map.get(sv);
-      out[a.key] = lbl != null ? lbl : (a.otherLabel != null ? a.otherLabel : sv);
+    const srcCol = (ds.columns || {})[g.source];
+    const dict = [], dictIndex = new Map(), codes = new Int32Array(N);
+    const present = new Set();
+    for (let r = 0; r < N; r++) {
+      const sv = awColStr(srcCol, r).trim();
+      const lbl = map.get(sv);
+      const label = lbl != null ? lbl : (otherLabel != null ? otherLabel : sv);
+      let c = dictIndex.get(label);
+      if (c === undefined) { c = dict.length; dict.push(label); dictIndex.set(label, c); }
+      codes[r] = c;
+      present.add(label);
     }
-    return out;
-  });
-
-  const dimensions = [...(ds.dimensions || [])];
-  const dimensionOrders = { ...(ds.dimensionOrders || {}) };
-  const groupedDimensions = [...(ds.groupedDimensions || [])];
-  for (const a of augmenters) {
-    if (!dimensions.includes(a.key)) dimensions.push(a.key);
-    if (!groupedDimensions.includes(a.key)) groupedDimensions.push(a.key);
-    // Mantém só os labels efetivamente presentes nas linhas, preservando a ordem.
-    const present = new Set(rows.map(r => r[a.key]));
-    dimensionOrders[a.key] = a.order.filter(l => present.has(l));
+    newColumns[g.name] = { kind: "dict", dict, codes };
+    if (!dimensions.includes(g.name)) dimensions.push(g.name);
+    if (!groupedDimensions.includes(g.name)) groupedDimensions.push(g.name);
+    dimensionOrders[g.name] = order.filter(l => present.has(l));
   }
-  return { ...ds, rows, dimensions, dimensionOrders, groupedDimensions };
+  return { ...ds, columns: newColumns, dimensions, dimensionOrders, groupedDimensions };
 }
 
 // Calcula cor de texto com contraste WCAG sobre um fundo hex.
@@ -1964,15 +2047,15 @@ export function resolveKpiScenarios(scenarios, kpiA, kpiB) {
 function KpiCard({ analyticsDataset, metricId, kpiA, kpiB, onChange }) {
   const kpi = useMemo(() => {
     if (!analyticsDataset) return null;
-    const { rows, scenarios, metrics } = analyticsDataset;
+    const { scenarios, metrics } = analyticsDataset;
     const md = metrics.find(m => m.id === metricId) || metrics[0];
     if (!md) return null;
     const { a, b } = resolveKpiScenarios(scenarios, kpiA, kpiB);
     return {
       metricDef: md,
       aScen: a, bScen: b,
-      aVal: a ? computeWidgetMetric(rows, md.id, a.decisionCol) : null,
-      bVal: b ? computeWidgetMetric(rows, md.id, b.decisionCol) : null,
+      aVal: a ? computeWidgetMetric(analyticsDataset, null, md.id, a.decisionCol) : null,
+      bVal: b ? computeWidgetMetric(analyticsDataset, null, md.id, b.decisionCol) : null,
     };
   }, [analyticsDataset, metricId, kpiA, kpiB]);
 
@@ -2860,7 +2943,6 @@ export default function App() {
       if (msgType === 'SIMULATION_RESULT') {
         setSimResult(e.data.result);
       } else if (msgType === 'OVERLAY_RESULT') {
-        setSimulationOverlay(e.data.overlay);
         setIncrementalResult(e.data.incrementalResult);
         setNodeArrivals(e.data.nodeArrivals || {});
       } else if (msgType === 'ANALYTICS_RESULT') {
@@ -2986,8 +3068,6 @@ export default function App() {
   useEffect(() => { lensPopulationsR.current = lensPopulations; }, [lensPopulations]);
 
   // ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ──────
-  // simulationOverlay: null | {[csvId]: {rowDecisions, summaryStats}}
-  const [simulationOverlay, setSimulationOverlay] = useState(null);
   // Contagem reativa de registros que chegam a cada nó por valor de domínio
   // (computada no worker junto do overlay). Alimenta o "Configurar nó" e o filtro
   // de exibição de domínios (modo automático). {[nodeId]: {val|row|col: {[v]:qty}}}

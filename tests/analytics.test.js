@@ -15,15 +15,61 @@ import {
   __setWorkerCsvStoreForTest,
 } from '../src/simulation.worker.js';
 
+// ── Helpers p/ o dataset largo COLUNAR (Otimização de Memória Fase 4) ──────────
+// O dataset deixou de ser array de objetos e virou colunar: { rowCount, columns:{...} }.
+// Estes helpers montam um ds colunar a partir de objetos legíveis e leem células —
+// mantêm as fixtures dos testes concisas e verificam o mesmo contrato numérico.
+const AW_NUM = new Set(['qty', 'qtdAltas', 'inadRRaw', 'qtdAltasInfer', 'inadIRaw']);
+function columnarDataset(objs, meta = {}) {
+  const rowCount = objs.length;
+  const names = new Set();
+  for (const o of objs) for (const k of Object.keys(o)) names.add(k);
+  const columns = {};
+  for (const name of names) {
+    if (AW_NUM.has(name)) {
+      const data = new Float64Array(rowCount);
+      for (let r = 0; r < rowCount; r++) {
+        const v = objs[r][name];
+        data[r] = (v === undefined || v === null || v === '') ? NaN : Number(v);
+      }
+      columns[name] = { kind: 'num', data };
+    } else {
+      const dict = [], dictIndex = new Map(), codes = new Int32Array(rowCount);
+      for (let r = 0; r < rowCount; r++) {
+        const v = String(objs[r][name] ?? '');
+        let c = dictIndex.get(v);
+        if (c === undefined) { c = dict.length; dict.push(v); dictIndex.set(v, c); }
+        codes[r] = c;
+      }
+      columns[name] = { kind: 'dict', dict, codes };
+    }
+  }
+  return {
+    rowCount, columns,
+    dimensions: meta.dimensions || [],
+    temporalColumns: meta.temporalColumns || [],
+    metrics: meta.metrics || [],
+    scenarios: meta.scenarios || [],
+    ...(meta.extra || {}),
+  };
+}
+function awCell(ds, name, r) {
+  const c = ds.columns[name];
+  if (!c) return undefined;
+  if (c.kind === 'num') { const n = c.data[r]; return Number.isNaN(n) ? 0 : n; }
+  return c.dict[c.codes[r]];
+}
+function awRowAt(ds, r) { const o = {}; for (const name of Object.keys(ds.columns)) o[name] = awCell(ds, name, r); return o; }
+function awColumn(ds, name) { const out = []; for (let r = 0; r < ds.rowCount; r++) out.push(awCell(ds, name, r)); return out; }
+
 // ── Fixture: dataset analítico largo (DEC-AW-003) com 2 cenários ──────────────
 // AS IS aprova rows 1 e 3; Política X aprova rows 1 e 2.
 function makeDataset() {
-  return {
-    rows: [
-      { mes: '2024-01', score: 'R1', qty: 100, qtdAltas: 40, qtdAltasInfer: 0, inadRRaw: 4, inadIRaw: 2, __DECISAO_AS_IS: 'APROVADO',  __DECISAO_cv1: 'APROVADO' },
-      { mes: '2024-01', score: 'R2', qty: 50,  qtdAltas: 10, qtdAltasInfer: 0, inadRRaw: 5, inadIRaw: 1, __DECISAO_AS_IS: 'REPROVADO', __DECISAO_cv1: 'APROVADO' },
-      { mes: '2024-02', score: 'R1', qty: 80,  qtdAltas: 30, qtdAltasInfer: 0, inadRRaw: 3, inadIRaw: 1, __DECISAO_AS_IS: 'APROVADO',  __DECISAO_cv1: 'REPROVADO' },
-    ],
+  return columnarDataset([
+    { mes: '2024-01', score: 'R1', qty: 100, qtdAltas: 40, qtdAltasInfer: 0, inadRRaw: 4, inadIRaw: 2, __DECISAO_AS_IS: 'APROVADO',  __DECISAO_cv1: 'APROVADO' },
+    { mes: '2024-01', score: 'R2', qty: 50,  qtdAltas: 10, qtdAltasInfer: 0, inadRRaw: 5, inadIRaw: 1, __DECISAO_AS_IS: 'REPROVADO', __DECISAO_cv1: 'APROVADO' },
+    { mes: '2024-02', score: 'R1', qty: 80,  qtdAltas: 30, qtdAltasInfer: 0, inadRRaw: 3, inadIRaw: 1, __DECISAO_AS_IS: 'APROVADO',  __DECISAO_cv1: 'REPROVADO' },
+  ], {
     dimensions: ['mes', 'score'],
     temporalColumns: ['mes'],
     metrics: [
@@ -37,7 +83,7 @@ function makeDataset() {
       { id: 'as_is', nome: 'AS IS',      decisionCol: '__DECISAO_AS_IS' },
       { id: 'cv1',   nome: 'Política X', decisionCol: '__DECISAO_cv1' },
     ],
-  };
+  });
 }
 
 // ── Sessão 5A — infraestrutura multi-canvas (duplicação) ──────────────────────
@@ -110,13 +156,13 @@ describe('5B · computeAnalyticsDataset', () => {
 
   beforeEach(() => { __setWorkerCsvStoreForTest(csvStore); });
 
-  it('emite uma linha por agrupamento com dimensões e métricas intrínsecas', () => {
+  it('emite (colunar) uma linha por agrupamento com dimensões e métricas intrínsecas', () => {
     const ds = computeAnalyticsDataset(canvasInputs, csvStore);
     expect(ds).not.toBeNull();
-    expect(ds.rows).toHaveLength(3);
+    expect(ds.rowCount).toBe(3);
     expect(ds.dimensions.sort()).toEqual(['mes', 'score']);
     expect(ds.temporalColumns).toEqual(['mes']);
-    expect(ds.rows[0]).toMatchObject({ mes: '2024-01', score: 'R1', qty: 100, qtdAltas: 40, inadRRaw: 4 });
+    expect(awRowAt(ds, 0)).toMatchObject({ mes: '2024-01', score: 'R1', qty: 100, qtdAltas: 40, inadRRaw: 4 });
   });
 
   it('registra os cenários: AS IS global + uma coluna por aba marcada', () => {
@@ -130,15 +176,16 @@ describe('5B · computeAnalyticsDataset', () => {
   it('faz join por (csvId,rowIdx): AS IS preserva histórico, cenário reflete a política', () => {
     const ds = computeAnalyticsDataset(canvasInputs, csvStore);
     // AS IS = histórico original
-    expect(ds.rows.map(r => r.__DECISAO_AS_IS)).toEqual(['APROVADO', 'REPROVADO', 'APROVADO']);
+    expect(awColumn(ds, '__DECISAO_AS_IS')).toEqual(['APROVADO', 'REPROVADO', 'APROVADO']);
     // Política X aprova todas as linhas (lens sem regras → approved)
-    expect(ds.rows.map(r => r.__DECISAO_cv1)).toEqual(['APROVADO', 'APROVADO', 'APROVADO']);
+    expect(awColumn(ds, '__DECISAO_cv1')).toEqual(['APROVADO', 'APROVADO', 'APROVADO']);
   });
 
   it('sem canvases marcados, ainda emite AS IS global', () => {
     const ds = computeAnalyticsDataset([], csvStore);
     expect(ds.scenarios).toEqual([{ id: 'as_is', nome: 'AS IS', decisionCol: '__DECISAO_AS_IS' }]);
-    expect(ds.rows.every(r => '__DECISAO_AS_IS' in r)).toBe(true);
+    expect('__DECISAO_AS_IS' in ds.columns).toBe(true);
+    expect(ds.rowCount).toBe(3);
   });
 
   it('retorna null quando nenhum CSV tem AS IS configurado', () => {
@@ -153,31 +200,31 @@ describe('computeWidgetMetric', () => {
   const ds = makeDataset();
   it('approvalRate = aprovados / total (por coluna de decisão)', () => {
     // AS IS aprova 100+80=180 de 230
-    expect(computeWidgetMetric(ds.rows, 'approvalRate', '__DECISAO_AS_IS')).toBeCloseTo(180 / 230 * 100, 4);
+    expect(computeWidgetMetric(ds, null, 'approvalRate', '__DECISAO_AS_IS')).toBeCloseTo(180 / 230 * 100, 4);
     // Política X aprova 100+50=150 de 230
-    expect(computeWidgetMetric(ds.rows, 'approvalRate', '__DECISAO_cv1')).toBeCloseTo(150 / 230 * 100, 4);
+    expect(computeWidgetMetric(ds, null, 'approvalRate', '__DECISAO_cv1')).toBeCloseTo(150 / 230 * 100, 4);
   });
   it('qty é o total (independe da decisão); approvedQty acumula só aprovados', () => {
-    expect(computeWidgetMetric(ds.rows, 'qty', '__DECISAO_AS_IS')).toBe(230);
-    expect(computeWidgetMetric(ds.rows, 'approvedQty', '__DECISAO_AS_IS')).toBe(180);
+    expect(computeWidgetMetric(ds, null, 'qty', '__DECISAO_AS_IS')).toBe(230);
+    expect(computeWidgetMetric(ds, null, 'approvedQty', '__DECISAO_AS_IS')).toBe(180);
   });
   it('inadReal = ∑inadRRaw / ∑qtdAltas só sobre aprovados', () => {
     // AS IS aprovados: rows 1,3 → (4+3)/(40+30) = 10%
-    expect(computeWidgetMetric(ds.rows, 'inadReal', '__DECISAO_AS_IS')).toBeCloseTo(10, 4);
+    expect(computeWidgetMetric(ds, null, 'inadReal', '__DECISAO_AS_IS')).toBeCloseTo(10, 4);
   });
   it('approvedAltasInfer = ∑qtdAltasInfer só sobre aprovados (vendas inferidas da política)', () => {
-    const rows = [
+    const cds = columnarDataset([
       { qty: 100, qtdAltasInfer: 35, __DECISAO_AS_IS: 'APROVADO' },
       { qty: 50,  qtdAltasInfer: 12, __DECISAO_AS_IS: 'REPROVADO' },
       { qty: 80,  qtdAltasInfer: 20, __DECISAO_AS_IS: 'APROVADO' },
-    ];
+    ]);
     // só as linhas aprovadas contribuem: 35 + 20 = 55
-    expect(computeWidgetMetric(rows, 'approvedAltasInfer', '__DECISAO_AS_IS')).toBe(55);
+    expect(computeWidgetMetric(cds, null, 'approvedAltasInfer', '__DECISAO_AS_IS')).toBe(55);
   });
   it('retorna null quando o denominador é zero', () => {
-    const rows = [{ qty: 10, __DECISAO_AS_IS: 'REPROVADO' }];
-    expect(computeWidgetMetric(rows, 'approvalRate', '__DECISAO_AS_IS')).toBe(0); // total>0, appr=0 → 0
-    expect(computeWidgetMetric(rows, 'inadReal', '__DECISAO_AS_IS')).toBeNull(); // sem altas aprovadas
+    const cds = columnarDataset([{ qty: 10, __DECISAO_AS_IS: 'REPROVADO' }]);
+    expect(computeWidgetMetric(cds, null, 'approvalRate', '__DECISAO_AS_IS')).toBe(0); // total>0, appr=0 → 0
+    expect(computeWidgetMetric(cds, null, 'inadReal', '__DECISAO_AS_IS')).toBeNull(); // sem altas aprovadas
   });
 });
 
@@ -243,17 +290,16 @@ describe('5C · buildAnalyticsCSV', () => {
     expect(lines[3]).toBe('2024-02,R1,80,30,0,3,1,APROVADO,REPROVADO');
   });
   it('escapa valores com vírgula/aspas conforme RFC 4180', () => {
-    const dirty = {
-      rows: [{ canal: 'a,b', qty: 1, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0, __DECISAO_AS_IS: 'APROVADO' }],
-      dimensions: ['canal'],
-      scenarios: [{ id: 'as_is', nome: 'AS IS', decisionCol: '__DECISAO_AS_IS' }],
-    };
+    const dirty = columnarDataset(
+      [{ canal: 'a,b', qty: 1, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0, __DECISAO_AS_IS: 'APROVADO' }],
+      { dimensions: ['canal'], scenarios: [{ id: 'as_is', nome: 'AS IS', decisionCol: '__DECISAO_AS_IS' }] }
+    );
     const line = buildAnalyticsCSV(dirty).split('\n')[1];
     expect(line.startsWith('"a,b",')).toBe(true);
   });
   it('retorna null para dataset vazio', () => {
     expect(buildAnalyticsCSV(null)).toBeNull();
-    expect(buildAnalyticsCSV({ rows: [], dimensions: [], scenarios: [] })).toBeNull();
+    expect(buildAnalyticsCSV(columnarDataset([], { dimensions: [], scenarios: [] }))).toBeNull();
   });
 });
 
@@ -349,16 +395,15 @@ describe('Agrupamentos · autoBuckets', () => {
 
 describe('Agrupamentos · distinctDimValues', () => {
   it('retorna valores distintos ordenados, ignorando vazios', () => {
-    const ds = { rows: [{ s: 'R02' }, { s: 'R10' }, { s: 'R02' }, { s: '' }, { s: 'R01' }] };
+    const ds = columnarDataset([{ s: 'R02' }, { s: 'R10' }, { s: 'R02' }, { s: '' }, { s: 'R01' }], { dimensions: ['s'] });
     expect(distinctDimValues(ds, 's')).toEqual(['R01', 'R02', 'R10']);
   });
 });
 
 describe('Agrupamentos · applyGroupingsToDataset', () => {
-  const base = () => ({
-    rows: [
-      { s: 'R01', qty: 10 }, { s: 'R02', qty: 10 }, { s: 'R10', qty: 10 }, { s: 'R20', qty: 10 },
-    ],
+  const base = () => columnarDataset([
+    { s: 'R01', qty: 10 }, { s: 'R02', qty: 10 }, { s: 'R10', qty: 10 }, { s: 'R20', qty: 10 },
+  ], {
     dimensions: ['s'],
     temporalColumns: [],
     metrics: [],
@@ -375,7 +420,7 @@ describe('Agrupamentos · applyGroupingsToDataset', () => {
 
   it('adiciona uma coluna derivada com o rótulo do bucket por linha', () => {
     const ds = applyGroupingsToDataset(base(), [grouping]);
-    expect(ds.rows.map(r => r['Faixa (agrup.)'])).toEqual(['Baixo', 'Baixo', 'Alto', 'Outros']);
+    expect(awColumn(ds, 'Faixa (agrup.)')).toEqual(['Baixo', 'Baixo', 'Alto', 'Outros']);
     expect(ds.dimensions).toContain('Faixa (agrup.)');
     expect(ds.groupedDimensions).toContain('Faixa (agrup.)');
   });
@@ -387,7 +432,7 @@ describe('Agrupamentos · applyGroupingsToDataset', () => {
 
   it('modo "keep" mantém o valor original para os não atribuídos', () => {
     const ds = applyGroupingsToDataset(base(), [{ ...grouping, unmatched: 'keep' }]);
-    expect(ds.rows.map(r => r['Faixa (agrup.)'])).toEqual(['Baixo', 'Baixo', 'Alto', 'R20']);
+    expect(awColumn(ds, 'Faixa (agrup.)')).toEqual(['Baixo', 'Baixo', 'Alto', 'R20']);
   });
 
   it('ignora agrupamento cujo nome colide com dimensão real', () => {
@@ -407,12 +452,14 @@ describe('Agrupamentos · applyGroupingsToDataset', () => {
   });
 
   it('a dimensão derivada é usável como Eixo X no pivot, na ordem dos buckets', () => {
-    const ds = applyGroupingsToDataset({
-      ...base(),
+    const ds = applyGroupingsToDataset(columnarDataset([
+      { s: 'R01', qty: 10, d: 'APROVADO' }, { s: 'R02', qty: 10, d: 'APROVADO' },
+      { s: 'R10', qty: 10, d: 'APROVADO' }, { s: 'R20', qty: 10, d: 'APROVADO' },
+    ], {
+      dimensions: ['s'],
       scenarios: [{ id: 'as_is', nome: 'AS IS', decisionCol: 'd' }],
       metrics: [{ id: 'qty', label: 'Vol', unit: 'qty' }],
-      rows: base().rows.map(r => ({ ...r, d: 'APROVADO' })),
-    }, [grouping]);
+    }), [grouping]);
     const piv = pivotWidget(ds, { xDimension: 'Faixa (agrup.)', metric: 'qty', serieBy: '__none__' });
     expect(piv.state).toBe('ok');
     expect(piv.data.map(d => d.x)).toEqual(['Baixo', 'Alto', 'Outros']);
