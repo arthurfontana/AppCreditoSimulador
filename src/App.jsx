@@ -4,7 +4,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
-import { buildColumnar, rowCount, cellStr, cellNum, getRow, materializeRows, distinctColValues, serializeCsvStore, deserializeCsvStore } from "./columnar.js";
+import { buildColumnar, rowCount, cellStr, cellNum, getRow, materializeRows, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage } from "./columnar.js";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -2911,8 +2911,17 @@ export default function App() {
   // Keep worker's csvStore in sync — send once per csvStore change (no debounce
   // needed here: UPDATE_CSV_STORE is lightweight and must arrive before any
   // subsequent RUN_SIMULATION / COMPUTE_OVERLAY that references the new data).
+  //
+  // Fase 2 — transferência sem cópia: `buildCsvStoreMessage` monta o payload e a
+  // lista de transferables. Sob cross-origin isolation as colunas são SAB-backed e o
+  // structured clone COMPARTILHA a memória (sem duplicar a base no worker); a lista de
+  // transfer é vazia de propósito — SAB não é transferido/neutralizado, é lido pelos
+  // dois lados (a main segue usando o csvStore para render). Ver columnar.js.
   useEffect(() => {
-    workerRef.current?.postMessage({ type: 'UPDATE_CSV_STORE', csvStore });
+    const w = workerRef.current;
+    if (!w) return;
+    const { payload, transfer } = buildCsvStoreMessage(csvStore);
+    w.postMessage(payload, transfer);
   }, [csvStore]);
 
   // Espelha a Tabela de Inferência no worker (Fase 2) — análogo ao UPDATE_CSV_STORE.

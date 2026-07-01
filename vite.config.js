@@ -16,8 +16,21 @@ function getBuildMeta() {
 
 const meta = getBuildMeta()
 
+// Fase 2 (Otimização de Memória) — habilita *cross-origin isolation* no app servido
+// (dev e preview). Sem esses headers, `crossOriginIsolated` é false e o
+// `SharedArrayBuffer` não pode ser compartilhado com o worker: a base colunar cairia
+// no clone (cópia) do structured clone. Com eles, o csvStore SAB-backed é lido por
+// main e worker sem duplicar a base no postMessage (ver src/columnar.js). Todos os
+// assets são bundlados (mesma origem), então require-corp não bloqueia nada.
+const crossOriginIsolation = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp',
+}
+
 export default defineConfig({
   plugins: [react()],
+  server: { headers: crossOriginIsolation },
+  preview: { headers: crossOriginIsolation },
   define: {
     __BUILD_NUMBER__: JSON.stringify(meta.count),
     __BUILD_TIME__:   JSON.stringify(new Date().toISOString()),

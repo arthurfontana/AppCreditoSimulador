@@ -13,13 +13,72 @@
 // (tests/inferenceCascade.test.js) passando inalterado: os hot paths do worker leem
 // pelo accessor, e o legado reproduz exatamente `row[idx]`.
 //
-// A transferência sem cópia pro worker (ArrayBuffer transferível) é a Fase 2 — aqui
-// o `postMessage` ainda faz structured clone (que preserva typed arrays).
+// A transferência sem cópia pro worker é a Fase 2 (abaixo): quando o contexto é
+// cross-origin isolated, os typed arrays são alocados sobre SharedArrayBuffer e o
+// `postMessage(UPDATE_CSV_STORE)` COMPARTILHA a memória (sem cópia) em vez de clonar.
 
 // Tipos de coluna que viram Float64Array. Todo o resto vira dictionary encoding.
 export const METRIC_COL_TYPES = new Set([
   'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida',
 ]);
+
+// ── Fase 2 — buffers compartilháveis com o worker (zero-cópia) ──────────────────
+//
+// A base é lida pelos DOIS lados (main renderiza preview/domínios/export em ~134
+// call sites; o worker roda a simulação), então NÃO dá para transferir/neutralizar
+// os buffers da base para o worker — a main perderia o acesso. A solução (recomendada
+// na Proposta §Fase 2, "usar SharedArrayBuffer para leitura compartilhada") é alocar
+// os typed arrays sobre `SharedArrayBuffer` quando o contexto é *cross-origin
+// isolated* (headers COOP/COEP presentes). Nesse caso o structured clone do
+// `postMessage` NÃO copia a memória — ele compartilha o SAB por referência —, então
+// main e worker leem os mesmos bytes sem duplicar a base. O worker é read-only, então
+// não há write race.
+//
+// Fora de COI (release aberto via file://, ambiente de teste Node/jsdom, ou browser
+// sem os headers) `sharedBuffersAvailable()` é `false` e caímos em `ArrayBuffer`
+// comum: o comportamento é o da Fase 1 (clone via structured clone) — correto, só sem
+// o ganho de memória. Em NENHUM caso um buffer da base é transferido/neutralizado.
+export function sharedBuffersAvailable() {
+  return typeof SharedArrayBuffer !== 'undefined'
+    && typeof globalThis !== 'undefined'
+    && globalThis.crossOriginIsolated === true;
+}
+
+// Aloca um Float64Array/Int32Array sobre SharedArrayBuffer quando compartilhável;
+// senão sobre ArrayBuffer normal. Ambos têm a mesma semântica de leitura/escrita.
+function allocF64(n) {
+  return sharedBuffersAvailable()
+    ? new Float64Array(new SharedArrayBuffer(n * Float64Array.BYTES_PER_ELEMENT))
+    : new Float64Array(n);
+}
+function allocI32(n) {
+  return sharedBuffersAvailable()
+    ? new Int32Array(new SharedArrayBuffer(n * Int32Array.BYTES_PER_ELEMENT))
+    : new Int32Array(n);
+}
+
+// Um csv está sobre buffers compartilhados quando suas colunas são SAB-backed.
+export function isSharedColumnar(csv) {
+  if (typeof SharedArrayBuffer === 'undefined' || !isColumnar(csv)) return false;
+  for (const col of Object.values(csv.columns)) {
+    const buf = col.kind === 'num' ? col.data?.buffer : col.codes?.buffer;
+    return buf instanceof SharedArrayBuffer; // política de alocação é uniforme no store
+  }
+  return false;
+}
+
+// Monta a mensagem UPDATE_CSV_STORE e a lista de *transferables* do `postMessage`.
+//
+// A lista de transfer é SEMPRE vazia — e é de propósito:
+//   • Com buffers SAB, o structured clone compartilha a memória por referência; SAB
+//     não pode (nem deve) ser transferido/neutralizado — é lido pelos dois lados.
+//   • Sem SAB, a main ainda precisa dos buffers da base para render, então deixamos
+//     o structured clone copiar (Fase 1). Transferi-los neutralizaria a main.
+// Em ambos os casos os buffers da base seguem íntegros e legíveis na main após o
+// envio (garantia "nada de acessar buffer neutralizado" dos critérios de aceite).
+export function buildCsvStoreMessage(csvStore) {
+  return { payload: { type: 'UPDATE_CSV_STORE', csvStore }, transfer: [] };
+}
 
 // Um csv está em formato colunar quando tem `columns` (mapa por nome de coluna).
 export function isColumnar(csv) {
@@ -36,7 +95,7 @@ export function buildColumnar(headers, rows, columnTypes) {
   for (let c = 0; c < headers.length; c++) {
     const name = headers[c];
     if (METRIC_COL_TYPES.has(types[name])) {
-      const data = new Float64Array(rowCount);
+      const data = allocF64(rowCount);
       for (let r = 0; r < rowCount; r++) {
         // parseFloat sem `|| 0`: mantém NaN p/ célula vazia/inválida. Os call sites
         // aplicam `|| 0` / `|| 1` — NaN e 0 são ambos falsy, então o resultado é
@@ -47,7 +106,7 @@ export function buildColumnar(headers, rows, columnTypes) {
     } else {
       const dict = [];
       const dictIndex = new Map();
-      const codes = new Int32Array(rowCount);
+      const codes = allocI32(rowCount);
       for (let r = 0; r < rowCount; r++) {
         const v = rows[r][c] ?? '';
         let code = dictIndex.get(v);
@@ -152,9 +211,13 @@ function deserializeColumns(columns) {
   const out = {};
   for (const [name, col] of Object.entries(columns || {})) {
     if (col.kind === 'num') {
-      out[name] = { kind: 'num', data: new Float64Array(col.data || []) };
+      const src = col.data || [];
+      const data = allocF64(src.length); data.set(src);
+      out[name] = { kind: 'num', data };
     } else {
-      out[name] = { kind: 'dict', dict: col.dict || [], codes: new Int32Array(col.codes || []) };
+      const src = col.codes || [];
+      const codes = allocI32(src.length); codes.set(src);
+      out[name] = { kind: 'dict', dict: col.dict || [], codes };
     }
   }
   return out;

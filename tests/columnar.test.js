@@ -14,6 +14,9 @@ import {
   distinctColValues,
   serializeCsvStore,
   deserializeCsvStore,
+  sharedBuffersAvailable,
+  isSharedColumnar,
+  buildCsvStoreMessage,
 } from '../src/columnar.js';
 
 // ── Parser mínimo (delimitador ';', sem aspas) — igual ao GATE ──────────────────
@@ -186,5 +189,79 @@ describe('Round-trip do Projeto (.credito.json) preservando a base colunar', () 
     const res = runSimulation(SHAPES, CONNS, restored, ref);
     expect(res.inadInferida).toBeGreaterThan(0.40);
     expect(res.inadInferida).toBeLessThan(0.41);
+  });
+});
+
+// ── Fase 2 — transferência sem cópia para o worker ──────────────────────────────
+describe('Fase 2 — buffers compartilhados (SharedArrayBuffer)', () => {
+  // Constrói uma variante SAB-backed manualmente (Node expõe SharedArrayBuffer,
+  // mesmo sem crossOriginIsolated) para provar que os accessors e o simulador operam
+  // idêntico sobre memória compartilhada.
+  function makeSharedCsv() {
+    const legacy = makeColumnarCsv();
+    const columns = {};
+    for (const [name, col] of Object.entries(legacy.columns)) {
+      if (col.kind === 'num') {
+        const d = new Float64Array(new SharedArrayBuffer(col.data.length * 8));
+        d.set(col.data);
+        columns[name] = { kind: 'num', data: d };
+      } else {
+        const c = new Int32Array(new SharedArrayBuffer(col.codes.length * 4));
+        c.set(col.codes);
+        columns[name] = { kind: 'dict', dict: col.dict, codes: c };
+      }
+    }
+    return { ...legacy, columns };
+  }
+
+  it('sharedBuffersAvailable reflete crossOriginIsolated; buildColumnar aloca o buffer condizente', () => {
+    const shared = sharedBuffersAvailable();
+    expect(typeof shared).toBe('boolean');
+    const { columns } = buildColumnar(baseHeaders, baseRows, columnTypes);
+    const buf = columns[WEIGHT_COL].data.buffer;
+    if (shared) expect(buf).toBeInstanceOf(SharedArrayBuffer);
+    else        expect(buf).toBeInstanceOf(ArrayBuffer); // sem COI (ambiente de teste) → cópia via clone
+  });
+
+  it('accessors + runSimulation batem o legado sobre colunas SAB-backed', () => {
+    const sharedCsv = makeSharedCsv();
+    expect(sharedCsv.columns[WEIGHT_COL].data.buffer).toBeInstanceOf(SharedArrayBuffer);
+    expect(isSharedColumnar(sharedCsv)).toBe(true);
+
+    // Célula a célula = base original.
+    const opIdx = baseHeaders.indexOf('OPERACAO');
+    const wIdx  = baseHeaders.indexOf(WEIGHT_COL);
+    for (let r = 0; r < rowCount(sharedCsv); r++) {
+      expect(cellStr(sharedCsv, r, opIdx)).toBe(baseRows[r][opIdx]);
+    }
+
+    const legacyRes = runSimulation(SHAPES, CONNS, { base: makeLegacyCsv() }, ref);
+    const sharedRes = runSimulation(SHAPES, CONNS, { base: sharedCsv }, ref);
+    expect(sharedRes.approvedQty).toBeCloseTo(legacyRes.approvedQty, 6);
+    expect(sharedRes.inadInferida).toBeCloseTo(legacyRes.inadInferida, 12);
+    expect(sharedRes.inadInferida).toBeGreaterThan(0.40);
+    expect(sharedRes.inadInferida).toBeLessThan(0.41);
+    // não-SAB report
+    expect(isSharedColumnar(makeColumnarCsv())).toBe(false);
+  });
+
+  it('buildCsvStoreMessage não neutraliza os buffers da base (main mantém acesso)', () => {
+    const store = { base: makeSharedCsv() };
+    const { payload, transfer } = buildCsvStoreMessage(store);
+
+    // SAB é COMPARTILHADO, nunca transferido → lista de transfer vazia.
+    expect(transfer).toEqual([]);
+    expect(payload.type).toBe('UPDATE_CSV_STORE');
+    expect(payload.csvStore).toBe(store); // mesmo objeto, sem cópia prévia
+
+    // Após montar a mensagem, os buffers seguem íntegros e legíveis na "main".
+    const wIdx = baseHeaders.indexOf(WEIGHT_COL);
+    expect(store.base.columns[WEIGHT_COL].data.buffer.byteLength).toBeGreaterThan(0);
+    expect(Number.isNaN(cellNum(store.base, 0, wIdx))).toBe(false);
+    expect(rowCount(store.base)).toBe(baseRows.length);
+
+    // E o simulador ainda roda sobre o mesmo store (nada foi neutralizado).
+    const res = runSimulation(SHAPES, CONNS, store, ref);
+    expect(res.inadInferida).toBeGreaterThan(0.40);
   });
 });
