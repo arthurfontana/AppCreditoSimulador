@@ -61,14 +61,14 @@ AppCreditoSimulador/
 - `johnnyModal`: otimizador multi-cineminha — `null | {pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, activeCard, proposedByShape, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, activeShapePreview, riskLevels, hierarchyMode, inadMetric}`
 - `lensModal`: modal de edição do Decision Lens — `null | {shapeId, rules, population}`
 - `incrementalResult`: resultado comparativo AS IS vs. simulado — `null | {baseline, simulated, impacted}`
-- `simulationOverlay`: mapa de decisões por linha — `null | {[csvId]: {rowDecisions, summaryStats}}`
-- `nodeArrivals`: contagem reativa de registros que chegam a cada nó por valor de domínio (worker, junto do overlay) — `{[nodeId]: {val|row|col: {[valor]: qty}}}` (ver Domínio Exibido)
+- ~~`simulationOverlay`~~: **removido** (Otimização de Memória Fase 4). O overlay por-linha (`rowDecisions`, ~1MM objetos) era clonado do worker pra main a cada tick e guardado num estado que **ninguém lia** — fonte de OOM no Canvas. Hoje o worker calcula o `incrementalResult` localmente e **não** envia o overlay; o Dashboard usa seu próprio overlay memoizado (`cachedCanvasOverlay`), independente
+- `nodeArrivals`: contagem reativa de registros que chegam a cada nó por valor de domínio (worker, junto do `COMPUTE_OVERLAY`) — `{[nodeId]: {val|row|col: {[valor]: qty}}}` (ver Domínio Exibido)
 - `domainModal`: modal "Configurar nó" (domínio exibido) — `null | {shapeId, draft:{val?|row?|col?: null|string[]}}`
 - `lensPopulations`: populações filtradas por cada lens — `{[lensId]: {[csvId]: boolean[]}}`
 - `cinemaLibrary`: biblioteca de configurações de Cineminha salvas localmente — `array`
 - `businessWidget`: widget de impacto de negócio flutuante — `{visible, x, y, w, h}`
 - `activeTab`: aba ativa — `"analysis" | "canvas"` (padrão `"canvas"` — aba exibida no label como "Dashboard")
-- `analyticsDataset`: dataset analítico largo cacheado do worker (`COMPUTE_ANALYTICS_DATASET`) — `null | AnalyticsDataset`
+- `analyticsDataset`: dataset analítico largo cacheado do worker (`COMPUTE_ANALYTICS_DATASET`) — `null | AnalyticsDataset` (formato **colunar** desde a Otimização de Memória Fase 4 — ver Analytics Workspace / accessors `awColStr`/`awColNum`)
 - `analyticsLayout`: gráficos do dashboard da aba Análise — `WidgetConfig[]` (ver Analytics Workspace)
 - `analyticsGroupings`: agrupamentos (dimensões derivadas) reutilizáveis nos gráficos — `Grouping[]` (ver Agrupamentos). `groupedDataset` (useMemo) = `analyticsDataset` enriquecido por `applyGroupingsToDataset` — é o que a aba Dashboard consome
 - `analyticsPageFilters`: filtro de página do Dashboard — `FilterCard[]` (ver Filtros). Combina por AND com o filtro de cada visual (`widget.config.filters`)
@@ -233,11 +233,11 @@ AppCreditoSimulador/
 - `computeLensAffectedRows(lensId, csvStore, lensPopulations)`: retorna contagem de linhas afetadas pelo lens (para exibição no nó `decision_lens`)
 - `buildFlowGraph(shapes, conns)`: constrói lista de adjacências do grafo de fluxo para o motor de simulação e `autoLayout`
 - `normalizeColName(s)`: normaliza nome de coluna para comparação fuzzy
-- `exportDiagnosticCSV(shapes, conns, csvStore, simulationOverlay)`: gera CSV de auditoria com métricas de funil por nó+valor (aprovação, volume, inadimplência) para diagnóstico da política
+- `exportDiagnosticCSV(shapes, conns, csvStore)`: gera CSV de auditoria com métricas de funil por nó+valor (aprovação, volume, inadimplência) para diagnóstico da política
 - `pivotWidget(ds, config)`: pivot client-side genérico → `{state, data, series, metricDef, xCol, truncated}`; usado pelos gráficos do Analytics Workspace
 - `resolveKpiScenarios(scenarios, kpiA, kpiB)`: resolve os cenários Baseline (A) e Comparação (B) do KPI a partir dos ids salvos no `WidgetConfig`, com fallback retrocompatível (A=AS IS, B=1º canvas; DEC-AW-008)
 - `buildAnalyticsCSV(ds)` / `exportAnalyticsDatasetCSV(ds)`: serializa/baixa o dataset analítico largo como CSV (dimensões + métricas intrínsecas + uma coluna de decisão por cenário, incl. AS IS), com BOM e escape RFC 4180 — abrível no Excel (5C)
-- `computeWidgetMetric(rows, metricId, decisionCol)`: agrega 1 métrica sobre linhas do dataset largo, replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`). Suporta `approvedAltasInfer` (∑ qtdAltasInfer sobre aprovados = Vol. Vendas Inferidas)
+- `computeWidgetMetric(ds, indices, metricId, decisionCol)`: agrega 1 métrica sobre um conjunto de linhas do dataset largo **colunar** (`indices`: `Int32Array|number[]|null`, null = todas as linhas ativas), replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`). Suporta `approvedAltasInfer` (∑ qtdAltasInfer sobre aprovados = Vol. Vendas Inferidas)
 
 ### Padrão de refs
 Toda variável de estado crítica tem um ref espelho para uso em event listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atualizado imediatamente.
@@ -324,10 +324,10 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | type | payload |
 |------|---------|
 | `SIMULATION_RESULT` | `{result: SimulationResult}` — inclui `inferenceSource` e `confiabVolume` (Fase 3) + `inferenceWeightMode` (Fase 4) |
-| `OVERLAY_RESULT` | `{overlay, incrementalResult, nodeArrivals}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido) |
+| `OVERLAY_RESULT` | `{incrementalResult, nodeArrivals}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido). **Não** envia mais o `overlay` por-linha (Otimização de Memória Fase 4) |
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
-| `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo (DEC-AW-003): `{rows, dimensions, temporalColumns, metrics, scenarios}` |
+| `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
 
 ### Funções no worker
 - `runSimulation(shapes, conns, csvStore)`: percorre todas as linhas de todos os CSVs pelo grafo, acumula métricas e retorna `SimulationResult`
@@ -339,14 +339,15 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante)
 - `computeNodeArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o fluxo a partir das entradas reais (in-degree 0 sobre arestas de fluxo — exclui corretamente um cineminha logo abaixo de um Decision Lens) e retorna, por nó, a contagem de registros por valor de domínio: `decision → {val: {[valor]: qty}}`, `cineminha → {row, col}`. Base do "Configurar nó" — ver Domínio Exibido
 - `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
-- `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo** (dimensões + métricas intrínsecas + `__DECISAO_AS_IS` global + uma coluna `__DECISAO_<canvasId>` por cenário); `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
+- `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo colunar** (Fase 4): dict encoding por dimensão + `__DECISAO_AS_IS` global + uma coluna dict `__DECISAO_<canvasId>` por cenário + `Float64Array` por métrica intrínseca. Os `ArrayBuffer`s são transferidos (zero-cópia) no `ANALYTICS_RESULT`; `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
 - `cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations)`: overlay por canvas memoizado por hash de `shapes`/`conns`/`lensPopulations` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só)
 
 ## Analytics Workspace (aba Dashboard)
 
 Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard") — builder de dashboards sobre os resultados da simulação. A aba padrão ao carregar é `"canvas"`. Ver `docs/wiki/Epicos-AnalyticsWorkspace.md`.
 
-- **Pipeline (DEC-AW-002)**: worker emite `analyticsDataset` (formato largo, DEC-AW-003) via `COMPUTE_ANALYTICS_DATASET`, debounced junto com a simulação; cada gráfico faz pivot client-side.
+- **Pipeline (DEC-AW-002)**: worker emite `analyticsDataset` (formato largo **colunar**, DEC-AW-003 + Otimização de Memória Fase 4) via `COMPUTE_ANALYTICS_DATASET`, debounced junto com a simulação (só na aba Dashboard — Fase 3); cada gráfico faz pivot client-side.
+- **Formato colunar do dataset largo (Fase 4)**: em vez de 1 objeto por linha (~1MM numa base diária, clonado inteiro pra main e recopiado por agrupamento — OOM ao abrir a aba Dashboard), o dataset é `{rowCount, columns:{[nome]:ColDef}, activeRows?, dimensions, temporalColumns, metrics, scenarios, dimensionOrders?, groupedDimensions?}`. `ColDef` = dict encoding (dimensões/decisões) ou `Float64Array` (métricas). Os `ArrayBuffer`s são **transferidos** (zero-cópia, sem depender de COI) no `postMessage`. Toda leitura por-linha passa pelos accessors globais `awColStr(col, r)` / `awColNum(col, r)` — nenhum consumidor reconstrói objetos por-linha. `activeRows` é a máscara `Int32Array` dos filtros (null = todas). `applyGroupingsToDataset` **adiciona uma coluna dict** (~4MB/1MM) em vez de copiar as linhas; filtros produzem `activeRows` em vez de subarrays de objetos.
 - **Tipo `temporal` (DEC-AW-005)**: marcado no Passo 2 do wizard (toggle de 3 estados Categórica → Ordinal → ⏱ Temporal, grava `columnTypes[col]='temporal'`). `parseTemporalKey(str)` deriva a chave de ordenação cronológica.
 - **Sessão 1** (entregue): pipeline ponta a ponta com um gráfico de linha fixo (Recharts, DEC-AW-001).
 - **Sessão 2** (entregue): builder de dashboard configurável — gráficos de linha configuráveis + painel de campos arrastáveis.
@@ -423,7 +424,8 @@ que já chega filtrado pela página. 100% client-side (não toca o worker).
 - **Helpers globais exportados**: `applyAnalyticsFilters(rows, cards)` (filtra linhas
   pelos cartões ativos, AND entre todos os cartões da lista) e
   `applyFiltersToDataset(ds, pageFilters, widgetFilters)` (concatena filtro de página +
-  filtro do visual e devolve o dataset largo com `rows` filtradas; ignora cartões cuja
+  filtro do visual e devolve o dataset largo com `activeRows` (máscara `Int32Array` de
+  índices sobreviventes — não copia linhas; Fase 4) restringindo a base; ignora cartões cuja
   dimensão não existe mais no dataset atual — base trocada/agrupamento removido).
 - **`FilterCardsEditor`/`FilterCardRow`**: componentes reutilizados nos dois níveis —
   só mudam a lista de cartões e o callback `onChange`.
@@ -767,7 +769,34 @@ typed arrays são alocados sobre `SharedArrayBuffer` — o structured clone do
 ### Fase 3 — `COMPUTE_ANALYTICS_DATASET` só na aba Dashboard
 O effect que dispara `COMPUTE_ANALYTICS_DATASET` agora só posta a mensagem quando
 `activeTab === 'analysis'`. Editar o canvas na aba Canvas não materializa mais o
-dataset largo (array de objetos simples — ainda não é SAB) a cada tick.
+dataset largo a cada tick.
+
+### Fase 4 — cortar os picos transitórios que ainda causavam OOM
+As Fases 0–3 enxugaram o **estado permanente** (`csvStore` colunar ~100MB), mas o
+"Out of memory" persistia em dois **picos transitórios** por-linha que ninguém tocara:
+
+1. **Overlay do Canvas.** `COMPUTE_OVERLAY` enviava o `overlay` inteiro
+   (`rowDecisions`: 1 objeto por linha, ~1MM numa base diária) de volta pela
+   `postMessage` → o structured clone materializava **outra** cópia de ~1MM objetos na
+   main, guardada no estado morto `simulationOverlay` (nunca lido). Estourava ao editar
+   o canvas com base grande. **Correção:** o worker computa o `incrementalResult`
+   localmente e **descarta** o overlay; a main só recebe `{incrementalResult,
+   nodeArrivals}`. Estado `simulationOverlay` removido. Zero mudança de matemática.
+2. **Dataset analítico largo (Dashboard).** `computeAnalyticsDataset` materializava 1
+   objeto por linha (~1MM), clonado pra main e recopiado por `applyGroupingsToDataset`.
+   Estourava ao abrir a aba Dashboard. **Correção:** dataset **colunar** (dict encoding +
+   `Float64Array`), `ArrayBuffer`s **transferidos** (zero-cópia) no `ANALYTICS_RESULT`;
+   consumidores (`pivotWidget`, `computeWidgetMetric`, filtros, `distinctDimValues`,
+   `applyGroupingsToDataset`, `buildAnalyticsCSV`) iteram por índice via `awColStr`/
+   `awColNum`; agrupamentos adicionam 1 coluna dict; filtros viram máscara `activeRows`.
+   Ver "Analytics Workspace / Formato colunar do dataset largo". GATE `analytics.test.js`
+   revalidado sobre o formato colunar.
+
+> Nota operacional: o `release/iniciar.bat` serve via `python -m http.server`, que **não**
+> manda os headers COOP/COEP — logo `crossOriginIsolated === false` e o SAB da Fase 2 não
+> ativa nesse modo (a base é clonada, ~200MB, tolerável). O dataset analítico da Fase 4
+> **não** depende de COI: usa `ArrayBuffer` transferível, então o ganho vale mesmo no
+> release aberto por `iniciar.bat`.
 
 ## Inferência de Negados (Tabela de Referência)
 
