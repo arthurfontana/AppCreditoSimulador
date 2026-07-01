@@ -1,11 +1,12 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~8434 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~10260 linhas)
 - Sem CSS externo — tudo inline styles
 - SVG puro para o canvas; matrizes interativas via `foreignObject` (sem biblioteca de diagramas)
 - **Recharts** para gráficos na aba Dashboard (exceção pontual ao ADR-003 — ver `DEC-AW-001`)
-- Web Worker (`src/simulation.worker.js`) para cálculos pesados fora da thread principal
+- Web Worker (`src/simulation.worker.js`, ~1327 linhas) para cálculos pesados fora da thread principal
+- **Vitest** para testes (`tests/*.test.js`, jsdom) — `npm test`
 
 ## O que é
 Whiteboard interativo + simulador de regras de crédito. O usuário carrega um CSV sumarizado, classifica colunas, arrasta variáveis de decisão para o canvas como losangos ou matrizes cruzadas (Cineminha) e monta um fluxo de política de crédito. O painel de simulação exibe taxa de aprovação e indicadores de inadimplência em tempo real, comparando com a política atual (AS IS).
@@ -15,9 +16,13 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ```
 AppCreditoSimulador/
 ├── src/
-│   ├── App.jsx                   # Componente único — ~7974 linhas
-│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny
+│   ├── App.jsx                   # Componente único — ~10260 linhas
+│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~1327 linhas)
 │   └── main.jsx                  # Entry point React
+├── tests/                        # Vitest (jsdom)
+│   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget
+│   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
+│   └── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
 │   └── wiki/                     # Documentação sincronizada com GitHub Wiki
@@ -585,6 +590,44 @@ Difere do **Exportar/Importar Fluxo** (seção Fluxo), que salva só o canvas at
 (shapes/conns + opcionalmente csvStore) — o Projeto salva *tudo* (todas as abas,
 bases, inferência, dashboard, biblioteca e preferências).
 
+## Auto-persistência de sessão (`sessionStorage`)
+
+Além do save/load explícito, parte do estado é persistida automaticamente em
+`sessionStorage` para sobreviver a reloads **dentro da mesma sessão** do navegador
+(não é durável — some ao fechar a aba). Chaves:
+
+- **`aw_canvases_v1`** (`CANVAS_STORAGE_KEY`): store multi-canvas. O effect grava
+  `{canvases, activeCanvasId}` a cada mudança de `shapes`/`conns`/`canvases`/
+  `activeCanvasId`, sempre mesclando a working copy do canvas ativo de volta em
+  `canvases[activeCanvasId]`. Init cacheado via `_initCanvasStore()` (parseia uma vez,
+  compartilhado pelos initializers de `canvases`/`activeCanvasId`/`shapes`/`conns`).
+- **`aw_layout_v1`**: `analyticsLayout` (gráficos do dashboard).
+- **`aw_groupings_v1`**: `analyticsGroupings` (dimensões derivadas).
+
+`csvStore`, `inferenceRef` e `cinemaLibrary` **não** vão para `sessionStorage`
+(muito grandes / precisam do Projeto `.credito.json`). Init/gravação são
+defensivos (`try/catch`), então quota estourada ou JSON inválido nunca quebram o boot.
+
+## Painel direito colapsável (`panelCollapsed`)
+
+O painel lateral direito (chips de variáveis, Projeto, Dados, indicadores) pode ser
+colapsado para uma faixa fina de 28px, liberando espaço de canvas. Estado
+`panelCollapsed` (boolean, default `false`); largura anima entre `272px` e `28px`.
+Quando colapsado, o conteúdo é escondido (`display:none`) e só a faixa com o botão de
+reabrir fica visível.
+
+## Carga de CSV assíncrona + modal de progresso (`importLoading`)
+
+Bases grandes travavam a UI no parse síncrono. `parseCSVAsync(text, delimiter,
+hasHeader, onProgress)` fatia o CSV em lotes, cede a thread principal a cada lote
+(`setTimeout 0`) e reporta progresso via `onProgress(linhasProcessadas, total)`.
+
+- Estado `importLoading`: `null | {phase:'reading'|'parsing', pct, filename}` —
+  alimenta um modal de progresso. `reader.onprogress` cobre a leitura do arquivo
+  (`reading`); `parseCSVAsync` cobre o parse (`parsing`).
+- Usado em `onFileChange` (import inicial) e `reparseWizardFile` (recarga no wizard) —
+  ambos mostram o mesmo modal.
+
 ## Inferência de Negados (Tabela de Referência)
 
 Fonte alternativa para os números de inferência (🔮 Conv. Inferida e 🎯 Inad.
@@ -817,10 +860,11 @@ npm install       # instalar dependências
 npm run dev       # servidor de desenvolvimento (Vite)
 npm run build     # build de produção → dist/
 npm run preview   # preview do build de produção
+npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/claude-md-docs-eweh6s`
+`claude/claude-md-docs-7evqu0`
 
 ## Roadmap futuro (não implementado)
 
@@ -829,5 +873,5 @@ npm run preview   # preview do build de produção
 - **Fronteira Pareto multi-dimensional**: 3D (aprovação × inad.real × inad.inferida)
 - **Decision Lens — modo incremental**: comparação visual linha a linha das decisões mudadas
 - **Exportação**: JSON canônico da política para importação em motor de decisão em produção; exportação do canvas como PNG/SVG
-- **Persistência**: export/import de projeto como `.credito.json` ✅ (ver "Salvar / Abrir Projeto"); falta auto-save no `localStorage`
+- **Persistência**: export/import de projeto como `.credito.json` ✅ (ver "Salvar / Abrir Projeto") + auto-persistência em `sessionStorage` ✅ (ver "Auto-persistência de sessão"); falta auto-save durável em `localStorage` (sobrevive só à sessão do navegador)
 - **Cálculo de delta marginal**: "adicionar esta célula muda aprovação em +X pp e inad em +Y pp"
