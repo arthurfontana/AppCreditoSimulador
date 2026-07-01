@@ -1229,6 +1229,7 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
       { id: 'inadInferida', label: 'Inad. Inferida',    unit: 'pct' },
       { id: 'qty',          label: 'Vol. Propostas',    unit: 'qty' },
       { id: 'approvedQty',  label: 'Vol. Aprovado',     unit: 'qty' },
+      { id: 'approvedAltasInfer', label: 'Vol. Vendas Inferidas', unit: 'qty' },
     ],
     scenarios: [
       { id: 'as_is', nome: 'AS IS', decisionCol: '__DECISAO_AS_IS' },
