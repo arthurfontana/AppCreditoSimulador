@@ -4,7 +4,7 @@ Plano de engenharia para permitir carregar bases sumarizadas **por dia** com
 ~1MM de linhas / ~130MB sem estourar a memória da aba do Chrome
 (erro *"Out of memory"*).
 
-> **Status:** Fases 0, 1 e 2 **entregues**. Dividido em 3 fases independentes e
+> **Status:** Fases 0, 1, 2 e 3 **entregues**. Dividido em fases independentes e
 > incrementais. Cada fase é entregável sozinha e verificável contra a suíte de testes.
 
 ---
@@ -196,6 +196,42 @@ correto, só sem o ganho de memória.
 `buildCsvStoreMessage` (transfer vazio + base íntegra/legível após montar a mensagem).
 
 **Pré-requisito:** Fase 1 concluída (base já em typed arrays).
+
+---
+
+## Fase 3 — Não recomputar o dataset analítico fora da aba Dashboard ✅ (entregue)
+
+**Objetivo:** parar de pagar o custo do dataset largo (`ANALYTICS_RESULT`, ainda um
+array de **objetos simples**, não vetorizado — ver nota da Fase 2) enquanto o
+usuário nem está olhando a aba Dashboard.
+
+**Diagnóstico:** mesmo com Fases 0–2 entregues (csvStore colunar + SAB), o effect
+que dispara `COMPUTE_ANALYTICS_DATASET` (`src/App.jsx`) rodava **sempre**, a cada
+mudança de `shapes`/`conns`/`csvStore`/`canvases`/`inferenceRef`, debounced em
+300ms — inclusive com a aba **Canvas** ativa. Cada disparo: (1) worker materializa
+1 objeto JS por linha × cenário marcado em `includeInDashboard`; (2) esse array
+volta pro main thread via *structured clone* (cópia real — não é SAB); (3) se
+houver algum Agrupamento configurado, `applyGroupingsToDataset` (`groupedDataset`
+useMemo) copia o array de novo (`ds.rows.map(r => ({...r, ...}))`). Editar o
+whiteboard com uma base grande carregada (ex.: arrastar formas) gerava esse ciclo
+de 2–3 cópias completas do dataset largo a cada poucas centenas de ms, mesmo sem
+nenhum gráfico visível — a causa mais provável do *Out of memory* observado com a
+aba **Canvas** ativa (não a Dashboard).
+
+**O que foi feito:** o effect de `COMPUTE_ANALYTICS_DATASET` agora só posta a
+mensagem quando `activeTab === 'analysis'` (Dashboard). `activeTab` entrou nas
+deps, então trocar para a aba Dashboard recomputa na hora; ficar na aba Canvas não
+dispara mais o worker nem a cópia de `groupedDataset`.
+
+**Critérios de aceite:**
+- `npm test` verde (sem mudança de comportamento numérico).
+- Trocar para a aba Dashboard sempre mostra dados atualizados (efeito reagе a
+  `activeTab`).
+- Editar o canvas com a aba Canvas ativa não dispara `COMPUTE_ANALYTICS_DATASET`.
+
+**Não faz parte:** vetorizar o dataset largo em si (typed arrays) — isso reduziria
+ainda mais o pico quando a aba Dashboard *está* aberta; continua como otimização
+futura (ver nota da Fase 2).
 
 ---
 
