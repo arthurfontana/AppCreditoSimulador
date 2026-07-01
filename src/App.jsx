@@ -172,9 +172,18 @@ const VAR_TYPES = [
   { value:"categorical", label:"Categórica", icon:"🏷️" },
 ];
 
+// Abreviações de mês de 3 letras (SAS DDMONYYYY) — inglês e português, já que
+// "JUN"/"JAN" coincidem nos dois idiomas mas MAI/ABR/AGO/SET/OUT/DEZ/FEV não
+// são reconhecidos pelo Date.parse do JS (só entende abreviações em inglês).
+const MONTH_ABBR = {
+  jan:0, fev:1, feb:1, mar:2, abr:3, apr:3, mai:4, may:4, jun:5,
+  jul:6, ago:7, aug:7, set:8, sep:8, out:9, oct:9, nov:10, dez:11, dec:11,
+};
+
 // Parse a temporal cell value into a sortable numeric key (UTC ms), or null if
 // unparseable. Supports ISO (YYYY-MM-DD / YYYY-MM), BR (DD/MM/YYYY), compact
-// (YYYYMMDD), and a Date.parse fallback. Used to order the X axis chronologically.
+// (YYYYMMDD), SAS DDMONYYYY (ex: 10MAI2026), e um fallback via Date.parse.
+// Usado para ordenar o eixo X cronologicamente.
 function parseTemporalKey(str) {
   const s = String(str ?? "").trim();
   if (!s) return null;
@@ -184,6 +193,11 @@ function parseTemporalKey(str) {
   if (m) { let y = +m[3]; if (y < 100) y += 2000; return Date.UTC(y, +m[2] - 1, +m[1]); }
   m = s.match(/^(\d{4})(\d{2})(\d{2})?$/);                               // YYYYMMDD / YYYYMM
   if (m) return Date.UTC(+m[1], +m[2] - 1, m[3] ? +m[3] : 1);
+  m = s.match(/^(\d{1,2})[-\s]?([A-Za-zÀ-ÿ]{3})[-\s]?(\d{2,4})$/);       // DDMONYYYY (SAS)
+  if (m) {
+    const mon = MONTH_ABBR[m[2].toLowerCase()];
+    if (mon != null) { let y = +m[3]; if (y < 100) y += 2000; return Date.UTC(y, mon, +m[1]); }
+  }
   const t = Date.parse(s);
   return isNaN(t) ? null : t;
 }
