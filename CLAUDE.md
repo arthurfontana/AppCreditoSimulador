@@ -600,19 +600,31 @@ O domínio completo continua guardado no shape (`rowDomain`/`colDomain`, ports).
 
 Botões **💾 Salvar Projeto** e **📁 Abrir Projeto** na seção **Projeto** (topo do
 painel direito). Persistência completa do estudo num único arquivo
-`.credito.json` (download/upload local, sem servidor), para o usuário retomar
-exatamente de onde parou.
+`.credito.json` (local, sem servidor), para o usuário retomar exatamente de onde
+parou.
 
-- **`saveProject()`**: mescla a working copy do canvas ativo de volta em `canvases`
-  (igual ao effect da `sessionStorage`) e baixa um snapshot `{schemaVersion:"2.0",
-  kind:"credito-project", activeTab, viewport, canvases, activeCanvasId, csvStore,
-  inferenceRef, analyticsLayout, analyticsGroupings, analyticsPageFilters, cinemaLibrary,
-  businessWidget, preferences}`.
+- **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
+  Monta o snapshot `{schemaVersion:"2.1", kind:"credito-project", generatedAt,
+  activeTab, viewport, panelCollapsed, canvases, activeCanvasId, csvStore,
+  inferenceRef, analyticsLayout, analyticsGroupings, analyticsPageFilters,
+  cinemaLibrary, businessWidget, preferences}`.
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
+  Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
+  (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
+  um Decision Lens recém-criado) não entram no arquivo.**
+- **`saveProject()`** (async): serializa `buildProjectPayload()` e usa o **"Salvar
+  como" nativo** (File System Access API `window.showSaveFilePicker`) quando
+  disponível — o usuário escolhe pasta e nome, e a escrita via stream (`createWritable`)
+  não sofre truncamento. `AbortError` = usuário cancelou (no-op). *Fallback* para
+  download via `<a download>` (browsers sem a API): anexa o `<a>` ao DOM e só revoga o
+  blob URL após `setTimeout(…, 2000)` — **revogar imediatamente após `click()` pode
+  truncar projetos grandes** (bug histórico: base de dados sumindo do arquivo salvo).
+  Dá feedback via `projectSaveNotice` (`{kind:'ok'|'err', msg}`) renderizado sob o botão.
 - **`loadProject(data)`** / **`onProjectFileChange`**: valida `kind:"credito-project"`,
   sobe o contador `_id` (varre shapes/conns/ids de todos os canvas) p/ evitar colisão,
-  restaura todo o estado, reseta seleção/edição e os stacks de undo/redo (que são por
-  canvas e ficariam inconsistentes após trocar todos os canvas). Os effects de
+  restaura todo o estado (cada seção com default defensivo — seções ausentes não zeram
+  o resto), reseta seleção/edição e os stacks de undo/redo (que são por canvas e
+  ficariam inconsistentes após trocar todos os canvas). Os effects de
   `csvStore`/`inferenceRef` reenviam `UPDATE_CSV_STORE`/`UPDATE_INFERENCE_REF` ao worker.
 - **`serializeInferenceRef` / `deserializeInferenceRef`** (helpers globais exportados):
   `inferenceRef.levels` é `{[nivel]: Map}` — JSON não serializa `Map`, então converte
@@ -622,6 +634,37 @@ exatamente de onde parou.
 Difere do **Exportar/Importar Fluxo** (seção Fluxo), que salva só o canvas ativo
 (shapes/conns + opcionalmente csvStore) — o Projeto salva *tudo* (todas as abas,
 bases, inferência, dashboard, biblioteca e preferências).
+
+### ⚠️ Regra para novas features — o que o usuário cria/ajusta PRECISA ser salvo
+
+**Toda vez que você adicionar um estado novo que representa algo criado ou
+configurado pelo usuário** (uma nova aba/canvas, um novo tipo de shape e seus
+campos, uma nova biblioteca, um novo painel/config do Dashboard, uma nova
+preferência de visualização, um novo modal de configuração persistente, etc.),
+inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passos:
+
+1. **Incluir no `buildProjectPayload()`** o novo campo (ou garantir que ele já
+   viaja dentro de um contêiner já salvo — ex.: um novo campo de um `shape` já é
+   coberto por `canvases`; um novo campo do `csvStore[csvId]` já é coberto por
+   `csvStore`). Só precisa de entrada própria estado que vive **fora** desses
+   contêineres (um novo `useState` de topo).
+2. **Restaurar em `loadProject(data)`** com default defensivo
+   (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
+   arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
+3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
+4. Se o estado for um `Map`/`Set`/tipo não-JSON, adicionar serialize/deserialize
+   dedicados (padrão do `serializeInferenceRef`) e cobrir o round-trip em teste.
+5. Se também deve sobreviver a reload na mesma sessão, adicionar à
+   auto-persistência de `sessionStorage` (ver seção abaixo).
+
+**Checklist do que hoje é salvo** (mantê-lo em dia): canvas e todos os shapes/conns
+de **todas** as abas (losangos, Cineminhas, Decision Lens e suas `rules`, frames,
+terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados completas
+(`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `inferenceConfig`) ·
+Tabela de Inferência (`inferenceRef`) · Dashboard (`analyticsLayout`,
+`analyticsGroupings`, `analyticsPageFilters`) · biblioteca de Cineminhas
+(`cinemaLibrary`) · widget de negócio · preferências de aresta/espessura ·
+viewport · aba ativa · painel colapsado.
 
 ## Auto-persistência de sessão (`sessionStorage`)
 

@@ -2749,6 +2749,8 @@ export default function App() {
   const fileInputRef  = useRef(null);
   const projectInputRef = useRef(null);
   const infRefInputRef = useRef(null);
+  // Feedback transitório do "Salvar Projeto" — null | {kind:'ok'|'err', msg}
+  const [projectSaveNotice, setProjectSaveNotice] = useState(null);
   const dragR         = useRef(null);
   const pinchR        = useRef(null);
   const movedR        = useRef(false);
@@ -4385,19 +4387,26 @@ export default function App() {
   // a Tabela de Inferência, os gráficos do Dashboard, a biblioteca de
   // Cineminhas, o widget de negócio e as preferências de visualização —
   // de modo que o usuário retome exatamente de onde parou.
-  const saveProject = () => {
+  // Monta o snapshot integral do estudo. FONTE ÚNICA DA VERDADE do que é
+  // persistido — qualquer estado novo criado/ajustado pelo usuário (nova aba,
+  // nova preferência, nova biblioteca, novo painel do Dashboard, etc.) precisa
+  // ser incluído AQUI e restaurado em `loadProject`. Ver checklist no CLAUDE.md
+  // (seção "Salvar / Abrir Projeto").
+  const buildProjectPayload = () => {
     // Mescla a working copy do canvas ativo de volta no store (igual ao
-    // effect de persistência da sessionStorage).
+    // effect de persistência da sessionStorage) — sem isso, edições no canvas
+    // ativo (ex.: um Decision Lens recém-criado) não entrariam no arquivo.
     const mergedCanvases = {
       ...canvases,
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
-    const payload = {
-      schemaVersion: "2.0",
+    return {
+      schemaVersion: "2.1",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
       viewport: vp,
+      panelCollapsed,
       canvases: mergedCanvases,
       activeCanvasId,
       csvStore,
@@ -4414,13 +4423,57 @@ export default function App() {
         showEdgeInadInf,
       },
     };
-    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `projeto_credito_${new Date().toISOString().slice(0,10)}.credito.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+  };
+
+  const projectFileName = () => `projeto_credito_${new Date().toISOString().slice(0,10)}.credito.json`;
+
+  const saveProject = async () => {
+    let json;
+    try {
+      json = JSON.stringify(buildProjectPayload());
+    } catch {
+      setProjectSaveNotice({ kind: "err", msg: "Não foi possível serializar o projeto." });
+      return;
+    }
+    const suggestedName = projectFileName();
+    // Preferência: "Salvar como" nativo (File System Access API) — o usuário
+    // escolhe pasta e nome, e a escrita via stream não sofre o truncamento que
+    // o download por <a>+revokeObjectURL pode causar em projetos grandes.
+    if (typeof window !== "undefined" && window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName,
+          types: [{
+            description: "Projeto Simulador de Crédito",
+            accept: { "application/json": [".json"] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(json);
+        await writable.close();
+        setProjectSaveNotice({ kind: "ok", msg: `Projeto salvo em "${handle.name}".` });
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return; // usuário cancelou o diálogo
+        // Qualquer outro erro (permissão, browser sem suporte real) → fallback.
+      }
+    }
+    // Fallback: download via <a>. Anexa ao DOM e só revoga o blob URL depois de
+    // um tick — revogar imediatamente após click() pode truncar arquivos grandes.
+    try {
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = suggestedName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      setProjectSaveNotice({ kind: "ok", msg: "Projeto exportado para os downloads." });
+    } catch {
+      setProjectSaveNotice({ kind: "err", msg: "Falha ao salvar o projeto." });
+    }
   };
 
   const loadProject = (data) => {
@@ -4458,6 +4511,7 @@ export default function App() {
     if (data.businessWidget) setBusinessWidget(data.businessWidget);
     if (data.viewport) setVp(data.viewport);
     if (data.activeTab) setActiveTab(data.activeTab);
+    if (typeof data.panelCollapsed === 'boolean') setPanelCollapsed(data.panelCollapsed);
     const pref = data.preferences || {};
     if (typeof pref.enableDynThickness === 'boolean') setEnableDynThickness(pref.enableDynThickness);
     if (typeof pref.showEdgeVol === 'boolean') setShowEdgeVol(pref.showEdgeVol);
@@ -4470,6 +4524,7 @@ export default function App() {
     setUndoStack([]); setRedoStack([]);
     setImportError(null);
     setImportWarn(null);
+    setProjectSaveNotice(null);
   };
 
   const onProjectFileChange = (e) => {
@@ -7026,6 +7081,16 @@ export default function App() {
             <span style={{fontSize:16}}>📁</span> Abrir Projeto
           </button>
           <input ref={projectInputRef} type="file" accept=".json,.credito.json,application/json" style={{display:"none"}} onChange={onProjectFileChange}/>
+          {projectSaveNotice && (
+            <div style={{marginTop:8,padding:"7px 10px",borderRadius:8,fontSize:11.5,lineHeight:1.35,display:"flex",alignItems:"flex-start",gap:6,
+              background: projectSaveNotice.kind==="ok" ? "#f0fdf4" : "#fef2f2",
+              color: projectSaveNotice.kind==="ok" ? "#15803d" : "#b91c1c",
+              border: `1px solid ${projectSaveNotice.kind==="ok" ? "#bbf7d0" : "#fecaca"}`}}>
+              <span>{projectSaveNotice.kind==="ok" ? "✅" : "⚠️"}</span>
+              <span style={{flex:1}}>{projectSaveNotice.msg}</span>
+              <span onClick={()=>setProjectSaveNotice(null)} style={{cursor:"pointer",opacity:.6,fontWeight:700}} title="Dispensar">×</span>
+            </div>
+          )}
         </div>
 
         {/* Importar CSV button */}
