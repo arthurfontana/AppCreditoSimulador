@@ -1352,6 +1352,56 @@ export function pivotWidget(ds, config) {
   return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated: serieBy !== SERIE_CENARIO && serieBy !== SERIE_NONE && seriesDefs.length >= MAX_SERIES };
 }
 
+// ── Filtros do Analytics Workspace (página + visual) ─────────────────────────
+// FilterCard: {id, dim, mode:'basic'|'advanced', selected: string[]|null, rules: FilterRule[]}
+// - modo 'basic': `selected===null` = todos os valores passam (inativo até desmarcar algo);
+//   `selected` array = lista explícita de valores marcados.
+// - modo 'advanced': `rules` — mesma semântica de LensRule (operator/value/logic AND-OR),
+//   avaliadas via `matchLensRule` sobre o valor da dimensão na linha.
+// Filtros de página e de visual se combinam por AND (um recorta em cima do outro).
+export function newFilterCard() {
+  return { id: uid(), dim: null, mode: "basic", selected: null, rules: [] };
+}
+
+function filterCardActive(card) {
+  if (!card || !card.dim) return false;
+  if (card.mode === "advanced") return (card.rules || []).some(r => String(r.value ?? "").trim());
+  return Array.isArray(card.selected);
+}
+
+function filterCardMatches(row, card) {
+  const val = String(row[card.dim] ?? "").trim();
+  if (card.mode === "advanced") {
+    const rules = card.rules || [];
+    if (rules.length === 0) return true;
+    let result = null;
+    for (const rule of rules) {
+      const m = matchLensRule(val, rule.operator, rule.value ?? "");
+      result = result === null ? m : (rule.logic === "OR" ? (result || m) : (result && m));
+    }
+    return result ?? true;
+  }
+  return !Array.isArray(card.selected) || card.selected.includes(val);
+}
+
+// Filtra as linhas do dataset largo pelos cartões de filtro ativos (AND entre todos os cartões).
+export function applyAnalyticsFilters(rows, cards) {
+  const active = (cards || []).filter(filterCardActive);
+  if (active.length === 0) return rows;
+  return rows.filter(r => active.every(c => filterCardMatches(r, c)));
+}
+
+// Combina filtro de página + filtro do visual (AND) sobre o dataset largo — o visual
+// recorta em cima da visão que já chega filtrada pela página. Ignora cartões cuja
+// dimensão não existe mais no dataset atual (base trocada/agrupamento removido).
+export function applyFiltersToDataset(ds, pageFilters, widgetFilters) {
+  if (!ds) return ds;
+  const validDims = new Set(ds.dimensions || []);
+  const cards = [...(pageFilters || []), ...(widgetFilters || [])].filter(c => c && validDims.has(c.dim));
+  const rows = applyAnalyticsFilters(ds.rows, cards);
+  return rows === ds.rows ? ds : { ...ds, rows };
+}
+
 // ── Agrupamentos (dimensões derivadas) ───────────────────────────────────────
 // Um agrupamento colapsa os valores de uma dimensão-base (ex.: FAIXA_SCORE R01–R20)
 // em poucos buckets reutilizáveis. Vira uma dimensão derivada usável em qualquer
@@ -1567,7 +1617,7 @@ function AWEmptyState({ icon, title, hint }) {
 }
 
 // ── FieldPanel — campos arrastáveis (dimensões + métricas), estilo Power BI ───
-function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGrouping, onDeleteGrouping }) {
+function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGrouping, onDeleteGrouping, pageFilters = [], onPageFiltersChange }) {
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
   const groupedSet = new Set(analyticsDataset?.groupedDimensions || []);
@@ -1611,8 +1661,20 @@ function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGro
     </div>
   );
 
+  const pageFilterCount = pageFilters.filter(c => c.dim).length;
+
   return (
     <div style={{ width: 220, flexShrink: 0, borderLeft: "1px solid #e2e8f0", background: "#fff", overflowY: "auto", padding: "16px 14px" }}>
+      <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>
+        🔎 Filtros da Página {pageFilterCount > 0 && <span style={{ color: "#2563eb" }}>({pageFilterCount})</span>}
+      </p>
+      <p style={{ fontSize: 10.5, color: "#cbd5e1", marginBottom: 8, lineHeight: 1.4 }}>
+        Aplica-se a todos os gráficos do Dashboard. Um filtro no visual recorta em cima deste.
+      </p>
+      <FilterCardsEditor cards={pageFilters} dataset={analyticsDataset} onChange={onPageFiltersChange} />
+
+      <div style={{ height: 1, background: "#e2e8f0", margin: "16px 0" }} />
+
       <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Dimensões</p>
       {chip("Cenários (abas)", "🎬", "#fff7ed", "#fed7aa", "#c2410c", "dim", XDIM_CENARIO)}
       {orderedDims.length > 0 ? orderedDims.map(d =>
@@ -1671,6 +1733,157 @@ function FieldWell({ icon, label, accept, value, displayValue, options, onChange
           {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </div>
+    </div>
+  );
+}
+
+// ── FilterCardsEditor — cartões de filtro (nível página ou nível visual) ─────
+// Inspirado no painel de filtros do Power BI: cada cartão fixa uma dimensão e
+// alterna entre "Básico" (lista de valores com checkbox) e "Avançado" (regras
+// AND/OR, mesma semântica do Decision Lens).
+function FilterCardRow({ card, dataset, onChange, onRemove }) {
+  const dims = dataset?.dimensions || [];
+  const temporalCols = new Set(dataset?.temporalColumns || []);
+  const groupedCols = new Set(dataset?.groupedDimensions || []);
+  const dimLabel = (d) => groupedCols.has(d) ? `🧩 ${d}` : (temporalCols.has(d) ? `⏱ ${d}` : d);
+  const orderedDims = [...dims].sort((a, b) => {
+    const ga = groupedCols.has(a), gb = groupedCols.has(b);
+    if (ga !== gb) return ga ? 1 : -1;
+    const ta = temporalCols.has(a), tb = temporalCols.has(b);
+    if (ta !== tb) return ta ? -1 : 1;
+    return a.localeCompare(b, "pt-BR");
+  });
+
+  const [search, setSearch] = useState("");
+  const distinct = useMemo(() => {
+    if (!card.dim || !dataset) return [];
+    const vals = distinctDimValues(dataset, card.dim);
+    const order = dataset.dimensionOrders?.[card.dim];
+    if (!order || !order.length) return vals;
+    const idx = new Map(order.map((v, i) => [v, i]));
+    return [...vals].sort((a, b) => {
+      const ia = idx.has(a) ? idx.get(a) : Infinity, ib = idx.has(b) ? idx.get(b) : Infinity;
+      return ia !== ib ? ia - ib : a.localeCompare(b, "pt-BR");
+    });
+  }, [dataset, card.dim]);
+  const shown = search ? distinct.filter(v => v.toLowerCase().includes(search.toLowerCase())) : distinct;
+  const selectedList = card.selected ?? distinct;
+  const selectedSet = new Set(selectedList);
+
+  const toggleVal = (v) => {
+    const base = card.selected ?? distinct;
+    const next = base.includes(v) ? base.filter(x => x !== v) : [...base, v];
+    onChange({ ...card, selected: next });
+  };
+  const addRule = () => onChange({ ...card, rules: [...card.rules, { id: uid(), operator: "equal", value: "", logic: card.rules.length > 0 ? "AND" : null }] });
+  const updateRule = (ruleId, patch) => onChange({ ...card, rules: card.rules.map(r => r.id === ruleId ? { ...r, ...patch } : r) });
+  const removeRule = (ruleId) => onChange({ ...card, rules: card.rules.filter(r => r.id !== ruleId).map((r, i) => i === 0 ? { ...r, logic: null } : r) });
+
+  const activeCount = !card.dim ? 0 : card.mode === "basic"
+    ? (Array.isArray(card.selected) ? card.selected.length : distinct.length)
+    : card.rules.filter(r => String(r.value ?? "").trim()).length;
+
+  const selStyle = { padding: "5px 7px", borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff",
+    fontSize: 11.5, color: "#1e293b", fontFamily: "inherit", outline: "none", cursor: "pointer" };
+
+  return (
+    <div style={{ border: "1px solid #e2e8f0", borderRadius: 10, background: "#fff", marginBottom: 8, overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 9px", background: "#f8fafc", borderBottom: card.dim ? "1px solid #f1f5f9" : "none" }}>
+        <select value={card.dim ?? ""} onChange={(e) => onChange({ ...card, dim: e.target.value || null, selected: null, rules: [] })}
+          style={{ ...selStyle, flex: 1, minWidth: 0 }}>
+          <option value="">— escolher dimensão —</option>
+          {orderedDims.map(d => <option key={d} value={d}>{dimLabel(d)}</option>)}
+        </select>
+        <button onClick={onRemove} title="Remover filtro"
+          style={{ flexShrink: 0, border: "none", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 13, padding: "2px 4px" }}>✕</button>
+      </div>
+      {card.dim && (
+        <div style={{ padding: "8px 9px" }}>
+          <div style={{ display: "flex", gap: 2, marginBottom: 8, padding: 2, background: "#f1f5f9", borderRadius: 8, width: "fit-content" }}>
+            {[["basic", "Básico"], ["advanced", "Avançado"]].map(([id, label]) => (
+              <button key={id} onClick={() => onChange({ ...card, mode: id })}
+                style={{ padding: "3px 10px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600,
+                  fontFamily: "inherit", background: card.mode === id ? "#fff" : "transparent",
+                  color: card.mode === id ? "#1e293b" : "#94a3b8", boxShadow: card.mode === id ? "0 1px 2px rgba(0,0,0,.08)" : "none" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {card.mode === "basic" ? (
+            <>
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar valor..."
+                style={{ width: "100%", padding: "5px 8px", borderRadius: 7, border: "1px solid #e2e8f0", background: "#f8fafc",
+                  fontSize: 11.5, fontFamily: "inherit", outline: "none", boxSizing: "border-box", marginBottom: 6 }} />
+              <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>
+                <button onClick={() => onChange({ ...card, selected: null })} style={{ border: "none", background: "none", color: "#2563eb", cursor: "pointer", fontSize: 10.5, fontFamily: "inherit", padding: 0 }}>Selecionar tudo</button>
+                <button onClick={() => onChange({ ...card, selected: [] })} style={{ border: "none", background: "none", color: "#2563eb", cursor: "pointer", fontSize: 10.5, fontFamily: "inherit", padding: 0 }}>Limpar</button>
+              </div>
+              <div style={{ maxHeight: 180, overflowY: "auto", border: "1px solid #f1f5f9", borderRadius: 7 }}>
+                {shown.length === 0 ? (
+                  <div style={{ padding: "10px 8px", fontSize: 11, color: "#cbd5e1", textAlign: "center" }}>Nenhum valor</div>
+                ) : shown.map(v => (
+                  <label key={v} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", fontSize: 11.5, color: "#334155", cursor: "pointer" }}>
+                    <input type="checkbox" checked={selectedSet.has(v)} onChange={() => toggleVal(v)} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 5 }}>
+                {activeCount} de {distinct.length} selecionados
+              </div>
+            </>
+          ) : (
+            <div>
+              {card.rules.length === 0 ? (
+                <div style={{ fontSize: 11, color: "#94a3b8", padding: "6px 2px" }}>Nenhuma regra ainda.</div>
+              ) : card.rules.map((rule, idx) => (
+                <div key={rule.id} style={{ marginBottom: 5 }}>
+                  {idx > 0 && (
+                    <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                      {["AND", "OR"].map(logic => (
+                        <button key={logic} onClick={() => updateRule(rule.id, { logic })}
+                          style={{ padding: "1px 8px", borderRadius: 10, border: `1px solid ${rule.logic === logic ? "#0891b2" : "#e2e8f0"}`,
+                            background: rule.logic === logic ? "#ecfeff" : "#fff", color: rule.logic === logic ? "#0891b2" : "#94a3b8",
+                            fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{logic}</button>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 5 }}>
+                    <select value={rule.operator} onChange={(e) => updateRule(rule.id, { operator: e.target.value })} style={{ ...selStyle, flexShrink: 0 }}>
+                      {LENS_OPERATORS.map(op => <option key={op.value} value={op.value}>{op.label}</option>)}
+                    </select>
+                    <input value={rule.value || ""} onChange={(e) => updateRule(rule.id, { value: e.target.value })}
+                      placeholder={rule.operator === "in" || rule.operator === "notIn" ? "val1, val2…" : "valor..."}
+                      style={{ flex: 1, minWidth: 0, padding: "5px 8px", borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff",
+                        fontSize: 11.5, fontFamily: "inherit", outline: "none", boxSizing: "border-box" }} />
+                    <button onClick={() => removeRule(rule.id)} style={{ flexShrink: 0, border: "none", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 12 }}>✕</button>
+                  </div>
+                </div>
+              ))}
+              <button onClick={addRule} style={{ marginTop: 4, ...selStyle, background: "#f8fafc", fontWeight: 600, color: "#475569" }}>+ Regra</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterCardsEditor({ cards, dataset, onChange }) {
+  const setCard = (id, patch) => onChange(cards.map(c => c.id === id ? patch : c));
+  const removeCard = (id) => onChange(cards.filter(c => c.id !== id));
+  const addCard = () => onChange([...cards, newFilterCard()]);
+  return (
+    <div>
+      {cards.map(c => (
+        <FilterCardRow key={c.id} card={c} dataset={dataset}
+          onChange={(next) => setCard(c.id, next)} onRemove={() => removeCard(c.id)} />
+      ))}
+      <button onClick={addCard} style={{ width: "100%", padding: "6px 8px", borderRadius: 8, border: "1px dashed #cbd5e1",
+        background: "#f8fafc", color: "#475569", cursor: "pointer", fontSize: 11.5, fontWeight: 600, fontFamily: "inherit" }}>
+        + Adicionar filtro
+      </button>
     </div>
   );
 }
@@ -1761,15 +1974,20 @@ function KpiCard({ analyticsDataset, metricId, kpiA, kpiB, onChange }) {
 }
 
 // ── AnalyticsWidget — um gráfico configurável ─────────────────────────────────
-function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChange, onDelete, onDragStart, onResizeStart }) {
+function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigChange, onTypeChange, onDelete, onDragStart, onResizeStart }) {
   const cfg = widget.config;
   const type = widget.type || "line";
   const isKpi = type === "kpi";
-  const pivot = useMemo(() => isKpi ? { state: "kpi" } : pivotWidget(analyticsDataset, cfg),
+  // Dataset filtrado: filtro de página AND filtro do visual (o visual recorta em cima da página).
+  const filteredDataset = useMemo(() => applyFiltersToDataset(analyticsDataset, pageFilters, cfg.filters),
+    [analyticsDataset, pageFilters, cfg.filters]);
+  const pivot = useMemo(() => isKpi ? { state: "kpi" } : pivotWidget(filteredDataset, cfg),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [analyticsDataset, isKpi, cfg.xDimension, cfg.metric, cfg.serieBy, cfg.activeScenarios]);
+    [filteredDataset, isKpi, cfg.xDimension, cfg.metric, cfg.serieBy, cfg.activeScenarios]);
 
   const [seriesStylesOpen, setSeriesStylesOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const widgetFilterCount = (cfg.filters || []).filter(c => c.dim).length;
   const styles = cfg.seriesStyles || {};
   // Aplica overrides de cor sem precisar modificar pivotWidget.
   const effectiveSeries = pivot.state === "ok"
@@ -1889,6 +2107,20 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
             )}
           </>
         )}
+        <button onClick={() => setFiltersOpen(v => !v)} title="Filtros deste visual (combinam com os filtros da página)"
+          style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, position: "relative",
+            border: `1px solid ${filtersOpen ? "#2563eb" : (widgetFilterCount > 0 ? "#93c5fd" : "#e2e8f0")}`,
+            background: filtersOpen || widgetFilterCount > 0 ? "#eff6ff" : "#fff",
+            color: filtersOpen || widgetFilterCount > 0 ? "#2563eb" : "#94a3b8",
+            cursor: "pointer", fontSize: 12, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          🔎
+          {widgetFilterCount > 0 && (
+            <span style={{ position: "absolute", top: -4, right: -4, background: "#2563eb", color: "#fff", borderRadius: 8,
+              fontSize: 8.5, fontWeight: 700, minWidth: 13, height: 13, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 2px" }}>
+              {widgetFilterCount}
+            </span>
+          )}
+        </button>
         <button onClick={() => onDelete(widget.id)} title="Remover gráfico"
           style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
             color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
@@ -1978,10 +2210,18 @@ function AnalyticsWidget({ widget, analyticsDataset, onConfigChange, onTypeChang
         <SeriesStylePanel series={effectiveSeries} isLine={type === "line"} seriesStyles={styles} onChange={setSeriesStyle} />
       )}
 
+      {/* Painel de filtros do visual — recorta em cima do que já chega filtrado pela página */}
+      {filtersOpen && (
+        <div style={{ background: "#fafafa", borderRadius: 9, border: "1px solid #e8ecf0", padding: "10px 12px", marginBottom: 10, flexShrink: 0, maxHeight: 320, overflowY: "auto" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.7 }}>Filtros deste visual</div>
+          <FilterCardsEditor cards={cfg.filters || []} dataset={analyticsDataset} onChange={(next) => set({ filters: next })} />
+        </div>
+      )}
+
       {/* Gráfico ou estado vazio */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {isKpi ? (
-          <KpiCard analyticsDataset={analyticsDataset} metricId={cfg.metric}
+          <KpiCard analyticsDataset={filteredDataset} metricId={cfg.metric}
             kpiA={cfg.kpiA} kpiB={cfg.kpiB} onChange={set} />
         ) : pivot.state === "no_x" ? (
           <AWEmptyState icon="📐" title="Escolha o Eixo X"
@@ -2225,7 +2465,7 @@ function GroupingModal({ draft, baseDataset, existingNames, onSave, onClose }) {
 }
 
 // ── AnalysisTab — página da aba Análise ───────────────────────────────────────
-function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyticsLayout, groupings, setGroupings }) {
+function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyticsLayout, groupings, setGroupings, pageFilters, setPageFilters }) {
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = analyticsDataset?.temporalColumns || [];
 
@@ -2233,7 +2473,7 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
     const nextY = analyticsLayout.reduce((acc, w) => Math.max(acc, (w.y ?? 0) + (w.h ?? 500)), 0);
     return {
       id: uid(), type: "line", x: 24, y: analyticsLayout.length === 0 ? 24 : nextY + 24, w: 560, h: 500,
-      config: { title, xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_CENARIO, yMin: null, yMax: null },
+      config: { title, xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_CENARIO, yMin: null, yMax: null, filters: [] },
     };
   };
 
@@ -2356,7 +2596,7 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
             <div style={{ position: "relative", minHeight: canvasH, minWidth: canvasW }}>
               {analyticsLayout.map(w => (
                 <div key={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 560, height: w.h ?? 500 }}>
-                  <AnalyticsWidget widget={w} analyticsDataset={analyticsDataset}
+                  <AnalyticsWidget widget={w} analyticsDataset={analyticsDataset} pageFilters={pageFilters}
                     onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget}
                     onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
                     onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
@@ -2369,7 +2609,8 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
 
       {/* Painel de campos */}
       {hasData && <FieldPanel analyticsDataset={analyticsDataset} groupings={groupings}
-        onNewGrouping={newGrouping} onEditGrouping={editGrouping} onDeleteGrouping={deleteGrouping} />}
+        onNewGrouping={newGrouping} onEditGrouping={editGrouping} onDeleteGrouping={deleteGrouping}
+        pageFilters={pageFilters} onPageFiltersChange={setPageFilters} />}
 
       {/* Modal de agrupamento */}
       {editingGrouping && (
@@ -2448,6 +2689,7 @@ export default function App() {
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
   const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = sessionStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
   const [analyticsGroupings, setAnalyticsGroupings] = useState(() => { try { const s = sessionStorage.getItem('aw_groupings_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // Grouping[] — dimensões derivadas reutilizáveis
+  const [analyticsPageFilters, setAnalyticsPageFilters] = useState(() => { try { const s = sessionStorage.getItem('aw_page_filters_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // FilterCard[] — filtro de página do Dashboard (aplica-se a todos os gráficos)
   // Dataset enriquecido com as dimensões derivadas (agrupamentos) — consumido pela aba Dashboard.
   const groupedDataset = useMemo(() => applyGroupingsToDataset(analyticsDataset, analyticsGroupings), [analyticsDataset, analyticsGroupings]);
   // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
@@ -2739,6 +2981,7 @@ export default function App() {
   // Persiste layout do dashboard na sessionStorage para sobreviver a reloads dentro da mesma sessão.
   useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
   useEffect(() => { sessionStorage.setItem('aw_groupings_v1', JSON.stringify(analyticsGroupings)); }, [analyticsGroupings]);
+  useEffect(() => { sessionStorage.setItem('aw_page_filters_v1', JSON.stringify(analyticsPageFilters)); }, [analyticsPageFilters]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
   useEffect(() => {
@@ -4161,6 +4404,7 @@ export default function App() {
       inferenceRef: serializeInferenceRef(inferenceRef),
       analyticsLayout,
       analyticsGroupings,
+      analyticsPageFilters,
       cinemaLibrary,
       businessWidget,
       preferences: {
@@ -4209,6 +4453,7 @@ export default function App() {
     setInfRefError(null);
     setAnalyticsLayout(Array.isArray(data.analyticsLayout) ? data.analyticsLayout : []);
     setAnalyticsGroupings(Array.isArray(data.analyticsGroupings) ? data.analyticsGroupings : []);
+    setAnalyticsPageFilters(Array.isArray(data.analyticsPageFilters) ? data.analyticsPageFilters : []);
     setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
     if (data.businessWidget) setBusinessWidget(data.businessWidget);
     if (data.viewport) setVp(data.viewport);
@@ -6057,7 +6302,7 @@ export default function App() {
 
 
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
-      {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} />}
+      {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} pageFilters={analyticsPageFilters} setPageFilters={setAnalyticsPageFilters} />}
 
       {/* ═══════════════ CANVAS PANE ═══════════════ */}
       <div style={{display:activeTab==="canvas"?"flex":"none",flex:1,minHeight:0,width:"100%",overflow:"hidden",position:"relative"}}>

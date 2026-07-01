@@ -67,6 +67,7 @@ AppCreditoSimulador/
 - `analyticsDataset`: dataset analítico largo cacheado do worker (`COMPUTE_ANALYTICS_DATASET`) — `null | AnalyticsDataset`
 - `analyticsLayout`: gráficos do dashboard da aba Análise — `WidgetConfig[]` (ver Analytics Workspace)
 - `analyticsGroupings`: agrupamentos (dimensões derivadas) reutilizáveis nos gráficos — `Grouping[]` (ver Agrupamentos). `groupedDataset` (useMemo) = `analyticsDataset` enriquecido por `applyGroupingsToDataset` — é o que a aba Dashboard consome
+- `analyticsPageFilters`: filtro de página do Dashboard — `FilterCard[]` (ver Filtros). Combina por AND com o filtro de cada visual (`widget.config.filters`)
 - `canvases`: store multi-canvas (Sub-sessão 5A, DEC-AW-007) — `{[id]: {id, name, shapes, conns, includeInDashboard}}`; `shapes`/`conns` são o **working copy** do canvas ativo
 - `activeCanvasId`: ID do canvas ativo
 - `renamingCanvasId` / `renameValue` / `canvasTabMenu`: estado UI da barra de abas de canvas
@@ -338,7 +339,7 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
 - **Tipo `temporal` (DEC-AW-005)**: marcado no Passo 2 do wizard (toggle de 3 estados Categórica → Ordinal → ⏱ Temporal, grava `columnTypes[col]='temporal'`). `parseTemporalKey(str)` deriva a chave de ordenação cronológica.
 - **Sessão 1** (entregue): pipeline ponta a ponta com um gráfico de linha fixo (Recharts, DEC-AW-001).
 - **Sessão 2** (entregue): builder de dashboard configurável — gráficos de linha configuráveis + painel de campos arrastáveis.
-  - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type, x, y, w, h, config:{title, xDimension, metric, serieBy, kpiA?, kpiB?}}` (`kpiA`/`kpiB` só nos cards `kpi`, 5C). Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
+  - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type, x, y, w, h, config:{title, xDimension, metric, serieBy, kpiA?, kpiB?, filters?}}` (`kpiA`/`kpiB` só nos cards `kpi`, 5C; `filters: FilterCard[]` é o filtro de nível visual — ver Filtros). Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
   - **`AnalysisTab`**: layout em 2 colunas — área de gráficos (scroll) + `FieldPanel` à direita. Header com botão **+ Adicionar gráfico**. Funções: `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`.
   - **`FieldPanel`**: chips arrastáveis — dimensões (temporais ⏱ primeiro, depois categóricas; `kind:'dim'`) e métricas (`kind:'metric'`). MIME `application/aw-field`.
   - **`AnalyticsWidget`**: card com título editável, botão remover, barra de 3 `FieldWell` (Eixo X, Métrica, Série) e `LineChart`. Pivot memoizado por `[analyticsDataset, xDimension, metric, serieBy]`.
@@ -387,6 +388,38 @@ Série ou KPI), no export CSV e salvas no projeto. Implementação 100% client-s
 - **Testes**: `tests/analytics.test.js` cobre `autoBuckets`, `distinctDimValues`,
   `applyGroupingsToDataset` (rótulos, ordem, modo keep, colisão de nome, base ausente,
   no-op) e o uso da derivada como Eixo X no `pivotWidget`.
+
+### Filtros (nível página + nível visual)
+
+Dois níveis de filtro sobre o dataset largo, no estilo do painel de filtros do Power
+BI, que se combinam por **AND**: o filtro de página restringe a base para todos os
+gráficos do Dashboard; o filtro de um visual específico recorta ainda mais em cima do
+que já chega filtrado pela página. 100% client-side (não toca o worker).
+
+- **FilterCard**: `{id, dim, mode:'basic'|'advanced', selected: string[]|null, rules: FilterRule[]}`.
+  - `dim`: dimensão-alvo (qualquer dimensão real ou agrupamento derivado do dataset largo).
+  - Modo **Básico**: lista de valores distintos com checkbox (estilo "seleção básica" do
+    Power BI) + busca + Selecionar tudo/Limpar. `selected === null` = todos selecionados
+    (cartão inativo até o usuário desmarcar algo); array = lista explícita marcada.
+  - Modo **Avançado**: regras AND/OR (`{id, operator, value, logic}`) com os mesmos
+    operadores do Decision Lens (`LENS_OPERATORS`), avaliadas via `matchLensRule`.
+- **Estado**: `analyticsPageFilters: FilterCard[]` em `App.jsx` (sessionStorage
+  `aw_page_filters_v1` + `.credito.json`, seção **Projeto**) — filtro de página, único
+  por estudo, editado na seção **🔎 Filtros da Página** do `FieldPanel`. Filtro de
+  visual vive em `widget.config.filters: FilterCard[]` (persistido junto do
+  `analyticsLayout`), editado no painel **Filtros deste visual** de cada
+  `AnalyticsWidget` (ícone 🔎 no header, com badge de contagem).
+- **Helpers globais exportados**: `applyAnalyticsFilters(rows, cards)` (filtra linhas
+  pelos cartões ativos, AND entre todos os cartões da lista) e
+  `applyFiltersToDataset(ds, pageFilters, widgetFilters)` (concatena filtro de página +
+  filtro do visual e devolve o dataset largo com `rows` filtradas; ignora cartões cuja
+  dimensão não existe mais no dataset atual — base trocada/agrupamento removido).
+- **`FilterCardsEditor`/`FilterCardRow`**: componentes reutilizados nos dois níveis —
+  só mudam a lista de cartões e o callback `onChange`.
+- **Consumo**: `AnalyticsWidget` computa `filteredDataset = applyFiltersToDataset(analyticsDataset, pageFilters, cfg.filters)`
+  e usa esse dataset filtrado tanto no `pivotWidget` (line/bar/bar100) quanto no
+  `KpiCard`. Os poços de campo (Eixo X/Métrica/Série) continuam listando dimensões do
+  dataset **não filtrado** — só os valores agregados mudam com o filtro.
 
 ## Engine de simulação
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos
@@ -573,8 +606,8 @@ exatamente de onde parou.
 - **`saveProject()`**: mescla a working copy do canvas ativo de volta em `canvases`
   (igual ao effect da `sessionStorage`) e baixa um snapshot `{schemaVersion:"2.0",
   kind:"credito-project", activeTab, viewport, canvases, activeCanvasId, csvStore,
-  inferenceRef, analyticsLayout, analyticsGroupings, cinemaLibrary, businessWidget,
-  preferences}`.
+  inferenceRef, analyticsLayout, analyticsGroupings, analyticsPageFilters, cinemaLibrary,
+  businessWidget, preferences}`.
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
 - **`loadProject(data)`** / **`onProjectFileChange`**: valida `kind:"credito-project"`,
   sobe o contador `_id` (varre shapes/conns/ids de todos os canvas) p/ evitar colisão,
@@ -603,6 +636,7 @@ Além do save/load explícito, parte do estado é persistida automaticamente em
   compartilhado pelos initializers de `canvases`/`activeCanvasId`/`shapes`/`conns`).
 - **`aw_layout_v1`**: `analyticsLayout` (gráficos do dashboard).
 - **`aw_groupings_v1`**: `analyticsGroupings` (dimensões derivadas).
+- **`aw_page_filters_v1`**: `analyticsPageFilters` (filtro de página do Dashboard).
 
 `csvStore`, `inferenceRef` e `cinemaLibrary` **não** vão para `sessionStorage`
 (muito grandes / precisam do Projeto `.credito.json`). Init/gravação são
