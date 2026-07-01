@@ -16,3 +16,4 @@
 **Engenharia**
 - [[Arquitetura]]
 - [[Decisoes|Decisões (ADRs)]]
+- [[Otimizacao-Memoria|Otimização de Memória (datasets grandes)]]
