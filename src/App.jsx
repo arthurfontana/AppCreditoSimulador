@@ -2860,7 +2860,6 @@ export default function App() {
       if (msgType === 'SIMULATION_RESULT') {
         setSimResult(e.data.result);
       } else if (msgType === 'OVERLAY_RESULT') {
-        setSimulationOverlay(e.data.overlay);
         setIncrementalResult(e.data.incrementalResult);
         setNodeArrivals(e.data.nodeArrivals || {});
       } else if (msgType === 'ANALYTICS_RESULT') {
@@ -2986,8 +2985,6 @@ export default function App() {
   useEffect(() => { lensPopulationsR.current = lensPopulations; }, [lensPopulations]);
 
   // ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ──────
-  // simulationOverlay: null | {[csvId]: {rowDecisions, summaryStats}}
-  const [simulationOverlay, setSimulationOverlay] = useState(null);
   // Contagem reativa de registros que chegam a cada nó por valor de domínio
   // (computada no worker junto do overlay). Alimenta o "Configurar nó" e o filtro
   // de exibição de domínios (modo automático). {[nodeId]: {val|row|col: {[v]:qty}}}

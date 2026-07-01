@@ -1296,10 +1296,17 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_OVERLAY') {
+    // `overlay` (rowDecisions: 1 objeto por linha, ~1MM numa base diária) é usado só
+    // aqui dentro por computeIncrementalResult e descartado em seguida. Ele NÃO é
+    // enviado à main thread: a main só consome `incrementalResult` (agregados) e
+    // `nodeArrivals`. Antes o overlay ia no postMessage (structured clone = +1MM
+    // objetos na main) e era guardado num estado que ninguém lia — fonte de OOM ao
+    // editar o canvas com base grande. O caminho do Dashboard tem seu próprio overlay
+    // memoizado (cachedCanvasOverlay), independente deste.
     const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
     const incrementalResult = computeIncrementalResult(overlay, workerCsvStore, workerInferenceRef);
     const nodeArrivals = computeNodeArrivals(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
-    self.postMessage({ type: 'OVERLAY_RESULT', overlay, incrementalResult, nodeArrivals });
+    self.postMessage({ type: 'OVERLAY_RESULT', incrementalResult, nodeArrivals });
     return;
   }
 
