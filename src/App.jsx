@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from "recharts";
+// Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
+// guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
+// célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
+import { buildColumnar, rowCount, cellStr, cellNum, getRow, materializeRows, distinctColValues, serializeCsvStore, deserializeCsvStore } from "./columnar.js";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -572,13 +576,14 @@ function matchLensRule(cellVal, operator, ruleVal) {
   }
 }
 
-function rowMatchesLensRules(row, headers, rules) {
+function rowMatchesLensRules(csv, r, rules) {
   if (!rules || rules.length === 0) return true;
+  const headers = csv.headers;
   let result = null;
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i];
     const colIdx = headers.indexOf(rule.col);
-    const cellVal = colIdx >= 0 ? (row[colIdx] ?? "") : "";
+    const cellVal = colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? "") : "";
     const matches = matchLensRule(cellVal, rule.operator, rule.value ?? "");
     if (result === null) { result = matches; }
     else if (rule.logic === "OR") { result = result || matches; }
@@ -593,10 +598,11 @@ function computeLensPopulation(rules, csvStore) {
     const types = csv.columnTypes || {};
     const qtyCol = Object.entries(types).find(([,t])=>t==='qty')?.[0];
     const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
-    for (const row of csv.rows) {
-      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 1) : 1;
+    const n = rowCount(csv);
+    for (let r = 0; r < n; r++) {
+      const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 1) : 1;
       total += qty;
-      if (rowMatchesLensRules(row, csv.headers, rules)) count += qty;
+      if (rowMatchesLensRules(csv, r, rules)) count += qty;
     }
   }
   return { count, total };
@@ -608,7 +614,10 @@ function computeLensAffectedRows(lensShape, csvStore) {
   const rules = lensShape.rules || [];
   const result = {};
   for (const [csvId, csv] of Object.entries(csvStore)) {
-    result[csvId] = csv.rows.map(row => rowMatchesLensRules(row, csv.headers, rules));
+    const n = rowCount(csv);
+    const arr = new Array(n);
+    for (let r = 0; r < n; r++) arr[r] = rowMatchesLensRules(csv, r, rules);
+    result[csvId] = arr;
   }
   return result;
 }
@@ -692,7 +701,8 @@ function exportDiagnosticCSV(shapes, conns, csvStore) {
     return k;
   }
 
-  function traverseRow(row, headers, startId) {
+  function traverseRow(csv, r, startId) {
+    const headers = csv.headers;
     let cur = startId;
     const visited = new Set();
     const stops = []; // [{nodeId, val}]
@@ -703,7 +713,7 @@ function exportDiagnosticCSV(shapes, conns, csvStore) {
       if (TERM.has(node.type)) break;
       if (node.type === 'decision') {
         const ci = headers.indexOf(node.variableCol);
-        const val = (ci >= 0 ? (row[ci] ?? '') : '').trim();
+        const val = (ci >= 0 ? (cellStr(csv, r, ci) ?? '') : '').trim();
         stops.push({ nodeId: cur, val, nodeName: getNodeLabel(node) });
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
         if (!match) break;
@@ -711,8 +721,8 @@ function exportDiagnosticCSV(shapes, conns, csvStore) {
       } else if (node.type === 'cineminha') {
         const ri = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const ci = node.colVar ? headers.indexOf(node.colVar.col) : -1;
-        const rv = node.rowVar && ri >= 0 ? (row[ri] ?? '').trim() : '*';
-        const cv = node.colVar && ci >= 0 ? (row[ci] ?? '').trim() : '*';
+        const rv = node.rowVar && ri >= 0 ? (cellStr(csv, r, ri) ?? '').trim() : '*';
+        const cv = node.colVar && ci >= 0 ? (cellStr(csv, r, ci) ?? '').trim() : '*';
         const cellKey = `${rv}|${cv}`;
         stops.push({ nodeId: cur, val: cellKey, nodeName: getNodeLabel(node) });
         const isEligible = isCellEligible(node.cells, cellKey);
@@ -748,19 +758,20 @@ function exportDiagnosticCSV(shapes, conns, csvStore) {
     if (csvRoots.length === 0) continue;
     const rootId = csvRoots[0].id;
 
-    for (const row of csv.rows) {
-      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
-      const qtdAltas = qtdAltasIdx >= 0 ? (parseFloat(row[qtdAltasIdx]) || 0) : 0;
-      const qtdAltasInfer = qtdAltasInferIdx >= 0 ? (parseFloat(row[qtdAltasInferIdx]) || 0) : 0;
-      const inadR = inadRealIdx >= 0 ? (parseFloat(row[inadRealIdx]) || 0) : 0;
-      const inadI = inadInferidaIdx >= 0 ? (parseFloat(row[inadInferidaIdx]) || 0) : 0;
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+      const qtdAltas = qtdAltasIdx >= 0 ? (cellNum(csv, r, qtdAltasIdx) || 0) : 0;
+      const qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
+      const inadR = inadRealIdx >= 0 ? (cellNum(csv, r, inadRealIdx) || 0) : 0;
+      const inadI = inadInferidaIdx >= 0 ? (cellNum(csv, r, inadInferidaIdx) || 0) : 0;
       totalQty += qty;
 
-      const { stops, result } = traverseRow(row, csv.headers, rootId);
+      const { stops, result } = traverseRow(csv, r, rootId);
       let isApproved = result === 'approved';
       let isRejected = result === 'rejected';
       if (result === 'as_is') {
-        const orig = dOrigIdx >= 0 ? String(row[dOrigIdx] ?? '').toUpperCase() : '';
+        const orig = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase() : '';
         if (orig === 'APROVADO') isApproved = true;
         else if (orig === 'REPROVADO') isRejected = true;
       }
@@ -936,12 +947,13 @@ function populateCellsFromResultVar(shape, csvStore) {
   const rDom = rowDomain?.length > 0 ? rowDomain : ['*'];
   const cDom = colDomain?.length > 0 ? colDomain : ['*'];
   const lookup = {};
-  for (const row of csv.rows) {
-    const rv = rowVar && rowCI >= 0 ? (row[rowCI] ?? '').toString().trim() : '*';
-    const cv = colVar && colCI >= 0 ? (row[colCI] ?? '').toString().trim() : '*';
+  const nRows = rowCount(csv);
+  for (let r = 0; r < nRows; r++) {
+    const rv = rowVar && rowCI >= 0 ? (cellStr(csv, r, rowCI) ?? '').toString().trim() : '*';
+    const cv = colVar && colCI >= 0 ? (cellStr(csv, r, colCI) ?? '').toString().trim() : '*';
     const key = `${rv}|${cv}`;
     if (lookup[key] === undefined) {
-      const raw = row[resultColIdx];
+      const raw = cellStr(csv, r, resultColIdx);
       const num = parseFloat(raw);
       lookup[key] = isNaN(num) ? (raw ? 1 : 0) : num;
     }
@@ -3815,7 +3827,7 @@ export default function App() {
           e.preventDefault(); e.stopPropagation();
           const csv=csvStoreR.current[ac.csvId]; if(!csv) return;
           let {ri,ci}=ac;
-          const maxR=Math.min(csv.rows.length,MAX_ROWS)-1, maxC=csv.headers.length-1;
+          const maxR=Math.min(rowCount(csv),MAX_ROWS)-1, maxC=csv.headers.length-1;
           if (e.key==="ArrowUp")    ri=Math.max(0,ri-1);
           if (e.key==="ArrowDown")  ri=Math.min(maxR,ri+1);
           if (e.key==="ArrowLeft")  ci=Math.max(0,ci-1);
@@ -4083,11 +4095,15 @@ export default function App() {
       if (!prev) { setWizard(null); return; }
       pushHistory();
 
-      // Strip any existing __DECISAO_ORIGINAL column from headers/rows
+      // Strip any existing __DECISAO_ORIGINAL column from headers/rows.
+      // `prev` está em formato colunar (Fase 1) — materializa string[][] só aqui
+      // (edição é rara) para reusar a lógica de strip/re-derivação da coluna, e
+      // re-vetoriza no fim. O array materializado é liberado logo em seguida.
       const DORIGINAL_COL = '__DECISAO_ORIGINAL';
       const existingIdx = prev.headers.indexOf(DORIGINAL_COL);
+      const prevRows = materializeRows(prev);
       const baseHeaders = existingIdx >= 0 ? prev.headers.filter((_,i) => i !== existingIdx) : prev.headers;
-      const baseRows = existingIdx >= 0 ? prev.rows.map(r => r.filter((_,i) => i !== existingIdx)) : prev.rows;
+      const baseRows = existingIdx >= 0 ? prevRows.map(r => r.filter((_,i) => i !== existingIdx)) : prevRows;
 
       // Rebuild __DECISAO_ORIGINAL if asIsVar is configured
       let finalHeaders = baseHeaders;
@@ -4104,10 +4120,11 @@ export default function App() {
 
       const finalTypes = buildFinalTypes(baseHeaders, columnTypes);
       const newAsIsConfig = asIsVar ? { col: asIsVar, mapping: asIsMapping || {} } : (prev.asIsConfig || null);
+      const { columns: editColumns, rowCount: editRowCount } = buildColumnar(finalHeaders, finalRows, finalTypes);
 
       setCsvStore(store => ({
         ...store,
-        [editCsvId]: { ...prev, name: filename||prev.name, headers: finalHeaders, rows: finalRows, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: newAsIsConfig, inferenceConfig }
+        [editCsvId]: { ...prev, name: filename||prev.name, headers: finalHeaders, columns: editColumns, rowCount: editRowCount, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: newAsIsConfig, inferenceConfig }
       }));
       setWizard(null);
       return;
@@ -4146,7 +4163,11 @@ export default function App() {
       });
     }
     const finalTypes = buildFinalTypes(headers, columnTypes);
-    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,rows:finalRows,columnTypes:finalTypes,varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null,inferenceConfig}}));
+    // Vetoriza a base (Fase 1): a partir daqui a base vive como colunar
+    // (Float64Array + dictionary encoding), não mais como string[][]. `finalRows`
+    // (string[][]) é liberado após esta chamada.
+    const { columns: newColumns, rowCount: newRowCount } = buildColumnar(finalHeaders, finalRows, finalTypes);
+    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,columns:newColumns,rowCount:newRowCount,columnTypes:finalTypes,varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null,inferenceConfig}}));
 
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
@@ -4277,7 +4298,8 @@ export default function App() {
     for (const h of csv.headers) {
       if (!varTypes[h]) {
         const ci = csv.headers.indexOf(h);
-        const vals = csv.rows.slice(0, 1000).map(r => r[ci] ?? '').filter(Boolean);
+        const sampleN = Math.min(rowCount(csv), 1000);
+        const vals = Array.from({length: sampleN}, (_, i) => cellStr(csv, i, ci) ?? '').filter(Boolean);
         varTypes[h] = suggestVarType(h, vals);
       }
     }
@@ -4339,7 +4361,8 @@ export default function App() {
       viewport: vp,
       shapes,
       conns,
-      csvStore: includeData ? csvStore : {},
+      // Serializa a base colunar (typed arrays → arrays planos) p/ caber em JSON.
+      csvStore: includeData ? serializeCsvStore(csvStore) : {},
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -4370,7 +4393,8 @@ export default function App() {
     const maxNum = Math.max(0, ...allIds.map(id => parseInt(id.replace(/\D/g,''))).filter(n => !isNaN(n)));
     if (maxNum >= _id) _id = maxNum + 1;
     // Detect missing variables (decision/cineminha nodes whose columns don't exist in the stored CSV)
-    const importedCsvStore = data.csvStore || {};
+    // Reconstrói typed arrays da base colunar (aceita também formato legado antigo).
+    const importedCsvStore = deserializeCsvStore(data.csvStore || {});
     const noDataset = Object.keys(importedCsvStore).length === 0;
     const missingVars = data.shapes.flatMap(s => {
       if (s.type === 'decision' && s.csvId && s.variableCol) {
@@ -4436,7 +4460,7 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.1",
+      schemaVersion: "2.2",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
@@ -4444,7 +4468,9 @@ export default function App() {
       panelCollapsed,
       canvases: mergedCanvases,
       activeCanvasId,
-      csvStore,
+      // Base colunar → arrays planos (typed arrays não são JSON nativo). Round-trip
+      // coberto em tests/columnar.test.js.
+      csvStore: serializeCsvStore(csvStore),
       inferenceRef: serializeInferenceRef(inferenceRef),
       analyticsLayout,
       analyticsGroupings,
@@ -4536,7 +4562,7 @@ export default function App() {
     setActiveCanvasId(actId);
     setShapes(canv[actId].shapes || []);
     setConns(canv[actId].conns || []);
-    setCsvStore(data.csvStore || {});
+    setCsvStore(deserializeCsvStore(data.csvStore || {}));
     setInferenceRef(deserializeInferenceRef(data.inferenceRef));
     setInfRefError(null);
     setAnalyticsLayout(Array.isArray(data.analyticsLayout) ? data.analyticsLayout : []);
@@ -4669,8 +4695,7 @@ export default function App() {
       if (csv) {
         const colIdx = csv.headers.indexOf(rowVarFinal.col);
         if (colIdx !== -1) {
-          const vals = [...new Set(csv.rows.map(r => r[colIdx]??'').filter(v => v !== ''))];
-          rowDomain = sortDomain(vals);
+          rowDomain = sortDomain(distinctColValues(csv, colIdx));
         }
       }
     }
@@ -4679,8 +4704,7 @@ export default function App() {
       if (csv) {
         const colIdx = csv.headers.indexOf(colVarFinal.col);
         if (colIdx !== -1) {
-          const vals = [...new Set(csv.rows.map(r => r[colIdx]??'').filter(v => v !== ''))];
-          colDomain = sortDomain(vals);
+          colDomain = sortDomain(distinctColValues(csv, colIdx));
         }
       }
     }
@@ -5021,7 +5045,7 @@ export default function App() {
     if (!csv) return;
     const colIdx = csv.headers.indexOf(variableCol);
     if (colIdx === -1) return;
-    const allVals = [...new Set(csv.rows.map(r=>r[colIdx]??"").filter(v=>v!==""))];
+    const allVals = distinctColValues(csv, colIdx);
     const distinctVals = allVals.slice(0, MAX_DISTINCT);
     const decId = uid();
     const decisionShape = {id:decId,type:"decision",x:wx-SW/2,y:wy-SH/2,w:SW,h:SH,label:variableCol,color:"#fef3c7",variableCol,csvId};
@@ -5168,7 +5192,7 @@ export default function App() {
     if (!csv) return;
     const colIdx = csv.headers.indexOf(col);
     if (colIdx === -1) return;
-    const allVals = [...new Set(csv.rows.map(r => r[colIdx]??'').filter(v=>v!==''))];
+    const allVals = distinctColValues(csv, colIdx);
     const domain  = sortDomain(allVals);
 
     // Pre-compute port repositioning for each cineminha
@@ -5311,11 +5335,19 @@ export default function App() {
   const editingCsv = wizard?.editCsvId ? csvStore[wizard.editCsvId] : null;
   const wizardPreview = useMemo(() => {
     if (!wizard) return null;
-    if (wizard.editCsvId) return editingCsv ? { headers: editingCsv.headers, rows: editingCsv.rows } : null;
-    if (wizard.parsedHeaders && wizard.parsedDelimiter === wizard.delimiter && wizard.parsedHasHeader === wizard.hasHeader) {
-      return { headers: wizard.parsedHeaders, rows: wizard.parsedRows };
+    // Edição: a base já vive em colunar. Materializa só um punhado de linhas para a
+    // tabela de amostra e carrega `count` com o total real (sem materializar 1MM).
+    if (wizard.editCsvId) {
+      if (!editingCsv) return null;
+      const total = rowCount(editingCsv);
+      const previewRows = Array.from({length: Math.min(total, 20)}, (_, i) => getRow(editingCsv, i));
+      return { headers: editingCsv.headers, rows: previewRows, count: total };
     }
-    return parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader);
+    if (wizard.parsedHeaders && wizard.parsedDelimiter === wizard.delimiter && wizard.parsedHasHeader === wizard.hasHeader) {
+      return { headers: wizard.parsedHeaders, rows: wizard.parsedRows, count: wizard.parsedRows.length };
+    }
+    const parsed = parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader);
+    return { ...parsed, count: parsed.rows.length };
   }, [wizard?.rawText, wizard?.delimiter, wizard?.hasHeader, wizard?.editCsvId, wizard?.parsedHeaders, wizard?.parsedRows, wizard?.parsedDelimiter, wizard?.parsedHasHeader, editingCsv]);
 
   const libWizardPreview = useMemo(() => {
@@ -5463,7 +5495,7 @@ export default function App() {
           </text>
           <text x={x+44} y={y+42} fontSize={10} fill="#94a3b8"
             fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none"}}>
-            {csv?`${csv.rows.length} linhas · ${csv.headers.length} colunas`:"CSV"}
+            {csv?`${rowCount(csv)} linhas · ${csv.headers.length} colunas`:"CSV"}
           </text>
           {/* Maximize btn */}
           <g onClick={e=>{e.stopPropagation();pushHistory();setShapes(p=>p.map(s=>s.id===id?{...s,minimized:false,w:CSV_W,h:CSV_H}:s));}} style={{cursor:"pointer"}}>
@@ -5476,8 +5508,10 @@ export default function App() {
 
     // ── Maximized ──
     const w=CSV_W, h=CSV_H;
-    const displayRows = csv ? csv.rows.slice(0,MAX_ROWS) : [];
-    const truncated = csv && csv.rows.length > MAX_ROWS;
+    const nRowsCsv = csv ? rowCount(csv) : 0;
+    // Materializa só as primeiras MAX_ROWS linhas para o preview (base é colunar).
+    const displayRows = csv ? Array.from({length: Math.min(nRowsCsv, MAX_ROWS)}, (_, i) => getRow(csv, i)) : [];
+    const truncated = csv && nRowsCsv > MAX_ROWS;
 
     return (
       <g key={id} data-sid={id} style={{filter:"drop-shadow(0 4px 16px rgba(0,0,0,.1))"}}>
@@ -5501,7 +5535,7 @@ export default function App() {
         {csv && (
           <text x={x+w-100} y={y+25} fontSize={10} fill="#94a3b8" textAnchor="end"
             fontFamily="'DM Sans',system-ui,sans-serif" style={{pointerEvents:"none"}}>
-            {truncated?`${MAX_ROWS}/${csv.rows.length} linhas`:(`${csv.rows.length} linhas`)} · {csv?.headers.length} colunas
+            {truncated?`${MAX_ROWS}/${nRowsCsv} linhas`:(`${nRowsCsv} linhas`)} · {csv?.headers.length} colunas
           </text>
         )}
 
@@ -5569,7 +5603,7 @@ export default function App() {
               {truncated&&(
                 <div style={{padding:"6px 12px",fontSize:10.5,color:"#94a3b8",
                   background:"#fafafa",borderTop:"1px solid #f1f5f9",textAlign:"center"}}>
-                  Exibindo {MAX_ROWS} de {csv.rows.length} linhas
+                  Exibindo {MAX_ROWS} de {nRowsCsv} linhas
                 </div>
               )}
             </div>
@@ -5906,7 +5940,7 @@ export default function App() {
         const qtyCol = Object.entries(types).find(([,t]) => t === 'qty')?.[0];
         const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
         flags.forEach((inPop, ri) => {
-          const q = qtyIdx >= 0 ? (parseFloat(csv.rows[ri]?.[qtyIdx]) || 1) : 1;
+          const q = qtyIdx >= 0 ? (cellNum(csv, ri, qtyIdx) || 1) : 1;
           popTotal += q;
           if (inPop) popQty += q;
         });
@@ -6013,7 +6047,7 @@ export default function App() {
         if(type==="decision"){
           lines=[shape.label,shape.variableCol||""];
           const csv2=shape.csvId&&csvStore[shape.csvId];
-          if(csv2){const ci=csv2.headers.indexOf(shape.variableCol);if(ci>=0){const cnt=new Set(csv2.rows.map(r=>r[ci]??'')).size;lines.push(`${cnt} valores distintos`);}}
+          if(csv2){const ci=csv2.headers.indexOf(shape.variableCol);if(ci>=0){const cnt=distinctColValues(csv2, ci).length;lines.push(`${cnt} valores distintos`);}}
         } else if(type==="port"){lines=[shape.label];}
         setTooltip({x:sx2,y:sy2,lines});
       },400);
@@ -7223,7 +7257,7 @@ export default function App() {
                 <span>📊</span>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:12,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{csv.name}</div>
-                  <div style={{fontSize:10.5,color:"#94a3b8"}}>{csv.rows.length} linhas · {csv.headers.length} colunas</div>
+                  <div style={{fontSize:10.5,color:"#94a3b8"}}>{rowCount(csv)} linhas · {csv.headers.length} colunas</div>
                 </div>
                 <button
                   title="Editar configurações do dataset"
@@ -7605,8 +7639,9 @@ export default function App() {
           for (const csv of Object.values(csvStore)) {
             const idx = csv.headers.indexOf(col);
             if (idx < 0) continue;
-            for (const row of csv.rows.slice(0, 200)) {
-              const v = String(row[idx] ?? "").trim();
+            const sampleN = Math.min(rowCount(csv), 200);
+            for (let r = 0; r < sampleN; r++) {
+              const v = String(cellStr(csv, r, idx) ?? "").trim();
               if (!v) continue;
               total++;
               if (!isNaN(parseFloat(v)) && isFinite(v)) numCount++;
@@ -7628,13 +7663,10 @@ export default function App() {
           for (const csv of Object.values(csvStore)) {
             const idx = csv.headers.indexOf(col);
             if (idx < 0) continue;
-            const rows = csv.rows;
-            // Random sample of up to 2000 rows to ensure full value coverage
-            const sample = rows.length <= 2000
-              ? rows
-              : Array.from({length: 2000}, () => rows[Math.floor(Math.random() * rows.length)]);
-            for (const row of sample) {
-              const v = String(row[idx] ?? "").trim();
+            // Base colunar: os distintos são o dicionário da coluna (cobertura total,
+            // sem amostragem). Já vêm sem vazios; ainda trimamos por segurança.
+            for (const v0 of distinctColValues(csv, idx)) {
+              const v = String(v0 ?? "").trim();
               if (v) vals.add(v);
             }
           }
@@ -8795,7 +8827,7 @@ export default function App() {
                         <div style={{padding:20,textAlign:"center",color:"#94a3b8",fontSize:13}}>Nenhum dado detectado com este delimitador</div>
                       )}
                     </div>
-                    {wizardPreview && <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>{wizardPreview.rows.length} linhas · {wizardPreview.headers.length} colunas encontradas</p>}
+                    {wizardPreview && <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>{wizardPreview.count ?? wizardPreview.rows.length} linhas · {wizardPreview.headers.length} colunas encontradas</p>}
                   </div>
                 </>
               ) : wizard.step===2 ? (()=>{
@@ -8829,9 +8861,14 @@ export default function App() {
                 const filterCols = allHeaders.filter(h => !usedMetricCols.has(h) && h !== wizard.asIsVar);
 
                 const asIsColIdx = wizard.asIsVar ? allHeaders.indexOf(wizard.asIsVar) : -1;
-                const distinctVals = asIsColIdx >= 0
-                  ? [...new Set(rows4preview.map(r => String(r[asIsColIdx]??'')).filter(v=>v!==''))].sort()
-                  : [];
+                // Em edição a base é colunar: cobertura total dos distintos vem do
+                // dicionário da coluna (rows4preview é só amostra). No import novo,
+                // rows4preview já é o string[][] parseado completo.
+                const editingColCsv = wizard.editCsvId ? csvStore[wizard.editCsvId] : null;
+                const distinctVals = asIsColIdx < 0 ? []
+                  : editingColCsv
+                    ? [...new Set(distinctColValues(editingColCsv, editingColCsv.headers.indexOf(wizard.asIsVar)).map(v => String(v ?? '')).filter(v=>v!==''))].sort()
+                    : [...new Set(rows4preview.map(r => String(r[asIsColIdx]??'')).filter(v=>v!==''))].sort();
                 const mapping = wizard.asIsMapping || {};
                 const hasAprovado = distinctVals.some(v => mapping[v]==='APROVADO');
                 const hasReprovado = distinctVals.some(v => mapping[v]==='REPROVADO');

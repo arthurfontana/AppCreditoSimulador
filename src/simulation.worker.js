@@ -2,6 +2,11 @@
 // Receives csvStore once (UPDATE_CSV_STORE) and caches it to avoid
 // re-serializing the full dataset on every simulation tick.
 
+// Accessor colunar (Otimização de Memória — Fase 1). Os hot paths abaixo leem
+// as células via cellStr/cellNum/rowCount, que funcionam tanto sobre a base
+// colunar (produção) quanto sobre o legado string[][] (testes / GATE).
+import { cellStr, cellNum, rowCount } from './columnar.js';
+
 const CINEMINHA_TYPES = {
   eligibility: {
     id: 'eligibility',
@@ -101,13 +106,23 @@ function buildInferenceResolver(csv, inferenceRef) {
     .map(Number)
     .sort((a, b) => (ref.levelKeyCount?.[b] || 0) - (ref.levelKeyCount?.[a] || 0));
   const normScore = cfg.normalizeScore !== false; // default: aplicar (fiel ao SAS)
-  return (row) => {
-    const peso = weightIdx >= 0 ? (parseFloat(row[weightIdx]) || 0) : 0;
-    const parts = keyBaseIdx.map((bi, j) => {
-      let v = bi >= 0 ? String(row[bi] ?? '').trim() : '';
+  // Resolvedor dual-mode (Fase 1 — accessor colunar):
+  //   - legado (GATE / testes): resolve(row) — `a` é a linha string[], `r` undefined;
+  //   - produção: resolve(csv, r) — `a` é o csv colunar, `r` o índice da linha.
+  // Ambos leem os MESMOS índices de coluna; o legado usa `a[idx]`, a produção lê pelo
+  // accessor (cellStr/cellNum). Físicos e cascata inalterados.
+  return (a, r) => {
+    const legacy = r === undefined;
+    let peso = 0;
+    if (weightIdx >= 0) peso = legacy ? (parseFloat(a[weightIdx]) || 0) : (cellNum(a, r, weightIdx) || 0);
+    const parts = new Array(keyBaseIdx.length);
+    for (let j = 0; j < keyBaseIdx.length; j++) {
+      const bi = keyBaseIdx[j];
+      let v = '';
+      if (bi >= 0) v = legacy ? String(a[bi] ?? '').trim() : String(cellStr(a, r, bi) ?? '').trim();
       if (j === 0 && normScore) v = normalizeScoreKey(v); // keyCols[0] = âncora = score
-      return v;
-    });
+      parts[j] = v;
+    }
     const p = cascadeLookupPremissa(ref, levelOrder, parts);
     const conv = p?.conv || 0, fpd = p?.fpd || 0;
     // confiab propagado da premissa usada (Fase 3 / Proposta §4.5, CONTRATO §7):
@@ -135,13 +150,14 @@ function matchLensRule(cellVal, operator, ruleVal) {
   }
 }
 
-function rowMatchesLensRules(row, headers, rules) {
+function rowMatchesLensRules(csv, r, rules) {
   if (!rules || rules.length === 0) return true;
+  const headers = csv.headers;
   let result = null;
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i];
     const colIdx = headers.indexOf(rule.col);
-    const cellVal = colIdx >= 0 ? (row[colIdx] ?? '') : '';
+    const cellVal = colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '';
     const matches = matchLensRule(cellVal, rule.operator, rule.value ?? '');
     if (result === null) { result = matches; }
     else if (rule.logic === 'OR') { result = result || matches; }
@@ -182,7 +198,8 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     if (!edgeAcc[cid]) edgeAcc[cid] = { qty: 0, approvedQty: 0, rejectedQty: 0, asIsQty: 0, inadRealSum: 0, inadInferidaSum: 0, qtdAltasSum: 0, qtdAltasInferSum: 0 };
   };
 
-  function traverseRow(row, headers, startId) {
+  function traverseRow(csv, r, startId) {
+    const headers = csv.headers;
     let cur = startId; const visited = new Set(); const path = [];
     while (cur) {
       if (visited.has(cur)) return { result: null, path };
@@ -191,7 +208,7 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
       if (TERM.has(node.type)) return { result: node.type, path };
       if (node.type === 'decision') {
         const colIdx = headers.indexOf(node.variableCol);
-        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
         if (!match) return { result: null, path };
         const cid = edgeLookup[cur]?.[`${match.to}::${match.label ?? ''}`];
@@ -200,8 +217,8 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
       } else if (node.type === 'cineminha') {
         const rowIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const colIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
-        const rowVal = node.rowVar && rowIdx >= 0 ? (row[rowIdx] ?? '').trim() : '';
-        const colVal = node.colVar && colIdx >= 0 ? (row[colIdx] ?? '').trim() : '';
+        const rowVal = node.rowVar && rowIdx >= 0 ? (cellStr(csv, r, rowIdx) ?? '').trim() : '';
+        const colVal = node.colVar && colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '').trim() : '';
         if (!node.rowVar && !node.colVar) return { result: null, path };
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
@@ -216,7 +233,7 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
         cur = match.to;
       } else if (node.type === 'decision_lens') {
         const rules = node.rules || [];
-        const passes = rowMatchesLensRules(row, headers, rules);
+        const passes = rowMatchesLensRules(csv, r, rules);
         if (!passes) return { result: null, path };
         const edges = out[cur] || []; if (edges.length === 0) return { result: null, path };
         const match = edges[0];
@@ -266,22 +283,23 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     if (csvRoots.length === 0) continue;
     const rootId = csvRoots[0].id;
 
-    for (const row of csv.rows) {
-      const qty          = qtyIdx          >= 0 ? (parseFloat(row[qtyIdx])          || 0) : 1;
-      const qtdAltas     = qtdAltasIdx     >= 0 ? (parseFloat(row[qtdAltasIdx])     || 0) : 0;
-      const inadR        = inadRealIdx     >= 0 ? (parseFloat(row[inadRealIdx])     || 0) : 0;
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty          = qtyIdx          >= 0 ? (cellNum(csv, r, qtyIdx)          || 0) : 1;
+      const qtdAltas     = qtdAltasIdx     >= 0 ? (cellNum(csv, r, qtdAltasIdx)     || 0) : 0;
+      const inadR        = inadRealIdx     >= 0 ? (cellNum(csv, r, inadRealIdx)     || 0) : 0;
       // 🔮/🎯: das colunas (modo 'columns') ou derivados do lookup em cascata (modo 'ref').
       let qtdAltasInfer, inadI, rowConfiab = null;
-      if (infResolve) { const r = infResolve(row); qtdAltasInfer = r.altasInfer; inadI = r.inadIRaw; rowConfiab = r.confiab; }
+      if (infResolve) { const rr = infResolve(csv, r); qtdAltasInfer = rr.altasInfer; inadI = rr.inadIRaw; rowConfiab = rr.confiab; }
       else {
-        qtdAltasInfer = qtdAltasInferIdx >= 0 ? (parseFloat(row[qtdAltasInferIdx]) || 0) : 0;
-        inadI         = inadInferidaIdx  >= 0 ? (parseFloat(row[inadInferidaIdx])  || 0) : 0;
+        qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
+        inadI         = inadInferidaIdx  >= 0 ? (cellNum(csv, r, inadInferidaIdx)  || 0) : 0;
       }
       totalQty += qty;
-      const { result: res, path } = traverseRow(row, csv.headers, rootId);
+      const { result: res, path } = traverseRow(csv, r, rootId);
       let isApproved = res === 'approved', isRejected = res === 'rejected';
       if (res === 'as_is') {
-        const origDecision = dOrigIdx >= 0 ? String(row[dOrigIdx] ?? '').toUpperCase() : '';
+        const origDecision = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase() : '';
         if (origDecision === 'APROVADO') isApproved = true;
         else if (origDecision === 'REPROVADO') isRejected = true;
         else asIsQty += qty;
@@ -369,7 +387,8 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
     edgeLookup[c.from][`${c.to}::${c.label ?? ''}`] = c.id;
   }
 
-  function traverseRow(row, headers, startId) {
+  function traverseRow(csv, r, startId) {
+    const headers = csv.headers;
     let cur = startId; const visited = new Set(); const path = [];
     while (cur) {
       if (visited.has(cur)) return { result: null, path };
@@ -378,7 +397,7 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
       if (TERM.has(node.type)) return { result: node.type, path };
       if (node.type === 'decision') {
         const colIdx = headers.indexOf(node.variableCol);
-        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
         if (!match) return { result: null, path };
         const cid = edgeLookup[cur]?.[`${match.to}::${match.label ?? ''}`];
@@ -387,8 +406,8 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
       } else if (node.type === 'cineminha') {
         const rowI = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const colI = node.colVar ? headers.indexOf(node.colVar.col) : -1;
-        const rowVal = node.rowVar && rowI >= 0 ? (row[rowI] ?? '').trim() : '';
-        const colVal = node.colVar && colI >= 0 ? (row[colI] ?? '').trim() : '';
+        const rowVal = node.rowVar && rowI >= 0 ? (cellStr(csv, r, rowI) ?? '').trim() : '';
+        const colVal = node.colVar && colI >= 0 ? (cellStr(csv, r, colI) ?? '').trim() : '';
         if (!node.rowVar && !node.colVar) return { result: null, path };
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
@@ -400,7 +419,7 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
         if (cid) path.push(cid);
         cur = match.to;
       } else if (node.type === 'decision_lens') {
-        const passes = rowMatchesLensRules(row, headers, node.rules || []);
+        const passes = rowMatchesLensRules(csv, r, node.rules || []);
         if (!passes) return { result: null, path };
         const edges = out[cur] || []; if (edges.length === 0) return { result: null, path };
         const match = edges[0];
@@ -439,19 +458,22 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
 
     const summaryStats = { totalQty: 0, mutableQty: 0, impactedQty: 0, rToA: 0, aToR: 0 };
 
-    const rowDecisions = csv.rows.map((row, rowIdx) => {
-      const decisaoOriginal = row[dOrigIdx] ?? '';
-      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 1) : 1;
+    const nRows = rowCount(csv);
+    const rowDecisions = new Array(nRows);
+    for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
+      const decisaoOriginal = cellStr(csv, rowIdx, dOrigIdx) ?? '';
+      const qty = qtyIdx >= 0 ? (cellNum(csv, rowIdx, qtyIdx) || 1) : 1;
       const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
 
       summaryStats.totalQty += qty;
       if (isMutable) summaryStats.mutableQty += qty;
 
       if (!isMutable || csvRoots.length === 0) {
-        return { rowIdx, decisaoOriginal, decisaoSimulada: decisaoOriginal, flagImpactado: false, componenteOrigem: null, flagMutavel: false };
+        rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada: decisaoOriginal, flagImpactado: false, componenteOrigem: null, flagMutavel: false };
+        continue;
       }
 
-      const { result: boardResult, path } = traverseRow(row, csv.headers, csvRoots[0].id);
+      const { result: boardResult, path } = traverseRow(csv, rowIdx, csvRoots[0].id);
       let decisaoSimulada = decisaoOriginal;
       let componenteOrigem = null;
 
@@ -475,8 +497,8 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
         if (decisaoOriginal === 'APROVADO'  && decisaoSimulada === 'REPROVADO') summaryStats.aToR += qty;
       }
 
-      return { rowIdx, decisaoOriginal, decisaoSimulada, flagImpactado, componenteOrigem, flagMutavel: true };
-    });
+      rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada, flagImpactado, componenteOrigem, flagMutavel: true };
+    }
 
     overlay[csvId] = { rowDecisions, summaryStats };
   }
@@ -506,17 +528,18 @@ function computeIncrementalResult(overlay, csvStore, inferenceRef) {
     const inadIIdx      = getIdx('inadInferida');
     const infResolve    = buildInferenceResolver(csv, inferenceRef);
 
+    const nRows = rowCount(csv);
     for (const rd of rowDecisions) {
-      const row = csv.rows[rd.rowIdx];
-      if (!row) continue;
-      const qty        = qtyIdx       >= 0 ? (parseFloat(row[qtyIdx])       || 1) : 1;
-      const altas      = altasIdx     >= 0 ? (parseFloat(row[altasIdx])     || 0) : 0;
-      const inadR      = inadRIdx     >= 0 ? (parseFloat(row[inadRIdx])     || 0) : 0;
+      const ri = rd.rowIdx;
+      if (ri < 0 || ri >= nRows) continue;
+      const qty        = qtyIdx       >= 0 ? (cellNum(csv, ri, qtyIdx)       || 1) : 1;
+      const altas      = altasIdx     >= 0 ? (cellNum(csv, ri, altasIdx)     || 0) : 0;
+      const inadR      = inadRIdx     >= 0 ? (cellNum(csv, ri, inadRIdx)     || 0) : 0;
       let altasInfer, inadI;
-      if (infResolve) { const r = infResolve(row); altasInfer = r.altasInfer; inadI = r.inadIRaw; }
+      if (infResolve) { const r = infResolve(csv, ri); altasInfer = r.altasInfer; inadI = r.inadIRaw; }
       else {
-        altasInfer = altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0;
-        inadI      = inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0;
+        altasInfer = altasInferIdx >= 0 ? (cellNum(csv, ri, altasInferIdx) || 0) : 0;
+        inadI      = inadIIdx      >= 0 ? (cellNum(csv, ri, inadIIdx)      || 0) : 0;
       }
 
       bl.totalQty += qty;
@@ -597,19 +620,20 @@ function computeCellMetrics(shape, csvStore, inferenceRef) {
   for (const rv of rDom)
     for (const cv of cDom)
       acc[`${rv}|${cv}`] = { qty: 0, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0 };
-  for (const row of csv.rows) {
-    const rv = rowVar && rowCI >= 0 ? (row[rowCI] ?? '').toString().trim() : '*';
-    const cv = colVar && colCI >= 0 ? (row[colCI] ?? '').toString().trim() : '*';
+  const nRows = rowCount(csv);
+  for (let r = 0; r < nRows; r++) {
+    const rv = rowVar && rowCI >= 0 ? (cellStr(csv, r, rowCI) ?? '').toString().trim() : '*';
+    const cv = colVar && colCI >= 0 ? (cellStr(csv, r, colCI) ?? '').toString().trim() : '*';
     const key = `${rv}|${cv}`;
     if (!acc[key]) continue;
-    const qty        = qtyI       >= 0 ? (parseFloat(row[qtyI])       || 0) : 1;
-    const altas      = altasI     >= 0 ? (parseFloat(row[altasI])     || 0) : 0;
-    const inadR      = inadRI     >= 0 ? (parseFloat(row[inadRI])     || 0) : 0;
+    const qty        = qtyI       >= 0 ? (cellNum(csv, r, qtyI)       || 0) : 1;
+    const altas      = altasI     >= 0 ? (cellNum(csv, r, altasI)     || 0) : 0;
+    const inadR      = inadRI     >= 0 ? (cellNum(csv, r, inadRI)     || 0) : 0;
     let altasInfer, inadI;
-    if (infResolve) { const r = infResolve(row); altasInfer = r.altasInfer; inadI = r.inadIRaw; }
+    if (infResolve) { const rr = infResolve(csv, r); altasInfer = rr.altasInfer; inadI = rr.inadIRaw; }
     else {
-      altasInfer = altasInferI >= 0 ? (parseFloat(row[altasInferI]) || 0) : 0;
-      inadI      = inadII      >= 0 ? (parseFloat(row[inadII])      || 0) : 0;
+      altasInfer = altasInferI >= 0 ? (cellNum(csv, r, altasInferI) || 0) : 0;
+      inadI      = inadII      >= 0 ? (cellNum(csv, r, inadII)      || 0) : 0;
     }
     acc[key].qty          += qty;
     acc[key].qtdAltas     += altas;
@@ -703,7 +727,8 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
     if (s.type === 'cineminha') arrivals[s.id] = {};
   }
 
-  function collectCinemaHits(row, headers, startId) {
+  function collectCinemaHits(csv, r, startId) {
+    const headers = csv.headers;
     let cur = startId;
     const visited = new Set();
     const hits = [];
@@ -715,15 +740,15 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
       if (TERM.has(node.type)) break;
       if (node.type === 'decision') {
         const colIdx = headers.indexOf(node.variableCol);
-        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
         if (!match) break;
         cur = match.to;
       } else if (node.type === 'cineminha') {
         const rIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const cIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
-        const rv   = node.rowVar && rIdx >= 0 ? (row[rIdx] ?? '').trim() : '';
-        const cv   = node.colVar && cIdx >= 0 ? (row[cIdx] ?? '').trim() : '';
+        const rv   = node.rowVar && rIdx >= 0 ? (cellStr(csv, r, rIdx) ?? '').trim() : '';
+        const cv   = node.colVar && cIdx >= 0 ? (cellStr(csv, r, cIdx) ?? '').trim() : '';
         if (!node.rowVar && !node.colVar) break;
         const rKey = node.rowVar ? rv : '*';
         const cKey = node.colVar ? cv : '*';
@@ -736,7 +761,7 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
         if (!match) break;
         cur = match.to;
       } else if (node.type === 'decision_lens') {
-        const passes = rowMatchesLensRules(row, headers, node.rules || []);
+        const passes = rowMatchesLensRules(csv, r, node.rules || []);
         if (!passes) break;
         const edges = out[cur] || [];
         if (edges.length === 0) break;
@@ -773,19 +798,20 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
     if (csvRoots.length === 0) continue;
     const rootId = csvRoots[0].id;
 
-    for (const row of csv.rows) {
-      const qty      = qtyIdx      >= 0 ? (parseFloat(row[qtyIdx])      || 0) : 1;
-      const altas    = altasIdx    >= 0 ? (parseFloat(row[altasIdx])    || 0) : 0;
-      const inadR    = inadRIdx    >= 0 ? (parseFloat(row[inadRIdx])    || 0) : 0;
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty      = qtyIdx      >= 0 ? (cellNum(csv, r, qtyIdx)      || 0) : 1;
+      const altas    = altasIdx    >= 0 ? (cellNum(csv, r, altasIdx)    || 0) : 0;
+      const inadR    = inadRIdx    >= 0 ? (cellNum(csv, r, inadRIdx)    || 0) : 0;
       let altasInf, inadI;
-      if (infResolve) { const r = infResolve(row); altasInf = r.altasInfer; inadI = r.inadIRaw; }
+      if (infResolve) { const rr = infResolve(csv, r); altasInf = rr.altasInfer; inadI = rr.inadIRaw; }
       else {
-        altasInf = altasInfIdx >= 0 ? (parseFloat(row[altasInfIdx]) || 0) : 0;
-        inadI    = inadIIdx    >= 0 ? (parseFloat(row[inadIIdx])    || 0) : 0;
+        altasInf = altasInfIdx >= 0 ? (cellNum(csv, r, altasInfIdx) || 0) : 0;
+        inadI    = inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
       }
-      const mixVal   = mixIdx      >= 0 ? (row[mixIdx] ?? '').toString().trim() : '';
+      const mixVal   = mixIdx      >= 0 ? (cellStr(csv, r, mixIdx) ?? '').toString().trim() : '';
 
-      const hits = collectCinemaHits(row, csv.headers, rootId);
+      const hits = collectCinemaHits(csv, r, rootId);
       for (const { shapeId, cellKey } of hits) {
         const acc = arrivals[shapeId];
         if (!acc) continue;
@@ -826,7 +852,8 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
     else if (s.type === 'cineminha') result[s.id] = { row: {}, col: {} };
   }
 
-  function walk(row, headers, startId, qty) {
+  function walk(csv, r, startId, qty) {
+    const headers = csv.headers;
     let cur = startId;
     const visited = new Set();
     while (cur) {
@@ -837,7 +864,7 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
       if (TERM.has(node.type)) break;
       if (node.type === 'decision') {
         const colIdx = headers.indexOf(node.variableCol);
-        const val = (colIdx >= 0 ? (row[colIdx] ?? '') : '').trim();
+        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
         if (result[cur] && val !== '') result[cur].val[val] = (result[cur].val[val] || 0) + qty;
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
         if (!match) break;
@@ -845,8 +872,8 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
       } else if (node.type === 'cineminha') {
         const rIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const cIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
-        const rv = node.rowVar && rIdx >= 0 ? (row[rIdx] ?? '').trim() : '';
-        const cv = node.colVar && cIdx >= 0 ? (row[cIdx] ?? '').trim() : '';
+        const rv = node.rowVar && rIdx >= 0 ? (cellStr(csv, r, rIdx) ?? '').trim() : '';
+        const cv = node.colVar && cIdx >= 0 ? (cellStr(csv, r, cIdx) ?? '').trim() : '';
         if (result[cur]) {
           if (node.rowVar && rv !== '') result[cur].row[rv] = (result[cur].row[rv] || 0) + qty;
           if (node.colVar && cv !== '') result[cur].col[cv] = (result[cur].col[cv] || 0) + qty;
@@ -862,7 +889,7 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
         if (!match) break;
         cur = match.to;
       } else if (node.type === 'decision_lens') {
-        if (!rowMatchesLensRules(row, headers, node.rules || [])) break;
+        if (!rowMatchesLensRules(csv, r, node.rules || [])) break;
         const edges = out[cur] || [];
         if (edges.length === 0) break;
         cur = edges[0].to;
@@ -885,9 +912,10 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
       return false;
     });
     if (csvRoots.length === 0) continue;
-    for (const row of csv.rows) {
-      const qty = qtyIdx >= 0 ? (parseFloat(row[qtyIdx]) || 0) : 1;
-      for (const root of csvRoots) walk(row, csv.headers, root.id, qty);
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+      for (const root of csvRoots) walk(csv, r, root.id, qty);
     }
   }
 
@@ -1195,18 +1223,19 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
     }
     const dimIdx = dimCols.map(h => csv.headers.indexOf(h));
 
-    csv.rows.forEach((row, rowIdx) => {
+    const nRows = rowCount(csv);
+    for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
       const out = {};
-      for (let i = 0; i < dimCols.length; i++) out[dimCols[i]] = row[dimIdx[i]] ?? '';
-      out.qty           = qtyIdx        >= 0 ? (parseFloat(row[qtyIdx])        || 0) : 1;
-      out.qtdAltas      = altasIdx      >= 0 ? (parseFloat(row[altasIdx])      || 0) : 0;
-      out.inadRRaw      = inadRIdx      >= 0 ? (parseFloat(row[inadRIdx])      || 0) : 0;
-      if (infResolve) { const r = infResolve(row); out.qtdAltasInfer = r.altasInfer; out.inadIRaw = r.inadIRaw; }
+      for (let i = 0; i < dimCols.length; i++) out[dimCols[i]] = cellStr(csv, rowIdx, dimIdx[i]) ?? '';
+      out.qty           = qtyIdx        >= 0 ? (cellNum(csv, rowIdx, qtyIdx)        || 0) : 1;
+      out.qtdAltas      = altasIdx      >= 0 ? (cellNum(csv, rowIdx, altasIdx)      || 0) : 0;
+      out.inadRRaw      = inadRIdx      >= 0 ? (cellNum(csv, rowIdx, inadRIdx)      || 0) : 0;
+      if (infResolve) { const r = infResolve(csv, rowIdx); out.qtdAltasInfer = r.altasInfer; out.inadIRaw = r.inadIRaw; }
       else {
-        out.qtdAltasInfer = altasInferIdx >= 0 ? (parseFloat(row[altasInferIdx]) || 0) : 0;
-        out.inadIRaw      = inadIIdx      >= 0 ? (parseFloat(row[inadIIdx])      || 0) : 0;
+        out.qtdAltasInfer = altasInferIdx >= 0 ? (cellNum(csv, rowIdx, altasInferIdx) || 0) : 0;
+        out.inadIRaw      = inadIIdx      >= 0 ? (cellNum(csv, rowIdx, inadIIdx)      || 0) : 0;
       }
-      const asIs = row[dOrigIdx] ?? '';
+      const asIs = cellStr(csv, rowIdx, dOrigIdx) ?? '';
       out.__DECISAO_AS_IS = asIs; // AS IS único e global
       // Join por (csvId, rowIdx): cada canvas marcado contribui sua coluna de decisão.
       for (const cs of canvasScenarios) {
@@ -1214,7 +1243,7 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
         out[cs.decisionCol] = rd ? rd.decisaoSimulada : asIs;
       }
       rows.push(out);
-    });
+    }
   }
 
   if (rows.length === 0) return null;
