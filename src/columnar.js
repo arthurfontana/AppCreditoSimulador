@@ -190,6 +190,286 @@ export function distinctColValues(csv, c) {
   return [...set];
 }
 
+// ── M1 (PERFORMANCE-ANALISE, Fase D) — Pipeline de importação vetorizado ────────
+//
+// Até o M1, o funil de import mantinha a base em 3–5 formas simultâneas na RAM
+// (texto cru no wizard + string[][] completo + cópia do normalizeDecimalSep +
+// cópia da derivação de __DECISAO_ORIGINAL) e só vetorizava NO FIM (buildColumnar).
+// Aqui o parse alimenta os encoders colunares DIRETAMENTE, linha a linha — a
+// matriz string[][] nunca existe:
+//   - parseCSVToColumnarAsync: parse chunked (mesma varredura por índice da Fase 0)
+//     → todas as colunas como dict encoding (os tipos de métrica só são conhecidos
+//     no passo 2 do wizard) + um preview de N linhas para a UI;
+//   - finalizeImportedColumns: no confirm, converte para Float64Array SÓ as colunas
+//     marcadas como métrica (O(distintos) de parseFloat + O(n) de inteiros) e aplica
+//     a normalização de separador decimal (','→'.') sobre os DICIONÁRIOS
+//     (O(distintos), com dedup+remap de códigos quando valores colidem) — o antigo
+//     normalizeDecimalSep (cópia integral da matriz) deixa de existir;
+//   - deriveMappedDictColumn: __DECISAO_ORIGINAL vira coluna dict DERIVADA — um
+//     mapa código da coluna AS IS → código de 'APROVADO'/'REPROVADO'/'' e um loop
+//     O(n) sobre codes, sem tocar nas demais colunas, sem copiar linha;
+//   - retypeColumn: modo de edição do wizard reclassifica colunas (dict↔num) sem
+//     materializar a base como string[][] (substitui o materializeRows do confirm).
+// Nenhuma mudança de matemática: equivalência célula a célula com o caminho legado
+// (parseCSV → normalizeDecimalSep → append __DECISAO_ORIGINAL → buildColumnar)
+// coberta em tests/importPipeline.test.js.
+
+// Mesma regra do normalizeDecimalSep legado: só converte células que são um
+// número "puro" com vírgula decimal (ex.: "0,394"); "1.234,56" não casa e passa.
+const DECIMAL_COMMA_RE = /^\-?\d+,\d+$/;
+function normalizeDecimalCell(cell) {
+  const v = (cell ?? '').trim();
+  return DECIMAL_COMMA_RE.test(v) ? v.replace(',', '.') : cell;
+}
+
+// Parse assíncrono/chunked de CSV DIRETO para colunas dict-encoded.
+// Substitui o parseCSVAsync (Fase 0) no import: mantém a varredura por índice
+// (sem text.split — nenhum array de 1MM de strings) e elimina também a saída
+// string[][] — cada célula entra no encoder da sua coluna e vira um inteiro.
+// Cede a thread principal a cada lote (setTimeout 0) e reporta progresso via
+// onProgress(posiçãoConsumida, total), como antes.
+// Retorna { headers, columns, rowCount, previewRows }:
+//   - columns: {[nome]: {kind:'dict', dict, codes}} — TODAS dict (a conversão de
+//     métricas para Float64Array acontece só no confirm, via finalizeImportedColumns);
+//   - previewRows: as primeiras PREVIEW_ROWS linhas como string[] cruas (amostra
+//     para a tabela de prévia do wizard — a UI não precisa de mais nada por linha).
+const PREVIEW_ROWS = 100;
+export function parseCSVToColumnarAsync(text, delimiter, hasHeader, onProgress) {
+  return new Promise((resolve, reject) => {
+    try {
+      const split = (line) => {
+        const res = []; let f = "", q = false;
+        for (let i = 0; i < line.length; i++) {
+          const c = line[i];
+          if (c === '"') q = !q;
+          else if (c === delimiter && !q) { res.push(f.trim()); f = ""; }
+          else f += c;
+        }
+        res.push(f.trim());
+        return res;
+      };
+      const len = text.length;
+      let pos = 0;
+      // Próxima linha não-vazia por índice (idêntico ao nextLine da Fase 0).
+      const nextLine = () => {
+        while (pos < len) {
+          let nl = text.indexOf('\n', pos);
+          if (nl === -1) nl = len;
+          const start = pos;
+          let end = nl;
+          if (end > start && text.charCodeAt(end - 1) === 13) end--; // \r final
+          pos = nl + 1;
+          if (end > start) {
+            const line = text.slice(start, end);
+            if (line.trim()) return line;
+          }
+        }
+        return null;
+      };
+
+      const firstLine = nextLine();
+      if (firstLine === null) { resolve({ headers: [], columns: {}, rowCount: 0, previewRows: [] }); return; }
+      const first = split(firstLine);
+      const headers = hasHeader ? first : first.map((_, i) => `Coluna ${i + 1}`);
+      const nCols = headers.length;
+
+      // Encoders por coluna (por ÍNDICE — headers duplicados colidem só na
+      // montagem final do mapa, com o mesmo last-wins do buildColumnar).
+      const dicts = new Array(nCols);
+      const dictIndexes = new Array(nCols);
+      let codesBuf = new Array(nCols);
+      let cap = 1024;
+      for (let c = 0; c < nCols; c++) {
+        dicts[c] = [];
+        dictIndexes[c] = new Map();
+        codesBuf[c] = new Int32Array(cap); // growable comum; a cópia final usa allocI32 (SAB-aware)
+      }
+      let n = 0;
+      const previewRows = [];
+
+      const pushRow = (cells) => {
+        if (n === cap) {
+          cap *= 2;
+          for (let c = 0; c < nCols; c++) {
+            const grown = new Int32Array(cap);
+            grown.set(codesBuf[c]);
+            codesBuf[c] = grown;
+          }
+        }
+        for (let c = 0; c < nCols; c++) {
+          const v = cells[c] ?? ''; // linha "ragged" → '' (mesma regra do buildColumnar)
+          let code = dictIndexes[c].get(v);
+          if (code === undefined) { code = dicts[c].length; dicts[c].push(v); dictIndexes[c].set(v, code); }
+          codesBuf[c][n] = code;
+        }
+        if (previewRows.length < PREVIEW_ROWS) previewRows.push(cells);
+        n++;
+      };
+
+      if (!hasHeader) pushRow(first); // sem cabeçalho, a 1ª linha também é dado
+
+      const CHUNK = 3000;
+      let finished = false;
+      const finish = () => {
+        const columns = {};
+        for (let c = 0; c < nCols; c++) {
+          const codes = allocI32(n);          // exato + SAB-aware (Fase 2)
+          codes.set(codesBuf[c].subarray(0, n));
+          codesBuf[c] = null;                 // solta o buffer growable
+          columns[headers[c]] = { kind: 'dict', dict: dicts[c], codes };
+        }
+        resolve({ headers, columns, rowCount: n, previewRows });
+      };
+      const step = () => {
+        try {
+          let count = 0;
+          while (count < CHUNK) {
+            const line = nextLine();
+            if (line === null) { finished = true; break; }
+            pushRow(split(line));
+            count++;
+          }
+          if (onProgress) onProgress(finished ? len : Math.min(pos, len), len);
+          if (finished) finish();
+          else setTimeout(step, 0);
+        } catch (err) { reject(err); }
+      };
+      step();
+    } catch (err) { reject(err); }
+  });
+}
+
+// Converte um dict column em Float64Array: parseFloat UMA vez por valor distinto
+// (com a normalização ','→'.' quando pedida) e lookup de inteiro por linha.
+// parseFloat('') = NaN — mesma semântica do buildColumnar (call sites aplicam ||0).
+function numFromDictColumn(col, n, normalizeDecimal) {
+  const src = col.dict;
+  const numByCode = new Float64Array(src.length);
+  for (let k = 0; k < src.length; k++) {
+    const cell = normalizeDecimal ? normalizeDecimalCell(src[k]) : src[k];
+    numByCode[k] = parseFloat(cell);
+  }
+  const data = allocF64(n);
+  for (let r = 0; r < n; r++) data[r] = numByCode[col.codes[r]];
+  return { kind: 'num', data };
+}
+
+// Converte um num column em dict (NaN → '', senão String(v)) — mesma string que
+// cellStr produz, e a mesma que o caminho legado obtinha ao materializar a linha.
+function dictFromNumColumn(col, n) {
+  const dict = []; const dictIndex = new Map();
+  const codes = allocI32(n);
+  for (let r = 0; r < n; r++) {
+    const v = col.data[r];
+    const s = Number.isNaN(v) ? '' : String(v);
+    let code = dictIndex.get(s);
+    if (code === undefined) { code = dict.length; dict.push(s); dictIndex.set(s, code); }
+    codes[r] = code;
+  }
+  return { kind: 'dict', dict, codes };
+}
+
+// Normalização de separador decimal sobre um dict column: transforma os VALORES
+// DO DICIONÁRIO (O(distintos)) em vez de copiar a matriz. Se a normalização faz
+// dois valores colidirem (ex.: "1,5" e "1.5"), deduplica e remapeia os códigos
+// (O(n) de inteiros) — preservando a ordem de primeira aparição, que é a mesma
+// que o normalizeDecimalSep legado + buildColumnar produziriam.
+function normalizeDictDecimal(col, n) {
+  const src = col.dict;
+  let changed = false;
+  const normed = new Array(src.length);
+  for (let k = 0; k < src.length; k++) {
+    normed[k] = normalizeDecimalCell(src[k]);
+    if (normed[k] !== src[k]) changed = true;
+  }
+  if (!changed) return col;
+  const dict = []; const dictIndex = new Map();
+  const translate = new Int32Array(src.length);
+  for (let k = 0; k < src.length; k++) {
+    let code = dictIndex.get(normed[k]);
+    if (code === undefined) { code = dict.length; dict.push(normed[k]); dictIndex.set(normed[k], code); }
+    translate[k] = code;
+  }
+  if (dict.length === src.length) {
+    // nenhum merge — translate é identidade; reusa os codes sem cópia
+    return { kind: 'dict', dict, codes: col.codes };
+  }
+  const codes = allocI32(n);
+  for (let r = 0; r < n; r++) codes[r] = translate[col.codes[r]];
+  return { kind: 'dict', dict, codes };
+}
+
+// Confirm do wizard (import novo): aplica os tipos do passo 2 sobre as colunas
+// all-dict do parse — métricas viram Float64Array, dimensões ganham a normalização
+// decimal — e devolve { columns, rowCount } no formato final do csvStore.
+// Colunas não tocadas são REUSADAS por referência (zero cópia).
+export function finalizeImportedColumns(headers, columns, n, columnTypes, decimalSep) {
+  const types = columnTypes || {};
+  const normalize = (decimalSep || '.') !== '.';
+  const out = {};
+  for (const name of headers) {
+    const col = columns[name];
+    if (METRIC_COL_TYPES.has(types[name])) {
+      out[name] = !col ? { kind: 'num', data: allocF64(n).fill(NaN) }
+        : col.kind === 'num' ? col
+        : numFromDictColumn(col, n, normalize);
+    } else {
+      out[name] = !col ? { kind: 'dict', dict: [''], codes: allocI32(n) }
+        : col.kind === 'dict' ? (normalize ? normalizeDictDecimal(col, n) : col)
+        : dictFromNumColumn(col, n);
+    }
+  }
+  return { columns: out, rowCount: n };
+}
+
+// Deriva uma coluna dict aplicando mapFn(valor) sobre outra coluna — usada para
+// __DECISAO_ORIGINAL (mapFn = valor AS IS → 'APROVADO'/'REPROVADO'/''). Sobre um
+// dict column, mapFn roda UMA vez por valor distinto (translate código→código) e
+// o loop de linhas só copia inteiros. A ordem do dicionário derivado é a de
+// primeira aparição nas linhas — idêntica à do caminho legado (append + build).
+export function deriveMappedDictColumn(srcCol, n, mapFn) {
+  const dict = []; const dictIndex = new Map();
+  const codes = allocI32(n);
+  const putCode = (mapped) => {
+    let code = dictIndex.get(mapped);
+    if (code === undefined) { code = dict.length; dict.push(mapped); dictIndex.set(mapped, code); }
+    return code;
+  };
+  if (srcCol && srcCol.kind === 'dict') {
+    const translate = new Int32Array(srcCol.dict.length).fill(-1);
+    for (let r = 0; r < n; r++) {
+      const sc = srcCol.codes[r];
+      let dc = translate[sc];
+      if (dc === -1) { dc = putCode(mapFn(srcCol.dict[sc])); translate[sc] = dc; }
+      codes[r] = dc;
+    }
+  } else if (srcCol && srcCol.kind === 'num') {
+    for (let r = 0; r < n; r++) {
+      const v = srcCol.data[r];
+      codes[r] = putCode(mapFn(Number.isNaN(v) ? '' : String(v)));
+    }
+  } else {
+    codes.fill(putCode(mapFn('')));
+  }
+  return { kind: 'dict', dict, codes };
+}
+
+// Modo de edição do wizard: reclassificar uma coluna (métrica ↔ dimensão) sem
+// materializar a base. Se o tipo não mudou, devolve a própria coluna (as colunas
+// nunca são mutadas, então compartilhar a referência com a entrada anterior do
+// store é seguro). Coluna ausente → defaults do caminho legado (parseFloat('')
+// = NaN para métrica; '' para dimensão).
+export function retypeColumn(col, toNum, n) {
+  if (toNum) {
+    if (!col) return { kind: 'num', data: allocF64(n).fill(NaN) };
+    if (col.kind === 'num') return col;
+    return numFromDictColumn(col, n, false);
+  }
+  if (!col) return { kind: 'dict', dict: [''], codes: allocI32(n) };
+  if (col.kind === 'dict') return col;
+  return dictFromNumColumn(col, n);
+}
+
 // ── Persistência (Projeto .credito.json / Fluxo) — M3 (Otimização de Memória) ──
 // Typed arrays não são JSON nativo. Até o schema 2.2, a serialização virava um
 // array PLANO de números (`Array.from(col.data)`): para uma base diária isso é
