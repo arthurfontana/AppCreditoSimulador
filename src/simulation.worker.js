@@ -1300,8 +1300,10 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
     // um `Int32Array` que traduz o código de origem (dicionário da própria base) para o
     // código de destino (dicionário do dataset largo); no loop de linhas resta uma leitura
     // de inteiro. Dimensão ausente nesta base ⇒ mesmo código constante em todas as linhas.
-    const dimTranslate = {};
-    const dimConst = {};
+    // `Object.create(null)`: sem protótipo, então `h in dimConst` nunca confunde uma
+    // dimensão chamada 'constructor'/'toString'/etc. com uma entrada herdada de Object.prototype.
+    const dimTranslate = Object.create(null);
+    const dimConst = Object.create(null);
     for (const h of dimNames) {
       const ci = dimIdxMap[h]; // undefined ⇒ dimensão ausente nesta base (não é -1: só existe se h ∈ dimCols)
       const srcCol = (ci !== undefined && isColumnar(csv)) ? csv.columns[h] : null;

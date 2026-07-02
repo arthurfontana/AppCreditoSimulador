@@ -193,6 +193,31 @@ describe('5B · computeAnalyticsDataset', () => {
     __setWorkerCsvStoreForTest(noAsIs);
     expect(computeAnalyticsDataset([], noAsIs)).toBeNull();
   });
+
+  // M15 — regressão: `dimConst`/`dimTranslate` (tabelas de tradução código→código) usam
+  // objetos JS crus como cache por nome de dimensão. Um nome de dimensão que colide com
+  // uma propriedade herdada de Object.prototype (ex.: "constructor") não pode ser
+  // confundido com uma entrada de fato gravada nesse cache — senão o valor lido vira o
+  // método herdado (uma function), não o dado real da linha.
+  it('dimensão com nome igual a uma propriedade de Object.prototype não quebra a tradução', () => {
+    const csvWithProtoName = {
+      c1: {
+        name: 'base',
+        headers: ['constructor', 'volume', '__DECISAO_ORIGINAL'],
+        rows: [
+          ['valorA', '10', 'APROVADO'],
+          ['valorB', '20', 'REPROVADO'],
+        ],
+        columnTypes: { volume: 'qty' },
+        varTypes: {},
+        asIsConfig: { col: 'dec', mapping: {} },
+      },
+    };
+    __setWorkerCsvStoreForTest(csvWithProtoName);
+    const ds = computeAnalyticsDataset([], csvWithProtoName);
+    expect(ds).not.toBeNull();
+    expect(awColumn(ds, 'constructor')).toEqual(['valorA', 'valorB']);
+  });
 });
 
 // ── Sessão 2/3 — métricas e pivot (revalidação) ───────────────────────────────
