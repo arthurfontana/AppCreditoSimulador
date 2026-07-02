@@ -1423,12 +1423,18 @@ export function computeWidgetMetric(ds, indices, metricId, decisionCol) {
   const inadRC = cols.inadRRaw, altasC = cols.qtdAltas, inadIC = cols.inadIRaw, altasInfC = cols.qtdAltasInfer;
   const act = indices || ds.activeRows || null;
   const N = act ? act.length : (ds.rowCount || 0);
+  // M14: resolve o código de "APROVADO" uma vez (coluna de decisão é dict-encoded) e
+  // compara inteiros por linha em vez de reconstruir/comparar strings a cada iteração.
+  const decIsDict = decC && decC.kind === "dict";
+  const apprCode = decIsDict ? decC.dict.indexOf("APROVADO") : -1;
+  const decCodes = decIsDict ? decC.codes : null;
   let total = 0, appr = 0, inadR = 0, altas = 0, inadI = 0, altasInf = 0;
   for (let i = 0; i < N; i++) {
     const r = act ? act[i] : i;
     const q = awColNum(qtyC, r);
     total += q;
-    if (awColStr(decC, r) === "APROVADO") {
+    const isAppr = decIsDict ? (decCodes[r] === apprCode) : (awColStr(decC, r) === "APROVADO");
+    if (isAppr) {
       appr += q;
       inadR += awColNum(inadRC, r);
       altas += awColNum(altasC, r);
@@ -1464,9 +1470,26 @@ export function pivotWidget(ds, config) {
   const act = ds.activeRows || null;
   const rowStr = (name, r) => awColStr(cols[name], r);
   // Valores distintos de uma dimensão nas linhas ativas (para séries/eixo por dimensão).
+  // M14: para colunas dict, o trabalho de string acontece só uma vez por código visto
+  // (limitado ao dicionário) e o loop por linha lê apenas o inteiro do código.
   const distinctOf = (name) => {
-    const set = new Set();
+    const c = cols[name];
     const L = act ? act.length : (ds.rowCount || 0);
+    if (c && c.kind === "dict") {
+      const codes = c.codes, dict = c.dict;
+      const seen = new Uint8Array(dict.length);
+      const set = new Set();
+      for (let i = 0; i < L; i++) {
+        const r = act ? act[i] : i;
+        const code = codes[r];
+        if (code < 0 || code >= seen.length || seen[code]) continue;
+        seen[code] = 1;
+        const v = String(dict[code] ?? "").trim();
+        if (v) set.add(v);
+      }
+      return [...set];
+    }
+    const set = new Set();
     for (let i = 0; i < L; i++) { const r = act ? act[i] : i; const v = rowStr(name, r).trim(); if (v) set.add(v); }
     return [...set];
   };
@@ -1476,6 +1499,21 @@ export function pivotWidget(ds, config) {
     const L = act ? act.length : (ds.rowCount || 0);
     for (let i = 0; i < L; i++) { const r = act ? act[i] : i; if (pred(r)) out.push(r); }
     return out;
+  };
+  // Predicado por linha "valor trimado da coluna === target". M14: quando a coluna é
+  // dict, pré-computa quais códigos casam (uma passada pelo dicionário) e por linha só
+  // consulta a máscara pelo código — sem trim/comparação de string por linha. Preserva
+  // a semântica anterior (compara o valor TRIMADO da célula com `target`).
+  const makeValPred = (colName, target) => {
+    const c = cols[colName];
+    if (c && c.kind === "dict") {
+      const pass = new Uint8Array(c.dict.length);
+      for (let k = 0; k < c.dict.length; k++) if (String(c.dict[k] ?? "").trim() === target) pass[k] = 1;
+      const codes = c.codes, len = pass.length;
+      const emptyMatch = ("" === target);
+      return (r) => { const code = codes[r]; return code >= 0 && code < len ? pass[code] === 1 : emptyMatch; };
+    }
+    return (r) => awColStr(c, r).trim() === target;
   };
 
   // Comparador de valores de uma dimensão. Dimensões agrupadas (derivadas) carregam
@@ -1520,12 +1558,13 @@ export function pivotWidget(ds, config) {
       seriesDefs = capped.map((v, i) => ({ key: v, label: v, filterCol: serieBy, filterVal: v, color: SERIE_COLORS[i % SERIE_COLORS.length] }));
     }
 
+    // Subconjunto por série independe do cenário — computa uma vez (via código) e reusa.
+    const seriesSubsets = seriesDefs.map(sd => sd.filterCol ? filterIndices(makeValPred(sd.filterCol, sd.filterVal)) : null);
     const data = visScenarios.map((s) => {
       const row = { x: s.nome };
-      for (const sd of seriesDefs) {
-        const subset = sd.filterCol ? filterIndices(r => rowStr(sd.filterCol, r).trim() === sd.filterVal) : null;
-        row[sd.label] = computeWidgetMetric(ds, subset, metricDef.id, s.decisionCol);
-      }
+      seriesDefs.forEach((sd, si) => {
+        row[sd.label] = computeWidgetMetric(ds, seriesSubsets[si], metricDef.id, s.decisionCol);
+      });
       return row;
     });
     return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated };
@@ -1559,13 +1598,43 @@ export function pivotWidget(ds, config) {
   {
     const xCC = cols[xCol];
     const L = act ? act.length : (ds.rowCount || 0);
-    for (let i = 0; i < L; i++) {
-      const r = act ? act[i] : i;
-      const xv = awColStr(xCC, r).trim();
-      if (!xv) continue;
-      let arr = xBuckets.get(xv);
-      if (!arr) { arr = []; xBuckets.set(xv, arr); }
-      arr.push(r);
+    if (xCC && xCC.kind === "dict") {
+      // M14: bucketiza por código do dicionário — trim/string só uma vez por código, e o
+      // agrupamento por linha vira um índice inteiro. Códigos distintos que colapsam no
+      // mesmo rótulo trimado são mesclados (mesma semântica do keyed-por-string anterior).
+      const codes = xCC.codes, dict = xCC.dict;
+      const codeKey = new Array(dict.length);       // rótulo trimado por código (null se vazio)
+      const codeBucket = new Array(dict.length);    // array de índices por código (null se vazio)
+      for (let i = 0; i < L; i++) {
+        const r = act ? act[i] : i;
+        const code = codes[r];
+        if (code < 0 || code >= dict.length) continue;
+        let arr = codeBucket[code];
+        if (arr === undefined) {
+          const v = String(dict[code] ?? "").trim();
+          codeKey[code] = v || null;
+          arr = v ? [] : null;
+          codeBucket[code] = arr;
+        }
+        if (arr) arr.push(r);
+      }
+      for (let code = 0; code < dict.length; code++) {
+        const arr = codeBucket[code];
+        if (!arr) continue;
+        const xv = codeKey[code];
+        const existing = xBuckets.get(xv);
+        if (existing) { for (let k = 0; k < arr.length; k++) existing.push(arr[k]); }
+        else xBuckets.set(xv, arr);
+      }
+    } else {
+      for (let i = 0; i < L; i++) {
+        const r = act ? act[i] : i;
+        const xv = awColStr(xCC, r).trim();
+        if (!xv) continue;
+        let arr = xBuckets.get(xv);
+        if (!arr) { arr = []; xBuckets.set(xv, arr); }
+        arr.push(r);
+      }
     }
   }
   if (xBuckets.size === 0) return { state: "empty" };
@@ -1582,13 +1651,16 @@ export function pivotWidget(ds, config) {
     return xCmp(a, b);
   });
 
+  // Predicado de série por código, resolvido uma vez (reusado em todos os buckets do X).
+  const seriesPreds = seriesDefs.map(sd => sd.filterCol ? makeValPred(sd.filterCol, sd.filterVal) : null);
   const data = sortedKeys.map((xv) => {
     const bucketRows = xBuckets.get(xv); // array de índices de linha
     const row = { x: xv };
-    for (const sd of seriesDefs) {
-      const subset = sd.filterCol ? bucketRows.filter(r => rowStr(sd.filterCol, r).trim() === sd.filterVal) : bucketRows;
+    seriesDefs.forEach((sd, si) => {
+      const pred = seriesPreds[si];
+      const subset = pred ? bucketRows.filter(pred) : bucketRows;
       row[sd.label] = computeWidgetMetric(ds, subset, metricDef.id, sd.decisionCol);
-    }
+    });
     return row;
   });
   return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated: serieBy !== SERIE_CENARIO && serieBy !== SERIE_NONE && seriesDefs.length >= MAX_SERIES };
@@ -1635,13 +1707,29 @@ export function applyAnalyticsFilters(ds, cards) {
   const cols = ds.columns || {};
   const base = ds.activeRows || null;
   const N = base ? base.length : (ds.rowCount || 0);
-  const cardCols = active.map(c => cols[c.dim]);
+  // M14: para cada cartão sobre uma coluna dict, avalia a regra UMA vez por valor do
+  // dicionário (máscara passByCode) — por linha resta um lookup de inteiro pelo código,
+  // sem awColStr/trim/matchLensRule por linha. Colunas não-dict caem no caminho anterior.
+  const evaluators = active.map(card => {
+    const c = cols[card.dim];
+    if (c && c.kind === "dict") {
+      const pass = new Uint8Array(c.dict.length);
+      for (let k = 0; k < c.dict.length; k++) pass[k] = filterCardMatchesVal(String(c.dict[k] ?? "").trim(), card) ? 1 : 0;
+      const emptyPass = filterCardMatchesVal("", card) ? 1 : 0; // códigos fora do intervalo → valor ""
+      return { dict: true, codes: c.codes, pass, len: pass.length, emptyPass };
+    }
+    return { dict: false, col: c, card };
+  });
   const out = [];
   for (let i = 0; i < N; i++) {
     const r = base ? base[i] : i;
     let ok = true;
-    for (let j = 0; j < active.length; j++) {
-      if (!filterCardMatchesVal(awColStr(cardCols[j], r).trim(), active[j])) { ok = false; break; }
+    for (let j = 0; j < evaluators.length; j++) {
+      const ev = evaluators[j];
+      let m;
+      if (ev.dict) { const code = ev.codes[r]; m = (code >= 0 && code < ev.len) ? ev.pass[code] : ev.emptyPass; }
+      else { m = filterCardMatchesVal(awColStr(ev.col, r).trim(), ev.card) ? 1 : 0; }
+      if (!m) { ok = false; break; }
     }
     if (ok) out.push(r);
   }
@@ -3152,7 +3240,27 @@ export default function App() {
   }, [inferenceRef]);
 
   // ── Simulation engine (reactive) ──────────────────────────────
-  const flowErrors = useMemo(() => validateFlow(shapes, conns), [shapes, conns]);
+  // M12: índice O(1) de shapes por id — evita `shapes.find` O(n) em hot paths (renderConn
+  // resolve `from`/`to` por conexão a cada frame de pan/zoom/drag; era O(conns × shapes)).
+  const shapesById = useMemo(() => {
+    const m = new Map();
+    for (const s of shapes) m.set(s.id, s);
+    return m;
+  }, [shapes]);
+  // M12: chave topológica — captura só ids/tipos/domínios exibidos e as arestas, NÃO as
+  // posições (x/y). Assim `flowErrors` e `hiddenPortIds` (que só dependem de topologia) não
+  // recomputam a cada frame de drag, que muda apenas a posição dos shapes. JSON.stringify
+  // garante uma chave sem ambiguidade (escape correto) mesmo se um label/valor contiver
+  // caracteres de separação, e é O(n) — muito mais barato que o DFS/loops que ele evita.
+  const topoKey = useMemo(() => JSON.stringify([
+    shapes.map(s => [s.id, s.type, s.visibleVals ?? null]),
+    conns.map(c => [c.from, c.to, c.label ?? '']),
+  ]), [shapes, conns]);
+  // Depende só da topologia (topoKey), não das posições — evita reprocessar o DFS de
+  // validação a cada frame de drag. shapes/conns lidos aqui são os do render corrente e
+  // são topologicamente idênticos sempre que topoKey não muda.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const flowErrors = useMemo(() => validateFlow(shapes, conns), [topoKey]);
   const [simResult, setSimResult] = useState(() => ({ totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{}, inferenceSource:null, confiabVolume:null, inferenceWeightMode:null }));
   // Espelhos para o autoLayout medir os "balões" das arestas sem closure stale.
   const simResultR        = useRef(simResult);        useEffect(()=>{simResultR.current=simResult},               [simResult]);
@@ -3186,6 +3294,9 @@ export default function App() {
 
   // Ports de losangos que não devem ser renderizados dado o domínio efetivo do nó
   // (não-destrutivo: o port/conn continua existindo e roteando na simulação).
+  // M12: depende só da topologia (topoKey) + chegadas por nó (nodeArrivals), não das
+  // posições — não recomputa o loop conns×decisions a cada frame de drag.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const hiddenPortIds = useMemo(() => {
     const hidden = new Set();
     for (const s of shapes) {
@@ -3196,7 +3307,7 @@ export default function App() {
       for (const c of portConns) if (!visible.has(c.label)) hidden.add(c.to);
     }
     return hidden;
-  }, [shapes, conns, nodeArrivals]);
+  }, [topoKey, nodeArrivals]);
 
   const simOverlayDebounceRef = useRef(null);
   useEffect(() => {
@@ -3509,11 +3620,11 @@ export default function App() {
   const onShapeClick = (e, id) => {
     e.stopPropagation(); if (movedR.current) return;
     if (tool==="connect"){
-      const s=shapes.find(sh=>sh.id===id);
+      const s=shapesById.get(id);
       if (s?.type==="simPanel") return; // simPanel cannot be connected
       if(!fromId){setFromId(id);}
       else if(fromId!==id){
-        const fromShape=shapes.find(sh=>sh.id===fromId);
+        const fromShape=shapesById.get(fromId);
         if (fromShape?.type!=="simPanel") {
           if(!conns.some(c=>c.from===fromId&&c.to===id)){pushHistory();setConns(p=>[...p,{id:uid(),from:fromId,to:id}]);}
         }
@@ -5612,7 +5723,7 @@ export default function App() {
   // ── Render: connection (adaptive routing) ─────────────────────
   const renderConn = (conn) => {
     if (hiddenPortIds.has(conn.from) || hiddenPortIds.has(conn.to)) return null; // port escondido em "Configurar nó"
-    const from=shapes.find(s=>s.id===conn.from), to=shapes.find(s=>s.id===conn.to);
+    const from=shapesById.get(conn.from), to=shapesById.get(conn.to); // M12: O(1) em vez de shapes.find
     if (!from||!to) return null;
     const [fx,fy]=ctr(from), [tx,ty]=ctr(to);
     const dx=tx-fx, dy=ty-fy;
@@ -6564,9 +6675,9 @@ export default function App() {
   };
 
   // ── Edit & helpers ────────────────────────────────────────────
-  const editShape=edit?shapes.find(s=>s.id===edit.id):null;
+  const editShape=edit?shapesById.get(edit.id):null;
   const commitEdit=()=>{if(!edit)return;pushHistory();setShapes(p=>p.map(s=>s.id===edit.id?{...s,label:edit.val}:s));setEdit(null);};
-  const selShape=sel?shapes.find(s=>s.id===sel):null;
+  const selShape=sel?shapesById.get(sel):null;
   const canvasCursor=tool==="hand"?"grab":tool==="select"?"default":"crosshair";
 
   // ── Decision variables computed for right panel ───────────────
@@ -6901,7 +7012,7 @@ export default function App() {
         })()}
 
         {/* Johnny toolbar — shows when 2+ cineminhas are selected */}
-        {multiSel.size>1&&[...multiSel].every(id=>shapes.find(s=>s.id===id)?.type==='cineminha')&&(
+        {multiSel.size>1&&[...multiSel].every(id=>shapesById.get(id)?.type==='cineminha')&&(
           <div style={{position:"absolute",top:110,left:"50%",transform:"translateX(-50%)",zIndex:300,
             display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
             border:"1px solid #fde68a",boxShadow:"0 2px 12px rgba(0,0,0,.08)",alignItems:"center"}}>
@@ -7274,7 +7385,7 @@ export default function App() {
         {editConn&&(()=>{
           const conn=conns.find(c=>c.id===editConn.id);
           if(!conn) return null;
-          const from=shapes.find(s=>s.id===conn.from),to=shapes.find(s=>s.id===conn.to);
+          const from=shapesById.get(conn.from),to=shapesById.get(conn.to);
           if(!from||!to) return null;
           const [fx,fy]=ctr(from),[tx,ty]=ctr(to);
           const mx=(fx+tx)/2*vp.s+vp.x, my=(fy+ty)/2*vp.s+vp.y;
