@@ -313,8 +313,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 |------|---------|-----------|
 | `UPDATE_CSV_STORE` | `{csvStore}` | Atualiza o cache do csvStore no worker (evita re-serialização a cada tick) |
 | `UPDATE_INFERENCE_REF` | `{inferenceRef}` | Espelha o índice da Tabela de Inferência no worker (Fase 2); usado pelo lookup em cascata quando `inferenceConfig.source==='ref'` |
-| `RUN_SIMULATION` | `{shapes, conns}` | Roda `runSimulation` e responde com `SIMULATION_RESULT` |
-| `COMPUTE_OVERLAY` | `{shapes, conns}` | Deriva as populações de lens localmente (M10, `getLensPopulations`) + roda `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`; responde com `OVERLAY_RESULT` |
+| `RUN_SIMULATION` | `{shapes, conns}` | Lê (ou computa) o tick via `getTickResult` (M6, ver abaixo) e responde com `SIMULATION_RESULT` |
+| `COMPUTE_OVERLAY` | `{shapes, conns}` | Lê (ou computa) o mesmo tick via `getTickResult` (M6) e responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
 | `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns}]` — abas marcadas (cenários, 5B). Populações de lens derivadas no worker (M10). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
@@ -329,17 +329,38 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
 
 ### Funções no worker
-- `runSimulation(shapes, conns, csvStore)`: percorre todas as linhas de todos os CSVs pelo grafo, acumula métricas e retorna `SimulationResult`
-- `computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations)`: compara decisão simulada vs. `__DECISAO_ORIGINAL` por linha
-- `computeIncrementalResult(overlay, csvStore)`: agrega `baseline`, `simulated` e `impacted` a partir do overlay
+- `computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
+- `runSimulation(shapes, conns, csvStore)`: percorre todas as linhas de todos os CSVs pelo grafo, acumula métricas e retorna `SimulationResult`. Continua existindo/exportada sem alteração (usada pelos GATEs numéricos e por quem precisar do resultado isolado) — o tick de edição passa a usar `computeSimulationTick`, não esta função diretamente
+- `computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations)`: compara decisão simulada vs. `__DECISAO_ORIGINAL` por linha. Continua existindo/exportada sem alteração — usada pelo `cachedCanvasOverlay` do Dashboard (overlay por canvas, independente do tick de edição)
+- `computeIncrementalResult(overlay, csvStore)`: agrega `baseline`, `simulated` e `impacted` a partir do overlay. Continua existindo/exportada sem alteração
 - `computeCellMetrics(shape, csvStore)`: agrega métricas por célula do Cineminha
 - `buildParetoFrontier(cellMetrics)`: fronteira Pareto greedy (sort por `inadInferida` crescente)
 - `extractScenarios(frontier)`: `{conservador, balanceado, melhorEficiencia, expansao}` — `melhorEficiencia` é o joelho da curva
 - `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante)
-- `computeNodeArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o fluxo a partir das entradas reais (in-degree 0 sobre arestas de fluxo — exclui corretamente um cineminha logo abaixo de um Decision Lens) e retorna, por nó, a contagem de registros por valor de domínio: `decision → {val: {[valor]: qty}}`, `cineminha → {row, col}`. Base do "Configurar nó" — ver Domínio Exibido
+- `computeNodeArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o fluxo a partir das entradas reais (in-degree 0 sobre arestas de fluxo — exclui corretamente um cineminha logo abaixo de um Decision Lens) e retorna, por nó, a contagem de registros por valor de domínio: `decision → {val: {[valor]: qty}}`, `cineminha → {row, col}`. Base do "Configurar nó" — ver Domínio Exibido. Continua existindo/exportada sem alteração — usada pelos testes; o tick de edição usa a mesma lógica de raízes fundida dentro de `computeSimulationTick`
 - `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
 - `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns}]`; populações de lens derivadas no worker — M10), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo colunar** (Fase 4): dict encoding por dimensão + `__DECISAO_AS_IS` global + uma coluna dict `__DECISAO_<canvasId>` por cenário + `Float64Array` por métrica intrínseca. Os `ArrayBuffer`s são transferidos (zero-cópia) no `ANALYTICS_RESULT`; `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
 - `cachedCanvasOverlay(canvasId, shapes, conns, csvStore)`: overlay por canvas memoizado por hash de `shapes`/`conns` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só); deriva as populações de lens localmente no cache miss (M10)
+
+### M6 — Tick de edição: passe único em vez de ~4 varreduras da base (entregue)
+Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M6, Fase C do backlog). Cada gesto de edição
+disparava `RUN_SIMULATION` e `COMPUTE_OVERLAY` (mesmos deps/debounce em `App.jsx`), que
+juntos percorriam a base **4 vezes** (`runSimulation`, `computeSimulatedDecisions`,
+`computeIncrementalResult`, `computeNodeArrivals`), cada uma recalculando
+`headers.indexOf`/mapas de aresta por rótulo **por linha** e alocando `new Set()`/`path=[]`
+por linha. **Correção:** `computeSimulationTick` funde as quatro passadas numa única
+iteração por csv×linha (índices de coluna e arestas pré-resolvidos por nó/csv, "visited"
+por época em vez de `new Set()`, buffer de caminho reaproveitado); `getTickResult` cacheia
+o resultado por tick (chave `csvStoreVersion + shapes + conns`, mesmo padrão do
+`cachedCanvasOverlay`) para que a segunda mensagem do mesmo gesto (`RUN_SIMULATION` ou
+`COMPUTE_OVERLAY`, o que chegar depois) não repita o cômputo. `runSimulation`,
+`computeSimulatedDecisions`, `computeIncrementalResult` e `computeNodeArrivals` continuam
+existindo/exportadas **sem nenhuma alteração** (usadas pelo `cachedCanvasOverlay` do
+Dashboard e pelos GATEs) — nenhuma mudança de matemática. Não inclui o motor "compilado"
+sobre códigos do dicionário (M8, roadmap futuro) — o roteamento continua por string,
+apenas com os índices/mapas resolvidos fora do loop de linhas. GATE de equivalência
+exaustiva (todas as combinações de raiz/AS IS/lens/multi-csv/inferência ref) em
+`tests/simulationTick.test.js`.
 
 ## Analytics Workspace (aba Dashboard)
 
