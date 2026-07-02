@@ -267,8 +267,30 @@ function suggestMetricColumns(headers) {
 }
 
 // ── CSV helpers ──────────────────────────────────────────────────────────────
+// Extrai as linhas [start, end) do texto por índice, sem materializar o array
+// de todas as linhas do arquivo (equivalente a text.split(/\r?\n/).slice(start,
+// end), mas parando de escanear assim que `end` é atingido) — usado pelos
+// detectores, que só olham as primeiras linhas mesmo em arquivos grandes.
+function sliceLinesByIndex(text, start, end) {
+  const result = [];
+  const len = text.length;
+  let pos = 0;
+  let idx = 0;
+  while (idx < end && pos <= len) {
+    const nl = text.indexOf('\n', pos);
+    const rawEnd = nl === -1 ? len : nl;
+    let line = text.slice(pos, rawEnd);
+    if (line.length > 0 && line.charCodeAt(line.length - 1) === 13) line = line.slice(0, -1); // \r final
+    if (idx >= start) result.push(line);
+    idx++;
+    if (nl === -1) break;
+    pos = nl + 1;
+  }
+  return result;
+}
+
 function detectDelimiter(text) {
-  const lines = text.split(/\r?\n/).slice(0, 12).filter(l => l.trim());
+  const lines = sliceLinesByIndex(text, 0, 12).filter(l => l.trim());
   if (!lines.length) return { delimiter:",", confident:true };
   const scores = {};
   for (const d of [",",";","|","\t"]) {
@@ -284,7 +306,7 @@ function detectDelimiter(text) {
 }
 
 function detectDecimalSep(text, delimiter) {
-  const lines = text.split(/\r?\n/).slice(1, 60).filter(l => l.trim());
+  const lines = sliceLinesByIndex(text, 1, 60).filter(l => l.trim());
   let commas = 0, dots = 0;
   for (const line of lines) {
     const cells = line.split(delimiter);
@@ -4471,7 +4493,7 @@ export default function App() {
       // Serializa a base colunar (typed arrays → arrays planos) p/ caber em JSON.
       csvStore: includeData ? serializeCsvStore(csvStore) : {},
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
