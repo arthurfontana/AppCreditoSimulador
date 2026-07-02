@@ -5,7 +5,7 @@
 // Accessor colunar (Otimização de Memória — Fase 1). Os hot paths abaixo leem
 // as células via cellStr/cellNum/rowCount, que funcionam tanto sobre a base
 // colunar (produção) quanto sobre o legado string[][] (testes / GATE).
-import { cellStr, cellNum, rowCount } from './columnar.js';
+import { cellStr, cellNum, rowCount, isColumnar } from './columnar.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -1269,12 +1269,15 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
   for (const name of [...dimNames, ...decisionColNames]) {
     enc[name] = { dict: [], dictIndex: new Map(), codes: new Int32Array(totalN) };
   }
-  const putCode = (name, w, val) => {
+  // codeFor: resolve (e registra, se novo) o código de destino de um valor no
+  // dicionário de uma coluna do dataset largo — O(distintos), nunca por linha.
+  const codeFor = (name, val) => {
     const e = enc[name];
     let c = e.dictIndex.get(val);
     if (c === undefined) { c = e.dict.length; e.dict.push(val); e.dictIndex.set(val, c); }
-    e.codes[w] = c;
+    return c;
   };
+  const putCode = (name, w, val) => { enc[name].codes[w] = codeFor(name, val); };
 
   let w = 0;
   for (const { csvId, csv, dOrigIdx, types, dimCols, n } of csvList) {
@@ -1291,10 +1294,53 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
     const dimIdxMap = {};
     for (const h of dimCols) dimIdxMap[h] = csv.headers.indexOf(h);
 
+    // M15 — tradução código→código: a base já é dict-encoded (Fase 1), então
+    // re-hashear `cellStr(...)` por linha por dimensão é redundante — o número de
+    // valores distintos é pequeno. Pré-resolve, uma vez por csv×dimensão (O(distintos)),
+    // um `Int32Array` que traduz o código de origem (dicionário da própria base) para o
+    // código de destino (dicionário do dataset largo); no loop de linhas resta uma leitura
+    // de inteiro. Dimensão ausente nesta base ⇒ mesmo código constante em todas as linhas.
+    // `Object.create(null)`: sem protótipo, então `h in dimConst` nunca confunde uma
+    // dimensão chamada 'constructor'/'toString'/etc. com uma entrada herdada de Object.prototype.
+    const dimTranslate = Object.create(null);
+    const dimConst = Object.create(null);
+    for (const h of dimNames) {
+      const ci = dimIdxMap[h]; // undefined ⇒ dimensão ausente nesta base (não é -1: só existe se h ∈ dimCols)
+      const srcCol = (ci !== undefined && isColumnar(csv)) ? csv.columns[h] : null;
+      if (srcCol && srcCol.kind === 'dict') {
+        const t = new Int32Array(srcCol.dict.length);
+        for (let sc = 0; sc < srcCol.dict.length; sc++) t[sc] = codeFor(h, srcCol.dict[sc]);
+        dimTranslate[h] = t;
+      } else if (ci === undefined) {
+        dimConst[h] = codeFor(h, '');
+      }
+      // senão: coluna existe mas não é dict-encoded (legado `rows: string[][]`) →
+      // cai no fallback `cellStr` por linha, mais abaixo.
+    }
+
+    // Mesma ideia para as colunas de decisão: __DECISAO_ORIGINAL já é dict-encoded,
+    // então a tradução AS IS e a de cada cenário (a partir do overlay tipado — M2)
+    // também viram Int32Array resolvidos uma vez, não por linha.
+    const asIsCol = isColumnar(csv) ? csv.columns['__DECISAO_ORIGINAL'] : null;
+    let asIsTranslate = null;
+    const csScenarios = canvasScenarios.map(cs => ({ ...cs, aprovadoCode: null, reprovadoCode: null, decTranslate: null }));
+    if (asIsCol && asIsCol.kind === 'dict') {
+      asIsTranslate = new Int32Array(asIsCol.dict.length);
+      for (let sc = 0; sc < asIsCol.dict.length; sc++) asIsTranslate[sc] = codeFor('__DECISAO_AS_IS', asIsCol.dict[sc]);
+      for (const cs of csScenarios) {
+        cs.aprovadoCode = codeFor(cs.decisionCol, 'APROVADO');
+        cs.reprovadoCode = codeFor(cs.decisionCol, 'REPROVADO');
+        cs.decTranslate = new Int32Array(asIsCol.dict.length);
+        for (let sc = 0; sc < asIsCol.dict.length; sc++) cs.decTranslate[sc] = codeFor(cs.decisionCol, asIsCol.dict[sc]);
+      }
+    }
+
     for (let rowIdx = 0; rowIdx < n; rowIdx++, w++) {
       for (const h of dimNames) {
-        const ci = dimIdxMap[h];
-        putCode(h, w, (ci != null && ci >= 0) ? (cellStr(csv, rowIdx, ci) ?? '') : '');
+        const t = dimTranslate[h];
+        if (t) enc[h].codes[w] = t[csv.columns[h].codes[rowIdx]];
+        else if (h in dimConst) enc[h].codes[w] = dimConst[h];
+        else putCode(h, w, cellStr(csv, rowIdx, dimIdxMap[h]) ?? '');
       }
       numData.qty[w]      = qtyIdx   >= 0 ? (cellNum(csv, rowIdx, qtyIdx)   || 0) : 1;
       numData.qtdAltas[w] = altasIdx >= 0 ? (cellNum(csv, rowIdx, altasIdx) || 0) : 0;
@@ -1304,13 +1350,26 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
         numData.qtdAltasInfer[w] = altasInferIdx >= 0 ? (cellNum(csv, rowIdx, altasInferIdx) || 0) : 0;
         numData.inadIRaw[w]      = inadIIdx      >= 0 ? (cellNum(csv, rowIdx, inadIIdx)      || 0) : 0;
       }
-      const asIs = cellStr(csv, rowIdx, dOrigIdx) ?? '';
-      putCode('__DECISAO_AS_IS', w, asIs); // AS IS único e global
       // Join por (csvId, rowIdx): cada canvas marcado contribui sua coluna de decisão.
       // Overlay tipado (M2): lê o código da linha e decodifica (DEC_SAME → própria AS IS).
-      for (const cs of canvasScenarios) {
-        const simCodes = cs.overlay?.[csvId]?.sim;
-        putCode(cs.decisionCol, w, simCodes ? decodeSimDecision(simCodes[rowIdx], asIs) : asIs);
+      if (asIsTranslate) {
+        const dOrigCode = asIsCol.codes[rowIdx];
+        enc['__DECISAO_AS_IS'].codes[w] = asIsTranslate[dOrigCode];
+        for (const cs of csScenarios) {
+          const simCodes = cs.overlay?.[csvId]?.sim;
+          const sc = simCodes ? simCodes[rowIdx] : DEC_SAME;
+          enc[cs.decisionCol].codes[w] = sc === DEC_APROVADO ? cs.aprovadoCode
+            : sc === DEC_REPROVADO ? cs.reprovadoCode
+            : cs.decTranslate[dOrigCode];
+        }
+      } else {
+        // Legado (`rows: string[][]`, sem dict-encoding) — mesma semântica, por linha.
+        const asIs = cellStr(csv, rowIdx, dOrigIdx) ?? '';
+        putCode('__DECISAO_AS_IS', w, asIs);
+        for (const cs of canvasScenarios) {
+          const simCodes = cs.overlay?.[csvId]?.sim;
+          putCode(cs.decisionCol, w, simCodes ? decodeSimDecision(simCodes[rowIdx], asIs) : asIs);
+        }
       }
     }
   }
