@@ -27,7 +27,9 @@ AppCreditoSimulador/
 │   ├── compiledEngine.test.js    # GATE M8: motor compilado (colunar) equivale ao caminho por string (legado)
 │   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
 │   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
-│   └── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
+│   ├── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
+│   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
+│   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
 │   └── wiki/                     # Documentação sincronizada com GitHub Wiki
