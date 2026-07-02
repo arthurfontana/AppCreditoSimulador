@@ -381,60 +381,44 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
     (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
   );
 
-  const edgeLookup = {};
-  for (const c of conns) {
-    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
-    edgeLookup[c.from][`${c.to}::${c.label ?? ''}`] = c.id;
-  }
-
   function traverseRow(csv, r, startId) {
     const headers = csv.headers;
-    let cur = startId; const visited = new Set(); const path = [];
+    let cur = startId; const visited = new Set();
     while (cur) {
-      if (visited.has(cur)) return { result: null, path };
+      if (visited.has(cur)) return null;
       visited.add(cur);
-      const node = shapesMap[cur]; if (!node) return { result: null, path };
-      if (TERM.has(node.type)) return { result: node.type, path };
+      const node = shapesMap[cur]; if (!node) return null;
+      if (TERM.has(node.type)) return node.type;
       if (node.type === 'decision') {
         const colIdx = headers.indexOf(node.variableCol);
         const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
         const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
-        if (!match) return { result: null, path };
-        const cid = edgeLookup[cur]?.[`${match.to}::${match.label ?? ''}`];
-        if (cid) path.push(cid);
+        if (!match) return null;
         cur = match.to;
       } else if (node.type === 'cineminha') {
         const rowI = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
         const colI = node.colVar ? headers.indexOf(node.colVar.col) : -1;
         const rowVal = node.rowVar && rowI >= 0 ? (cellStr(csv, r, rowI) ?? '').trim() : '';
         const colVal = node.colVar && colI >= 0 ? (cellStr(csv, r, colI) ?? '').trim() : '';
-        if (!node.rowVar && !node.colVar) return { result: null, path };
+        if (!node.rowVar && !node.colVar) return null;
         const rKey = node.rowVar ? rowVal : '*';
         const cKey = node.colVar ? colVal : '*';
         const isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
         const typeCfg = getCinemaType(node.cinemaType);
         const match = (out[cur] || []).find(e => e.label === (isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label));
-        if (!match) return { result: null, path };
-        const cid = edgeLookup[cur]?.[`${match.to}::${match.label ?? ''}`];
-        if (cid) path.push(cid);
+        if (!match) return null;
         cur = match.to;
       } else if (node.type === 'decision_lens') {
         const passes = rowMatchesLensRules(csv, r, node.rules || []);
-        if (!passes) return { result: null, path };
-        const edges = out[cur] || []; if (edges.length === 0) return { result: null, path };
-        const match = edges[0];
-        const cid = edgeLookup[cur]?.[`${match.to}::${match.label ?? ''}`];
-        if (cid) path.push(cid);
-        cur = match.to;
+        if (!passes) return null;
+        const edges = out[cur] || []; if (edges.length === 0) return null;
+        cur = edges[0].to;
       } else if (node.type === 'port') {
-        const edges = out[cur] || []; if (edges.length === 0) return { result: null, path };
-        const match = edges[0];
-        const cid = edgeLookup[cur]?.[`${match.to}::${match.label ?? ''}`];
-        if (cid) path.push(cid);
-        cur = match.to;
-      } else return { result: null, path };
+        const edges = out[cur] || []; if (edges.length === 0) return null;
+        cur = edges[0].to;
+      } else return null;
     }
-    return { result: null, path };
+    return null;
   }
 
   const overlay = {};
@@ -445,10 +429,6 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
     if (dOrigIdx < 0) continue;
     hasAnyDecisaoCol = true;
 
-    const types = csv.columnTypes || {};
-    const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
-    const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
-
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
@@ -456,51 +436,34 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
       return false;
     });
 
-    const summaryStats = { totalQty: 0, mutableQty: 0, impactedQty: 0, rToA: 0, aToR: 0 };
-
     const nRows = rowCount(csv);
     const rowDecisions = new Array(nRows);
     for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
       const decisaoOriginal = cellStr(csv, rowIdx, dOrigIdx) ?? '';
-      const qty = qtyIdx >= 0 ? (cellNum(csv, rowIdx, qtyIdx) || 1) : 1;
       const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
 
-      summaryStats.totalQty += qty;
-      if (isMutable) summaryStats.mutableQty += qty;
-
       if (!isMutable || csvRoots.length === 0) {
-        rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada: decisaoOriginal, flagImpactado: false, componenteOrigem: null, flagMutavel: false };
+        rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada: decisaoOriginal, flagImpactado: false };
         continue;
       }
 
-      const { result: boardResult, path } = traverseRow(csv, rowIdx, csvRoots[0].id);
+      const boardResult = traverseRow(csv, rowIdx, csvRoots[0].id);
       let decisaoSimulada = decisaoOriginal;
-      let componenteOrigem = null;
 
       if (boardResult === 'approved') {
         decisaoSimulada = 'APROVADO';
-        const lastConn = conns.find(c => c.id === path[path.length - 1]);
-        componenteOrigem = lastConn ? (shapesMap[lastConn.to]?.label || 'Aprovado') : 'Aprovado';
       } else if (boardResult === 'rejected') {
         decisaoSimulada = 'REPROVADO';
-        const lastConn = conns.find(c => c.id === path[path.length - 1]);
-        componenteOrigem = lastConn ? (shapesMap[lastConn.to]?.label || 'Reprovado') : 'Reprovado';
       } else if (boardResult === 'as_is') {
         decisaoSimulada = decisaoOriginal;
-        componenteOrigem = 'AS IS';
       }
 
       const flagImpactado = decisaoOriginal !== '' && decisaoSimulada !== decisaoOriginal;
-      if (flagImpactado) {
-        summaryStats.impactedQty += qty;
-        if (decisaoOriginal === 'REPROVADO' && decisaoSimulada === 'APROVADO') summaryStats.rToA += qty;
-        if (decisaoOriginal === 'APROVADO'  && decisaoSimulada === 'REPROVADO') summaryStats.aToR += qty;
-      }
 
-      rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada, flagImpactado, componenteOrigem, flagMutavel: true };
+      rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada, flagImpactado };
     }
 
-    overlay[csvId] = { rowDecisions, summaryStats };
+    overlay[csvId] = { rowDecisions };
   }
 
   return hasAnyDecisaoCol ? overlay : null;
