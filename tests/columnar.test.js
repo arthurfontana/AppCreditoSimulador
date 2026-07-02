@@ -190,6 +190,70 @@ describe('Round-trip do Projeto (.credito.json) preservando a base colunar', () 
     expect(res.inadInferida).toBeGreaterThan(0.40);
     expect(res.inadInferida).toBeLessThan(0.41);
   });
+
+  // ── M3 (Otimização de Memória) — save/load em base64 ────────────────────────
+  describe('M3 — serialização das colunas em base64 (schema 2.3)', () => {
+    it('serializeCsvStore emite base64 (não array plano de números) para num e dict', () => {
+      const store = { base: makeColumnarCsv() };
+      const ser = serializeCsvStore(store);
+      const wcol = ser.base.columns[WEIGHT_COL];
+      const scol = ser.base.columns['OPERACAO'];
+      expect(wcol.encoding).toBe('base64');
+      expect(typeof wcol.data).toBe('string');
+      expect(Array.isArray(wcol.data)).toBe(false);
+      expect(scol.encoding).toBe('base64');
+      expect(typeof scol.codes).toBe('string');
+      expect(Array.isArray(scol.codes)).toBe(false);
+    });
+
+    it('base64 produz um JSON menor que o array plano para números com muitos dígitos', () => {
+      // Vantagem de tamanho do base64 depende da largura decimal dos valores (a codificação
+      // de um Float64 é ~10.7 chars base64 fixos, contra o nº de dígitos decimais do valor —
+      // só compensa quando os números não são inteiros pequenos). Testa com valores realistas
+      // de uma métrica decimal (ex.: taxas/somas acumuladas), o caso que a Fase B mira.
+      const data = new Float64Array(500).map((_, i) => 1234567.891234 + i * 0.918273);
+      const store = { base: { headers: ['m'], columns: { m: { kind: 'num', data } }, rowCount: data.length } };
+      const ser = serializeCsvStore(store);
+      const plainJsonLen = JSON.stringify(Array.from(data)).length;
+      const base64JsonLen = JSON.stringify(ser.base.columns.m.data).length;
+      expect(base64JsonLen).toBeLessThan(plainJsonLen);
+    });
+
+    it('deserialize aceita o formato antigo (array plano, schema ≤ 2.2) e reconstrói typed arrays', () => {
+      // Simula um projeto salvo ANTES da M3: sem `encoding`, `data`/`codes` como array plano.
+      const store = { base: makeColumnarCsv() };
+      const oldSerialized = {
+        base: {
+          ...store.base,
+          columns: {
+            [WEIGHT_COL]: { kind: 'num', data: Array.from(store.base.columns[WEIGHT_COL].data) },
+            OPERACAO: { kind: 'dict', dict: store.base.columns.OPERACAO.dict, codes: Array.from(store.base.columns.OPERACAO.codes) },
+          },
+        },
+      };
+      const restored = deserializeCsvStore(JSON.parse(JSON.stringify(oldSerialized)));
+      const rcsv = restored.base;
+      expect(rcsv.columns[WEIGHT_COL].data).toBeInstanceOf(Float64Array);
+      expect(rcsv.columns.OPERACAO.codes).toBeInstanceOf(Int32Array);
+      expect(Array.from(rcsv.columns[WEIGHT_COL].data)).toEqual(Array.from(store.base.columns[WEIGHT_COL].data));
+      const opIdx = baseHeaders.indexOf('OPERACAO');
+      expect(cellStr(rcsv, 0, opIdx)).toBe(baseRows[0][opIdx]);
+    });
+
+    it('round-trip base64 preserva NaN e valores negativos/decimais das métricas', () => {
+      const data = new Float64Array([1.5, -2.25, NaN, 0, 123456789.987654]);
+      const codes = new Int32Array([0, 1, 2, 2, 0]);
+      const store = { base: { headers: ['m', 'd'], columns: { m: { kind: 'num', data }, d: { kind: 'dict', dict: ['x', 'y', 'z'], codes } }, rowCount: 5 } };
+      const restored = deserializeCsvStore(JSON.parse(JSON.stringify(serializeCsvStore(store))));
+      const got = restored.base.columns.m.data;
+      expect(got[0]).toBeCloseTo(1.5, 10);
+      expect(got[1]).toBeCloseTo(-2.25, 10);
+      expect(Number.isNaN(got[2])).toBe(true);
+      expect(got[3]).toBe(0);
+      expect(got[4]).toBeCloseTo(123456789.987654, 6);
+      expect(Array.from(restored.base.columns.d.codes)).toEqual([0, 1, 2, 2, 0]);
+    });
+  });
 });
 
 // ── Fase 2 — transferência sem cópia para o worker ──────────────────────────────

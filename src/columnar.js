@@ -190,18 +190,55 @@ export function distinctColValues(csv, c) {
   return [...set];
 }
 
-// ── Persistência (Projeto .credito.json / Fluxo) ────────────────────────────────
-// Typed arrays não são JSON nativo; convertemos para arrays planos na serialização
-// e reconstruímos os typed arrays na carga (mesmo padrão de serializeInferenceRef).
-// Round-trip coberto em tests/columnar.test.js.
+// ── Persistência (Projeto .credito.json / Fluxo) — M3 (Otimização de Memória) ──
+// Typed arrays não são JSON nativo. Até o schema 2.2, a serialização virava um
+// array PLANO de números (`Array.from(col.data)`): para uma base diária isso é
+// ~15MM de números *boxed* — o próprio pico de memória que o formato colunar
+// deveria evitar. A partir do schema 2.3, os buffers viram uma STRING BASE64
+// (bytes crus do typed array, sem materializar array de números): elimina os
+// números boxed, produz um JSON ~30% menor que a mesma sequência em dígitos
+// decimais, e serializa/parseia mais rápido.
+// `deserializeColumns` aceita os DOIS formatos (base64 novo e array plano antigo)
+// — retrocompatibilidade com projetos/exports salvos antes desta mudança. Round-trip
+// (dos dois formatos) coberto em tests/columnar.test.js.
+
+// Codifica bytes em base64 em chunks (evita `String.fromCharCode(...bytes)` com
+// milhões de argumentos — estoura a pilha de chamada em arrays grandes).
+const BASE64_CHUNK = 0x8000;
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += BASE64_CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + BASE64_CHUNK));
+  }
+  return typeof btoa === 'function' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
+}
+function base64ToBytes(b64) {
+  if (typeof atob === 'function') {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  return new Uint8Array(Buffer.from(b64, 'base64'));
+}
+// Base64 dos bytes crus de um typed array (respeita byteOffset/byteLength — nunca
+// assume que a view cobre o buffer inteiro).
+function typedArrayToBase64(ta) {
+  return bytesToBase64(new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength));
+}
+// Reconstrói um typed array a partir do base64 dos seus bytes crus.
+function base64ToTypedArray(b64, TypedArrayCtor) {
+  const bytes = base64ToBytes(b64);
+  return new TypedArrayCtor(bytes.buffer, 0, bytes.byteLength / TypedArrayCtor.BYTES_PER_ELEMENT);
+}
 
 function serializeColumns(columns) {
   const out = {};
   for (const [name, col] of Object.entries(columns || {})) {
     if (col.kind === 'num') {
-      out[name] = { kind: 'num', data: Array.from(col.data) };
+      out[name] = { kind: 'num', encoding: 'base64', length: col.data.length, data: typedArrayToBase64(col.data) };
     } else {
-      out[name] = { kind: 'dict', dict: col.dict, codes: Array.from(col.codes) };
+      out[name] = { kind: 'dict', dict: col.dict, encoding: 'base64', length: col.codes.length, codes: typedArrayToBase64(col.codes) };
     }
   }
   return out;
@@ -211,12 +248,24 @@ function deserializeColumns(columns) {
   const out = {};
   for (const [name, col] of Object.entries(columns || {})) {
     if (col.kind === 'num') {
-      const src = col.data || [];
-      const data = allocF64(src.length); data.set(src);
+      let data;
+      if (col.encoding === 'base64') {
+        data = allocF64(col.length ?? 0);
+        data.set(base64ToTypedArray(col.data, Float64Array));
+      } else {
+        const src = col.data || []; // formato legado (schema ≤ 2.2): array plano
+        data = allocF64(src.length); data.set(src);
+      }
       out[name] = { kind: 'num', data };
     } else {
-      const src = col.codes || [];
-      const codes = allocI32(src.length); codes.set(src);
+      let codes;
+      if (col.encoding === 'base64') {
+        codes = allocI32(col.length ?? 0);
+        codes.set(base64ToTypedArray(col.codes, Int32Array));
+      } else {
+        const src = col.codes || []; // formato legado (schema ≤ 2.2): array plano
+        codes = allocI32(src.length); codes.set(src);
+      }
       out[name] = { kind: 'dict', dict: col.dict || [], codes };
     }
   }

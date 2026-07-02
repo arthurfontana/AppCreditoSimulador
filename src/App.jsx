@@ -561,6 +561,59 @@ export function deserializeInferenceRef(ser) {
   return { ...ser, levels };
 }
 
+// ── Serialização do Projeto em partes (M3 — Otimização de Memória) ──────────
+// `JSON.stringify(buildProjectPayload())` monta a base inteira (já em base64 —
+// ver columnar.js) numa ÚNICA string contígua: com várias colunas de uma base
+// diária isso ainda é um pico evitável de memória antes da escrita. Em vez disso,
+// monta-se a "casca" do payload (tudo exceto o `csvStore`) e, dentro dele, as
+// colunas de cada base UMA POR VEZ — cada `JSON.stringify` cobre só uma coluna
+// (no máximo alguns MB em base64), nunca o projeto inteiro. O array resultante é
+// tanto uma sequência de `write()` para o `createWritable` (streaming em disco)
+// quanto os `BlobPart[]` do fallback `<a download>` — nos dois casos o Blob/stream
+// aceita as partes sem que o texto precise existir concatenado na RAM.
+// A concatenação das partes é sempre um JSON válido e idêntico, em conteúdo, ao
+// que `JSON.stringify(payload)` produziria (só a ordem de escrita muda).
+export function buildProjectJSONChunks(payload) {
+  const chunks = [];
+  const pushKV = (obj, key) => {
+    const v = JSON.stringify(obj[key]);
+    if (v === undefined) return false; // mesma semântica de JSON.stringify: omite undefined
+    chunks.push(JSON.stringify(key) + ':' + v);
+    return true;
+  };
+  const { csvStore, ...rest } = payload;
+  chunks.push('{');
+  for (const k of Object.keys(rest)) {
+    if (pushKV(rest, k)) chunks.push(',');
+  }
+  chunks.push('"csvStore":{');
+  const csvIds = Object.keys(csvStore || {});
+  csvIds.forEach((id, ci) => {
+    const csv = csvStore[id];
+    if (csv && csv.columns) {
+      const { columns, ...csvRest } = csv;
+      chunks.push(JSON.stringify(id) + ':{');
+      for (const k of Object.keys(csvRest)) {
+        if (pushKV(csvRest, k)) chunks.push(',');
+      }
+      chunks.push('"columns":{');
+      const colNames = Object.keys(columns);
+      colNames.forEach((name, cj) => {
+        chunks.push(JSON.stringify(name) + ':' + JSON.stringify(columns[name]));
+        if (cj < colNames.length - 1) chunks.push(',');
+      });
+      chunks.push('}}');
+    } else {
+      // Entrada legada (sem `columns`) — pequena o bastante para ir de uma vez.
+      chunks.push(JSON.stringify(id) + ':' + JSON.stringify(csv));
+    }
+    if (ci < csvIds.length - 1) chunks.push(',');
+  });
+  chunks.push('}'); // fecha csvStore
+  chunks.push('}'); // fecha o objeto raiz
+  return chunks;
+}
+
 function sortDomain(values) {
   const allNum = values.length > 0 && values.every(v => v !== "" && !isNaN(parseFloat(v)) && isFinite(Number(v)));
   return allNum
@@ -4640,7 +4693,7 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.2",
+      schemaVersion: "2.3",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
@@ -4669,17 +4722,18 @@ export default function App() {
   const projectFileName = () => `projeto_credito_${new Date().toISOString().slice(0,10)}.credito.json`;
 
   const saveProject = async () => {
-    let json;
+    let chunks;
     try {
-      json = JSON.stringify(buildProjectPayload());
+      chunks = buildProjectJSONChunks(buildProjectPayload());
     } catch {
       setProjectSaveNotice({ kind: "err", msg: "Não foi possível serializar o projeto." });
       return;
     }
     const suggestedName = projectFileName();
     // Preferência: "Salvar como" nativo (File System Access API) — o usuário
-    // escolhe pasta e nome, e a escrita via stream não sofre o truncamento que
-    // o download por <a>+revokeObjectURL pode causar em projetos grandes.
+    // escolhe pasta e nome, e a escrita via stream (em partes, uma coluna por vez —
+    // ver buildProjectJSONChunks) não sofre o truncamento que o download por
+    // <a>+revokeObjectURL pode causar em projetos grandes, nem monta a string inteira em RAM.
     if (typeof window !== "undefined" && window.showSaveFilePicker) {
       try {
         const handle = await window.showSaveFilePicker({
@@ -4690,7 +4744,7 @@ export default function App() {
           }],
         });
         const writable = await handle.createWritable();
-        await writable.write(json);
+        for (const chunk of chunks) await writable.write(chunk);
         await writable.close();
         setProjectSaveNotice({ kind: "ok", msg: `Projeto salvo em "${handle.name}".` });
         return;
@@ -4701,8 +4755,9 @@ export default function App() {
     }
     // Fallback: download via <a>. Anexa ao DOM e só revoga o blob URL depois de
     // um tick — revogar imediatamente após click() pode truncar arquivos grandes.
+    // O Blob aceita as partes (BlobPart[]) sem concatená-las numa string única.
     try {
-      const blob = new Blob([json], { type: "application/json" });
+      const blob = new Blob(chunks, { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

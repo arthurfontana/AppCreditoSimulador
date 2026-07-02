@@ -616,7 +616,7 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"2.2", kind:"credito-project", generatedAt,
+  Monta o snapshot `{schemaVersion:"2.3", kind:"credito-project", generatedAt,
   activeTab, viewport, panelCollapsed, canvases, activeCanvasId, csvStore,
   inferenceRef, analyticsLayout, analyticsGroupings, analyticsPageFilters,
   cinemaLibrary, businessWidget, preferences}`.
@@ -624,33 +624,51 @@ parou.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
   (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
   um Decision Lens recém-criado) não entram no arquivo.**
-  O `csvStore` é serializado via `serializeCsvStore()` (typed arrays → arrays planos)
-  e restaurado via `deserializeCsvStore()` (arrays planos → typed arrays; também aceita
-  o formato legado `rows: string[][]` de projetos anteriores à Fase 1, migrando-os
-  transparentemente).
-- **`saveProject()`** (async): serializa `buildProjectPayload()` e usa o **"Salvar
-  como" nativo** (File System Access API `window.showSaveFilePicker`) quando
-  disponível — o usuário escolhe pasta e nome, e a escrita via stream (`createWritable`)
-  não sofre truncamento. `AbortError` = usuário cancelou (no-op). *Fallback* para
-  download via `<a download>` (browsers sem a API): anexa o `<a>` ao DOM e só revoga o
-  blob URL após `setTimeout(…, 2000)` — **revogar imediatamente após `click()` pode
-  truncar projetos grandes** (bug histórico: base de dados sumindo do arquivo salvo).
-  Dá feedback via `projectSaveNotice` (`{kind:'ok'|'err', msg}`) renderizado sob o botão.
+  O `csvStore` é serializado via `serializeCsvStore()` (typed arrays → **base64**, ver
+  Otimização de Memória — M3) e restaurado via `deserializeCsvStore()` (base64 → typed
+  arrays; também aceita os formatos antigos: arrays planos de números — schema ≤ 2.2 —
+  e `rows: string[][]` de projetos anteriores à Fase 1, migrando-os transparentemente).
+- **`saveProject()`** (async): monta `buildProjectJSONChunks(buildProjectPayload())`
+  (helper global em `App.jsx`, M3) — a "casca" do payload (tudo exceto `csvStore`) mais
+  as colunas de cada base **uma por vez**, em vez de um único
+  `JSON.stringify(payload)` monolítico — e usa o **"Salvar como" nativo** (File System
+  Access API `window.showSaveFilePicker`) quando disponível — o usuário escolhe pasta e
+  nome, e os *chunks* são escritos em sequência no `createWritable` (streaming real:
+  nenhuma string única do projeto inteiro chega a existir em RAM). `AbortError` = usuário
+  cancelou (no-op). *Fallback* para download via `<a download>` (browsers sem a API): os
+  mesmos *chunks* viram o array de `BlobPart[]` do `Blob` (aceito sem concatenação) e o
+  `<a>` é anexado ao DOM, só revogando o blob URL após `setTimeout(…, 2000)` — **revogar
+  imediatamente após `click()` pode truncar projetos grandes** (bug histórico: base de
+  dados sumindo do arquivo salvo). Dá feedback via `projectSaveNotice`
+  (`{kind:'ok'|'err', msg}`) renderizado sob o botão.
 - **`loadProject(data)`** / **`onProjectFileChange`**: valida `kind:"credito-project"`,
   sobe o contador `_id` (varre shapes/conns/ids de todos os canvas) p/ evitar colisão,
   restaura todo o estado (cada seção com default defensivo — seções ausentes não zeram
   o resto), reseta seleção/edição e os stacks de undo/redo (que são por canvas e
   ficariam inconsistentes após trocar todos os canvas). Os effects de
   `csvStore`/`inferenceRef` reenviam `UPDATE_CSV_STORE`/`UPDATE_INFERENCE_REF` ao worker.
+  A leitura do arquivo (`onProjectFileChange`) continua via `FileReader.readAsText` +
+  `JSON.parse` — o ganho de memória do M3 é no *tamanho* do JSON (base64, sem números
+  boxed), não numa leitura streaming do lado do load.
 - **`serializeInferenceRef` / `deserializeInferenceRef`** (helpers globais exportados):
   `inferenceRef.levels` é `{[nivel]: Map}` — JSON não serializa `Map`, então converte
   para arrays de entradas na exportação e reconstrói os `Map`s na carga. Round-trip
   coberto em `tests/inferenceRef.test.js`.
 - **`serializeCsvStore` / `deserializeCsvStore`** (em `src/columnar.js`, importados em `App.jsx`):
-  Typed arrays (`Float64Array`, `Int32Array`) não são JSON nativo — `serializeCsvStore`
-  converte-os para arrays planos e `deserializeCsvStore` reconstrói os typed arrays
-  (inclusive migrando o formato legado `rows: string[][]` para colunar). Round-trip
-  coberto em `tests/columnar.test.js`.
+  Typed arrays (`Float64Array`, `Int32Array`) não são JSON nativo. Desde a M3 (Otimização
+  de Memória), `serializeCsvStore` converte-os para **base64 dos bytes crus** (em vez de
+  array plano de números boxed — schema ≤ 2.2) e `deserializeCsvStore` reconstrói os
+  typed arrays a partir do base64. Aceita os três formatos na carga: base64 (atual), array
+  plano (projetos/exports salvos com schema ≤ 2.2) e `rows: string[][]` (legado pré-Fase 1,
+  vetorizado on-the-fly). Round-trip (dos três formatos) coberto em `tests/columnar.test.js`.
+- **`buildProjectJSONChunks(payload)`** (helper global em `App.jsx`, M3): serializa o
+  payload do Projeto como um **array de strings JSON** em vez de uma string única — a
+  "casca" (todo campo exceto `csvStore`) primeiro, depois `csvStore` com cada coluna de
+  cada base serializada (`JSON.stringify`) individualmente. A concatenação dos chunks é
+  sempre um JSON válido idêntico, em conteúdo, ao de `JSON.stringify(payload)` — só a
+  forma de entrega muda (partes em vez de string monolítica), o que permite ao
+  `createWritable`/`Blob` consumi-las sem montar o projeto inteiro como uma string
+  contígua em memória.
 
 Difere do **Exportar/Importar Fluxo** (seção Fluxo), que salva só o canvas ativo
 (shapes/conns + opcionalmente csvStore) — o Projeto salva *tudo* (todas as abas,
@@ -673,7 +691,7 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"2.2"`** (bumped na Fase 1 de otimização de memória — `csvStore` colunar).
+   Versão atual: **`"2.3"`** (bumped na M3 de otimização de memória — `csvStore` em base64).
 4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
    adicionar serialize/deserialize dedicados (padrão de `serializeInferenceRef` e
    `serializeCsvStore`/`deserializeCsvStore`) e cobrir o round-trip em teste.
@@ -731,11 +749,13 @@ hasHeader, onProgress)` fatia o CSV em lotes, cede a thread principal a cada lot
   `text.split(/\r?\n/)` inteiro. Varre o texto por índice (`indexOf('\n')`) e fatia
   cada linha sob demanda — elimina o pico de RAM do parse (~260MB em bases grandes).
 
-## Otimização de Memória — `src/columnar.js` (Fases 0–3)
+## Otimização de Memória — `src/columnar.js` (Fases 0–4 + M3/M15)
 
 Para bases sumarizadas por dia (~1MM linhas / ~130MB), a arquitetura anterior
 mantinha várias cópias completas em `string` na RAM. Ver o plano completo em
-`docs/wiki/Otimizacao-Memoria.md`. **Fases 0, 1, 2, 3 entregues.**
+`docs/wiki/Otimizacao-Memoria.md` (Fases 0–4) e `docs/wiki/PERFORMANCE-ANALISE.md`
+(backlog M1–M15, priorizado em Fases A–D). **Fases 0, 1, 2, 3, 4 entregues; do
+backlog do `PERFORMANCE-ANALISE.md`, M3 e M15 (Fase B) entregues.**
 
 ### Fase 0 — Parse sem cópia intermediária
 `parseCSVAsync` varre o texto por índice em vez de `split(/\r?\n/)`. Sem o array
@@ -753,7 +773,7 @@ da base.
   - `getRow(csv, r)` — materializa uma linha como `string[]` (uso pontual)
   - `materializeRows(csv)` — materializa tudo (evitar em hot paths)
   - `distinctColValues(csv, c)` — distintos não-vazios (O(distintos) em modo colunar)
-- **Persistência**: `serializeCsvStore(store)` / `deserializeCsvStore(store)` — typed arrays ↔ arrays planos para JSON. `deserializeCsvStore` também aceita o formato legado `rows: string[][]` (migração transparente de projetos antigos).
+- **Persistência**: `serializeCsvStore(store)` / `deserializeCsvStore(store)` — typed arrays ↔ **base64** dos bytes crus para JSON (M3; era array plano de números boxed até o schema 2.2). `deserializeCsvStore` aceita os três formatos: base64 (atual), array plano (schema ≤ 2.2) e o legado `rows: string[][]` (migração transparente de projetos anteriores à Fase 1).
 - **GATE**: `tests/columnar.test.js` verifica equivalência célula a célula com o legado, round-trip de projeto e runSimulation sobre base colunar (mesma FPD ≈ 40,06%).
 
 ### Fase 2 — Transferência sem cópia para o worker via `SharedArrayBuffer`
@@ -800,6 +820,44 @@ As Fases 0–3 enxugaram o **estado permanente** (`csvStore` colunar ~100MB), ma
 > preserva `serve.py` junto do `iniciar.bat` ao recopiar o `dist/`. O dataset analítico
 > da Fase 4 **não** depende de COI (usa `ArrayBuffer` transferível), então já valia
 > mesmo antes; a mudança do `serve.py` beneficia a base colunar (Fase 2).
+
+### M3 — Save/Load do Projeto: base64 + escrita em partes (schema 2.3)
+Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M3, Fase B do backlog). Dois picos
+que sobravam ao **salvar** um projeto com base grande:
+1. **Arrays planos de números boxed.** `serializeColumns` fazia `Array.from(col.data)`
+   — ~15MM de números *boxed* numa base diária. **Correção:** os bytes crus do typed
+   array (`Float64Array`/`Int32Array`) viram uma **string base64**
+   (`typedArrayToBase64`/`base64ToTypedArray`, `columnar.js`) — sem materializar array
+   de números, JSON ~30% menor que a mesma sequência em dígitos decimais.
+   `deserializeColumns` aceita os dois formatos (`encoding:'base64'` novo e o array
+   plano antigo, schema ≤ 2.2) — retrocompatibilidade coberta em `tests/columnar.test.js`.
+2. **`JSON.stringify(payload)` monolítico.** Mesmo em base64, uma única chamada monta
+   o projeto inteiro como uma string contígua antes de gravar. **Correção:**
+   `buildProjectJSONChunks(payload)` (`App.jsx`) monta a "casca" do payload (tudo
+   exceto `csvStore`) e, dentro de `csvStore`, cada **coluna de cada base
+   individualmente** — a concatenação dos chunks é o mesmo JSON que
+   `JSON.stringify(payload)` produziria, só que entregue em partes. `saveProject`
+   escreve os chunks em sequência no `createWritable` (streaming real) e, no
+   fallback `<a download>`, os mesmos chunks viram o `BlobPart[]` do `Blob` (aceito
+   sem concatenação prévia).
+- Schema bump: **`"2.2"` → `"2.3"`**. `loadProject`/`onProjectFileChange` não mudam
+  (a leitura ainda é `FileReader.readAsText` + `JSON.parse` — o ganho é no *tamanho*
+  do JSON, não numa leitura em streaming do lado do load).
+
+### M15 — Dataset analítico: tradução código→código (em vez de re-hash por linha)
+Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M15, Fase B do backlog). `computeAnalyticsDataset`
+(worker) fazia, **por linha × por dimensão**, `cellStr(...)` → `Map.get(string)` para
+recodificar valores que a base **já** tem codificados (dictionary encoding, Fase 1) —
+~10MM lookups de hash de string por recompute numa base de 1MM linhas × 10 dimensões.
+**Correção:** para cada `csv × dimensão` (e para as colunas de decisão, a partir do
+overlay tipado do M2), constrói-se uma vez um `Int32Array` de tradução
+`código de origem (dicionário da base) → código de destino (dicionário do dataset
+largo)` — O(distintos), não O(linhas). No loop de linhas resta `codes[w] =
+translate[srcCodes[r]]` (leitura de inteiro). Dimensão ausente numa base específica ⇒
+código constante (resolvido uma vez, sem tradução por linha); coluna não dict-encoded
+(caminho legado `rows: string[][]`, usado só em teste) cai no `cellStr` por linha de
+antes — sem mudança de comportamento. GATE: `tests/analytics.test.js` (5B) revalidado
+sem alteração de contrato/matemática.
 
 ## Inferência de Negados (Tabela de Referência)
 
