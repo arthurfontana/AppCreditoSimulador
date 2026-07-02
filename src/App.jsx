@@ -644,20 +644,6 @@ function computeLensPopulation(rules, csvStore) {
   return { count, total };
 }
 
-// ── Engine de População Impactada (Feature 4) ─────────────────────────────────
-// Retorna {[csvId]: boolean[]} — índice por rowIdx, true = FLAG_POPULACAO_ALVO
-function computeLensAffectedRows(lensShape, csvStore) {
-  const rules = lensShape.rules || [];
-  const result = {};
-  for (const [csvId, csv] of Object.entries(csvStore)) {
-    const n = rowCount(csv);
-    const arr = new Array(n);
-    for (let r = 0; r < n; r++) arr[r] = rowMatchesLensRules(csv, r, rules);
-    result[csvId] = arr;
-  }
-  return result;
-}
-
 // ── Flow engine ──────────────────────────────────────────────────────────────
 function buildFlowGraph(shapes, conns) {
   const out = {}, inc = {};
@@ -3030,6 +3016,7 @@ export default function App() {
       } else if (msgType === 'OVERLAY_RESULT') {
         setIncrementalResult(e.data.incrementalResult);
         setNodeArrivals(e.data.nodeArrivals || {});
+        setLensCounts(e.data.lensCounts || {});
       } else if (msgType === 'ANALYTICS_RESULT') {
         setAnalyticsDataset(e.data.dataset);
       } else if (msgType === 'OPTIM_RESULT') {
@@ -3129,28 +3116,12 @@ export default function App() {
   }, [shapes, conns, csvStore, inferenceRef]);
 
   // ── Engine de População Impactada (Feature 4) ─────────────────
-  // lensPopulations: {[lensId]: {[csvId]: boolean[]}} — FLAG_POPULACAO_ALVO por linha
-  // lensRulesKey: chave estável que só muda quando regras de um lens mudam (não quando x/y muda)
-  const lensRulesKey = useMemo(() =>
-    JSON.stringify(
-      shapes
-        .filter(s => s.type === 'decision_lens')
-        .map(s => ({ id: s.id, rules: s.rules }))
-    )
-  , [shapes]);
-
-  const lensPopulations = useMemo(() => {
-    const result = {};
-    for (const shape of shapes) {
-      if (shape.type !== 'decision_lens') continue;
-      result[shape.id] = computeLensAffectedRows(shape, csvStore);
-    }
-    return result;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lensRulesKey, csvStore]);
-
-  const lensPopulationsR = useRef(lensPopulations);
-  useEffect(() => { lensPopulationsR.current = lensPopulations; }, [lensPopulations]);
+  // M10: as populações de lens (Array<boolean> de ~1MM posições por lens×csv) deixaram de
+  // ser computadas/mantidas na main thread (varredura que travava a UI) e de ser clonadas
+  // pro worker a cada tick. O worker as deriva das regras dos shapes decision_lens e devolve
+  // só as contagens {[lensId]: {count, total}} (ponderadas pelo volume) no OVERLAY_RESULT —
+  // o único uso que a main tinha delas era o rótulo do nó decision_lens.
+  const [lensCounts, setLensCounts] = useState({});
 
   // ── Engine de Sobrescrita de Decisão Simulada (Feature 5) ──────
   // Contagem reativa de registros que chegam a cada nó por valor de domínio
@@ -3178,30 +3149,26 @@ export default function App() {
   useEffect(() => {
     clearTimeout(simOverlayDebounceRef.current);
     simOverlayDebounceRef.current = setTimeout(() => {
-      workerRef.current?.postMessage({ type: 'COMPUTE_OVERLAY', shapes: shapesR.current, conns: connsR.current, lensPopulations: lensPopulationsR.current });
+      workerRef.current?.postMessage({ type: 'COMPUTE_OVERLAY', shapes: shapesR.current, conns: connsR.current });
     }, 300);
     return () => clearTimeout(simOverlayDebounceRef.current);
-  }, [shapes, conns, csvStore, lensPopulations, inferenceRef]);
+  }, [shapes, conns, csvStore, inferenceRef]);
 
   // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
   // Recomputado pelo worker quando a simulação muda; cacheado em analyticsDataset.
   // 5B: monta as abas marcadas (includeInDashboard) como cenários — working copy para o
-  // canvas ativo, store para os demais — e resolve lensPopulations por canvas (DEC-AW-007).
+  // canvas ativo, store para os demais. M10: as populações de lens são derivadas no worker
+  // a partir das regras dos shapes (não mais recomputadas aqui na main a cada tick).
   const buildAnalyticsCanvasInputs = useCallback(() => {
     const cs = canvasesR.current;
     const activeId = activeCanvasIdR.current;
-    const store = csvStoreR.current;
     const inputs = [];
     for (const id of Object.keys(cs)) {
       const c = cs[id];
       if (!c.includeInDashboard) continue;
       const shapes_ = id === activeId ? shapesR.current : (c.shapes || []);
       const conns_  = id === activeId ? connsR.current  : (c.conns  || []);
-      const lensPop = {};
-      for (const shape of shapes_) {
-        if (shape.type === 'decision_lens') lensPop[shape.id] = computeLensAffectedRows(shape, store);
-      }
-      inputs.push({ id, nome: c.name, shapes: shapes_, conns: conns_, lensPopulations: lensPop });
+      inputs.push({ id, nome: c.name, shapes: shapes_, conns: conns_ });
     }
     return inputs;
   }, []);
@@ -6142,23 +6109,11 @@ export default function App() {
     const isSel = sel === id;
     const isMulti = multiSel.has(id) && !isSel;
     const ruleCount = (rules || []).length;
-    // Compute population stats for this lens (Feature 4)
-    const popMap = lensPopulations[id];
-    let popQty = 0, popTotal = 0;
-    if (popMap) {
-      for (const [csvId, flags] of Object.entries(popMap)) {
-        const csv = csvStore[csvId];
-        if (!csv) continue;
-        const types = csv.columnTypes || {};
-        const qtyCol = Object.entries(types).find(([,t]) => t === 'qty')?.[0];
-        const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
-        flags.forEach((inPop, ri) => {
-          const q = qtyIdx >= 0 ? (cellNum(csv, ri, qtyIdx) || 1) : 1;
-          popTotal += q;
-          if (inPop) popQty += q;
-        });
-      }
-    }
+    // Contagem de população impactada (Feature 4) — vem do worker (M10), ponderada pelo
+    // volume: {count, total}. Chega via OVERLAY_RESULT (debounced), sem varrer a base na main.
+    const stats = lensCounts[id];
+    const popQty = stats?.count || 0;
+    const popTotal = stats?.total || 0;
     const stroke = isSel || isMulti ? "#3b82f6" : "#0891b2";
     const sw = isSel || isMulti ? 2 : 1.5;
     const filter = isSel
@@ -6589,7 +6544,6 @@ export default function App() {
       shapes: shapesR.current,
       cinemaIds: shapeIds,
       conns: connsR.current,
-      lensPopulations: lensPopulationsR.current,
       // Pass user settings if they're already configured (re-open with same cinemas)
       riskLevels:    cur?.riskLevels    || null,
       hierarchyMode: cur?.hierarchyMode || 'cascata',
@@ -6607,7 +6561,6 @@ export default function App() {
       shapes: shapesR.current,
       cinemaIds: cur.shapeMetas.map(m => m.id),
       conns: connsR.current,
-      lensPopulations: lensPopulationsR.current,
       riskLevels:    overrides.riskLevels    ?? cur.riskLevels,
       hierarchyMode: overrides.hierarchyMode ?? cur.hierarchyMode,
       inadMetric:    overrides.inadMetric    ?? cur.inadMetric,
@@ -10331,7 +10284,7 @@ export default function App() {
                                   setJohnnyModal(m=>({...m,riskLevels:{...m.riskLevels,[meta.id]:v}}));
                                 }}
                                 onBlur={()=>setJohnnyModal(cur=>{
-                                  if(cur)workerRef.current?.postMessage({type:'COMPUTE_JOHNNY',shapes:shapesR.current,cinemaIds:cur.shapeMetas.map(m=>m.id),conns:connsR.current,lensPopulations:lensPopulationsR.current,riskLevels:cur.riskLevels,hierarchyMode:cur.hierarchyMode,inadMetric:cur.inadMetric});
+                                  if(cur)workerRef.current?.postMessage({type:'COMPUTE_JOHNNY',shapes:shapesR.current,cinemaIds:cur.shapeMetas.map(m=>m.id),conns:connsR.current,riskLevels:cur.riskLevels,hierarchyMode:cur.hierarchyMode,inadMetric:cur.inadMetric});
                                   return cur;
                                 })}
                                 style={{width:48,padding:"2px 5px",fontSize:11,fontWeight:700,

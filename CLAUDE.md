@@ -64,7 +64,7 @@ AppCreditoSimulador/
 - ~~`simulationOverlay`~~: **removido** (Otimização de Memória Fase 4). O overlay por-linha (`rowDecisions`, ~1MM objetos) era clonado do worker pra main a cada tick e guardado num estado que **ninguém lia** — fonte de OOM no Canvas. Hoje o worker calcula o `incrementalResult` localmente e **não** envia o overlay; o Dashboard usa seu próprio overlay memoizado (`cachedCanvasOverlay`), independente
 - `nodeArrivals`: contagem reativa de registros que chegam a cada nó por valor de domínio (worker, junto do `COMPUTE_OVERLAY`) — `{[nodeId]: {val|row|col: {[valor]: qty}}}` (ver Domínio Exibido)
 - `domainModal`: modal "Configurar nó" (domínio exibido) — `null | {shapeId, draft:{val?|row?|col?: null|string[]}}`
-- `lensPopulations`: populações filtradas por cada lens — `{[lensId]: {[csvId]: boolean[]}}`
+- `lensCounts`: contagens de população impactada por lens, computadas no worker (M10) e recebidas no `OVERLAY_RESULT` — `{[lensId]: {count, total}}` (ponderadas pelo volume; alimentam o rótulo do nó `decision_lens`). As populações por-linha (`Uint8Array`) vivem só no worker, não na main
 - `cinemaLibrary`: biblioteca de configurações de Cineminha salvas localmente — `array`
 - `businessWidget`: widget de impacto de negócio flutuante — `{visible, x, y, w, h}`
 - `activeTab`: aba ativa — `"analysis" | "canvas"` (padrão `"canvas"` — aba exibida no label como "Dashboard")
@@ -229,8 +229,7 @@ AppCreditoSimulador/
 - `detectDelimiter(text)`: detecta separador CSV com score de confiança
 - `detectDecimalSep(text, delimiter)`: detecta separador decimal (`,` ou `.`)
 - `matchLensRule(cellVal, operator, ruleVal)`: avalia uma regra de Decision Lens contra um valor de célula
-- `computeLensPopulation(rules, csvStore)`: calcula `{[csvId]: boolean[]}` — quais linhas de cada CSV passam pelas regras do lens
-- `computeLensAffectedRows(lensId, csvStore, lensPopulations)`: retorna contagem de linhas afetadas pelo lens (para exibição no nó `decision_lens`)
+- `computeLensPopulation(rules, csvStore)`: calcula `{count, total}` ponderado por volume — usado só no preview síncrono do `lensModal` ao editar regras (o rótulo do nó `decision_lens` usa `lensCounts`, vindo do worker via M10)
 - `buildFlowGraph(shapes, conns)`: constrói lista de adjacências do grafo de fluxo para o motor de simulação e `autoLayout`
 - `normalizeColName(s)`: normaliza nome de coluna para comparação fuzzy
 - `exportDiagnosticCSV(shapes, conns, csvStore)`: gera CSV de auditoria com métricas de funil por nó+valor (aprovação, volume, inadimplência) para diagnóstico da política
@@ -242,7 +241,7 @@ AppCreditoSimulador/
 ### Padrão de refs
 Toda variável de estado crítica tem um ref espelho para uso em event listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atualizado imediatamente.
 
-Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `inferenceRefR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `lensPopulationsR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
+Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `inferenceRefR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
 
 ## Reorganização Automática (Auto Layout)
 
@@ -315,16 +314,16 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `UPDATE_CSV_STORE` | `{csvStore}` | Atualiza o cache do csvStore no worker (evita re-serialização a cada tick) |
 | `UPDATE_INFERENCE_REF` | `{inferenceRef}` | Espelha o índice da Tabela de Inferência no worker (Fase 2); usado pelo lookup em cascata quando `inferenceConfig.source==='ref'` |
 | `RUN_SIMULATION` | `{shapes, conns}` | Roda `runSimulation` e responde com `SIMULATION_RESULT` |
-| `COMPUTE_OVERLAY` | `{shapes, conns, lensPopulations}` | Roda `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`; responde com `OVERLAY_RESULT` |
+| `COMPUTE_OVERLAY` | `{shapes, conns}` | Deriva as populações de lens localmente (M10, `getLensPopulations`) + roda `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`; responde com `OVERLAY_RESULT` |
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
-| `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, lensPopulations, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
-| `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns, lensPopulations}]` — abas marcadas (cenários, 5B). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
+| `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
+| `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns}]` — abas marcadas (cenários, 5B). Populações de lens derivadas no worker (M10). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
 |------|---------|
 | `SIMULATION_RESULT` | `{result: SimulationResult}` — inclui `inferenceSource` e `confiabVolume` (Fase 3) + `inferenceWeightMode` (Fase 4) |
-| `OVERLAY_RESULT` | `{incrementalResult, nodeArrivals}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido). **Não** envia mais o `overlay` por-linha (Otimização de Memória Fase 4) |
+| `OVERLAY_RESULT` | `{incrementalResult, nodeArrivals, lensCounts}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido); `lensCounts: {[lensId]: {count, total}}` (M10). **Não** envia mais o `overlay` por-linha (Otimização de Memória Fase 4) nem as populações de lens por-linha |
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
@@ -339,8 +338,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante)
 - `computeNodeArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o fluxo a partir das entradas reais (in-degree 0 sobre arestas de fluxo — exclui corretamente um cineminha logo abaixo de um Decision Lens) e retorna, por nó, a contagem de registros por valor de domínio: `decision → {val: {[valor]: qty}}`, `cineminha → {row, col}`. Base do "Configurar nó" — ver Domínio Exibido
 - `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
-- `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns, lensPopulations}]`), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo colunar** (Fase 4): dict encoding por dimensão + `__DECISAO_AS_IS` global + uma coluna dict `__DECISAO_<canvasId>` por cenário + `Float64Array` por métrica intrínseca. Os `ArrayBuffer`s são transferidos (zero-cópia) no `ANALYTICS_RESULT`; `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
-- `cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations)`: overlay por canvas memoizado por hash de `shapes`/`conns`/`lensPopulations` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só)
+- `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns}]`; populações de lens derivadas no worker — M10), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo colunar** (Fase 4): dict encoding por dimensão + `__DECISAO_AS_IS` global + uma coluna dict `__DECISAO_<canvasId>` por cenário + `Float64Array` por métrica intrínseca. Os `ArrayBuffer`s são transferidos (zero-cópia) no `ANALYTICS_RESULT`; `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
+- `cachedCanvasOverlay(canvasId, shapes, conns, csvStore)`: overlay por canvas memoizado por hash de `shapes`/`conns` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só); deriva as populações de lens localmente no cache miss (M10)
 
 ## Analytics Workspace (aba Dashboard)
 
@@ -550,7 +549,7 @@ Selecionar um nó `cineminha` exibe toolbar contextual com botão **⚙ Otimizar
 ## Otimizador Multi-Cineminha — Johnny (`johnnyModal`)
 
 ### Ativação
-Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otimização Johnny (N)**. Dispara `COMPUTE_JOHNNY` no worker com todos os shapes do canvas, os IDs dos cineminhas selecionados, as conexões e as `lensPopulations`.
+Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otimização Johnny (N)**. Dispara `COMPUTE_JOHNNY` no worker com todos os shapes do canvas, os IDs dos cineminhas selecionados e as conexões (as populações de lens são derivadas no worker — M10).
 
 ### Algoritmo (Sessão C — DEC-JO-003/004)
 1. **Pool de métricas**: agrega células de **todos** os Cineminhas selecionados via `computeCinemaArrivals` (populações filtradas pelo grafo de fluxo)
@@ -951,12 +950,19 @@ premissa colapsada (≠ `ALTA`) — em especial o caso do canal **PAP** (CONTRAT
 ### Propósito
 Segmentar uma sub-população da base histórica e aplicar regras diferentes a ela. O Decision Lens não filtra o fluxo — ele **marca** quais linhas devem ser processadas pelo fluxo subsequente.
 
-### `lensPopulations`
-Calculado via `useMemo` a cada mudança em `shapes` e `csvStore`:
+### Populações de lens (M10 — no worker)
+Derivadas **no worker** a partir das regras dos shapes `decision_lens` (helper
+`computeLensPopulations`, memoizado por `csvStoreVersion` + regras dos lens via
+`getLensPopulations`), como `Uint8Array` por lens×csv (1 byte/linha):
 ```js
-// {[lensId]: {[csvId]: boolean[]}}
-// boolean[rowIndex] = true se a linha passa pelas regras do lens
+// worker: {populations: {[lensId]: {[csvId]: Uint8Array}}, counts: {[lensId]: {count, total}}}
+// populations[lensId][csvId][rowIndex] === 1 se a linha passa pelas regras do lens
 ```
+A main **não** computa nem mantém as populações por-linha (antes um `useMemo` que varria
+~1MM linhas e clonava `Array<boolean>` pro worker a cada tick). Ela recebe só as `counts`
+no `OVERLAY_RESULT` (estado `lensCounts`) para o rótulo do nó. As demais funções do worker
+que roteiam por lens (`computeSimulatedDecisions`, `computeCinemaArrivals`,
+`computeNodeArrivals`) avaliam `rowMatchesLensRules` sobre `node.rules` diretamente.
 
 ### Fluxo no motor
 Em `traverseRow`, quando o nó é `decision_lens`:

@@ -166,6 +166,60 @@ function rowMatchesLensRules(csv, r, rules) {
   return result ?? true;
 }
 
+// ── Lens populations (M10) — derivadas no worker, tipadas e memoizadas ────────
+// Antes eram computadas na main thread (varredura de ~1MM linhas × regras por lens,
+// travando a UI) e clonadas pro worker como Array<boolean> por lens×csv a cada
+// COMPUTE_OVERLAY (structured clone elemento a elemento). Agora o worker as deriva de
+// `shape.rules` (já embutidas nos `shapes` que ele recebe), como Uint8Array (1 byte/linha
+// em vez de um boolean boxed), e a main só recebe as contagens {[lensId]: {count, total}}
+// (ponderadas pelo volume) para o rótulo do nó decision_lens.
+function lensRulesKeyOf(shapes) {
+  return JSON.stringify(
+    shapes.filter(s => s.type === 'decision_lens').map(s => ({ id: s.id, rules: s.rules || [] }))
+  );
+}
+
+// {populations: {[lensId]: {[csvId]: Uint8Array}}, counts: {[lensId]: {count, total}}}
+// `populations[lensId][csvId][r] === 1` ⇔ a linha r casa as regras do lens.
+function computeLensPopulations(shapes, csvStore) {
+  const populations = {};
+  const counts = {};
+  const lenses = shapes.filter(s => s.type === 'decision_lens');
+  for (const lens of lenses) {
+    const rules = lens.rules || [];
+    const perCsv = {};
+    let count = 0, total = 0;
+    for (const [csvId, csv] of Object.entries(csvStore)) {
+      const n = rowCount(csv);
+      const arr = new Uint8Array(n);
+      const types = csv.columnTypes || {};
+      const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
+      const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+      for (let r = 0; r < n; r++) {
+        const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 1) : 1;
+        total += qty;
+        if (rowMatchesLensRules(csv, r, rules)) { arr[r] = 1; count += qty; }
+      }
+      perCsv[csvId] = arr;
+    }
+    populations[lens.id] = perCsv;
+    counts[lens.id] = { count, total };
+  }
+  return { populations, counts };
+}
+
+// Cache single-slot pro caminho do COMPUTE_OVERLAY (canvas ativo): as regras dos lens não
+// mudam durante um drag (só x/y), então isso evita re-varrer a base a cada tick debounced.
+// Invalidado por csvStoreVersion (nova base) ou por mudança de regras (lensRulesKeyOf).
+let lensPopCache = { key: null, value: null };
+function getLensPopulations(shapes, csvStore) {
+  const key = csvStoreVersion + '|' + lensRulesKeyOf(shapes);
+  if (lensPopCache.key === key) return lensPopCache.value;
+  const value = computeLensPopulations(shapes, csvStore);
+  lensPopCache = { key, value };
+  return value;
+}
+
 function buildFlowGraph(shapes, conns) {
   const out = {}, inc = {};
   for (const s of shapes) { out[s.id] = []; inc[s.id] = []; }
@@ -455,7 +509,7 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
     const nRows = rowCount(csv);
     const sim = new Int8Array(nRows); // DEC_SAME (0) por default — só mudamos linhas roteadas
     for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
-      const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
+      const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === 1);
       if (!isMutable || csvRoots.length === 0) continue; // mantém original (DEC_SAME)
 
       const boardResult = traverseRow(csv, rowIdx, csvRoots[0].id);
@@ -1134,9 +1188,9 @@ function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulation
 const ANALYTICS_METRIC_TYPES = new Set(['qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida', 'mixRisco']);
 
 // Overlay (decisão simulada por csvId+rowIdx) de um canvas, memoizado por hash de
-// shapes/conns/lensPopulations + versão do csvStore (5B — evita reprocessar canvases intocados).
-function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations, csvStore) {
-  // Chave barata (M2): NÃO stringifica `lensPopulations` (Array<boolean> de ~1MM posições
+// shapes/conns + versão do csvStore (5B — evita reprocessar canvases intocados).
+function cachedCanvasOverlay(canvasId, shapes, conns, csvStore) {
+  // Chave barata (M2): NÃO stringifica populações de lens (Array<boolean> de ~1MM posições
   // por lens → ~5-6MB de string temporária por lens, por canvas, a cada tick do Dashboard).
   // As populações são 100% derivadas das regras dos shapes decision_lens (já embutidas em
   // `shapes`) + a base (versionada por `csvStoreVersion`), então shapes + conns + versão já
@@ -1144,7 +1198,10 @@ function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations, csvStore)
   const key = csvStoreVersion + '|' + JSON.stringify(shapes) + '|' + JSON.stringify(conns);
   const hit = analyticsOverlayCache[canvasId];
   if (hit && hit.key === key) return hit.overlay;
-  const overlay = computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations);
+  // M10: as populações de lens vêm das regras dos shapes (não mais da main). Só derivadas
+  // aqui no cache miss (canvas de fato editado), evitando a varredura em canvases intocados.
+  const { populations } = computeLensPopulations(shapes, csvStore);
+  const overlay = computeSimulatedDecisions(shapes, conns, csvStore, populations);
   analyticsOverlayCache[canvasId] = { key, overlay };
   return overlay;
 }
@@ -1162,7 +1219,8 @@ const ANALYTICS_NUM_FIELDS = ['qty', 'qtdAltas', 'inadRRaw', 'qtdAltasInfer', 'i
 // TRANSFERIDOS pra main (zero-cópia, sem depender de crossOriginIsolated) — ver o handler
 // de COMPUTE_ANALYTICS_DATASET. A main lê tudo por accessor (awColStr/awColNum), sem nunca
 // reconstruir objetos por-linha.
-// canvasInputs: [{id, nome, shapes, conns, lensPopulations}] — uma aba marcada por cenário.
+// canvasInputs: [{id, nome, shapes, conns}] — uma aba marcada por cenário. As populações
+// de lens são derivadas no worker a partir das regras dos shapes (M10), não vêm da main.
 // Métricas intrínsecas vêm do agrupamento (uma vez); cada canvas emite sua coluna de decisão,
 // unidas por (csvId, rowIdx) — datasets compartilhados ⇒ agrupamentos idênticos entre cenários.
 function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
@@ -1176,7 +1234,7 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
     id: ci.id,
     nome: ci.nome,
     decisionCol: `__DECISAO_${ci.id}`,
-    overlay: cachedCanvasOverlay(ci.id, ci.shapes, ci.conns, ci.lensPopulations, csvStore),
+    overlay: cachedCanvasOverlay(ci.id, ci.shapes, ci.conns, csvStore),
   }));
 
   // ── Passo 1: união de dimensões + total de linhas (barato — só headers/tipos) ──
@@ -1333,10 +1391,13 @@ function handleMessage(e) {
     // +1MM objetos na main) e era guardado num estado que ninguém lia — fonte de OOM ao
     // editar o canvas com base grande. O caminho do Dashboard tem seu próprio overlay
     // memoizado (cachedCanvasOverlay), independente deste.
-    const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
+    // M10: populações de lens derivadas aqui (memoizadas) — não chegam mais da main.
+    // computeNodeArrivals roteia pelas próprias regras dos lens, então não precisa delas.
+    const { populations, counts } = getLensPopulations(e.data.shapes, workerCsvStore);
+    const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, populations);
     const incrementalResult = computeIncrementalResult(overlay, workerCsvStore, workerInferenceRef);
-    const nodeArrivals = computeNodeArrivals(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
-    self.postMessage({ type: 'OVERLAY_RESULT', incrementalResult, nodeArrivals });
+    const nodeArrivals = computeNodeArrivals(e.data.shapes, e.data.conns, workerCsvStore, null);
+    self.postMessage({ type: 'OVERLAY_RESULT', incrementalResult, nodeArrivals, lensCounts: counts });
     return;
   }
 
