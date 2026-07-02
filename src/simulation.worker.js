@@ -944,6 +944,389 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
   return result;
 }
 
+// ── Tick de edição — passe único (Otimização de Performance M6) ──────────────
+// Cada gesto de edição disparava, até aqui, 4 varreduras COMPLETAS e independentes da
+// base — runSimulation, computeSimulatedDecisions (só para o overlay do COMPUTE_OVERLAY),
+// computeIncrementalResult (relia o overlay linha a linha de novo) e computeNodeArrivals
+// (mais uma varredura, com um walk por raiz) — cada uma recalculando `headers.indexOf` e
+// os mapas de aresta por rótulo POR LINHA, e alocando `new Set()`/`path=[]` por linha.
+//
+// `computeSimulationTick` funde essas quatro passadas numa única iteração por csv×linha:
+// os índices de coluna e os mapas de aresta por nó são resolvidos UMA VEZ por nó/csv (não
+// por linha, item 2 do M6), o "visited" do walk vira um array de época reutilizado em vez
+// de `new Set()` por linha, e o buffer do caminho (edgeStats) é reaproveitado entre linhas
+// (item 3). A leitura das colunas de métrica (qty/altas/inadReal/inadInferida/inferência)
+// acontece uma vez por linha e alimenta tanto a simulação quanto o incremental — antes eram
+// lidas duas vezes (uma em runSimulation, outra em computeIncrementalResult).
+//
+// Preserva EXATAMENTE a matemática e as semânticas existentes — incluindo a diferença
+// sutil entre o conjunto de "raízes" da simulação/overlay (só a 1ª raiz por csv, como
+// runSimulation/computeSimulatedDecisions) e o das chegadas por nó (TODAS as raízes, com
+// critério mais estrito — exclui nós logo abaixo de um Decision Lens — como
+// computeNodeArrivals). `runSimulation`, `computeSimulatedDecisions`, `computeIncrementalResult`
+// e `computeNodeArrivals` continuam existindo/exportadas sem NENHUMA alteração (usadas pelo
+// `cachedCanvasOverlay` do Dashboard e pelos testes/GATEs) — esta função é só o caminho
+// fundido usado pelo tick de edição (RUN_SIMULATION + COMPUTE_OVERLAY). Equivalência
+// numérica coberta em `tests/simulationTick.test.js`.
+function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopulations) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+
+  // Raízes da simulação/overlay (mesmo critério de runSimulation/computeSimulatedDecisions):
+  // só exclui nós com entrada vinda de um port.
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const simRootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  // Raízes de chegada por nó (mesmo critério de computeNodeArrivals): mais estrito —
+  // exclui nós com entrada vinda de QUALQUER emissor de fluxo (port/lens/decision/cineminha).
+  // Por construção, arrivalsRootNodes ⊆ simRootNodes (EMIT ⊇ {port}).
+  const EMIT = new Set(['port', 'decision_lens', 'decision', 'cineminha']);
+  const nonRoot = new Set(conns.filter(c => EMIT.has(shapesMap[c.from]?.type)).map(c => c.to));
+  const arrivalsRootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !nonRoot.has(s.id)
+  );
+
+  const nodeArrivals = {};
+  for (const s of shapes) {
+    if (s.type === 'decision')       nodeArrivals[s.id] = { val: {} };
+    else if (s.type === 'cineminha') nodeArrivals[s.id] = { row: {}, col: {} };
+  }
+
+  const hasLens = lensPopulations && Object.keys(lensPopulations).length > 0;
+
+  // ── Pré-resolução das arestas por nó — uma vez, fora do loop de linhas ───────
+  const edgeLookup = {};
+  for (const c of conns) {
+    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
+    edgeLookup[c.from][`${c.to}::${c.label ?? ''}`] = c.id;
+  }
+  const decisionRoutes = {}; // nodeId -> Map(label.trim() -> {to, cid})
+  const cinemaRoutes   = {}; // nodeId -> {eligible, notEligible}
+  const singleEdge     = {}; // nodeId -> {to, cid} | null  (decision_lens / port)
+  for (const s of shapes) {
+    if (s.type === 'decision') {
+      const m = new Map();
+      for (const e of (out[s.id] || [])) {
+        const label = (e.label ?? '').trim();
+        if (!m.has(label)) m.set(label, { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] });
+      }
+      decisionRoutes[s.id] = m;
+    } else if (s.type === 'cineminha') {
+      const typeCfg = getCinemaType(s.cinemaType);
+      const findEdge = (label) => {
+        const e = (out[s.id] || []).find(x => x.label === label);
+        return e ? { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] } : null;
+      };
+      cinemaRoutes[s.id] = { eligible: findEdge(typeCfg.ports[0].label), notEligible: findEdge(typeCfg.ports[1].label) };
+    } else if (s.type === 'decision_lens' || s.type === 'port') {
+      const e = (out[s.id] || [])[0];
+      singleEdge[s.id] = e ? { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] } : null;
+    }
+  }
+
+  // ── "visited" por época — evita `new Set()` por linha ────────────────────────
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const lastVisit = new Int32Array(shapes.length);
+  let epoch = 0;
+  const pathBuf = []; // reaproveitado entre chamadas — só o walk principal (wantPath) escreve
+
+  // Anda pelo fluxo a partir de `startId`. `wantPath` também recolhe os edge ids (edgeStats,
+  // via pathBuf/pathLen); `wantArrivals` também acumula as chegadas por nó (val/row/col).
+  function walk(csv, r, startId, qty, colIdxCache, wantPath, wantArrivals) {
+    epoch++;
+    let cur = startId;
+    let pathLen = 0;
+    while (cur) {
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) return { result: null, pathLen };
+      lastVisit[idx] = epoch;
+      const node = shapesMap[cur];
+      if (!node) return { result: null, pathLen };
+      if (TERM.has(node.type)) return { result: node.type, pathLen };
+
+      if (node.type === 'decision') {
+        const colIdx = colIdxCache.decision[cur];
+        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
+        if (wantArrivals && nodeArrivals[cur] && val !== '') {
+          nodeArrivals[cur].val[val] = (nodeArrivals[cur].val[val] || 0) + qty;
+        }
+        const match = decisionRoutes[cur]?.get(val);
+        if (!match) return { result: null, pathLen };
+        if (wantPath && match.cid) pathBuf[pathLen++] = match.cid;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const cache = colIdxCache.cinema[cur] || { rowIdx: -1, colIdx: -1 };
+        const rv = node.rowVar && cache.rowIdx >= 0 ? (cellStr(csv, r, cache.rowIdx) ?? '').trim() : '';
+        const cv = node.colVar && cache.colIdx >= 0 ? (cellStr(csv, r, cache.colIdx) ?? '').trim() : '';
+        if (wantArrivals && nodeArrivals[cur]) {
+          if (node.rowVar && rv !== '') nodeArrivals[cur].row[rv] = (nodeArrivals[cur].row[rv] || 0) + qty;
+          if (node.colVar && cv !== '') nodeArrivals[cur].col[cv] = (nodeArrivals[cur].col[cv] || 0) + qty;
+        }
+        if (!node.rowVar && !node.colVar) return { result: null, pathLen };
+        const rKey = node.rowVar ? rv : '*';
+        const cKey = node.colVar ? cv : '*';
+        const isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
+        const routes = cinemaRoutes[cur];
+        const match = isEligible ? routes?.eligible : routes?.notEligible;
+        if (!match) return { result: null, pathLen };
+        if (wantPath && match.cid) pathBuf[pathLen++] = match.cid;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        if (!rowMatchesLensRules(csv, r, node.rules || [])) return { result: null, pathLen };
+        const match = singleEdge[cur];
+        if (!match) return { result: null, pathLen };
+        if (wantPath && match.cid) pathBuf[pathLen++] = match.cid;
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const match = singleEdge[cur];
+        if (!match) return { result: null, pathLen };
+        if (wantPath && match.cid) pathBuf[pathLen++] = match.cid;
+        cur = match.to;
+      } else return { result: null, pathLen };
+    }
+    return { result: null, pathLen };
+  }
+
+  // Índices de coluna por nó, resolvidos uma vez por csv (não por linha, M6 item 2).
+  function buildColIdxCache(csv) {
+    const decision = {};
+    const cinema = {};
+    for (const s of shapes) {
+      if (s.type === 'decision') decision[s.id] = csv.headers.indexOf(s.variableCol);
+      else if (s.type === 'cineminha') {
+        cinema[s.id] = {
+          rowIdx: s.rowVar ? csv.headers.indexOf(s.rowVar.col) : -1,
+          colIdx: s.colVar ? csv.headers.indexOf(s.colVar.col) : -1,
+        };
+      }
+    }
+    return { decision, cinema };
+  }
+
+  // Espelha o early-return de runSimulation quando não há NENHUMA raiz de simulação no
+  // canvas inteiro: o simResult final fica sem os campos de inferência (mesmo formato).
+  const globalSimRoots = simRootNodes.length > 0;
+
+  let totalQty = 0, approvedQty = 0, rejectedQty = 0, asIsQty = 0;
+  let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
+  let anyRefSource = false;
+  const refWeightModes = new Set();
+  const confiabVolume = { ALTA: 0, MEDIA: 0, BAIXA: 0, GLOBAL: 0 };
+  const edgeAcc = {};
+  const initEdge = (cid) => {
+    if (!edgeAcc[cid]) edgeAcc[cid] = { qty: 0, approvedQty: 0, rejectedQty: 0, asIsQty: 0, inadRealSum: 0, inadInferidaSum: 0, qtdAltasSum: 0, qtdAltasInferSum: 0 };
+  };
+
+  const bl  = { approvedQty: 0, rejectedQty: 0, totalQty: 0, qtdAltasSum: 0, qtdAltasInferSum: 0, inadRRaw: 0, inadIRaw: 0 };
+  const sim = { approvedQty: 0, rejectedQty: 0, totalQty: 0, qtdAltasSum: 0, qtdAltasInferSum: 0, inadRRaw: 0, inadIRaw: 0 };
+  const imp = { qty: 0, rToA: 0, aToR: 0, qtdAltasSimSum: 0, inadRSimRaw: 0, inadISimRaw: 0, altasInferRtoA: 0, altasRealAtoR: 0 };
+  let hasAnyDecisaoCol = false;
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const colIdxOf = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx           = colIdxOf('qty');
+    const qtdAltasIdx      = colIdxOf('qtdAltas');
+    const qtdAltasInferIdx = colIdxOf('qtdAltasInfer');
+    const inadRealIdx      = colIdxOf('inadReal');
+    const inadInferidaIdx  = colIdxOf('inadInferida');
+    const dOrigIdx         = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const hasAsIsCol       = dOrigIdx >= 0;
+    if (hasAsIsCol) hasAnyDecisaoCol = true;
+
+    const infResolve = buildInferenceResolver(csv, inferenceRef);
+    // Espelha runSimulation: anyRefSource/refWeightModes são setados ANTES do `continue`
+    // por csvRoots vazio — um csv sem raiz própria ainda sinaliza a origem da inferência.
+    if (globalSimRoots && infResolve) {
+      anyRefSource = true;
+      refWeightModes.add(csv.inferenceConfig?.weightMode === 'aprovados' ? 'aprovados' : 'propostas');
+    }
+
+    const csvMatch = (d) => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    };
+    const simCsvRoots      = globalSimRoots ? simRootNodes.filter(csvMatch) : [];
+    const arrivalsCsvRoots = arrivalsRootNodes.filter(csvMatch);
+    const doSim      = globalSimRoots && simCsvRoots.length > 0;
+    const doArrivals = arrivalsCsvRoots.length > 0;
+
+    if (!doSim && !hasAsIsCol) continue; // nada a contribuir deste csv
+
+    const rootId = doSim ? simCsvRoots[0].id : null;
+    const colIdxCache = (doSim || doArrivals) ? buildColIdxCache(csv) : null;
+    // Caso comum: a única raiz de chegadas é a mesma raiz da simulação (mesmo csv/row, walk
+    // determinístico) — dobra a chegada dentro do walk principal em vez de andar 2x por linha.
+    const arrivalsFoldedIntoPrimary = doSim && doArrivals && arrivalsCsvRoots.length === 1 && arrivalsCsvRoots[0].id === rootId;
+
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty      = qtyIdx      >= 0 ? (cellNum(csv, r, qtyIdx)      || 0) : 1;
+      const qtdAltas = qtdAltasIdx >= 0 ? (cellNum(csv, r, qtdAltasIdx) || 0) : 0;
+      const inadR    = inadRealIdx >= 0 ? (cellNum(csv, r, inadRealIdx) || 0) : 0;
+      let qtdAltasInfer, inadI, rowConfiab = null;
+      if (infResolve) { const rr = infResolve(csv, r); qtdAltasInfer = rr.altasInfer; inadI = rr.inadIRaw; rowConfiab = rr.confiab; }
+      else {
+        qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
+        inadI         = inadInferidaIdx  >= 0 ? (cellNum(csv, r, inadInferidaIdx)  || 0) : 0;
+      }
+
+      let res = null;
+      if (doSim) {
+        totalQty += qty;
+        const walked = walk(csv, r, rootId, qty, colIdxCache, true, arrivalsFoldedIntoPrimary);
+        res = walked.result;
+        const pathLen = walked.pathLen;
+
+        let isApproved = res === 'approved', isRejected = res === 'rejected';
+        if (res === 'as_is') {
+          const origDecision = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase() : '';
+          if (origDecision === 'APROVADO') isApproved = true;
+          else if (origDecision === 'REPROVADO') isRejected = true;
+          else asIsQty += qty;
+        }
+        if (isApproved) {
+          approvedQty      += qty;
+          qtdAltasSum      += qtdAltas;
+          qtdAltasInferSum += qtdAltasInfer;
+          inadRealSum      += inadR;
+          inadInferidaSum  += inadI;
+          if (rowConfiab !== null && qtdAltasInfer > 0) {
+            if (rowConfiab in confiabVolume) confiabVolume[rowConfiab] += qtdAltasInfer;
+            else confiabVolume.GLOBAL += qtdAltasInfer;
+          }
+        } else if (isRejected) rejectedQty += qty;
+
+        for (let i = 0; i < pathLen; i++) {
+          const cid = pathBuf[i];
+          initEdge(cid);
+          edgeAcc[cid].qty += qty;
+          if (isApproved) {
+            edgeAcc[cid].approvedQty      += qty;
+            edgeAcc[cid].qtdAltasSum      += qtdAltas;
+            edgeAcc[cid].qtdAltasInferSum += qtdAltasInfer;
+            edgeAcc[cid].inadRealSum      += inadR;
+            edgeAcc[cid].inadInferidaSum  += inadI;
+          } else if (isRejected) {
+            edgeAcc[cid].rejectedQty += qty;
+          } else if (res === 'as_is') {
+            edgeAcc[cid].asIsQty += qty;
+          }
+        }
+      }
+
+      if (hasAsIsCol) {
+        const decisaoOriginal = cellStr(csv, r, dOrigIdx) ?? '';
+        const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[r] === 1);
+        const decisaoSimulada = (doSim && isMutable)
+          ? (res === 'approved' ? 'APROVADO' : res === 'rejected' ? 'REPROVADO' : decisaoOriginal)
+          : decisaoOriginal;
+        const flagImpactado = decisaoOriginal !== '' && decisaoSimulada !== decisaoOriginal;
+
+        bl.totalQty += qty;
+        if (decisaoOriginal === 'APROVADO') {
+          bl.approvedQty += qty; bl.qtdAltasSum += qtdAltas; bl.qtdAltasInferSum += qtdAltasInfer; bl.inadRRaw += inadR; bl.inadIRaw += inadI;
+        } else if (decisaoOriginal === 'REPROVADO') {
+          bl.rejectedQty += qty;
+        }
+
+        sim.totalQty += qty;
+        if (decisaoSimulada === 'APROVADO') {
+          sim.approvedQty += qty; sim.qtdAltasSum += qtdAltas; sim.qtdAltasInferSum += qtdAltasInfer; sim.inadRRaw += inadR; sim.inadIRaw += inadI;
+        } else if (decisaoSimulada === 'REPROVADO') {
+          sim.rejectedQty += qty;
+        }
+
+        if (flagImpactado) {
+          imp.qty += qty;
+          if (decisaoOriginal === 'REPROVADO' && decisaoSimulada === 'APROVADO') {
+            imp.rToA += qty; imp.qtdAltasSimSum += qtdAltas; imp.inadRSimRaw += inadR; imp.inadISimRaw += inadI;
+            imp.altasInferRtoA += qtdAltasInfer;
+          } else if (decisaoOriginal === 'APROVADO' && decisaoSimulada === 'REPROVADO') {
+            imp.aToR += qty;
+            imp.altasRealAtoR += qtdAltas;
+          }
+        }
+      }
+
+      if (doArrivals && !arrivalsFoldedIntoPrimary) {
+        for (const root of arrivalsCsvRoots) walk(csv, r, root.id, qty, colIdxCache, false, true);
+      }
+    }
+  }
+
+  const simResult = !globalSimRoots
+    ? { totalQty: 0, approvedQty: 0, rejectedQty: 0, asIsQty: 0, approvalRate: 0, inadReal: null, inadInferida: null, edgeStats: {} }
+    : (() => {
+        const inadReal     = qtdAltasSum > 0 ? inadRealSum / qtdAltasSum : null;
+        const inadInferida = qtdAltasInferSum > 0 ? inadInferidaSum / qtdAltasInferSum
+                           : approvedQty      > 0 ? inadInferidaSum / approvedQty : null;
+        const edgeStats = {};
+        for (const [cid, acc] of Object.entries(edgeAcc)) {
+          edgeStats[cid] = {
+            qty: acc.qty,
+            approvedQty: acc.approvedQty,
+            rejectedQty: acc.rejectedQty,
+            asIsQty: acc.asIsQty,
+            qtdAltas: acc.qtdAltasSum,
+            approvalRate: acc.qty > 0 ? acc.approvedQty / acc.qty : null,
+            inadReal: acc.qtdAltasSum > 0 ? acc.inadRealSum / acc.qtdAltasSum : null,
+            inadInferida: acc.qtdAltasInferSum > 0 ? acc.inadInferidaSum / acc.qtdAltasInferSum
+                        : acc.approvedQty      > 0 ? acc.inadInferidaSum / acc.approvedQty : null,
+          };
+        }
+        return {
+          totalQty, approvedQty, rejectedQty, asIsQty,
+          approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
+          inadReal, inadInferida, edgeStats,
+          inferenceSource: anyRefSource ? 'ref' : null,
+          confiabVolume: anyRefSource ? confiabVolume : null,
+          inferenceWeightMode: anyRefSource ? (refWeightModes.size === 1 ? [...refWeightModes][0] : 'misto') : null,
+        };
+      })();
+
+  let incrementalResult = null;
+  if (hasAnyDecisaoCol) {
+    const blRate  = bl.totalQty  > 0 ? (bl.approvedQty  / bl.totalQty)  * 100 : 0;
+    const simRate = sim.totalQty > 0 ? (sim.approvedQty / sim.totalQty) * 100 : 0;
+    incrementalResult = {
+      baseline: {
+        approvedQty: bl.approvedQty, rejectedQty: bl.rejectedQty, totalQty: bl.totalQty,
+        approvalRate: blRate,
+        inadReal:     bl.qtdAltasSum      > 0 ? bl.inadRRaw / bl.qtdAltasSum      : null,
+        inadInferida: bl.qtdAltasInferSum > 0 ? bl.inadIRaw / bl.qtdAltasInferSum
+                    : bl.approvedQty      > 0 ? bl.inadIRaw / bl.approvedQty      : null,
+      },
+      simulated: {
+        approvedQty: sim.approvedQty, rejectedQty: sim.rejectedQty, totalQty: sim.totalQty,
+        approvalRate: simRate,
+        inadReal:     sim.qtdAltasSum      > 0 ? sim.inadRRaw / sim.qtdAltasSum      : null,
+        inadInferida: sim.qtdAltasInferSum > 0 ? sim.inadIRaw / sim.qtdAltasInferSum
+                    : sim.approvedQty      > 0 ? sim.inadIRaw / sim.approvedQty      : null,
+      },
+      impacted: {
+        qty: imp.qty, totalQty: bl.totalQty,
+        pct: bl.totalQty > 0 ? (imp.qty / bl.totalQty) * 100 : 0,
+        rToA: imp.rToA, aToR: imp.aToR,
+        approvalDelta: simRate - blRate,
+        altasInferRtoA: imp.altasInferRtoA,
+        altasRealAtoR: imp.altasRealAtoR,
+      },
+    };
+  }
+
+  return { simResult, incrementalResult, nodeArrivals };
+}
+
 // DEC-JO-004: greedy com restrição de precedência (Sessão C).
 // riskLevels: {[shapeId]: number} — maior = mais restritivo (DEC-JO-002)
 // hierarchyMode: 'cascata'|'independente' (DEC-JO-003)
@@ -1420,6 +1803,23 @@ let csvStoreVersion = 0;             // bump a cada UPDATE_CSV_STORE — invalid
 let workerInferenceRef = null;       // índice da Tabela de Inferência (UPDATE_INFERENCE_REF)
 const analyticsOverlayCache = {};    // {[canvasId]: {key, overlay}} — cache por canvas (5B)
 
+// Cache single-slot do tick de edição (M6): RUN_SIMULATION e COMPUTE_OVERLAY chegam do
+// mesmo gesto de edição (mesmos deps/debounce em App.jsx), então o worker computa o passe
+// único (`computeSimulationTick`) na PRIMEIRA das duas mensagens e a segunda só lê do
+// cache — nenhuma re-varredura da base. Chave barata (mesmo padrão do `cachedCanvasOverlay`,
+// M2): shapes/conns são pequenos comparados às linhas da base.
+let tickCache = { key: null, value: null };
+function getTickResult(shapes, conns) {
+  const key = csvStoreVersion + '|' + JSON.stringify(shapes) + '|' + JSON.stringify(conns);
+  if (tickCache.key === key) return tickCache.value;
+  const { populations, counts } = getLensPopulations(shapes, workerCsvStore);
+  const { simResult, incrementalResult, nodeArrivals } =
+    computeSimulationTick(shapes, conns, workerCsvStore, workerInferenceRef, populations);
+  const value = { simResult, incrementalResult, nodeArrivals, lensCounts: counts };
+  tickCache = { key, value };
+  return value;
+}
+
 function handleMessage(e) {
   const { type } = e.data;
 
@@ -1437,26 +1837,19 @@ function handleMessage(e) {
   }
 
   if (type === 'RUN_SIMULATION') {
-    const result = runSimulation(e.data.shapes, e.data.conns, workerCsvStore, workerInferenceRef);
-    self.postMessage({ type: 'SIMULATION_RESULT', result });
+    const { simResult } = getTickResult(e.data.shapes, e.data.conns);
+    self.postMessage({ type: 'SIMULATION_RESULT', result: simResult });
     return;
   }
 
   if (type === 'COMPUTE_OVERLAY') {
-    // `overlay` é tipado (M2): 1 Int8Array/csv (~1MB/1MM linhas) com o código da decisão
-    // simulada por linha. É usado só aqui dentro por computeIncrementalResult e descartado
-    // em seguida — NÃO é enviado à main thread: a main só consome `incrementalResult`
-    // (agregados) e `nodeArrivals`. Antes o overlay ia no postMessage (structured clone =
-    // +1MM objetos na main) e era guardado num estado que ninguém lia — fonte de OOM ao
-    // editar o canvas com base grande. O caminho do Dashboard tem seu próprio overlay
-    // memoizado (cachedCanvasOverlay), independente deste.
-    // M10: populações de lens derivadas aqui (memoizadas) — não chegam mais da main.
-    // computeNodeArrivals roteia pelas próprias regras dos lens, então não precisa delas.
-    const { populations, counts } = getLensPopulations(e.data.shapes, workerCsvStore);
-    const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, populations);
-    const incrementalResult = computeIncrementalResult(overlay, workerCsvStore, workerInferenceRef);
-    const nodeArrivals = computeNodeArrivals(e.data.shapes, e.data.conns, workerCsvStore, null);
-    self.postMessage({ type: 'OVERLAY_RESULT', incrementalResult, nodeArrivals, lensCounts: counts });
+    // M6: computado junto de RUN_SIMULATION no mesmo passe (`computeSimulationTick`, via
+    // `getTickResult`) — não é mais uma varredura própria da base. O overlay tipado
+    // (Int8Array por csv, M2) segue interno à função, descartado ao final: a main só
+    // recebe `incrementalResult` (agregados) e `nodeArrivals`. O caminho do Dashboard tem
+    // seu próprio overlay memoizado (cachedCanvasOverlay), independente deste.
+    const { incrementalResult, nodeArrivals, lensCounts } = getTickResult(e.data.shapes, e.data.conns);
+    self.postMessage({ type: 'OVERLAY_RESULT', incrementalResult, nodeArrivals, lensCounts });
     return;
   }
 
@@ -1506,6 +1899,8 @@ export {
   computeSimulatedDecisions,
   computeCinemaArrivals,
   computeNodeArrivals,
+  computeSimulationTick,
+  computeLensPopulations,
   buildFlowGraph,
   buildInferenceResolver,
   resolveWeightCol,
