@@ -669,6 +669,11 @@ function buildFlowGraph(shapes, conns) {
   return {out, inc};
 }
 
+// DFS iterativo com marcação tricolor (IN_PROGRESS/DONE) + memoização do resultado por nó
+// (M13) — equivalente ao DFS recursivo anterior (que copiava `new Set(path)` por aresta
+// visitada, O(V×E) em fluxos com losangos encadeados), mas sem cópias e O(V+E): um nó só é
+// expandido uma vez (memoizado via `okOf`), e o back-edge para um nó IN_PROGRESS já indica
+// ciclo, sem precisar reconstruir o conjunto de ancestrais do caminho atual.
 function validateFlow(shapes, conns) {
   const errors = {};
   const FLOW = new Set(['decision','port','approved','rejected','as_is','cineminha','decision_lens']);
@@ -676,21 +681,62 @@ function validateFlow(shapes, conns) {
   const flowShapes = shapes.filter(s => FLOW.has(s.type));
   if (flowShapes.length === 0) return errors;
   const {out} = buildFlowGraph(shapes, conns);
+  const shapesById = new Map(shapes.map(s => [s.id, s]));
 
-  function dfs(nodeId, path) {
-    if (path.has(nodeId)) { errors[nodeId] = 'Loop infinito detectado'; return false; }
-    const node = shapes.find(s => s.id === nodeId);
-    if (!node) return false;
-    if (TERM.has(node.type)) return true;
+  const IN_PROGRESS = 1, DONE = 2;
+  const state = new Map();
+  const okOf = new Map();
+
+  // Resolve nós triviais (inexistente / terminal / sem saída) sem empilhar frame;
+  // marca IN_PROGRESS e devolve o frame para os demais (equivalente a `path.add(nodeId)`
+  // antes de recursar nos filhos).
+  function makeFrame(nodeId) {
+    const node = shapesById.get(nodeId);
+    if (!node) { state.set(nodeId, DONE); okOf.set(nodeId, false); return null; }
+    if (TERM.has(node.type)) { state.set(nodeId, DONE); okOf.set(nodeId, true); return null; }
     const edges = out[nodeId] || [];
-    if (edges.length === 0) { errors[nodeId] = 'Caminho sem finalização'; return false; }
-    path.add(nodeId);
-    let ok = true;
-    for (const e of edges) { if (!dfs(e.to, new Set(path))) ok = false; }
-    if (!ok && !errors[nodeId]) errors[nodeId] = 'Possui caminhos sem finalização';
-    return ok;
+    if (edges.length === 0) {
+      if (!errors[nodeId]) errors[nodeId] = 'Caminho sem finalização';
+      state.set(nodeId, DONE); okOf.set(nodeId, false);
+      return null;
+    }
+    state.set(nodeId, IN_PROGRESS);
+    return { id: nodeId, edges, i: 0, ok: true };
   }
-  shapes.filter(s => s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens').forEach(d => dfs(d.id, new Set()));
+
+  function visit(rootId) {
+    if (state.get(rootId) === DONE) return;
+    const root = makeFrame(rootId);
+    if (!root) return;
+    const stack = [root];
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      if (frame.i < frame.edges.length) {
+        const to = frame.edges[frame.i++].to;
+        const st = state.get(to);
+        if (st === IN_PROGRESS) {
+          if (!errors[to]) errors[to] = 'Loop infinito detectado';
+          frame.ok = false;
+        } else if (st === DONE) {
+          if (!okOf.get(to)) frame.ok = false;
+        } else {
+          const child = makeFrame(to);
+          if (child) stack.push(child);
+          else if (!okOf.get(to)) frame.ok = false;
+        }
+        continue;
+      }
+      stack.pop();
+      state.set(frame.id, DONE);
+      if (!frame.ok && !errors[frame.id]) errors[frame.id] = 'Possui caminhos sem finalização';
+      okOf.set(frame.id, frame.ok);
+      if (stack.length && !frame.ok) stack[stack.length - 1].ok = false;
+    }
+  }
+
+  for (const s of shapes) {
+    if (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') visit(s.id);
+  }
   return errors;
 }
 
@@ -900,9 +946,16 @@ const ANALYTICS_EXPORT_METRICS = [
   { key: "inadIRaw",      label: "Inad. Inferida (num)" },
 ];
 
-// Serializa o dataset analítico largo como CSV: dimensões + métricas intrínsecas +
-// uma coluna de decisão por cenário (AS IS + cada aba marcada). Excel-friendly (5C).
-export function buildAnalyticsCSV(ds) {
+// Nº de linhas por parte do CSV exportado (M5) — em vez de montar 1MM strings de linha e
+// dar join numa string única (~200-400MB de strings temporárias + a string final, tudo de
+// uma vez), acumula um buffer e o empurra para o array de BlobPart a cada N linhas. O Blob
+// aceita o array de partes sem concatenar em RAM.
+const CSV_EXPORT_CHUNK_ROWS = 50000;
+
+// Gera as partes do CSV do dataset analítico largo (dimensões + métricas intrínsecas + uma
+// coluna de decisão por cenário, AS IS + cada aba marcada) — concatenadas, equivalem
+// byte-a-byte ao CSV completo (sem quebra de linha final, mesma semântica de `join("\n")`).
+function buildAnalyticsCSVParts(ds) {
   if (!ds || !ds.rowCount || !ds.columns) return null;
   const dimensions = ds.dimensions || [];
   const scenarios = ds.scenarios || [];
@@ -912,23 +965,33 @@ export function buildAnalyticsCSV(ds) {
     ...dimensions,
     ...ANALYTICS_EXPORT_METRICS.map(m => m.label),
     ...scenarios.map(s => `Decisão · ${s.nome}`),
-  ];
+  ].map(esc).join(",");
   const N = ds.rowCount;
-  const lines = new Array(N);
+  const parts = [header];
+  let buf = "";
   for (let r = 0; r < N; r++) {
-    lines[r] = [
+    buf += "\n" + [
       ...dimensions.map(d => awColStr(cols[d], r)),
       ...ANALYTICS_EXPORT_METRICS.map(m => cols[m.key] ? awColNum(cols[m.key], r) : 0),
       ...scenarios.map(s => awColStr(cols[s.decisionCol], r)),
     ].map(esc).join(",");
+    if ((r + 1) % CSV_EXPORT_CHUNK_ROWS === 0) { parts.push(buf); buf = ""; }
   }
-  return [header.map(esc).join(","), ...lines].join("\n");
+  if (buf) parts.push(buf);
+  return parts;
+}
+
+// Serializa o dataset analítico largo como CSV: dimensões + métricas intrínsecas +
+// uma coluna de decisão por cenário (AS IS + cada aba marcada). Excel-friendly (5C).
+export function buildAnalyticsCSV(ds) {
+  const parts = buildAnalyticsCSVParts(ds);
+  return parts ? parts.join("") : null;
 }
 
 function exportAnalyticsDatasetCSV(ds) {
-  const csv = buildAnalyticsCSV(ds);
-  if (!csv) return;
-  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+  const parts = buildAnalyticsCSVParts(ds);
+  if (!parts) return;
+  const blob = new Blob(["﻿", ...parts], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -3162,18 +3225,39 @@ export default function App() {
   useEffect(() => { sessionStorage.setItem('aw_page_filters_v1', JSON.stringify(analyticsPageFilters)); }, [analyticsPageFilters]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
-  useEffect(() => {
+  // Debounced (500ms, mesmo padrão dos effects de simulação): setShapes é chamado por
+  // mousemove durante drag, e sem debounce cada frame pagava JSON.stringify de todos os
+  // canvases + sessionStorage.setItem síncrono (M11). Flush imediato em beforeunload/
+  // visibilitychange para não perder o último estado ao fechar/trocar de aba.
+  const flushCanvasStorage = useCallback(() => {
     try {
+      const cs = canvasesR.current;
+      const activeId = activeCanvasIdR.current;
       const toSave = {
         canvases: {
-          ...canvases,
-          [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
+          ...cs,
+          [activeId]: { ...cs[activeId], shapes: shapesR.current, conns: connsR.current },
         },
-        activeCanvasId,
+        activeCanvasId: activeId,
       };
       sessionStorage.setItem(CANVAS_STORAGE_KEY, JSON.stringify(toSave));
     } catch {}
-  }, [shapes, conns, canvases, activeCanvasId]);
+  }, []);
+  const canvasStorageDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(canvasStorageDebounceRef.current);
+    canvasStorageDebounceRef.current = setTimeout(flushCanvasStorage, 500);
+    return () => clearTimeout(canvasStorageDebounceRef.current);
+  }, [shapes, conns, canvases, activeCanvasId, flushCanvasStorage]);
+  useEffect(() => {
+    const onVisibilityChange = () => { if (document.visibilityState === 'hidden') { clearTimeout(canvasStorageDebounceRef.current); flushCanvasStorage(); } };
+    window.addEventListener('beforeunload', flushCanvasStorage);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('beforeunload', flushCanvasStorage);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [flushCanvasStorage]);
 
   // ── Feature 6: Reprocessamento Incremental de Indicadores ──────
   // incrementalResult: null | {baseline, simulated, impacted}
