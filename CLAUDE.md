@@ -1,11 +1,11 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~10670 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~10920 linhas)
 - Sem CSS externo — tudo inline styles
 - SVG puro para o canvas; matrizes interativas via `foreignObject` (sem biblioteca de diagramas)
 - **Recharts** para gráficos na aba Dashboard (exceção pontual ao ADR-003 — ver `DEC-AW-001`)
-- Web Worker (`src/simulation.worker.js`, ~1357 linhas) para cálculos pesados fora da thread principal
+- Web Worker (`src/simulation.worker.js`, ~2240 linhas) para cálculos pesados fora da thread principal
 - **`src/columnar.js`**: módulo de armazenamento colunar do `csvStore` (otimização de memória — Fases 0, 1, 2) + pipeline de importação vetorizado (M1 — parse direto para colunar, sem `string[][]`)
 - **Vitest** para testes (`tests/*.test.js`, jsdom) — `npm test`
 
@@ -17,13 +17,14 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ```
 AppCreditoSimulador/
 ├── src/
-│   ├── App.jsx                   # Componente único — ~10670 linhas
-│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~1357 linhas)
+│   ├── App.jsx                   # Componente único — ~10920 linhas
+│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~2240 linhas)
 │   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
 │   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget
 │   ├── columnar.test.js          # GATE colunar: accessor, round-trip projeto, SharedArrayBuffer
+│   ├── compiledEngine.test.js    # GATE M8: motor compilado (colunar) equivale ao caminho por string (legado)
 │   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
 │   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
 │   └── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
@@ -332,12 +333,12 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
 - `runSimulation(shapes, conns, csvStore)`: percorre todas as linhas de todos os CSVs pelo grafo, acumula métricas e retorna `SimulationResult`. Continua existindo/exportada sem alteração (usada pelos GATEs numéricos e por quem precisar do resultado isolado) — o tick de edição passa a usar `computeSimulationTick`, não esta função diretamente
-- `computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations)`: compara decisão simulada vs. `__DECISAO_ORIGINAL` por linha. Continua existindo/exportada sem alteração — usada pelo `cachedCanvasOverlay` do Dashboard (overlay por canvas, independente do tick de edição)
+- `computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations)`: compara decisão simulada vs. `__DECISAO_ORIGINAL` por linha. Usada pelo `cachedCanvasOverlay` do Dashboard (overlay por canvas, independente do tick de edição). Desde o M8 roteia por **códigos do dicionário** em base colunar (fallback por string no legado) — ver seção M8
 - `computeIncrementalResult(overlay, csvStore)`: agrega `baseline`, `simulated` e `impacted` a partir do overlay. Continua existindo/exportada sem alteração
 - `computeCellMetrics(shape, csvStore)`: agrega métricas por célula do Cineminha
 - `buildParetoFrontier(cellMetrics)`: fronteira Pareto greedy (sort por `inadInferida` crescente)
 - `extractScenarios(frontier)`: `{conservador, balanceado, melhorEficiencia, expansao}` — `melhorEficiencia` é o joelho da curva
-- `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante)
+- `computeCinemaArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o grafo de fluxo linha a linha e retorna `{[shapeId]: {[cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix}}}` — métricas filtradas pelas linhas que efetivamente chegam a cada Cineminha via roteamento (respeita losangos, decision_lens e ports a montante). Desde o M8 roteia por códigos (chave de célula via `keyByPair`, sem concat por linha) e só lê as métricas da linha quando ela chega a algum Cineminha
 - `computeNodeArrivals(shapes, conns, csvStore, lensPopulations)`: percorre o fluxo a partir das entradas reais (in-degree 0 sobre arestas de fluxo — exclui corretamente um cineminha logo abaixo de um Decision Lens) e retorna, por nó, a contagem de registros por valor de domínio: `decision → {val: {[valor]: qty}}`, `cineminha → {row, col}`. Base do "Configurar nó" — ver Domínio Exibido. Continua existindo/exportada sem alteração — usada pelos testes; o tick de edição usa a mesma lógica de raízes fundida dentro de `computeSimulationTick`
 - `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
 - `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns}]`; populações de lens derivadas no worker — M10), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo colunar** (Fase 4): dict encoding por dimensão + `__DECISAO_AS_IS` global + uma coluna dict `__DECISAO_<canvasId>` por cenário + `Float64Array` por métrica intrínseca. Os `ArrayBuffer`s são transferidos (zero-cópia) no `ANALYTICS_RESULT`; `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
@@ -356,12 +357,47 @@ o resultado por tick (chave `csvStoreVersion + shapes + conns`, mesmo padrão do
 `cachedCanvasOverlay`) para que a segunda mensagem do mesmo gesto (`RUN_SIMULATION` ou
 `COMPUTE_OVERLAY`, o que chegar depois) não repita o cômputo. `runSimulation`,
 `computeSimulatedDecisions`, `computeIncrementalResult` e `computeNodeArrivals` continuam
-existindo/exportadas **sem nenhuma alteração** (usadas pelo `cachedCanvasOverlay` do
-Dashboard e pelos GATEs) — nenhuma mudança de matemática. Não inclui o motor "compilado"
-sobre códigos do dicionário (M8, roadmap futuro) — o roteamento continua por string,
-apenas com os índices/mapas resolvidos fora do loop de linhas. GATE de equivalência
-exaustiva (todas as combinações de raiz/AS IS/lens/multi-csv/inferência ref) em
-`tests/simulationTick.test.js`.
+existindo/exportadas (usadas pelo `cachedCanvasOverlay` do Dashboard e pelos GATEs) —
+nenhuma mudança de matemática. GATE de equivalência exaustiva (todas as combinações de
+raiz/AS IS/lens/multi-csv/inferência ref) em `tests/simulationTick.test.js`. O motor
+"compilado" sobre códigos do dicionário veio depois, no M8 (ver seção seguinte).
+
+### M8 (D2) — Motor "compilado" sobre códigos do dicionário (entregue)
+Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M8, Fase D do backlog). A base era colunar
+com dictionary encoding (Fase 1), mas o motor decidia a rota de **cada linha**
+re-materializando strings: `(cellStr(...) ?? '').trim()` + match de rótulo nos losangos,
+`` `${rKey}|${cKey}` `` (concat + hash de string) no Cineminha e `matchLensRule`
+(`parseFloat`/`toLowerCase`/`split(',')`) por linha nos lens. **Correção:** como a decisão
+depende só do valor — e o nº de distintos é pequeno — tudo é pré-resolvido **uma vez por
+nó×csv sobre o dicionário** (O(distintos)); no loop de linhas resta ler `codes[r]` e
+seguir inteiros. Primitivas (em `simulation.worker.js`):
+- `compileRoutes(shapes, conns, out)`: rotas por nó resolvidas uma vez sobre a topologia
+  (`decisionRoutes` Map rótulo-trimado→{to,cid} first-wins, `cinemaRoutes`
+  eligible/notEligible por rótulo exato, `singleEdge` p/ lens/port) — mesma semântica
+  dos `find`s por linha que existiam.
+- `compileDecisionNode`: `routeByCode[code]` + `valByCode[code]` (trim por distinto).
+- `compileCinemaNode`: `eligByPair[rowCode*nC+colCode]` (`Uint8Array`) + `keyByPair`
+  (chave de célula pronta) — teto `CINEMA_COMPILE_MAX_PAIRS = 2^16` pares; acima disso
+  (eixo patológico de altíssima cardinalidade) o nó fica no caminho por-linha.
+- `compileLensMatcher`: `passByCode: Uint8Array` por regra (matchLensRule avaliado uma
+  vez por valor distinto; regra sobre coluna ausente vira constante; coluna não-dict cai
+  no matchLensRule por-linha), combinadas com o mesmo AND/OR de `rowMatchesLensRules`.
+- `buildInferenceResolver` ganhou caminho compilado de **chaves**: trim +
+  `normalizeScoreKey` rodam uma vez por valor distinto de cada coluna-chave; por linha a
+  chave completa é concatenada com cortes de prefixo registrados e a cascata lê
+  `full.slice(0, corte)` — **mesma cascata, mesmos físicos** (a lógica de inferência não
+  muda; só a representação/estratégia de execução). `confiab` normalizado é cacheado por
+  premissa.
+Consumidores compilados: `computeSimulationTick` (tick de edição), `computeSimulatedDecisions`
+(overlay do Dashboard), `computeCinemaArrivals` (Johnny) e `computeLensPopulations`.
+Colunas não dict-encoded (legado `string[][]` dos testes, eixo sobre coluna métrica) caem
+no caminho por-linha de antes — mesma matemática nos dois caminhos. `runSimulation`,
+`computeNodeArrivals` e `computeIncrementalResult` seguem **sem alteração** como
+referências de controle dos GATEs. GATE de equivalência colunar×legado (decision com
+trim/duplicata/ciclo, cineminha 2D/1D/offer/fora-de-domínio/eixo-métrico, lens com
+todos os operadores, AS IS, multi-csv e inferência ref sobre a amostra real) em
+`tests/compiledEngine.test.js`. Ordem de grandeza (1MM linhas, bench local): tick fundido
+compilado ~0,7s contra ~1,4s de **um único** passe por string; overlay do Dashboard ~0,2s.
 
 ## Analytics Workspace (aba Dashboard)
 
@@ -781,7 +817,9 @@ Para bases sumarizadas por dia (~1MM linhas / ~130MB), a arquitetura anterior
 mantinha várias cópias completas em `string` na RAM. Ver o plano completo em
 `docs/wiki/Otimizacao-Memoria.md` (Fases 0–4) e `docs/wiki/PERFORMANCE-ANALISE.md`
 (backlog M1–M15, priorizado em Fases A–D). **Fases 0, 1, 2, 3, 4 entregues; do
-backlog do `PERFORMANCE-ANALISE.md`, M3 e M15 (Fase B) e M1 (Fase D) entregues.**
+backlog do `PERFORMANCE-ANALISE.md`, M3 e M15 (Fase B), M6 (Fase C) e M1 e M8 (Fase D)
+entregues** (M2/M10 documentados nas seções do worker; M8 na seção "M8 (D2) — Motor
+compilado").
 
 ### Fase 0 — Parse sem cópia intermediária
 O parse do import varre o texto por índice em vez de `split(/\r?\n/)`. Sem o array

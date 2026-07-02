@@ -106,6 +106,82 @@ function buildInferenceResolver(csv, inferenceRef) {
     .map(Number)
     .sort((a, b) => (ref.levelKeyCount?.[b] || 0) - (ref.levelKeyCount?.[a] || 0));
   const normScore = cfg.normalizeScore !== false; // default: aplicar (fiel ao SAS)
+
+  // Faixa de confiab normalizada, cacheada POR PREMISSA (as premissas são objetos
+  // estáveis do índice) — evita trim/toUpperCase por linha. Mesma expressão do
+  // caminho original: premissa nula / confiab ausente ou em branco → 'GLOBAL'.
+  // (Fase 3 / Proposta §4.5, CONTRATO §7 — sinaliza premissa colapsada ≠ ALTA.)
+  const confiabCache = new Map();
+  const confiabOf = (p) => {
+    if (!p || !p.confiab) return 'GLOBAL';
+    let v = confiabCache.get(p);
+    if (v === undefined) { v = String(p.confiab).trim().toUpperCase() || 'GLOBAL'; confiabCache.set(p, v); }
+    return v;
+  };
+
+  // ── (M8) Caminho compilado sobre a base colunar ───────────────────────────────
+  // As colunas-chave já são dict-encoded (Fase 1): trim + normalizeScoreKey rodam UMA
+  // vez por valor distinto (O(distintos)); por linha resta ler `codes[r]` e concatenar
+  // a chave completa registrando os cortes de prefixo — a cascata lê `full.slice(0,
+  // corte)` em vez de alocar `parts.slice(0,k).join('|')` por nível. MESMA cascata,
+  // MESMOS físicos (peso × conv / peso × conv × fpd) — só a montagem da chave muda.
+  // O modo legado (string[][], GATEs) e chaves sobre coluna não-dict seguem no
+  // caminho genérico abaixo.
+  let compiledKeys = null;
+  if (isColumnar(csv)) {
+    compiledKeys = new Array(keyBaseIdx.length);
+    for (let j = 0; j < keyBaseIdx.length; j++) {
+      const bi = keyBaseIdx[j];
+      if (bi < 0) {
+        // Chave ausente na base → parte vazia constante (âncora normaliza '' → R20).
+        compiledKeys[j] = { codes: null, vals: null, fixed: (j === 0 && normScore) ? normalizeScoreKey('') : '' };
+        continue;
+      }
+      const col = csv.columns[csv.headers[bi]];
+      if (!col || col.kind !== 'dict') { compiledKeys = null; break; }
+      const vals = new Array(col.dict.length);
+      for (let k = 0; k < col.dict.length; k++) {
+        let v = String(col.dict[k] ?? '').trim();
+        if (j === 0 && normScore) v = normalizeScoreKey(v); // keyCols[0] = âncora = score
+        vals[k] = v;
+      }
+      compiledKeys[j] = { codes: col.codes, vals, fixed: '' };
+    }
+  }
+  if (compiledKeys) {
+    const L = keyBaseIdx.length;
+    // Níveis pré-filtrados na MESMA ordem da cascata; `k` clampado a L porque
+    // `parts.slice(0, k)` de um array de L partes nunca passa de L (chave = full).
+    const cascade = [];
+    for (const niv of levelOrder) {
+      const k = ref.levelKeyCount?.[niv] || 0;
+      if (k <= 0) continue;
+      const map = ref.levels?.[niv];
+      if (!map) continue;
+      cascade.push({ k: Math.min(k, L), map });
+    }
+    const cutLen = new Int32Array(L); // buffer reutilizado por linha (worker single-thread)
+    return (a, r) => {
+      const peso = weightIdx >= 0 ? (cellNum(a, r, weightIdx) || 0) : 0;
+      let full = '';
+      for (let j = 0; j < L; j++) {
+        const ck = compiledKeys[j];
+        const v = ck.codes ? ck.vals[ck.codes[r]] : ck.fixed;
+        full = j === 0 ? v : full + '|' + v;
+        cutLen[j] = full.length;
+      }
+      let p = null;
+      for (let i = 0; i < cascade.length; i++) {
+        const lv = cascade[i];
+        p = lv.map.get(lv.k >= L ? full : full.slice(0, cutLen[lv.k - 1]));
+        if (p) break;
+      }
+      if (!p) p = ref.global || null;
+      const conv = p?.conv || 0, fpd = p?.fpd || 0;
+      return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd, confiab: confiabOf(p) };
+    };
+  }
+
   // Resolvedor dual-mode (Fase 1 — accessor colunar):
   //   - legado (GATE / testes): resolve(row) — `a` é a linha string[], `r` undefined;
   //   - produção: resolve(csv, r) — `a` é o csv colunar, `r` o índice da linha.
@@ -125,10 +201,8 @@ function buildInferenceResolver(csv, inferenceRef) {
     }
     const p = cascadeLookupPremissa(ref, levelOrder, parts);
     const conv = p?.conv || 0, fpd = p?.fpd || 0;
-    // confiab propagado da premissa usada (Fase 3 / Proposta §4.5, CONTRATO §7):
-    // sinaliza quando uma fatia do estudo herdou premissa colapsada (≠ ALTA).
-    const confiab = (p?.confiab ? String(p.confiab).trim().toUpperCase() : 'GLOBAL') || 'GLOBAL';
-    return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd, confiab };
+    // confiab propagado da premissa usada (Fase 3 / Proposta §4.5, CONTRATO §7).
+    return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd, confiab: confiabOf(p) };
   };
 }
 
@@ -166,6 +240,193 @@ function rowMatchesLensRules(csv, r, rules) {
   return result ?? true;
 }
 
+// ── M8 (D2) — Motor "compilado" sobre códigos do dicionário ──────────────────
+// A base é colunar com dictionary encoding (Fase 1), mas o roteamento decidia a
+// rota de CADA linha re-materializando strings: `(cellStr(...) ?? '').trim()` +
+// lookup por rótulo nos losangos, `${rKey}|${cKey}` (concat + hash de string) no
+// Cineminha e `matchLensRule` (parseFloat/toLowerCase/split(',')) por linha nos
+// lens. Como a decisão depende só do VALOR — e o nº de distintos é pequeno
+// (dicionário) — tudo é pré-resolvido UMA vez por nó×csv sobre o dicionário
+// (O(distintos)); no loop de linhas resta ler `codes[r]` e seguir inteiros:
+//   - decision:  routeByCode[code] → {to, cid} (trim + match de rótulo por distinto);
+//   - cineminha: eligByPair[rowCode*nC+colCode] + keyByPair (chave de célula pronta);
+//   - lens:      passByCode: Uint8Array por regra (matchLensRule por valor distinto).
+// Colunas não dict-encoded (legado `string[][]` dos testes, ou eixo sobre coluna
+// métrica) caem no caminho por-linha de antes — MESMA matemática nos dois caminhos.
+// GATE de equivalência colunar×legado em tests/compiledEngine.test.js.
+
+// Valores do dicionário com o MESMO trim do caminho por string, uma vez por distinto.
+function trimmedDictVals(dict) {
+  const out = new Array(dict.length);
+  for (let k = 0; k < dict.length; k++) out[k] = String(dict[k] ?? '').trim();
+  return out;
+}
+
+// Coluna dict de um csv colunar pelo índice do header (null → sem caminho compilado).
+function dictColAt(csv, colIdx) {
+  if (colIdx < 0 || !isColumnar(csv)) return null;
+  const col = csv.columns[csv.headers[colIdx]];
+  return col && col.kind === 'dict' ? col : null;
+}
+
+// Rotas por nó resolvidas uma vez sobre a topologia (independente de csv) — mesma
+// semântica dos `find`s por linha que existiam: decision casa o rótulo TRIMADO com
+// first-wins; cineminha casa o rótulo EXATO do port de saída; lens/port seguem a
+// primeira aresta. `cid` (id da conexão) é usado só por quem acumula edgeStats.
+function compileRoutes(shapes, conns, out) {
+  const edgeLookup = {};
+  for (const c of conns) {
+    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
+    edgeLookup[c.from][`${c.to}::${c.label ?? ''}`] = c.id;
+  }
+  const decisionRoutes = {}; // nodeId -> Map(label.trim() -> {to, cid})
+  const cinemaRoutes   = {}; // nodeId -> {eligible, notEligible}
+  const singleEdge     = {}; // nodeId -> {to, cid} | null  (decision_lens / port)
+  for (const s of shapes) {
+    if (s.type === 'decision') {
+      const m = new Map();
+      for (const e of (out[s.id] || [])) {
+        const label = (e.label ?? '').trim();
+        if (!m.has(label)) m.set(label, { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] });
+      }
+      decisionRoutes[s.id] = m;
+    } else if (s.type === 'cineminha') {
+      const typeCfg = getCinemaType(s.cinemaType);
+      const findEdge = (label) => {
+        const e = (out[s.id] || []).find(x => x.label === label);
+        return e ? { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] } : null;
+      };
+      cinemaRoutes[s.id] = { eligible: findEdge(typeCfg.ports[0].label), notEligible: findEdge(typeCfg.ports[1].label) };
+    } else if (s.type === 'decision_lens' || s.type === 'port') {
+      const e = (out[s.id] || [])[0];
+      singleEdge[s.id] = e ? { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] } : null;
+    }
+  }
+  return { decisionRoutes, cinemaRoutes, singleEdge };
+}
+
+// decision → { colIdx, codes, valByCode, routeByCode }. `codes === null` ⇒ coluna
+// não dict-encoded (ou ausente): o chamador usa o caminho por-linha com `colIdx`.
+function compileDecisionNode(node, csv, routeMap) {
+  const colIdx = csv.headers.indexOf(node.variableCol);
+  const col = dictColAt(csv, colIdx);
+  if (!col) return { colIdx, codes: null };
+  const n = col.dict.length;
+  const valByCode = new Array(n);
+  const routeByCode = new Array(n);
+  for (let k = 0; k < n; k++) {
+    const val = String(col.dict[k] ?? '').trim();
+    valByCode[k] = val;
+    routeByCode[k] = (routeMap && routeMap.get(val)) || null;
+  }
+  return { colIdx, codes: col.codes, valByCode, routeByCode };
+}
+
+// Teto de pares (|dict linha| × |dict coluna|) para compilar um Cineminha; acima
+// disso (eixo de altíssima cardinalidade — patológico) o nó fica no caminho por-linha.
+const CINEMA_COMPILE_MAX_PAIRS = 1 << 16;
+
+// cineminha → { mode:'code', none, rowCodes, colCodes, rowVals, colVals, nC,
+// eligByPair, keyByPair } ou { mode:'row', rowIdx, colIdx } (caminho por-linha).
+// eligByPair/keyByPair são indexados por `rowCode * nC + colCode`; a elegibilidade e a
+// chave de célula (`${rKey}|${cKey}`) são resolvidas uma vez por PAR de códigos.
+function compileCinemaNode(node, csv) {
+  const rowIdx = node.rowVar ? csv.headers.indexOf(node.rowVar.col) : -1;
+  const colIdx = node.colVar ? csv.headers.indexOf(node.colVar.col) : -1;
+  const fallback = { mode: 'row', rowIdx, colIdx };
+  if (!isColumnar(csv)) return fallback;
+  if (!node.rowVar && !node.colVar) return { mode: 'code', none: true };
+
+  let rowCodes = null, rowVals = null;
+  if (node.rowVar && rowIdx >= 0) {
+    const col = dictColAt(csv, rowIdx);
+    if (!col) return fallback; // eixo sobre coluna num → caminho por linha
+    rowCodes = col.codes;
+    rowVals = trimmedDictVals(col.dict);
+  }
+  let colCodes = null, colVals = null;
+  if (node.colVar && colIdx >= 0) {
+    const col = dictColAt(csv, colIdx);
+    if (!col) return fallback;
+    colCodes = col.codes;
+    colVals = trimmedDictVals(col.dict);
+  }
+  const nR = rowVals ? rowVals.length : 1;
+  const nC = colVals ? colVals.length : 1;
+  if (nR * nC > CINEMA_COMPILE_MAX_PAIRS) return fallback;
+
+  // Mesmas chaves do caminho por string: eixo ausente no nó → '*'; eixo presente
+  // mas com coluna ausente na base → '' (rv/cv vazios).
+  const rKeyFixed = node.rowVar ? '' : '*';
+  const cKeyFixed = node.colVar ? '' : '*';
+  const eligByPair = new Uint8Array(nR * nC);
+  const keyByPair = new Array(nR * nC);
+  for (let i = 0; i < nR; i++) {
+    const rKey = rowVals ? rowVals[i] : rKeyFixed;
+    for (let j = 0; j < nC; j++) {
+      const cKey = colVals ? colVals[j] : cKeyFixed;
+      const key = `${rKey}|${cKey}`;
+      keyByPair[i * nC + j] = key;
+      eligByPair[i * nC + j] = isCellEligible(node.cells, key) ? 1 : 0;
+    }
+  }
+  return { mode: 'code', none: false, rowCodes, colCodes, rowVals, colVals, nC, eligByPair, keyByPair, rowIdx, colIdx };
+}
+
+// decision_lens → matcher(r) que replica rowMatchesLensRules regra a regra, mas com
+// matchLensRule avaliado UMA vez por valor distinto (passByCode) nas colunas dict.
+// Retorna null quando não há regras (passa tudo — mesma semântica da lista vazia).
+// Regras sobre coluna ausente viram constante; sobre coluna não-dict (num/legado)
+// caem no matchLensRule por-linha de antes.
+function compileLensMatcher(csv, rules) {
+  if (!rules || rules.length === 0) return null;
+  const headers = csv.headers;
+  const compiled = new Array(rules.length);
+  for (let i = 0; i < rules.length; i++) {
+    const rule = rules[i];
+    const colIdx = headers.indexOf(rule.col);
+    const ruleVal = rule.value ?? '';
+    if (colIdx < 0) {
+      compiled[i] = { logic: rule.logic, kind: 'const', match: matchLensRule('', rule.operator, ruleVal) };
+      continue;
+    }
+    const col = dictColAt(csv, colIdx);
+    if (col) {
+      const passByCode = new Uint8Array(col.dict.length);
+      for (let k = 0; k < col.dict.length; k++) {
+        passByCode[k] = matchLensRule(col.dict[k] ?? '', rule.operator, ruleVal) ? 1 : 0;
+      }
+      compiled[i] = { logic: rule.logic, kind: 'code', codes: col.codes, passByCode };
+    } else {
+      compiled[i] = { logic: rule.logic, kind: 'row', colIdx, operator: rule.operator, value: ruleVal };
+    }
+  }
+  return (r) => {
+    let result = null;
+    for (let i = 0; i < compiled.length; i++) {
+      const e = compiled[i];
+      const matches = e.kind === 'code' ? e.passByCode[e.codes[r]] === 1
+        : e.kind === 'const' ? e.match
+        : matchLensRule(cellStr(csv, r, e.colIdx) ?? '', e.operator, e.value);
+      if (result === null) { result = matches; }
+      else if (e.logic === 'OR') { result = result || matches; }
+      else { result = result && matches; }
+    }
+    return result ?? true;
+  };
+}
+
+// Compila todos os nós roteáveis de um canvas para um csv (O(distintos) por nó).
+function compileNodesForCsv(shapes, csv, routes) {
+  const decision = {}, cinema = {}, lens = {};
+  for (const s of shapes) {
+    if (s.type === 'decision') decision[s.id] = compileDecisionNode(s, csv, routes.decisionRoutes[s.id]);
+    else if (s.type === 'cineminha') cinema[s.id] = compileCinemaNode(s, csv);
+    else if (s.type === 'decision_lens') lens[s.id] = compileLensMatcher(csv, s.rules || []);
+  }
+  return { decision, cinema, lens };
+}
+
 // ── Lens populations (M10) — derivadas no worker, tipadas e memoizadas ────────
 // Antes eram computadas na main thread (varredura de ~1MM linhas × regras por lens,
 // travando a UI) e clonadas pro worker como Array<boolean> por lens×csv a cada
@@ -195,10 +456,13 @@ function computeLensPopulations(shapes, csvStore) {
       const types = csv.columnTypes || {};
       const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
       const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+      // (M8) regras avaliadas uma vez por valor distinto do dicionário (passByCode);
+      // matcher null = sem regras = passa tudo (mesma semântica de rowMatchesLensRules).
+      const matcher = compileLensMatcher(csv, rules);
       for (let r = 0; r < n; r++) {
         const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 1) : 1;
         total += qty;
-        if (rowMatchesLensRules(csv, r, rules)) { arr[r] = 1; count += qty; }
+        if (!matcher || matcher(r)) { arr[r] = 1; count += qty; }
       }
       perCsv[csvId] = arr;
     }
@@ -451,41 +715,64 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
     (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
   );
 
-  function traverseRow(csv, r, startId) {
-    const headers = csv.headers;
-    let cur = startId; const visited = new Set();
+  // (M8) rotas resolvidas uma vez sobre a topologia + nós compilados por csv: o
+  // traverseRow deixa de tocar strings nas colunas dict — lê codes[r] e segue rotas.
+  // "visited" por época em vez de `new Set()` por linha (mesma técnica do M6).
+  const routes = compileRoutes(shapes, conns, out);
+  const { decisionRoutes, cinemaRoutes, singleEdge } = routes;
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const lastVisit = new Int32Array(shapes.length);
+  let epoch = 0;
+
+  function traverseRow(csv, r, startId, compiled) {
+    epoch++;
+    let cur = startId;
     while (cur) {
-      if (visited.has(cur)) return null;
-      visited.add(cur);
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) return null;
+      lastVisit[idx] = epoch;
       const node = shapesMap[cur]; if (!node) return null;
       if (TERM.has(node.type)) return node.type;
       if (node.type === 'decision') {
-        const colIdx = headers.indexOf(node.variableCol);
-        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
-        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        const cd = compiled.decision[cur];
+        let match;
+        if (cd.codes) match = cd.routeByCode[cd.codes[r]];
+        else {
+          const val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim();
+          match = decisionRoutes[cur]?.get(val);
+        }
         if (!match) return null;
         cur = match.to;
       } else if (node.type === 'cineminha') {
-        const rowI = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
-        const colI = node.colVar ? headers.indexOf(node.colVar.col) : -1;
-        const rowVal = node.rowVar && rowI >= 0 ? (cellStr(csv, r, rowI) ?? '').trim() : '';
-        const colVal = node.colVar && colI >= 0 ? (cellStr(csv, r, colI) ?? '').trim() : '';
-        if (!node.rowVar && !node.colVar) return null;
-        const rKey = node.rowVar ? rowVal : '*';
-        const cKey = node.colVar ? colVal : '*';
-        const isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
-        const typeCfg = getCinemaType(node.cinemaType);
-        const match = (out[cur] || []).find(e => e.label === (isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label));
+        const cc = compiled.cinema[cur];
+        let isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) return null;
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0;
+          const ci = cc.colCodes ? cc.colCodes[r] : 0;
+          isEligible = cc.eligByPair[ri * cc.nC + ci] === 1;
+        } else {
+          const rowVal = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const colVal = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (!node.rowVar && !node.colVar) return null;
+          const rKey = node.rowVar ? rowVal : '*';
+          const cKey = node.colVar ? colVal : '*';
+          isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
+        }
+        const rt = cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
         if (!match) return null;
         cur = match.to;
       } else if (node.type === 'decision_lens') {
-        const passes = rowMatchesLensRules(csv, r, node.rules || []);
-        if (!passes) return null;
-        const edges = out[cur] || []; if (edges.length === 0) return null;
-        cur = edges[0].to;
+        const m = compiled.lens[cur];
+        if (m && !m(r)) return null;
+        const match = singleEdge[cur];
+        if (!match) return null;
+        cur = match.to;
       } else if (node.type === 'port') {
-        const edges = out[cur] || []; if (edges.length === 0) return null;
-        cur = edges[0].to;
+        const match = singleEdge[cur];
+        if (!match) return null;
+        cur = match.to;
       } else return null;
     }
     return null;
@@ -508,14 +795,28 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
 
     const nRows = rowCount(csv);
     const sim = new Int8Array(nRows); // DEC_SAME (0) por default — só mudamos linhas roteadas
-    for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
-      const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === 1);
-      if (!isMutable || csvRoots.length === 0) continue; // mantém original (DEC_SAME)
+    if (csvRoots.length > 0) {
+      const compiled = compileNodesForCsv(shapes, csv, routes);
+      const rootId = csvRoots[0].id;
+      // Populações de lens deste csv resolvidas UMA vez — não Object.values(...).some
+      // (alocação + closure) por linha.
+      const csvLensPops = hasLens
+        ? Object.values(lensPopulations).map(pop => pop[csvId]).filter(Boolean)
+        : null;
+      for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
+        let isMutable = !hasLens;
+        if (!isMutable) {
+          for (let i = 0; i < csvLensPops.length; i++) {
+            if (csvLensPops[i][rowIdx] === 1) { isMutable = true; break; }
+          }
+        }
+        if (!isMutable) continue; // mantém original (DEC_SAME)
 
-      const boardResult = traverseRow(csv, rowIdx, csvRoots[0].id);
-      if (boardResult === 'approved') sim[rowIdx] = DEC_APROVADO;
-      else if (boardResult === 'rejected') sim[rowIdx] = DEC_REPROVADO;
-      // 'as_is' ou null (não roteou) → mantém a decisão original (DEC_SAME, já é 0)
+        const boardResult = traverseRow(csv, rowIdx, rootId, compiled);
+        if (boardResult === 'approved') sim[rowIdx] = DEC_APROVADO;
+        else if (boardResult === 'rejected') sim[rowIdx] = DEC_REPROVADO;
+        // 'as_is' ou null (não roteou) → mantém a decisão original (DEC_SAME, já é 0)
+      }
     }
 
     overlay[csvId] = { sim };
@@ -749,52 +1050,73 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
     if (s.type === 'cineminha') arrivals[s.id] = {};
   }
 
-  function collectCinemaHits(csv, r, startId) {
-    const headers = csv.headers;
+  // (M8) rotas compiladas + "visited" por época + buffers de hit reutilizados entre
+  // linhas (o walk é síncrono e single-thread) — sem `new Set()`/array por linha.
+  const routes = compileRoutes(shapes, conns, out);
+  const { decisionRoutes, cinemaRoutes, singleEdge } = routes;
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const lastVisit = new Int32Array(shapes.length);
+  let epoch = 0;
+  const hitShapeBuf = [], hitKeyBuf = [];
+
+  function collectCinemaHits(csv, r, startId, compiled) {
+    epoch++;
     let cur = startId;
-    const visited = new Set();
-    const hits = [];
+    let hitLen = 0;
     while (cur) {
-      if (visited.has(cur)) break;
-      visited.add(cur);
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) break;
+      lastVisit[idx] = epoch;
       const node = shapesMap[cur];
       if (!node) break;
       if (TERM.has(node.type)) break;
       if (node.type === 'decision') {
-        const colIdx = headers.indexOf(node.variableCol);
-        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
-        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        const cd = compiled.decision[cur];
+        let match;
+        if (cd.codes) match = cd.routeByCode[cd.codes[r]];
+        else {
+          const val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim();
+          match = decisionRoutes[cur]?.get(val);
+        }
         if (!match) break;
         cur = match.to;
       } else if (node.type === 'cineminha') {
-        const rIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
-        const cIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
-        const rv   = node.rowVar && rIdx >= 0 ? (cellStr(csv, r, rIdx) ?? '').trim() : '';
-        const cv   = node.colVar && cIdx >= 0 ? (cellStr(csv, r, cIdx) ?? '').trim() : '';
-        if (!node.rowVar && !node.colVar) break;
-        const rKey = node.rowVar ? rv : '*';
-        const cKey = node.colVar ? cv : '*';
-        const cellKey = `${rKey}|${cKey}`;
-        if (arrivals[node.id] !== undefined) hits.push({ shapeId: node.id, cellKey });
-        const isEligible = isCellEligible(node.cells, cellKey);
-        const typeCfg = getCinemaType(node.cinemaType);
-        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
-        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        const cc = compiled.cinema[cur];
+        let cellKey, isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) break;
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0;
+          const ci = cc.colCodes ? cc.colCodes[r] : 0;
+          const p = ri * cc.nC + ci;
+          cellKey = cc.keyByPair[p];
+          isEligible = cc.eligByPair[p] === 1;
+        } else {
+          const rv = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const cv = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (!node.rowVar && !node.colVar) break;
+          const rKey = node.rowVar ? rv : '*';
+          const cKey = node.colVar ? cv : '*';
+          cellKey = `${rKey}|${cKey}`;
+          isEligible = isCellEligible(node.cells, cellKey);
+        }
+        if (arrivals[node.id] !== undefined) { hitShapeBuf[hitLen] = node.id; hitKeyBuf[hitLen] = cellKey; hitLen++; }
+        const rt = cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
         if (!match) break;
         cur = match.to;
       } else if (node.type === 'decision_lens') {
-        const passes = rowMatchesLensRules(csv, r, node.rules || []);
-        if (!passes) break;
-        const edges = out[cur] || [];
-        if (edges.length === 0) break;
-        cur = edges[0].to;
+        const m = compiled.lens[cur];
+        if (m && !m(r)) break;
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
       } else if (node.type === 'port') {
-        const edges = out[cur] || [];
-        if (edges.length === 0) break;
-        cur = edges[0].to;
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
       } else break;
     }
-    return hits;
+    return hitLen;
   }
 
   for (const [csvId, csv] of Object.entries(csvStore)) {
@@ -819,9 +1141,17 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
     });
     if (csvRoots.length === 0) continue;
     const rootId = csvRoots[0].id;
+    const compiled = compileNodesForCsv(shapes, csv, routes); // (M8) uma vez por csv
+
+    // (M8) valores de mixRisco por código (trim por distinto, não por linha).
+    const mixDictCol = mixIdx >= 0 ? dictColAt(csv, mixIdx) : null;
+    const mixVals = mixDictCol ? trimmedDictVals(mixDictCol.dict) : null;
 
     const nRows = rowCount(csv);
     for (let r = 0; r < nRows; r++) {
+      const hitLen = collectCinemaHits(csv, r, rootId, compiled);
+      if (hitLen === 0) continue; // linha não chega a nenhum cineminha — não lê métricas
+
       const qty      = qtyIdx      >= 0 ? (cellNum(csv, r, qtyIdx)      || 0) : 1;
       const altas    = altasIdx    >= 0 ? (cellNum(csv, r, altasIdx)    || 0) : 0;
       const inadR    = inadRIdx    >= 0 ? (cellNum(csv, r, inadRIdx)    || 0) : 0;
@@ -831,12 +1161,13 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
         altasInf = altasInfIdx >= 0 ? (cellNum(csv, r, altasInfIdx) || 0) : 0;
         inadI    = inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
       }
-      const mixVal   = mixIdx      >= 0 ? (cellStr(csv, r, mixIdx) ?? '').toString().trim() : '';
+      const mixVal = mixVals ? mixVals[mixDictCol.codes[r]]
+        : mixIdx >= 0 ? (cellStr(csv, r, mixIdx) ?? '').toString().trim() : '';
 
-      const hits = collectCinemaHits(csv, r, rootId);
-      for (const { shapeId, cellKey } of hits) {
-        const acc = arrivals[shapeId];
+      for (let h = 0; h < hitLen; h++) {
+        const acc = arrivals[hitShapeBuf[h]];
         if (!acc) continue;
+        const cellKey = hitKeyBuf[h];
         if (!acc[cellKey]) acc[cellKey] = { qty: 0, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0, mix: {} };
         acc[cellKey].qty           += qty;
         acc[cellKey].qtdAltas      += altas;
@@ -999,34 +1330,8 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
   const hasLens = lensPopulations && Object.keys(lensPopulations).length > 0;
 
   // ── Pré-resolução das arestas por nó — uma vez, fora do loop de linhas ───────
-  const edgeLookup = {};
-  for (const c of conns) {
-    if (!edgeLookup[c.from]) edgeLookup[c.from] = {};
-    edgeLookup[c.from][`${c.to}::${c.label ?? ''}`] = c.id;
-  }
-  const decisionRoutes = {}; // nodeId -> Map(label.trim() -> {to, cid})
-  const cinemaRoutes   = {}; // nodeId -> {eligible, notEligible}
-  const singleEdge     = {}; // nodeId -> {to, cid} | null  (decision_lens / port)
-  for (const s of shapes) {
-    if (s.type === 'decision') {
-      const m = new Map();
-      for (const e of (out[s.id] || [])) {
-        const label = (e.label ?? '').trim();
-        if (!m.has(label)) m.set(label, { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] });
-      }
-      decisionRoutes[s.id] = m;
-    } else if (s.type === 'cineminha') {
-      const typeCfg = getCinemaType(s.cinemaType);
-      const findEdge = (label) => {
-        const e = (out[s.id] || []).find(x => x.label === label);
-        return e ? { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] } : null;
-      };
-      cinemaRoutes[s.id] = { eligible: findEdge(typeCfg.ports[0].label), notEligible: findEdge(typeCfg.ports[1].label) };
-    } else if (s.type === 'decision_lens' || s.type === 'port') {
-      const e = (out[s.id] || [])[0];
-      singleEdge[s.id] = e ? { to: e.to, cid: edgeLookup[s.id]?.[`${e.to}::${e.label ?? ''}`] } : null;
-    }
-  }
+  const routes = compileRoutes(shapes, conns, out);
+  const { decisionRoutes, cinemaRoutes, singleEdge } = routes;
 
   // ── "visited" por época — evita `new Set()` por linha ────────────────────────
   const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
@@ -1036,7 +1341,10 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
 
   // Anda pelo fluxo a partir de `startId`. `wantPath` também recolhe os edge ids (edgeStats,
   // via pathBuf/pathLen); `wantArrivals` também acumula as chegadas por nó (val/row/col).
-  function walk(csv, r, startId, qty, colIdxCache, wantPath, wantArrivals) {
+  // (M8) `compiled` = nós compilados por csv (compileNodesForCsv): nas colunas dict o
+  // roteamento lê `codes[r]` e segue rotas pré-resolvidas; colunas não-dict/legado caem
+  // no caminho por-linha (string) de antes.
+  function walk(csv, r, startId, qty, compiled, wantPath, wantArrivals) {
     epoch++;
     let cur = startId;
     let pathLen = 0;
@@ -1049,34 +1357,59 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
       if (TERM.has(node.type)) return { result: node.type, pathLen };
 
       if (node.type === 'decision') {
-        const colIdx = colIdxCache.decision[cur];
-        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
-        if (wantArrivals && nodeArrivals[cur] && val !== '') {
-          nodeArrivals[cur].val[val] = (nodeArrivals[cur].val[val] || 0) + qty;
+        const cd = compiled.decision[cur];
+        let match;
+        if (cd.codes) {
+          const code = cd.codes[r];
+          match = cd.routeByCode[code];
+          if (wantArrivals && nodeArrivals[cur]) {
+            const val = cd.valByCode[code];
+            if (val !== '') nodeArrivals[cur].val[val] = (nodeArrivals[cur].val[val] || 0) + qty;
+          }
+        } else {
+          const val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim();
+          if (wantArrivals && nodeArrivals[cur] && val !== '') {
+            nodeArrivals[cur].val[val] = (nodeArrivals[cur].val[val] || 0) + qty;
+          }
+          match = decisionRoutes[cur]?.get(val);
         }
-        const match = decisionRoutes[cur]?.get(val);
         if (!match) return { result: null, pathLen };
         if (wantPath && match.cid) pathBuf[pathLen++] = match.cid;
         cur = match.to;
       } else if (node.type === 'cineminha') {
-        const cache = colIdxCache.cinema[cur] || { rowIdx: -1, colIdx: -1 };
-        const rv = node.rowVar && cache.rowIdx >= 0 ? (cellStr(csv, r, cache.rowIdx) ?? '').trim() : '';
-        const cv = node.colVar && cache.colIdx >= 0 ? (cellStr(csv, r, cache.colIdx) ?? '').trim() : '';
-        if (wantArrivals && nodeArrivals[cur]) {
-          if (node.rowVar && rv !== '') nodeArrivals[cur].row[rv] = (nodeArrivals[cur].row[rv] || 0) + qty;
-          if (node.colVar && cv !== '') nodeArrivals[cur].col[cv] = (nodeArrivals[cur].col[cv] || 0) + qty;
+        const cc = compiled.cinema[cur];
+        let isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) return { result: null, pathLen }; // sem eixos — nada a acumular
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0;
+          const ci = cc.colCodes ? cc.colCodes[r] : 0;
+          if (wantArrivals && nodeArrivals[cur]) {
+            const rv = cc.rowVals ? cc.rowVals[ri] : '';
+            const cv = cc.colVals ? cc.colVals[ci] : '';
+            if (node.rowVar && rv !== '') nodeArrivals[cur].row[rv] = (nodeArrivals[cur].row[rv] || 0) + qty;
+            if (node.colVar && cv !== '') nodeArrivals[cur].col[cv] = (nodeArrivals[cur].col[cv] || 0) + qty;
+          }
+          isEligible = cc.eligByPair[ri * cc.nC + ci] === 1;
+        } else {
+          const rv = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const cv = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (wantArrivals && nodeArrivals[cur]) {
+            if (node.rowVar && rv !== '') nodeArrivals[cur].row[rv] = (nodeArrivals[cur].row[rv] || 0) + qty;
+            if (node.colVar && cv !== '') nodeArrivals[cur].col[cv] = (nodeArrivals[cur].col[cv] || 0) + qty;
+          }
+          if (!node.rowVar && !node.colVar) return { result: null, pathLen };
+          const rKey = node.rowVar ? rv : '*';
+          const cKey = node.colVar ? cv : '*';
+          isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
         }
-        if (!node.rowVar && !node.colVar) return { result: null, pathLen };
-        const rKey = node.rowVar ? rv : '*';
-        const cKey = node.colVar ? cv : '*';
-        const isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
-        const routes = cinemaRoutes[cur];
-        const match = isEligible ? routes?.eligible : routes?.notEligible;
+        const rt = cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
         if (!match) return { result: null, pathLen };
         if (wantPath && match.cid) pathBuf[pathLen++] = match.cid;
         cur = match.to;
       } else if (node.type === 'decision_lens') {
-        if (!rowMatchesLensRules(csv, r, node.rules || [])) return { result: null, pathLen };
+        const m = compiled.lens[cur];
+        if (m && !m(r)) return { result: null, pathLen };
         const match = singleEdge[cur];
         if (!match) return { result: null, pathLen };
         if (wantPath && match.cid) pathBuf[pathLen++] = match.cid;
@@ -1089,22 +1422,6 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
       } else return { result: null, pathLen };
     }
     return { result: null, pathLen };
-  }
-
-  // Índices de coluna por nó, resolvidos uma vez por csv (não por linha, M6 item 2).
-  function buildColIdxCache(csv) {
-    const decision = {};
-    const cinema = {};
-    for (const s of shapes) {
-      if (s.type === 'decision') decision[s.id] = csv.headers.indexOf(s.variableCol);
-      else if (s.type === 'cineminha') {
-        cinema[s.id] = {
-          rowIdx: s.rowVar ? csv.headers.indexOf(s.rowVar.col) : -1,
-          colIdx: s.colVar ? csv.headers.indexOf(s.colVar.col) : -1,
-        };
-      }
-    }
-    return { decision, cinema };
   }
 
   // Espelha o early-return de runSimulation quando não há NENHUMA raiz de simulação no
@@ -1163,10 +1480,15 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
     if (!doSim && !hasAsIsCol) continue; // nada a contribuir deste csv
 
     const rootId = doSim ? simCsvRoots[0].id : null;
-    const colIdxCache = (doSim || doArrivals) ? buildColIdxCache(csv) : null;
+    const compiled = (doSim || doArrivals) ? compileNodesForCsv(shapes, csv, routes) : null; // (M8)
     // Caso comum: a única raiz de chegadas é a mesma raiz da simulação (mesmo csv/row, walk
     // determinístico) — dobra a chegada dentro do walk principal em vez de andar 2x por linha.
     const arrivalsFoldedIntoPrimary = doSim && doArrivals && arrivalsCsvRoots.length === 1 && arrivalsCsvRoots[0].id === rootId;
+    // Populações de lens deste csv resolvidas UMA vez — não Object.values(...).some
+    // (alocação + closure) por linha.
+    const csvLensPops = (hasLens && hasAsIsCol)
+      ? Object.values(lensPopulations).map(pop => pop[csvId]).filter(Boolean)
+      : null;
 
     const nRows = rowCount(csv);
     for (let r = 0; r < nRows; r++) {
@@ -1183,7 +1505,7 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
       let res = null;
       if (doSim) {
         totalQty += qty;
-        const walked = walk(csv, r, rootId, qty, colIdxCache, true, arrivalsFoldedIntoPrimary);
+        const walked = walk(csv, r, rootId, qty, compiled, true, arrivalsFoldedIntoPrimary);
         res = walked.result;
         const pathLen = walked.pathLen;
 
@@ -1226,7 +1548,12 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
 
       if (hasAsIsCol) {
         const decisaoOriginal = cellStr(csv, r, dOrigIdx) ?? '';
-        const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[r] === 1);
+        let isMutable = !hasLens;
+        if (!isMutable) {
+          for (let i = 0; i < csvLensPops.length; i++) {
+            if (csvLensPops[i][r] === 1) { isMutable = true; break; }
+          }
+        }
         const decisaoSimulada = (doSim && isMutable)
           ? (res === 'approved' ? 'APROVADO' : res === 'rejected' ? 'REPROVADO' : decisaoOriginal)
           : decisaoOriginal;
@@ -1259,7 +1586,7 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
       }
 
       if (doArrivals && !arrivalsFoldedIntoPrimary) {
-        for (const root of arrivalsCsvRoots) walk(csv, r, root.id, qty, colIdxCache, false, true);
+        for (const root of arrivalsCsvRoots) walk(csv, r, root.id, qty, compiled, false, true);
       }
     }
   }
