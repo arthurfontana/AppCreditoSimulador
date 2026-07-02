@@ -4,7 +4,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
-import { buildColumnar, rowCount, cellStr, cellNum, getRow, materializeRows, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage } from "./columnar.js";
+import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn } from "./columnar.js";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -342,79 +342,12 @@ function parseCSV(text, delimiter, hasHeader) {
   return { headers, rows };
 }
 
-// Versão assíncrona/chunked de parseCSV — cede a thread principal a cada lote
-// de linhas (setTimeout 0) para não congelar a UI em bases grandes, e reporta
-// progresso via onProgress(offset, total) (fração consumida do texto). Usada no
-// carregamento de CSV (onFileChange/reparseWizardFile) para alimentar o modal
-// de progresso.
-//
-// Otimização de memória (Fase 0): NÃO materializa `text.split(/\r?\n/)` — esse
-// array de dezenas de milhões de strings dobrava o pico de RAM do parse. Aqui o
-// texto é varrido por índice (`indexOf('\n')`) e cada linha é fatiada/parseada
-// sob demanda, alimentando `rows` diretamente. O único array grande que
-// sobrevive é o próprio `rows` (a saída). A referência ao `text` cru vive só na
-// closure enquanto o parse roda e é solta assim que a Promise resolve.
-function parseCSVAsync(text, delimiter, hasHeader, onProgress) {
-  return new Promise((resolve, reject) => {
-    try {
-      const split = (line) => {
-        const res = []; let f = "", q = false;
-        for (let i = 0; i < line.length; i++) {
-          const c = line[i];
-          if (c === '"') q = !q;
-          else if (c === delimiter && !q) { res.push(f.trim()); f = ""; }
-          else f += c;
-        }
-        res.push(f.trim());
-        return res;
-      };
-      const len = text.length;
-      let pos = 0;
-      // Avança até a próxima linha não-vazia a partir de `pos`, sem alocar o
-      // array inteiro de linhas. Equivale a `split(/\r?\n/).filter(l=>l.trim())`:
-      // quebra só em '\n', tira um '\r' final (suporta CRLF) e pula linhas em
-      // branco. Retorna o conteúdo cru da linha ou null no fim do texto.
-      const nextLine = () => {
-        while (pos < len) {
-          let nl = text.indexOf('\n', pos);
-          if (nl === -1) nl = len;
-          const start = pos;
-          let end = nl;
-          if (end > start && text.charCodeAt(end - 1) === 13) end--; // \r final
-          pos = nl + 1;
-          if (end > start) {
-            const line = text.slice(start, end);
-            if (line.trim()) return line;
-          }
-        }
-        return null;
-      };
-
-      const firstLine = nextLine();
-      if (firstLine === null) { resolve({ headers: [], rows: [] }); return; }
-      const first = split(firstLine);
-      const headers = hasHeader ? first : first.map((_,i)=>`Coluna ${i+1}`);
-      const rows = [];
-      if (!hasHeader) rows.push(first); // sem cabeçalho, a 1ª linha também é dado
-
-      const CHUNK = 3000;
-      let finished = false;
-      const step = () => {
-        let count = 0;
-        while (count < CHUNK) {
-          const line = nextLine();
-          if (line === null) { finished = true; break; }
-          rows.push(split(line));
-          count++;
-        }
-        if (onProgress) onProgress(finished ? len : Math.min(pos, len), len);
-        if (finished) resolve({ headers, rows });
-        else setTimeout(step, 0);
-      };
-      step();
-    } catch (err) { reject(err); }
-  });
-}
+// O parse assíncrono/chunked do IMPORT (antigo parseCSVAsync, Fase 0) virou
+// parseCSVToColumnarAsync em src/columnar.js (M1): mesma varredura por índice e
+// mesmo protocolo de progresso, mas alimentando os encoders colunares
+// diretamente — a base nunca existe como string[][]. O parseCSV síncrono acima
+// permanece para artefatos pequenos (Tabela de Inferência, biblioteca de
+// Cineminha).
 
 const tDist = (t) => { const dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY; return Math.sqrt(dx*dx+dy*dy); };
 const trunc = (s, n) => s && s.length > n ? s.slice(0,n-1)+"…" : s;
@@ -429,14 +362,9 @@ const estConnLabelW = (s) => {
 const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
 const fmtPct = (v) => v === null ? "N/A" : `${(v * 100).toFixed(2)}%`;
 const normalizeColName = (s) => (s || "").toLowerCase().replace(/[\s_\-\.]+/g, "").trim();
-const normalizeDecimalSep = (rows, sep) => {
-  if (sep === '.') return rows;
-  return rows.map(row => row.map(cell => {
-    const v = cell.trim();
-    if (/^\-?\d+,\d+$/.test(v)) return v.replace(',', '.');
-    return cell;
-  }));
-};
+// A normalização de separador decimal (','→'.') acontece no confirm do wizard,
+// sobre os DICIONÁRIOS das colunas (finalizeImportedColumns em src/columnar.js,
+// M1) — O(distintos) em vez de uma cópia integral da matriz de linhas.
 
 // ── Inferência de negados — indexação da Tabela de Referência (Fase 1) ──
 // Lê o artefato do SAS (delimitador ';', decimal '.') e o indexa UMA vez na
@@ -4197,6 +4125,11 @@ export default function App() {
   const zoomCenter=(f)=>{const r=getBR();doZoom(r.width/2,r.height/2,f);};
 
   // ── CSV import ────────────────────────────────────────────────
+  // M1 (import vetorizado): o parse alimenta os encoders colunares diretamente
+  // (parseCSVToColumnarAsync) — a base NUNCA existe como string[][] e o texto cru
+  // é solto assim que o parse termina. O wizard guarda só o File handle (para
+  // reparse no passo 1), headers, as colunas dict (cujos dicionários já são os
+  // distintos que os passos 2/3 precisam) e um preview de ~100 linhas.
   const onFileChange = (e) => {
     const file=e.target.files[0]; if (!file) return;
     e.target.value="";
@@ -4221,16 +4154,16 @@ export default function App() {
         const {delimiter,confident}=detectDelimiter(text);
         const {decimalSep, confident: decConfident}=detectDecimalSep(text, delimiter);
         setImportLoading(l=>l&&({...l,phase:'parsing',pct:35}));
-        const {headers, rows} = await parseCSVAsync(text, delimiter, true, (done,total)=>{
+        const parsed = await parseCSVToColumnarAsync(text, delimiter, true, (done,total)=>{
           setImportLoading(l=>l&&({...l,pct:35+Math.round((done/Math.max(total,1))*60)}));
         });
-        if (!headers.length || !rows.length) {
+        if (!parsed.headers.length || !parsed.rowCount) {
           setImportLoading(null);
           setCsvImportError(`Não foi possível identificar colunas em "${file.name}" com o delimitador detectado ("${delimiter}"). Verifique se o arquivo é um CSV válido.`);
           return;
         }
         setImportLoading(null);
-        setWizard({rawText:text,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,inferenceSource:'columns',keyMap:{},weightCol:null,weightMode:'propostas',normalizeScore:true,parsedHeaders:headers,parsedRows:rows,parsedDelimiter:delimiter,parsedHasHeader:true});
+        setWizard({file,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,inferenceSource:'columns',keyMap:{},weightCol:null,weightMode:'propostas',normalizeScore:true,parsedHeaders:parsed.headers,parsedColumns:parsed.columns,parsedRowCount:parsed.rowCount,previewRows:parsed.previewRows,parsedDelimiter:delimiter,parsedHasHeader:true});
       } catch (err) {
         setImportLoading(null);
         setCsvImportError(`Falha ao processar "${file.name}": ${err?.message || err}`);
@@ -4239,26 +4172,42 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  // Reprocessa o arquivo bruto com novo delimitador/cabeçalho sem travar a UI
-  // (chunked via parseCSVAsync) — usado pelos seletores do Passo 1 do wizard.
-  // Mostra o mesmo modal de progresso da carga inicial; só atualiza
-  // delimiter/hasHeader no wizard quando o reparse termina.
+  // Reprocessa o arquivo com novo delimitador/cabeçalho sem travar a UI —
+  // usado pelos seletores do Passo 1 do wizard. Desde o M1 o texto cru não fica
+  // mais no estado: o File handle guardado no wizard é RELIDO do disco e passa
+  // pelo mesmo parse colunar chunked da carga inicial (mesmo modal de progresso);
+  // delimiter/hasHeader só mudam no wizard quando o reparse termina.
   const reparseWizardFile = (patch) => {
     if (!wizard) return;
     if (wizard.editCsvId) { setWizard(w => w ? {...w, ...patch} : w); return; }
     const nextDelimiter = 'delimiter' in patch ? patch.delimiter : wizard.delimiter;
     const nextHasHeader = 'hasHeader' in patch ? patch.hasHeader : wizard.hasHeader;
-    const { filename, rawText } = wizard;
-    setImportLoading({phase:'parsing', pct:5, filename});
-    parseCSVAsync(rawText, nextDelimiter, nextHasHeader, (done,total)=>{
-      setImportLoading(l=>l&&({...l,pct:5+Math.round((done/Math.max(total,1))*90)}));
-    }).then(({headers,rows})=>{
+    const { filename, file } = wizard;
+    if (!file) return;
+    setImportLoading({phase:'reading', pct:0, filename});
+    const reader = new FileReader();
+    reader.onerror = () => {
       setImportLoading(null);
-      setWizard(w2=>w2?{...w2,...patch,parsedHeaders:headers,parsedRows:rows,parsedDelimiter:nextDelimiter,parsedHasHeader:nextHasHeader}:w2);
-    }).catch(err=>{
-      setImportLoading(null);
-      setCsvImportError(`Falha ao reprocessar "${filename}": ${err?.message||err}`);
-    });
+      setCsvImportError(`Não foi possível reler o arquivo "${filename}". Verifique se ele ainda existe e não está aberto em outro programa.`);
+    };
+    reader.onprogress = (ev) => {
+      if (ev.lengthComputable) setImportLoading(l=>l&&({...l,pct:Math.round((ev.loaded/ev.total)*30)}));
+    };
+    reader.onload = async (ev) => {
+      try {
+        const text = ev.target.result;
+        setImportLoading(l=>l&&({...l,phase:'parsing',pct:35}));
+        const parsed = await parseCSVToColumnarAsync(text, nextDelimiter, nextHasHeader, (done,total)=>{
+          setImportLoading(l=>l&&({...l,pct:35+Math.round((done/Math.max(total,1))*60)}));
+        });
+        setImportLoading(null);
+        setWizard(w2=>w2?{...w2,...patch,parsedHeaders:parsed.headers,parsedColumns:parsed.columns,parsedRowCount:parsed.rowCount,previewRows:parsed.previewRows,parsedDelimiter:nextDelimiter,parsedHasHeader:nextHasHeader}:w2);
+      } catch (err) {
+        setImportLoading(null);
+        setCsvImportError(`Falha ao reprocessar "${filename}": ${err?.message||err}`);
+      }
+    };
+    reader.readAsText(file);
   };
 
   // ── Import da Tabela de Inferência (slot dedicado — Fase 1) ──
@@ -4411,7 +4360,8 @@ export default function App() {
 
   const onImportConfirm = () => {
     if (!wizard) return;
-    const {rawText,filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId,decimalSep,inferenceSource,keyMap,weightCol,weightMode,normalizeScore}=wizard;
+    const {filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId,decimalSep,inferenceSource,keyMap,weightCol,weightMode,normalizeScore}=wizard;
+    const DORIGINAL_COL = '__DECISAO_ORIGINAL';
 
     // Auto-assign 'decision' to all columns without an explicit type
     const buildFinalTypes = (headers, types) => {
@@ -4439,48 +4389,48 @@ export default function App() {
       if (!prev) { setWizard(null); return; }
       pushHistory();
 
-      // Strip any existing __DECISAO_ORIGINAL column from headers/rows.
-      // `prev` está em formato colunar (Fase 1) — materializa string[][] só aqui
-      // (edição é rara) para reusar a lógica de strip/re-derivação da coluna, e
-      // re-vetoriza no fim. O array materializado é liberado logo em seguida.
-      const DORIGINAL_COL = '__DECISAO_ORIGINAL';
-      const existingIdx = prev.headers.indexOf(DORIGINAL_COL);
-      const prevRows = materializeRows(prev);
-      const baseHeaders = existingIdx >= 0 ? prev.headers.filter((_,i) => i !== existingIdx) : prev.headers;
-      const baseRows = existingIdx >= 0 ? prevRows.map(r => r.filter((_,i) => i !== existingIdx)) : prevRows;
+      // M1: a base fica em colunar do começo ao fim — nada de materializeRows.
+      // Remover a coluna derivada é só omitir a entrada; reclassificar tipos
+      // (métrica ↔ dimensão) converte coluna a coluna via retypeColumn (colunas
+      // com o mesmo tipo são compartilhadas por referência, sem cópia); e
+      // __DECISAO_ORIGINAL é re-derivada por códigos (deriveMappedDictColumn).
+      const prevCol = isColumnar(prev) ? prev
+        : { ...prev, ...buildColumnar(prev.headers, prev.rows || [], prev.columnTypes) }; // defensivo: entrada legada
+      const n = rowCount(prevCol);
+      const baseHeaders = prevCol.headers.filter(h => h !== DORIGINAL_COL);
+      const finalTypes = buildFinalTypes(baseHeaders, columnTypes);
+      const baseColumns = {};
+      for (const h of baseHeaders) {
+        baseColumns[h] = retypeColumn(prevCol.columns[h], METRIC_COL_TYPES.has(finalTypes[h]), n);
+      }
 
       // Rebuild __DECISAO_ORIGINAL if asIsVar is configured
       let finalHeaders = baseHeaders;
-      let finalRows = baseRows;
+      let editColumns = baseColumns;
       if (asIsVar && baseHeaders.includes(asIsVar)) {
-        const asIsIdx = baseHeaders.indexOf(asIsVar);
+        const mapping = asIsMapping || {};
         finalHeaders = [...baseHeaders, DORIGINAL_COL];
-        finalRows = baseRows.map(r => {
-          const val = String(r[asIsIdx] ?? '');
-          const mapped = (asIsMapping || {})[val] || '';
-          return [...r, mapped];
-        });
+        editColumns = { ...baseColumns, [DORIGINAL_COL]: deriveMappedDictColumn(baseColumns[asIsVar], n, v => mapping[String(v ?? '')] || '') };
       }
 
-      const finalTypes = buildFinalTypes(baseHeaders, columnTypes);
       const newAsIsConfig = asIsVar ? { col: asIsVar, mapping: asIsMapping || {} } : (prev.asIsConfig || null);
-      const { columns: editColumns, rowCount: editRowCount } = buildColumnar(finalHeaders, finalRows, finalTypes);
 
       setCsvStore(store => ({
         ...store,
-        [editCsvId]: { ...prev, name: filename||prev.name, headers: finalHeaders, columns: editColumns, rowCount: editRowCount, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: newAsIsConfig, inferenceConfig }
+        [editCsvId]: { ...prev, name: filename||prev.name, headers: finalHeaders, columns: editColumns, rowCount: n, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: newAsIsConfig, inferenceConfig }
       }));
       setWizard(null);
       return;
     }
 
-    // Reusa o parse já cacheado pelo wizard (onFileChange/reparseWizardFile)
-    // quando ele bate com o delimiter/hasHeader atuais — evita reparsear a
-    // base inteira de novo só para confirmar a importação.
-    const {headers, rows: rawRows} = (wizard.parsedHeaders && wizard.parsedDelimiter===delimiter && wizard.parsedHasHeader===hasHeader)
-      ? {headers: wizard.parsedHeaders, rows: wizard.parsedRows}
-      : parseCSV(rawText,delimiter,hasHeader);
-    const rows = normalizeDecimalSep(rawRows, decimalSep || '.');
+    // M1: consome o parse colunar cacheado pelo wizard (onFileChange/
+    // reparseWizardFile) — a base nunca existiu como string[][]. O confirm só
+    // converte tipos (dict → Float64Array nas métricas, normalização decimal
+    // sobre os dicionários) e deriva __DECISAO_ORIGINAL por códigos.
+    const parsedOk = wizard.parsedColumns && wizard.parsedDelimiter===delimiter && wizard.parsedHasHeader===hasHeader;
+    if (!parsedOk) return; // reparse pendente/falho — o botão Importar já fica desabilitado sem preview
+    const headers = wizard.parsedHeaders;
+    const newRowCount = wizard.parsedRowCount;
 
     pushHistory();
     const csvId=uid();
@@ -4489,29 +4439,30 @@ export default function App() {
     const normMap = {};
     for (const h of headers) normMap[normalizeColName(h)] = h;
 
+    const finalTypes = buildFinalTypes(headers, columnTypes);
+    const { columns: typedColumns } = finalizeImportedColumns(headers, wizard.parsedColumns, newRowCount, finalTypes, decimalSep || '.');
+
     // Derive DECISAO_ORIGINAL column if asIsVar is configured
     let finalHeaders = headers;
-    let finalRows = rows;
+    let newColumns = typedColumns;
     if (asIsVar && headers.includes(asIsVar)) {
-      const asIsIdx = headers.indexOf(asIsVar);
-      const DORIGINAL_COL = '__DECISAO_ORIGINAL';
       // Strip existing derived column if re-importing
-      const existingIdx = headers.indexOf(DORIGINAL_COL);
-      const baseHeaders = existingIdx >= 0 ? headers.filter((_,i)=>i!==existingIdx) : headers;
-      const baseRows = existingIdx >= 0 ? rows.map(r=>r.filter((_,i)=>i!==existingIdx)) : rows;
+      const baseHeaders = headers.filter(h => h !== DORIGINAL_COL);
+      const mapping = asIsMapping || {};
       finalHeaders = [...baseHeaders, DORIGINAL_COL];
-      finalRows = baseRows.map(r => {
-        const val = String(r[asIsIdx] ?? '');
-        const mapped = (asIsMapping||{})[val] || '';
-        return [...r, mapped];
-      });
+      newColumns = {};
+      for (const h of baseHeaders) newColumns[h] = typedColumns[h];
+      newColumns[DORIGINAL_COL] = deriveMappedDictColumn(typedColumns[asIsVar], newRowCount, v => mapping[String(v ?? '')] || '');
     }
-    const finalTypes = buildFinalTypes(headers, columnTypes);
-    // Vetoriza a base (Fase 1): a partir daqui a base vive como colunar
-    // (Float64Array + dictionary encoding), não mais como string[][]. `finalRows`
-    // (string[][]) é liberado após esta chamada.
-    const { columns: newColumns, rowCount: newRowCount } = buildColumnar(finalHeaders, finalRows, finalTypes);
     setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,columns:newColumns,rowCount:newRowCount,columnTypes:finalTypes,varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null,inferenceConfig}}));
+
+    // Entrada recém-criada (para recomputar domínios na reconciliação abaixo —
+    // os distintos saem dos dicionários, O(distintos), sem varrer linhas).
+    const newCsvEntry = { headers: finalHeaders, columns: newColumns, rowCount: newRowCount };
+    const domainOfCol = (colName) => {
+      const ci = finalHeaders.indexOf(colName);
+      return ci >= 0 ? sortDomain(distinctColValues(newCsvEntry, ci)) : null;
+    };
 
     const svgEl=svgRef.current;
     const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
@@ -4550,20 +4501,14 @@ export default function App() {
             if (matched) { updated.colVar = {col:matched, csvId}; changed = true; }
           }
           if (!changed) return s;
-          // Recompute domains from new data
+          // Recompute domains from new data (distintos direto dos dicionários — M1)
           if (updated.rowVar) {
-            const ci = headers.indexOf(updated.rowVar.col);
-            if (ci >= 0) {
-              const vals = [...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];
-              updated.rowDomain = sortDomain(vals);
-            }
+            const d = domainOfCol(updated.rowVar.col);
+            if (d) updated.rowDomain = d;
           }
           if (updated.colVar) {
-            const ci = headers.indexOf(updated.colVar.col);
-            if (ci >= 0) {
-              const vals = [...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];
-              updated.colDomain = sortDomain(vals);
-            }
+            const d = domainOfCol(updated.colVar.col);
+            if (d) updated.colDomain = d;
           }
           // Rebuild cells preserving existing states
           const rDom = updated.rowDomain.length>0 ? updated.rowDomain : ['*'];
@@ -4608,8 +4553,8 @@ export default function App() {
             if (m) { upd.colVar = {col:m, csvId}; ch = true; }
           }
           if (!ch) return s;
-          if (upd.rowVar) { const ci=headers.indexOf(upd.rowVar.col); if(ci>=0){const vals=[...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];upd.rowDomain=sortDomain(vals);} }
-          if (upd.colVar) { const ci=headers.indexOf(upd.colVar.col); if(ci>=0){const vals=[...new Set(rows.map(r=>r[ci]??'').filter(v=>v!==''))];upd.colDomain=sortDomain(vals);} }
+          if (upd.rowVar) { const d=domainOfCol(upd.rowVar.col); if(d) upd.rowDomain=d; }
+          if (upd.colVar) { const d=domainOfCol(upd.colVar.col); if(d) upd.colDomain=d; }
           const rDom=upd.rowDomain.length>0?upd.rowDomain:['*']; const cDom=upd.colDomain.length>0?upd.colDomain:['*'];
           const nc={}; for(const rv of rDom) for(const cv of cDom){const k=`${rv}|${cv}`;nc[k]=getCellValue(s.cells,k);}
           upd.cells=nc; const {w:nw,h:nh}=computeCinemaSize(upd.rowDomain,upd.colDomain); upd.w=nw; upd.h=nh;
@@ -4648,7 +4593,6 @@ export default function App() {
       }
     }
     setWizard({
-      rawText: null,
       filename: csv.name,
       delimiter: ",",
       detected: ",",
@@ -5671,13 +5615,11 @@ export default function App() {
   },[]); // eslint-disable-line
 
   // ── Wizard preview ────────────────────────────────────────────
-  // Memoizado: antes este bloco rodava parseCSV() (parse da base inteira) a
-  // cada render do App — qualquer setState em qualquer parte do componente
-  // (debounce da simulação, hover, etc.) reparseava o arquivo inteiro de novo,
-  // o que travava a aba em bases grandes ("Página sem resposta"). Agora só
-  // reparseia quando algo relevante muda, e prioriza o cache populado por
-  // onFileChange/reparseWizardFile (parse assíncrono/chunked) em vez de
-  // reparsear de forma síncrona.
+  // M1 (import vetorizado): o preview vem inteiro do que o parse colunar já
+  // deixou no wizard (headers + previewRows de ~100 linhas + rowCount) — não
+  // existe mais rawText/string[][] para reparsear. Enquanto um reparse do
+  // passo 1 está em andamento, os campos parsed* ainda batem com o
+  // delimiter/hasHeader vigentes (só mudam juntos, ao fim do reparse).
   const editingCsv = wizard?.editCsvId ? csvStore[wizard.editCsvId] : null;
   const wizardPreview = useMemo(() => {
     if (!wizard) return null;
@@ -5690,11 +5632,10 @@ export default function App() {
       return { headers: editingCsv.headers, rows: previewRows, count: total };
     }
     if (wizard.parsedHeaders && wizard.parsedDelimiter === wizard.delimiter && wizard.parsedHasHeader === wizard.hasHeader) {
-      return { headers: wizard.parsedHeaders, rows: wizard.parsedRows, count: wizard.parsedRows.length };
+      return { headers: wizard.parsedHeaders, rows: wizard.previewRows || [], count: wizard.parsedRowCount || 0 };
     }
-    const parsed = parseCSV(wizard.rawText, wizard.delimiter, wizard.hasHeader);
-    return { ...parsed, count: parsed.rows.length };
-  }, [wizard?.rawText, wizard?.delimiter, wizard?.hasHeader, wizard?.editCsvId, wizard?.parsedHeaders, wizard?.parsedRows, wizard?.parsedDelimiter, wizard?.parsedHasHeader, editingCsv]);
+    return null;
+  }, [wizard?.delimiter, wizard?.hasHeader, wizard?.editCsvId, wizard?.parsedHeaders, wizard?.previewRows, wizard?.parsedRowCount, wizard?.parsedDelimiter, wizard?.parsedHasHeader, editingCsv]);
 
   const libWizardPreview = useMemo(() => {
     if (!libWizard) return null;
@@ -9165,7 +9106,6 @@ export default function App() {
               ) : wizard.step===2 ? (()=>{
                 const METRIC_TYPES_SET = new Set(['qty','qtdAltas','qtdAltasInfer','inadReal','inadInferida']);
                 const allHeaders = wizardPreview?.headers || (wizard.editCsvId ? csvStore[wizard.editCsvId]?.headers?.filter(h=>h!=='__DECISAO_ORIGINAL') : []) || [];
-                const rows4preview = wizardPreview?.rows || (wizard.editCsvId ? csvStore[wizard.editCsvId]?.rows : []) || [];
 
                 // Derive current metric col selections from columnTypes
                 const selMetric = {};
@@ -9193,14 +9133,14 @@ export default function App() {
                 const filterCols = allHeaders.filter(h => !usedMetricCols.has(h) && h !== wizard.asIsVar);
 
                 const asIsColIdx = wizard.asIsVar ? allHeaders.indexOf(wizard.asIsVar) : -1;
-                // Em edição a base é colunar: cobertura total dos distintos vem do
-                // dicionário da coluna (rows4preview é só amostra). No import novo,
-                // rows4preview já é o string[][] parseado completo.
+                // Cobertura total dos distintos vem do dicionário da coluna — em
+                // edição, do csvStore; em import novo, das colunas dict que o parse
+                // colunar deixou no wizard (M1; previewRows é só amostra de UI).
                 const editingColCsv = wizard.editCsvId ? csvStore[wizard.editCsvId] : null;
                 const distinctVals = asIsColIdx < 0 ? []
                   : editingColCsv
                     ? [...new Set(distinctColValues(editingColCsv, editingColCsv.headers.indexOf(wizard.asIsVar)).map(v => String(v ?? '')).filter(v=>v!==''))].sort()
-                    : [...new Set(rows4preview.map(r => String(r[asIsColIdx]??'')).filter(v=>v!==''))].sort();
+                    : ((wizard.parsedColumns?.[wizard.asIsVar]?.dict) || []).filter(v => v !== '' && v != null).sort();
                 const mapping = wizard.asIsMapping || {};
                 const hasAprovado = distinctVals.some(v => mapping[v]==='APROVADO');
                 const hasReprovado = distinctVals.some(v => mapping[v]==='REPROVADO');
@@ -9515,14 +9455,21 @@ export default function App() {
                 {wizard.step===1 ? (
                   <button onClick={()=>{
                     if (!wizardPreview) return;
-                    const {headers, rows} = wizardPreview;
-                    // Auto-suggest varTypes and metric columns
+                    const {headers} = wizardPreview;
+                    // Auto-suggest varTypes and metric columns — amostra as 1000
+                    // primeiras linhas via dicionário (M1: mesma janela que o
+                    // caminho legado amostrava do string[][]).
                     const varSuggestions = {};
+                    const sampleN = Math.min(1000, wizard.parsedRowCount || 0);
                     for (const h of headers) {
-                      const ci = headers.indexOf(h);
-                      // suggestVarType só amostra os 200 primeiros valores — limitar aqui
-                      // evita percorrer a base inteira (×colunas) só para sugerir o tipo.
-                      const vals = rows.slice(0, 1000).map(r => r[ci] ?? '').filter(Boolean);
+                      const col = wizard.parsedColumns?.[h];
+                      const vals = [];
+                      if (col?.kind === 'dict') {
+                        for (let r = 0; r < sampleN; r++) {
+                          const v = col.dict[col.codes[r]];
+                          if (v) vals.push(v);
+                        }
+                      }
                       varSuggestions[h] = suggestVarType(h, vals);
                     }
                     const metricSuggestions = suggestMetricColumns(headers);

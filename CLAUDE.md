@@ -6,7 +6,7 @@
 - SVG puro para o canvas; matrizes interativas via `foreignObject` (sem biblioteca de diagramas)
 - **Recharts** para gráficos na aba Dashboard (exceção pontual ao ADR-003 — ver `DEC-AW-001`)
 - Web Worker (`src/simulation.worker.js`, ~1357 linhas) para cálculos pesados fora da thread principal
-- **`src/columnar.js`**: módulo de armazenamento colunar do `csvStore` (otimização de memória — Fases 0, 1, 2)
+- **`src/columnar.js`**: módulo de armazenamento colunar do `csvStore` (otimização de memória — Fases 0, 1, 2) + pipeline de importação vetorizado (M1 — parse direto para colunar, sem `string[][]`)
 - **Vitest** para testes (`tests/*.test.js`, jsdom) — `npm test`
 
 ## O que é
@@ -24,6 +24,7 @@ AppCreditoSimulador/
 ├── tests/                        # Vitest (jsdom)
 │   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget
 │   ├── columnar.test.js          # GATE colunar: accessor, round-trip projeto, SharedArrayBuffer
+│   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
 │   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
 │   └── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
 ├── docs/
@@ -54,7 +55,7 @@ AppCreditoSimulador/
 - `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `as_is`, `csv`, `simPanel`, `cineminha`, `decision_lens`, `frame`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
 - `csvStore`: `{[csvId]: {name, headers, rows, columnTypes, varTypes, asIsConfig}}`
-- `wizard`: modal de importação em 3 passos — `{rawText, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId, decimalSep, decimalSepConfident}`
+- `wizard`: modal de importação em 3 passos — `{file, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId, decimalSep, decimalSepConfident, parsedHeaders, parsedColumns, parsedRowCount, previewRows}`. Desde o M1 **não guarda** `rawText` nem `string[][]`: o parse vai direto para colunas dict (`parsedColumns`), o preview é uma amostra de ~100 linhas (`previewRows`) e trocar delimitador/cabeçalho relê o `File` handle (`file`)
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha (single) — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, matrixZoom, matrixPanX, matrixPanY}`
@@ -757,31 +758,35 @@ reabrir fica visível.
 
 ## Carga de CSV assíncrona + modal de progresso (`importLoading`)
 
-Bases grandes travavam a UI no parse síncrono. `parseCSVAsync(text, delimiter,
-hasHeader, onProgress)` fatia o CSV em lotes, cede a thread principal a cada lote
-(`setTimeout 0`) e reporta progresso via `onProgress(linhasProcessadas, total)`.
+Bases grandes travavam a UI no parse síncrono. `parseCSVToColumnarAsync(text,
+delimiter, hasHeader, onProgress)` (em `src/columnar.js`; substituiu o
+`parseCSVAsync` no M1) fatia o CSV em lotes, cede a thread principal a cada lote
+(`setTimeout 0`) e reporta progresso via `onProgress(posiçãoConsumida, total)`.
 
 - Estado `importLoading`: `null | {phase:'reading'|'parsing', pct, filename}` —
   alimenta um modal de progresso. `reader.onprogress` cobre a leitura do arquivo
-  (`reading`); `parseCSVAsync` cobre o parse (`parsing`).
-- Usado em `onFileChange` (import inicial) e `reparseWizardFile` (recarga no wizard) —
-  ambos mostram o mesmo modal.
-- **Fase 0 (otimização de memória)**: `parseCSVAsync` NÃO materializa mais
+  (`reading`); `parseCSVToColumnarAsync` cobre o parse (`parsing`).
+- Usado em `onFileChange` (import inicial) e `reparseWizardFile` (recarga no wizard —
+  desde o M1 relê o `File` handle guardado no wizard) — ambos mostram o mesmo modal.
+- **Fase 0 (otimização de memória)**: o parse NÃO materializa
   `text.split(/\r?\n/)` inteiro. Varre o texto por índice (`indexOf('\n')`) e fatia
   cada linha sob demanda — elimina o pico de RAM do parse (~260MB em bases grandes).
+- **M1 (import vetorizado)**: cada linha alimenta os encoders colunares diretamente
+  (dictionary encoding por coluna) — a matriz `string[][]` nunca existe (ver seção
+  M1 abaixo).
 
-## Otimização de Memória — `src/columnar.js` (Fases 0–4 + M3/M15)
+## Otimização de Memória — `src/columnar.js` (Fases 0–4 + M1/M3/M15)
 
 Para bases sumarizadas por dia (~1MM linhas / ~130MB), a arquitetura anterior
 mantinha várias cópias completas em `string` na RAM. Ver o plano completo em
 `docs/wiki/Otimizacao-Memoria.md` (Fases 0–4) e `docs/wiki/PERFORMANCE-ANALISE.md`
 (backlog M1–M15, priorizado em Fases A–D). **Fases 0, 1, 2, 3, 4 entregues; do
-backlog do `PERFORMANCE-ANALISE.md`, M3 e M15 (Fase B) entregues.**
+backlog do `PERFORMANCE-ANALISE.md`, M3 e M15 (Fase B) e M1 (Fase D) entregues.**
 
 ### Fase 0 — Parse sem cópia intermediária
-`parseCSVAsync` varre o texto por índice em vez de `split(/\r?\n/)`. Sem o array
+O parse do import varre o texto por índice em vez de `split(/\r?\n/)`. Sem o array
 intermediário de 1MM strings, o pico de RAM do parse cai de ~3× para ~1× o tamanho
-da base.
+da base. (A técnica vive hoje dentro de `parseCSVToColumnarAsync` — ver M1.)
 
 ### Fase 1 — Armazenamento colunar no `csvStore`
 `src/columnar.js` define a estrutura vetorizada e os accessors:
@@ -879,6 +884,50 @@ código constante (resolvido uma vez, sem tradução por linha); coluna não dic
 (caminho legado `rows: string[][]`, usado só em teste) cai no `cellStr` por linha de
 antes — sem mudança de comportamento. GATE: `tests/analytics.test.js` (5B) revalidado
 sem alteração de contrato/matemática.
+
+### M1 — Import vetorizado direto para colunar (Fase D — mudança arquitetural)
+Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M1/D1). Até aqui, o funil de import
+mantinha a base em **3–5 formas simultâneas** na RAM (pico >2GB num CSV de 130MB —
+o cenário de OOM mais provável): o texto cru (`wizard.rawText`, ~260MB), a matriz
+`parsedRows: string[][]` (~15MM de strings) retida pelos 3 passos do wizard, e no
+confirm mais **duas cópias integrais** (`normalizeDecimalSep` e o
+`rows.map(r => [...r, mapped])` da derivação de `__DECISAO_ORIGINAL`) antes de o
+`buildColumnar` vetorizar **no fim**. **Correção (tudo em `src/columnar.js`, UI do
+wizard intocada):**
+1. **`parseCSVToColumnarAsync(text, delimiter, hasHeader, onProgress)`** — o parse
+   chunked (mesma varredura por índice da Fase 0, mesmo protocolo de progresso)
+   alimenta os encoders colunares **linha a linha**; como os tipos de métrica só são
+   conhecidos no passo 2, **todas** as colunas nascem dict-encoded. Devolve
+   `{headers, columns, rowCount, previewRows}`; a matriz `string[][]` nunca existe e
+   o texto cru é solto quando o parse resolve.
+2. **Wizard sem `rawText`/`parsedRows`** — o estado guarda o `File` handle (`file`),
+   `parsedHeaders`, `parsedColumns` (dict), `parsedRowCount` e `previewRows` (~100
+   linhas para a tabela de prévia). Os dicionários já são os distintos que os passos
+   2/3 precisam (sugestões `suggestVarType` por amostra das 1000 primeiras linhas via
+   `dict[codes[r]]`; mapping AS IS lê `parsedColumns[asIsVar].dict`). Trocar
+   delimitador/cabeçalho no passo 1 **relê o `File`** (`reparseWizardFile`).
+3. **`finalizeImportedColumns(headers, columns, n, columnTypes, decimalSep)`** — no
+   confirm, converte para `Float64Array` **só** as colunas marcadas como métrica
+   (`parseFloat` O(distintos) via `numByCode` + loop O(n) de inteiros) e aplica a
+   normalização de decimal (`,`→`.`) **sobre os dicionários** (O(distintos), com
+   dedup+remap de códigos quando valores colidem — ex.: `"1,5"` e `"1.5"`). Colunas
+   não tocadas são reusadas por referência. `normalizeDecimalSep` (cópia integral)
+   deixou de existir.
+4. **`deriveMappedDictColumn(srcCol, n, mapFn)`** — `__DECISAO_ORIGINAL` vira coluna
+   dict **derivada**: translate `código AS IS → código de 'APROVADO'/'REPROVADO'/''`
+   + loop O(n) sobre `codes`, sem tocar nas demais colunas, sem copiar linha. Usada
+   nos dois caminhos do confirm (import novo e edição).
+5. **`retypeColumn(col, toNum, n)`** — o modo de edição do wizard reclassifica
+   colunas (métrica ↔ dimensão) coluna a coluna, **sem `materializeRows`** (que
+   copiava a base inteira como `string[][]`); colunas de tipo inalterado são
+   compartilhadas por referência.
+Domínios da reconciliação de Cineminha no confirm saem de `distinctColValues`
+(O(distintos)) em vez de varrer linhas. Nenhuma mudança de matemática nem de UX (3
+passos, preview, progresso e validações idênticos). GATE:
+`tests/importPipeline.test.js` — equivalência célula a célula contra o caminho
+legado (parse `string[][]` → `normalizeDecimalSep` → append `__DECISAO_ORIGINAL` →
+`buildColumnar`) reimplementado como controle, incl. aspas/CRLF/ragged/decimal
+vírgula/colisão de normalização/`hasHeader=false`/`retypeColumn`.
 
 ## Inferência de Negados (Tabela de Referência)
 
