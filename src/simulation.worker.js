@@ -367,6 +367,22 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
   };
 }
 
+// Overlay tipado (Otimização de Performance M2) — códigos da decisão SIMULADA por linha.
+// Em vez de 1 objeto de 4 campos por linha (~120MB/1MM linhas, retido no cache do Dashboard
+// por canvas), o overlay é um Int8Array de 1 byte/linha (~1MB/1MM). A decisão ORIGINAL já
+// vive na coluna dict __DECISAO_ORIGINAL, então os consumidores a releem de lá; o "impactado"
+// é derivado comparando simulada vs. original no ponto de consumo.
+//   DEC_SAME (0)     → decisão simulada == original (não roteou, as_is, imutável ou sem raiz);
+//                      o decode devolve a própria string original — cobre '', 'IGNORAR', etc.,
+//                      sem hardcode e sem perda.
+//   DEC_APROVADO (1) → roteou para terminal 'approved'.
+//   DEC_REPROVADO(2) → roteou para terminal 'rejected'.
+// Int8Array já zera (DEC_SAME por default): só gravamos 1/2 quando a linha muda de decisão.
+const DEC_SAME = 0, DEC_APROVADO = 1, DEC_REPROVADO = 2;
+function decodeSimDecision(code, origStr) {
+  return code === DEC_APROVADO ? 'APROVADO' : code === DEC_REPROVADO ? 'REPROVADO' : origStr;
+}
+
 function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
   const hasLens = lensPopulations && Object.keys(lensPopulations).length > 0;
   const hasAsIs = Object.values(csvStore).some(csv => csv.headers.indexOf('__DECISAO_ORIGINAL') >= 0);
@@ -437,33 +453,18 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
     });
 
     const nRows = rowCount(csv);
-    const rowDecisions = new Array(nRows);
+    const sim = new Int8Array(nRows); // DEC_SAME (0) por default — só mudamos linhas roteadas
     for (let rowIdx = 0; rowIdx < nRows; rowIdx++) {
-      const decisaoOriginal = cellStr(csv, rowIdx, dOrigIdx) ?? '';
       const isMutable = !hasLens || Object.values(lensPopulations).some(pop => pop[csvId]?.[rowIdx] === true);
-
-      if (!isMutable || csvRoots.length === 0) {
-        rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada: decisaoOriginal, flagImpactado: false };
-        continue;
-      }
+      if (!isMutable || csvRoots.length === 0) continue; // mantém original (DEC_SAME)
 
       const boardResult = traverseRow(csv, rowIdx, csvRoots[0].id);
-      let decisaoSimulada = decisaoOriginal;
-
-      if (boardResult === 'approved') {
-        decisaoSimulada = 'APROVADO';
-      } else if (boardResult === 'rejected') {
-        decisaoSimulada = 'REPROVADO';
-      } else if (boardResult === 'as_is') {
-        decisaoSimulada = decisaoOriginal;
-      }
-
-      const flagImpactado = decisaoOriginal !== '' && decisaoSimulada !== decisaoOriginal;
-
-      rowDecisions[rowIdx] = { rowIdx, decisaoOriginal, decisaoSimulada, flagImpactado };
+      if (boardResult === 'approved') sim[rowIdx] = DEC_APROVADO;
+      else if (boardResult === 'rejected') sim[rowIdx] = DEC_REPROVADO;
+      // 'as_is' ou null (não roteou) → mantém a decisão original (DEC_SAME, já é 0)
     }
 
-    overlay[csvId] = { rowDecisions };
+    overlay[csvId] = { sim };
   }
 
   return hasAnyDecisaoCol ? overlay : null;
@@ -476,7 +477,7 @@ function computeIncrementalResult(overlay, csvStore, inferenceRef) {
   const sim = { approvedQty: 0, rejectedQty: 0, totalQty: 0, qtdAltasSum: 0, qtdAltasInferSum: 0, inadRRaw: 0, inadIRaw: 0 };
   const imp = { qty: 0, rToA: 0, aToR: 0, qtdAltasSimSum: 0, inadRSimRaw: 0, inadISimRaw: 0, altasInferRtoA: 0, altasRealAtoR: 0 };
 
-  for (const [csvId, { rowDecisions }] of Object.entries(overlay)) {
+  for (const [csvId, { sim: simCodes }] of Object.entries(overlay)) {
     const csv = csvStore[csvId];
     if (!csv) continue;
     const types = csv.columnTypes || {};
@@ -489,12 +490,16 @@ function computeIncrementalResult(overlay, csvStore, inferenceRef) {
     const altasInferIdx = getIdx('qtdAltasInfer');
     const inadRIdx      = getIdx('inadReal');
     const inadIIdx      = getIdx('inadInferida');
+    const dOrigIdx      = csv.headers.indexOf('__DECISAO_ORIGINAL');
     const infResolve    = buildInferenceResolver(csv, inferenceRef);
 
-    const nRows = rowCount(csv);
-    for (const rd of rowDecisions) {
-      const ri = rd.rowIdx;
-      if (ri < 0 || ri >= nRows) continue;
+    const nRows = Math.min(simCodes.length, rowCount(csv));
+    for (let ri = 0; ri < nRows; ri++) {
+      // Decisão original vem da coluna dict (o overlay tipado guarda só a simulada);
+      // decodeSimDecision devolve a própria original quando a linha não mudou (DEC_SAME).
+      const decisaoOriginal = dOrigIdx >= 0 ? (cellStr(csv, ri, dOrigIdx) ?? '') : '';
+      const decisaoSimulada = decodeSimDecision(simCodes[ri], decisaoOriginal);
+      const flagImpactado   = decisaoOriginal !== '' && decisaoSimulada !== decisaoOriginal;
       const qty        = qtyIdx       >= 0 ? (cellNum(csv, ri, qtyIdx)       || 1) : 1;
       const altas      = altasIdx     >= 0 ? (cellNum(csv, ri, altasIdx)     || 0) : 0;
       const inadR      = inadRIdx     >= 0 ? (cellNum(csv, ri, inadRIdx)     || 0) : 0;
@@ -506,25 +511,25 @@ function computeIncrementalResult(overlay, csvStore, inferenceRef) {
       }
 
       bl.totalQty += qty;
-      if (rd.decisaoOriginal === 'APROVADO') {
+      if (decisaoOriginal === 'APROVADO') {
         bl.approvedQty += qty; bl.qtdAltasSum += altas; bl.qtdAltasInferSum += altasInfer; bl.inadRRaw += inadR; bl.inadIRaw += inadI;
-      } else if (rd.decisaoOriginal === 'REPROVADO') {
+      } else if (decisaoOriginal === 'REPROVADO') {
         bl.rejectedQty += qty;
       }
 
       sim.totalQty += qty;
-      if (rd.decisaoSimulada === 'APROVADO') {
+      if (decisaoSimulada === 'APROVADO') {
         sim.approvedQty += qty; sim.qtdAltasSum += altas; sim.qtdAltasInferSum += altasInfer; sim.inadRRaw += inadR; sim.inadIRaw += inadI;
-      } else if (rd.decisaoSimulada === 'REPROVADO') {
+      } else if (decisaoSimulada === 'REPROVADO') {
         sim.rejectedQty += qty;
       }
 
-      if (rd.flagImpactado) {
+      if (flagImpactado) {
         imp.qty += qty;
-        if (rd.decisaoOriginal === 'REPROVADO' && rd.decisaoSimulada === 'APROVADO') {
+        if (decisaoOriginal === 'REPROVADO' && decisaoSimulada === 'APROVADO') {
           imp.rToA += qty; imp.qtdAltasSimSum += altas; imp.inadRSimRaw += inadR; imp.inadISimRaw += inadI;
           imp.altasInferRtoA += altasInfer;
-        } else if (rd.decisaoOriginal === 'APROVADO' && rd.decisaoSimulada === 'REPROVADO') {
+        } else if (decisaoOriginal === 'APROVADO' && decisaoSimulada === 'REPROVADO') {
           imp.aToR += qty;
           imp.altasRealAtoR += altas;
         }
@@ -1131,7 +1136,12 @@ const ANALYTICS_METRIC_TYPES = new Set(['qty', 'qtdAltas', 'qtdAltasInfer', 'ina
 // Overlay (decisão simulada por csvId+rowIdx) de um canvas, memoizado por hash de
 // shapes/conns/lensPopulations + versão do csvStore (5B — evita reprocessar canvases intocados).
 function cachedCanvasOverlay(canvasId, shapes, conns, lensPopulations, csvStore) {
-  const key = csvStoreVersion + '|' + JSON.stringify(shapes) + '|' + JSON.stringify(conns) + '|' + JSON.stringify(lensPopulations || {});
+  // Chave barata (M2): NÃO stringifica `lensPopulations` (Array<boolean> de ~1MM posições
+  // por lens → ~5-6MB de string temporária por lens, por canvas, a cada tick do Dashboard).
+  // As populações são 100% derivadas das regras dos shapes decision_lens (já embutidas em
+  // `shapes`) + a base (versionada por `csvStoreVersion`), então shapes + conns + versão já
+  // determinam o overlay unicamente — incluir as populações na chave era redundante e caro.
+  const key = csvStoreVersion + '|' + JSON.stringify(shapes) + '|' + JSON.stringify(conns);
   const hit = analyticsOverlayCache[canvasId];
   if (hit && hit.key === key) return hit.overlay;
   const overlay = computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations);
@@ -1239,9 +1249,10 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
       const asIs = cellStr(csv, rowIdx, dOrigIdx) ?? '';
       putCode('__DECISAO_AS_IS', w, asIs); // AS IS único e global
       // Join por (csvId, rowIdx): cada canvas marcado contribui sua coluna de decisão.
+      // Overlay tipado (M2): lê o código da linha e decodifica (DEC_SAME → própria AS IS).
       for (const cs of canvasScenarios) {
-        const rd = cs.overlay?.[csvId]?.rowDecisions?.[rowIdx];
-        putCode(cs.decisionCol, w, rd ? rd.decisaoSimulada : asIs);
+        const simCodes = cs.overlay?.[csvId]?.sim;
+        putCode(cs.decisionCol, w, simCodes ? decodeSimDecision(simCodes[rowIdx], asIs) : asIs);
       }
     }
   }
@@ -1315,11 +1326,11 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_OVERLAY') {
-    // `overlay` (rowDecisions: 1 objeto por linha, ~1MM numa base diária) é usado só
-    // aqui dentro por computeIncrementalResult e descartado em seguida. Ele NÃO é
-    // enviado à main thread: a main só consome `incrementalResult` (agregados) e
-    // `nodeArrivals`. Antes o overlay ia no postMessage (structured clone = +1MM
-    // objetos na main) e era guardado num estado que ninguém lia — fonte de OOM ao
+    // `overlay` é tipado (M2): 1 Int8Array/csv (~1MB/1MM linhas) com o código da decisão
+    // simulada por linha. É usado só aqui dentro por computeIncrementalResult e descartado
+    // em seguida — NÃO é enviado à main thread: a main só consome `incrementalResult`
+    // (agregados) e `nodeArrivals`. Antes o overlay ia no postMessage (structured clone =
+    // +1MM objetos na main) e era guardado num estado que ninguém lia — fonte de OOM ao
     // editar o canvas com base grande. O caminho do Dashboard tem seu próprio overlay
     // memoizado (cachedCanvasOverlay), independente deste.
     const overlay = computeSimulatedDecisions(e.data.shapes, e.data.conns, workerCsvStore, e.data.lensPopulations);
