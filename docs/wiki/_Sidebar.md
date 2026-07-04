@@ -9,6 +9,10 @@
 - [[Epicos-Cineminha|Cineminha (Matriz Cruzada)]]
 - [[Epicos-Importacao|Importação e AS IS]]
 - [[Epicos-AnalyticsWorkspace|Analytics Workspace]]
+- [[Epicos-CopilotoIA|Copiloto IA (local-first)]]
+  - [[Copiloto-ConstrucaoAssistida|1. Construção Assistida]]
+  - [[Copiloto-SugestoesMelhoria|2. Sugestões de Melhoria]]
+  - [[Copiloto-DocumentacaoAutomatica|3. Documentação Automática]]
 - [[Roadmap]]
 
 ---

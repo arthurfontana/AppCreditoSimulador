@@ -126,3 +126,34 @@ o comportamento de troca/recarga da referência (§9.4) e o formato visual do se
 ainda resolve a coluna), e a heurística de coluna de aprovados (`/aprov/i`) é frágil para
 nomes atípicos — mitigada pelo override explícito de `weightCol`. Validado em
 `tests/inferenceCascade.test.js` (resolveWeightCol, aprovados ⊆ propostas, `inferenceWeightMode`).
+
+---
+
+## ADR-007 (DEC-IA-001..006): Copiloto local-first com camada de IA opcional e plugável
+
+**Decisão:** as três frentes do copiloto (construção assistida, sugestões de
+melhoria, documentação automática) são implementadas **100% locais** — motores
+determinísticos no worker sobre uma representação canônica da política (**PolicyIR**).
+A IA generativa é uma **camada opcional de enriquecimento**, atrás de uma interface
+`AIProvider` plugável (sem provedor escolhido; adapters intercambiáveis; null
+provider como default), configurada pelo usuário em runtime e regida por um contrato
+de privacidade em níveis (estrutura e agregados podem sair; **dado linha a linha
+nunca sai**) e por um contrato anti-alucinação (**números sempre do motor**; a IA só
+escreve patches de IR, validados e simulados antes de exibir).
+
+**Contexto:** políticas de crédito contêm informação sensível; parte dos usuários
+opera sem poder acionar APIs externas. A análise de viabilidade
+([[Epicos-CopilotoIA]]) mostrou que os blocos de inteligência necessários já existem
+no projeto (grafo de fluxo, Pareto/Johnny, `nodeArrivals`, `incrementalResult`,
+`exportDiagnosticCSV`, `cinemaLibrary`) — o que falta é orquestração e UX, não LLM.
+
+**Justificativa:**
+- Viabiliza uso em ambiente regulado por padrão (privacidade estrutural, não por configuração).
+- Precisão: recomendações e documentos carregam números simulados, nunca estimados por modelo.
+- Sem lock-in: trocar/remover o provedor não remove funcionalidade (critério de aceite permanente).
+
+**Tradeoff aceito:** sem IA, a entrada é estruturada (formulários/gestos, não
+linguagem natural) e a prosa da documentação é mecânica; a busca do Goal Seek é
+gulosa (ótimos locais, mitigados por beam search e pela fronteira exposta). Detalhes,
+níveis de maturidade e plano de sessões em [[Epicos-CopilotoIA]] e nos documentos
+das frentes.
