@@ -47,6 +47,17 @@ Em vez de simular toda a base do zero, sobrescreve apenas o subconjunto afetado 
 
 ---
 
+## Copiloto de Política (IA opcional, local-first)
+
+Épico planejado e documentado em [[Epicos-CopilotoIA]] (construção assistida,
+sugestões de melhoria orientadas a objetivo/Goal Seek, documentação automática).
+Princípio: tudo funciona 100% local; IA é camada opcional de enriquecimento
+(ADR-007). O plano de sessões absorve dois itens deste Roadmap: **JSON canônico da
+política** (PolicyIR, Sessão 0) e **cálculo de delta marginal** (deltas O(1) por
+segmento no Goal Seek, Sessão 4).
+
+---
+
 ## Exportação
 
 - Exportar política de crédito como JSON estruturado

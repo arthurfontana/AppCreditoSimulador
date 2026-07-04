@@ -18,6 +18,7 @@ Whiteboard interativo para modelagem e simulação de políticas de crédito. O 
 | [[Epicos-Simulador]] | Engine de simulação e painel de indicadores |
 | [[Epicos-Cineminha]] | Matriz cruzada e motor de otimização Pareto |
 | [[Epicos-Importacao]] | Wizard de importação CSV e variável AS IS |
+| [[Epicos-CopilotoIA]] | Copiloto de política (IA opcional, local-first) — arquitetura evolutiva |
 | [[Roadmap]] | Funcionalidades planejadas e não implementadas |
 | [[Decisoes]] | Registros de decisão arquitetural (ADRs) |
 
