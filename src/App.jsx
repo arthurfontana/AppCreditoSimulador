@@ -2584,6 +2584,64 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
   );
 }
 
+// ── TextWidget — caixa de texto livre para anotar análises e conclusões ───────
+// Componente de texto (não é gráfico): título + área de texto livre com correção
+// automática (spellcheck nativo do navegador — sublinha erros e sugere correções no
+// menu de contexto). Vive no mesmo `analyticsLayout` dos gráficos (persistido no
+// projeto e na sessionStorage), diferenciado por `type: "text"`.
+function TextWidget({ widget, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart }) {
+  const cfg = widget.config || {};
+  const set = (patch) => onConfigChange(widget.id, patch);
+  const spell = cfg.spellCheck ?? true;
+  return (
+    <div style={{ position: "relative", background: "#fffef7", borderRadius: 14, border: "1px solid #fde68a",
+      boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "12px 14px 12px", display: "flex", flexDirection: "column",
+      height: "100%", boxSizing: "border-box" }}>
+      {/* Cabeçalho: arrasto + título + correção + duplicar + remover */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexShrink: 0 }}>
+        {onDragStart && <div onMouseDown={(e) => { e.stopPropagation(); onDragStart(e); }} style={{ cursor: "grab", color: "#d6b45a", fontSize: 15, userSelect: "none", flexShrink: 0, lineHeight: 1 }}>⠿</div>}
+        <span style={{ fontSize: 14, flexShrink: 0, lineHeight: 1 }}>📝</span>
+        <input value={cfg.title ?? ""} onChange={(e) => set({ title: e.target.value })}
+          placeholder="Título da anotação"
+          style={{ flex: 1, fontSize: 14, fontWeight: 600, color: "#78350f", border: "1px solid transparent",
+            borderRadius: 7, padding: "4px 7px", background: "transparent", fontFamily: "inherit", outline: "none", minWidth: 0 }}
+          onFocus={(e) => { e.target.style.borderColor = "#fde68a"; e.target.style.background = "#fffbeb"; }}
+          onBlur={(e) => { e.target.style.borderColor = "transparent"; e.target.style.background = "transparent"; }} />
+        <button onClick={() => set({ spellCheck: !spell })} title={spell ? "Correção automática ligada (clique p/ desligar)" : "Correção automática desligada (clique p/ ligar)"}
+          style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: `1px solid ${spell ? "#f59e0b" : "#e2e8f0"}`,
+            background: spell ? "#fef3c7" : "#fff", color: spell ? "#b45309" : "#94a3b8",
+            cursor: "pointer", fontSize: 11, fontWeight: 700, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit" }}>ABC</button>
+        {onDuplicate && (
+          <button onClick={() => onDuplicate(widget.id)} title="Duplicar anotação"
+            style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fde68a", background: "#fffbeb",
+              color: "#b45309", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>⧉</button>
+        )}
+        <button onClick={() => onDelete(widget.id)} title="Remover anotação"
+          style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
+            color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+      </div>
+
+      {/* Área de texto livre — correção automática via spellcheck nativo */}
+      <textarea value={cfg.text ?? ""} onChange={(e) => set({ text: e.target.value })}
+        placeholder="Escreva aqui suas análises e conclusões…"
+        spellCheck={spell} autoCorrect={spell ? "on" : "off"} autoCapitalize="sentences" lang="pt-BR"
+        style={{ flex: 1, minHeight: 0, width: "100%", resize: "none", boxSizing: "border-box",
+          border: "1px solid #fef3c7", borderRadius: 9, background: "#fff", padding: "10px 12px",
+          fontSize: 13.5, lineHeight: 1.55, color: "#334155", fontFamily: "inherit", outline: "none" }}
+        onFocus={(e) => { e.target.style.borderColor = "#fcd34d"; }}
+        onBlur={(e) => { e.target.style.borderColor = "#fef3c7"; }} />
+
+      {/* Resize handles — transparentes, ativam cursor e drag */}
+      {onResizeStart && ['n','s','e','w','ne','nw','se','sw'].map(dir => {
+        const H = 8, C = 16;
+        const cur = { n:'n-resize', s:'s-resize', e:'e-resize', w:'w-resize', ne:'ne-resize', nw:'nw-resize', se:'se-resize', sw:'sw-resize' };
+        const pos = { n:{top:0,left:C,right:C,height:H}, s:{bottom:0,left:C,right:C,height:H}, e:{right:0,top:C,bottom:C,width:H}, w:{left:0,top:C,bottom:C,width:H}, ne:{top:0,right:0,width:C,height:C}, nw:{top:0,left:0,width:C,height:C}, se:{bottom:0,right:0,width:C,height:C}, sw:{bottom:0,left:0,width:C,height:C} }[dir];
+        return <div key={dir} onMouseDown={(e) => { e.stopPropagation(); onResizeStart(e, dir); }} style={{ position:"absolute", zIndex:10, cursor:cur[dir], ...pos }} />;
+      })}
+    </div>
+  );
+}
+
 // ── GroupingModal — editor de agrupamento (dimensão derivada) ─────────────────
 function GroupingModal({ draft, baseDataset, existingNames, onSave, onClose }) {
   const [name, setName]           = useState(draft.name || "");
@@ -2773,7 +2831,16 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analyticsDataset]);
 
+  const makeTextWidget = () => {
+    const nextY = analyticsLayout.reduce((acc, w) => Math.max(acc, (w.y ?? 0) + (w.h ?? 500)), 0);
+    return {
+      id: uid(), type: "text", x: 24, y: analyticsLayout.length === 0 ? 24 : nextY + 24, w: 380, h: 220,
+      config: { title: "Anotação", text: "", spellCheck: true },
+    };
+  };
+
   const addWidget = () => setAnalyticsLayout(prev => [...prev, makeWidget("Novo gráfico")]);
+  const addTextWidget = () => setAnalyticsLayout(prev => [...prev, makeTextWidget()]);
   const duplicateWidget = (id) => setAnalyticsLayout(prev => {
     const src = prev.find(w => w.id === id);
     if (!src) return prev;
@@ -2831,7 +2898,11 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
     e.stopPropagation();
     const wgt = layoutRef.current.find(w => w.id === id);
     if (!wgt) return;
-    dragRef.current = { id, type, dir, startX: e.clientX, startY: e.clientY, startWx: wgt.x ?? 24, startWy: wgt.y ?? 24, startW: wgt.w ?? 560, startH: wgt.h ?? 500 };
+    // Sem teto de tamanho — o usuário aumenta o quanto quiser (só um piso p/ não colapsar).
+    // Caixas de texto podem ser menores que os gráficos.
+    const isText = wgt.type === 'text';
+    const minW = isText ? 160 : 340, minH = isText ? 100 : 340;
+    dragRef.current = { id, type, dir, startX: e.clientX, startY: e.clientY, startWx: wgt.x ?? 24, startWy: wgt.y ?? 24, startW: wgt.w ?? 560, startH: wgt.h ?? 500, minW, minH };
     const onMove = (ev) => {
       const dr = dragRef.current; if (!dr) return;
       const dx = ev.clientX - dr.startX, dy = ev.clientY - dr.startY;
@@ -2840,10 +2911,10 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
       } else {
         const d = dr.dir;
         let nx = dr.startWx, ny = dr.startWy, nw = dr.startW, nh = dr.startH;
-        if (d.includes('e')) nw = Math.min(1200, Math.max(340, dr.startW + dx));
-        if (d.includes('s')) nh = Math.min(900, Math.max(340, dr.startH + dy));
-        if (d.includes('w')) { nw = Math.min(1200, Math.max(340, dr.startW - dx)); nx = Math.max(0, dr.startWx + dr.startW - nw); }
-        if (d.includes('n')) { nh = Math.min(900, Math.max(340, dr.startH - dy)); ny = Math.max(0, dr.startWy + dr.startH - nh); }
+        if (d.includes('e')) nw = Math.max(dr.minW, dr.startW + dx);
+        if (d.includes('s')) nh = Math.max(dr.minH, dr.startH + dy);
+        if (d.includes('w')) { nw = Math.max(dr.minW, dr.startW - dx); nx = Math.max(0, dr.startWx + dr.startW - nw); }
+        if (d.includes('n')) { nh = Math.max(dr.minH, dr.startH - dy); ny = Math.max(0, dr.startWy + dr.startH - nh); }
         setAnalyticsLayout(prev => prev.map(w => w.id === dr.id ? { ...w, x: nx, y: ny, w: nw, h: nh } : w));
       }
     };
@@ -2875,6 +2946,12 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
                   border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
                 <span style={{ fontSize: 14, lineHeight: 1 }}>⬇</span> Exportar CSV
               </button>
+              <button onClick={addTextWidget}
+                title="Adiciona uma caixa de texto livre para explicar análises e conclusões"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #f59e0b", background: "#fffbeb", color: "#b45309", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 14, lineHeight: 1 }}>📝</span> Adicionar texto
+              </button>
               <button onClick={addWidget}
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
                   border: "1px solid #2563eb", background: "#2563eb", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
@@ -2896,10 +2973,17 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
             <div style={{ position: "relative", minHeight: canvasH, minWidth: canvasW }}>
               {analyticsLayout.map(w => (
                 <div key={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 560, height: w.h ?? 500 }}>
-                  <AnalyticsWidget widget={w} analyticsDataset={analyticsDataset} pageFilters={pageFilters}
-                    onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget} onDuplicate={duplicateWidget}
-                    onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
-                    onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+                  {w.type === "text" ? (
+                    <TextWidget widget={w}
+                      onConfigChange={changeConfig} onDelete={removeWidget} onDuplicate={duplicateWidget}
+                      onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
+                      onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+                  ) : (
+                    <AnalyticsWidget widget={w} analyticsDataset={analyticsDataset} pageFilters={pageFilters}
+                      onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget} onDuplicate={duplicateWidget}
+                      onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
+                      onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+                  )}
                 </div>
               ))}
             </div>
