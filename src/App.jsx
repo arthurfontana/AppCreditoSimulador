@@ -1063,7 +1063,7 @@ function populateCellsFromResultVar(shape, csvStore) {
 // (0) quando 100% do volume DECIDIDO da interseção é REPROVADO (nenhuma
 // aprovação); caselas sem decisão/volume ficam elegíveis (1). Retorna null
 // quando não há decisão AS IS disponível para o dataset (sem prévia).
-function computeAsIsCells(shape, csvStore) {
+export function computeAsIsCells(shape, csvStore) {
   const { rowVar, colVar, rowDomain, colDomain } = shape;
   const csvId = rowVar?.csvId || colVar?.csvId;
   if (!csvId) return null;
@@ -3220,6 +3220,10 @@ export default function App() {
   // ── Web Worker — simulation off the main thread ───────────────
   const workerRef = useRef(null);
   const pendingOptimShapeIdRef = useRef(null);
+  // Prévia AS IS contextualizada (assignCinemaVar): token por shape p/ ignorar
+  // respostas obsoletas do worker (reatribuição posterior antes da resposta chegar).
+  const asIsPreviewTokenRef = useRef({});
+  const asIsPreviewCounterRef = useRef(0);
 
   useEffect(() => {
     const worker = new Worker(new URL('./simulation.worker.js', import.meta.url), { type: 'module' });
@@ -3234,6 +3238,25 @@ export default function App() {
         setLensCounts(e.data.lensCounts || {});
       } else if (msgType === 'ANALYTICS_RESULT') {
         setAnalyticsDataset(e.data.dataset);
+      } else if (msgType === 'ASIS_PREVIEW_RESULT') {
+        // Prévia AS IS contextualizada ao nó (respeita filtros a montante) — chega
+        // async do worker após assignCinemaVar. Aplica só se o token ainda for o mais
+        // recente (sem reatribuição posterior) e as caselas não tiverem sido editadas
+        // manualmente. Não faz pushHistory: a atribuição já registrou o passo de undo.
+        const { cellsByShape, reqTokens } = e.data;
+        if (!cellsByShape) return;
+        setShapes(prev => {
+          let changed = false;
+          const next = prev.map(s => {
+            const cells = cellsByShape[s.id];
+            if (!cells) return s;
+            if (asIsPreviewTokenRef.current[s.id] !== reqTokens?.[s.id]) return s;
+            if (s.cellsUserEdited) return s;
+            changed = true;
+            return { ...s, cells };
+          });
+          return changed ? next : prev;
+        });
       } else if (msgType === 'OPTIM_RESULT') {
         const { shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf } = e.data;
         if (pendingOptimShapeIdRef.current !== shapeId) return;
@@ -5648,7 +5671,14 @@ export default function App() {
       });
     }
 
-    setShapes(prev => prev.map(s => {
+    // Alvos da prévia AS IS: cineminhas cujas caselas não foram editadas manualmente
+    // e não têm resultVar. A prévia agora é CONTEXTUALIZADA ao nó (respeita os filtros
+    // a montante — Decision Lens/ports) e por isso é computada no worker, de forma
+    // assíncrona; até a resposta chegar, as caselas ficam com o valor herdado (default
+    // elegível). `reqTokens` deixa a resposta descartar-se se houver reatribuição.
+    const previewTargetIds = [];
+    const reqTokens = {};
+    const nextShapes = shapesR.current.map(s => {
       if (shapeIds.includes(s.id)) {
         const newRowVar    = axis==='row' ? {col,csvId} : s.rowVar;
         const newColVar    = axis==='col' ? {col,csvId} : s.colVar;
@@ -5665,12 +5695,13 @@ export default function App() {
         const baseShape = {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
         if (s.resultVar) {
           baseShape.cells = populateCellsFromResultVar(baseShape, csvStoreR.current);
-        } else if (!s.cellsUserEdited) {
-          // Prévia automática a partir da decisão histórica (AS IS): caselas com
-          // aprovações herdam a política atual (baseline); caselas 100% reprovadas
-          // ficam não elegíveis. Sobrescrita por qualquer edição manual do usuário.
-          const preview = computeAsIsCells(baseShape, csvStoreR.current);
-          if (preview) baseShape.cells = preview;
+        } else if (!s.cellsUserEdited && (newRowVar || newColVar)) {
+          // Prévia contextualizada ao nó: computada no worker sobre a população que
+          // efetivamente chega a este cineminha. Registra o token e adia a aplicação.
+          const token = ++asIsPreviewCounterRef.current;
+          asIsPreviewTokenRef.current[s.id] = token;
+          reqTokens[s.id] = token;
+          previewTargetIds.push(s.id);
         }
         return baseShape;
       }
@@ -5678,8 +5709,20 @@ export default function App() {
         return {...s, ...portPositions[s.id]};
       }
       return s;
-    }));
+    });
+
+    setShapes(nextShapes);
     setAxisModal(null);
+
+    if (previewTargetIds.length > 0) {
+      workerRef.current?.postMessage({
+        type: 'COMPUTE_ASIS_PREVIEW',
+        shapes: nextShapes,
+        conns: connsR.current,
+        targetIds: previewTargetIds,
+        reqTokens,
+      });
+    }
   }, []); // eslint-disable-line
 
   // ── assignResultVar ───────────────────────────────────────────
