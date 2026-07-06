@@ -424,6 +424,18 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   - **`bar100`**: normaliza cada bucket do eixo X para somar 100% (memo `stacked100` derivado do pivot), `<Bar stackId>`, eixo Y `[0,100]%`; poço de série rotulado "Composição".
   - **`kpi`**: ignora Eixo X/Série, usa só a Métrica + seletores Baseline (A)/Comparação (B) (5C, DEC-AW-008); `KpiCard` computa A e B sobre todas as linhas via `computeWidgetMetric`; valor grande = B + baseline A + delta `B − A` (pp/qty) colorido por `GOOD_WHEN_LOWER` (`inadReal`/`inadInferida` = menor é melhor). A/B persistidos em `config.kpiA`/`kpiB`; export do dataset largo via **⬇ Exportar CSV** no header.
   - **Constantes**: `CHART_TYPES`, `GOOD_WHEN_LOWER`.
+- **Caixas de texto (`type: "text"`)**: além dos gráficos, o `analyticsLayout` aceita
+  widgets de **texto livre** para anotar análises e conclusões, renderizados pelo
+  componente `TextWidget` (não pelo `AnalyticsWidget` — o `AnalysisTab` faz o branch por
+  `w.type === "text"`). `config: {title, text, spellCheck}`. Adicionados pelo botão
+  **📝 Adicionar texto** no header. A área de texto usa a **correção automática nativa do
+  navegador** (`spellCheck`/`autoCorrect`/`autoCapitalize`, `lang="pt-BR"` — sublinha
+  erros e sugere correções no menu de contexto); botão **ABC** liga/desliga (`config.spellCheck`,
+  default `true`). Como vive dentro de `analyticsLayout`, já é persistido no Projeto e na
+  `sessionStorage` sem mudança de schema.
+- **Redimensionamento livre**: `startWidgetInteract` (resize) **não tem teto** de largura/
+  altura — o usuário aumenta qualquer widget o quanto quiser; só há um piso por tipo
+  (gráfico `340×340`, texto `160×100`) para o card não colapsar.
 
 ### Agrupamentos (dimensões derivadas)
 
