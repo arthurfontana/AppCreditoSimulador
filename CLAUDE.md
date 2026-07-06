@@ -125,11 +125,13 @@ AppCreditoSimulador/
   metadata: CinemaMetadata | null,      // metadados de biblioteca (type, identifiers, dimensions, etc.)
   visibleRow: null|string[],            // "Configurar nó" eixo linha (ver Domínio Exibido)
   visibleCol: null|string[],            // "Configurar nó" eixo coluna
+  cellsUserEdited: boolean,             // true = usuário mexeu nas caselas (bloqueia a prévia AS IS — ver Prévia AS IS)
 }
 ```
 - **Tipo `eligibility`**: ports `"Elegível"` (verde) e `"Não Elegível"` (vermelho)
 - **Tipo `offer`**: ports `"Com Oferta"` (azul-claro) e `"Sem Oferta"` (amarelo)
 - Chave de célula 1D-linha: `"${rowVal}|*"` / 1D-coluna: `"*|${colVal}"`
+- **Prévia AS IS**: ao atribuir uma variável de eixo (`assignCinemaVar`), se as caselas ainda não foram editadas manualmente (`!cellsUserEdited`) e o dataset tem decisão histórica (`__DECISAO_ORIGINAL`), as caselas são pré-preenchidas via `computeAsIsCells` como *baseline*: caselas com qualquer aprovação AS IS ficam elegíveis; uma casela só fica **não elegível** quando **100% do volume decidido da interseção é REPROVADO** (nenhuma aprovação). Qualquer edição manual (toggle, valor, otimizador, Johnny, biblioteca) grava `cellsUserEdited=true` e passa a sobrescrever a prévia. Persistido junto do shape (via `canvases`, sem bump de schema).
 
 ### Shape: `decision_lens`
 ```js
@@ -228,6 +230,7 @@ AppCreditoSimulador/
 - `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → array de pontos
 - `extractScenarios(frontier)`: extrai 4 pontos representativos → `{conservador, balanceado, melhorEficiencia, expansao}` onde `melhorEficiencia` é o joelho da curva
 - `isCellEligible(cells, key)`: retorna `true` se a célula está elegível (considera `null`/`true` como elegível, `false` como não elegível)
+- `computeAsIsCells(shape, csvStore)`: deriva a prévia de elegibilidade das caselas a partir da decisão histórica AS IS (`__DECISAO_ORIGINAL`) — agrega volume aprovado/reprovado por interseção `rowVal|colVal`; casela = `1` (elegível) se há qualquer aprovação, `0` só quando 100% do volume decidido é REPROVADO. Retorna `null` sem AS IS. Usado na prévia do `assignCinemaVar` e no botão **↺ Resgatar AS IS** do Johnny
 - `suggestVarType(colName, values)`: heurística para sugerir `ordinal` ou `categorical`
 - `suggestMetricColumns(headers)`: heurística para mapear nomes de colunas aos tipos de métrica
 - `detectDelimiter(text)`: detecta separador CSV com score de confiança
@@ -653,8 +656,16 @@ Com 2 ou mais nós Cineminha selecionados, a toolbar contextual exibe **⚡ Otim
 }
 ```
 
+### Resgatar AS IS
+Botão **↺ Resgatar AS IS** no rodapé do `johnnyModal` (habilitado só quando algum
+dataset dos cineminhas tem `__DECISAO_ORIGINAL`): preenche `proposedByShape` de todos
+os cineminhas via `computeAsIsCells` (baseline da decisão histórica — caselas com
+aprovação ficam elegíveis; só as 100% reprovadas ficam não elegíveis), recalcula o
+índice de slider mais próximo e marca `activeCard='personalizado'`. É apenas proposta
+até clicar em **⚡ Aplicar**.
+
 ### Aplicar
-`applyJohnnyResult(proposedByShape)` — sobrescreve `cells` em múltiplos Cineminhas simultaneamente.
+`applyJohnnyResult(proposedByShape)` — sobrescreve `cells` em múltiplos Cineminhas simultaneamente (grava `cellsUserEdited=true`).
 
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 

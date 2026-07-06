@@ -1055,6 +1055,52 @@ function populateCellsFromResultVar(shape, csvStore) {
   return newCells;
 }
 
+// ── computeAsIsCells ─────────────────────────────────────────────────────────
+// Deriva uma prévia de elegibilidade a partir da decisão histórica (AS IS,
+// coluna __DECISAO_ORIGINAL). Agrega o volume APROVADO/REPROVADO por interseção
+// (rowVal|colVal): caselas com aprovações herdam a decisão da política atual
+// (elegível = a AS IS aprovou → baseline). Uma casela só é marcada NÃO elegível
+// (0) quando 100% do volume DECIDIDO da interseção é REPROVADO (nenhuma
+// aprovação); caselas sem decisão/volume ficam elegíveis (1). Retorna null
+// quando não há decisão AS IS disponível para o dataset (sem prévia).
+function computeAsIsCells(shape, csvStore) {
+  const { rowVar, colVar, rowDomain, colDomain } = shape;
+  const csvId = rowVar?.csvId || colVar?.csvId;
+  if (!csvId) return null;
+  const csv = csvStore?.[csvId];
+  if (!csv) return null;
+  const decIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+  if (decIdx === -1) return null;
+  const types = csv.columnTypes || {};
+  const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
+  const qtyIdx = qtyCol != null ? csv.headers.indexOf(qtyCol) : -1;
+  const rowCI = rowVar ? csv.headers.indexOf(rowVar.col) : -1;
+  const colCI = colVar ? csv.headers.indexOf(colVar.col) : -1;
+  const rDom = rowDomain?.length > 0 ? rowDomain : ['*'];
+  const cDom = colDomain?.length > 0 ? colDomain : ['*'];
+  const acc = {};
+  for (const rv of rDom) for (const cv of cDom) acc[`${rv}|${cv}`] = { ap: 0, rp: 0 };
+  const nRows = rowCount(csv);
+  for (let r = 0; r < nRows; r++) {
+    const rv = rowVar && rowCI >= 0 ? (cellStr(csv, r, rowCI) ?? '').toString().trim() : '*';
+    const cv = colVar && colCI >= 0 ? (cellStr(csv, r, colCI) ?? '').toString().trim() : '*';
+    const cell = acc[`${rv}|${cv}`];
+    if (!cell) continue;
+    const dec = (cellStr(csv, r, decIdx) ?? '').toString().trim().toUpperCase();
+    if (dec !== 'APROVADO' && dec !== 'REPROVADO') continue;
+    const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+    if (dec === 'APROVADO') cell.ap += qty; else cell.rp += qty;
+  }
+  const cells = {};
+  for (const rv of rDom) for (const cv of cDom) {
+    const key = `${rv}|${cv}`;
+    const { ap, rp } = acc[key];
+    // NÃO elegível só quando 100% do volume decidido é REPROVADO (sem aprovações).
+    cells[key] = (rp > 0 && ap === 0) ? 0 : 1;
+  }
+  return cells;
+}
+
 // ── Sinalização de inferência por referência (Fase 3 / Proposta §4.5, CONTRATO §7) ──
 // Selo discreto de origem + indicador "% do volume inferido com confiab ALTA" com
 // alerta visual quando uma fatia relevante herdou premissa colapsada (caso PAP §7).
@@ -5110,7 +5156,7 @@ export default function App() {
     const { w, h } = computeCinemaSize(rowDomain, colDomain);
     const importedType = config.cinemaType && CINEMINHA_TYPES[config.cinemaType] ? config.cinemaType : undefined;
     setShapes(prev => prev.map(s => s.id !== shapeId ? s : {
-      ...s, rowVar: rowVarFinal, colVar: colVarFinal, rowDomain, colDomain, cells: newCells, w, h,
+      ...s, cellsUserEdited: true, rowVar: rowVarFinal, colVar: colVarFinal, rowDomain, colDomain, cells: newCells, w, h,
       ...(importedType ? { cinemaType: importedType } : {}),
       ...(fromLibrary && config.name ? { label: config.name } : {}),
     }));
@@ -5211,7 +5257,7 @@ export default function App() {
         newCells[key] = getCellValue(shape.cells, key);
       }
     }
-    setShapes(prev => prev.map(s => s.id !== shapeId ? s : { ...s, cells: newCells, ...(item.name ? { label: item.name } : {}) }));
+    setShapes(prev => prev.map(s => s.id !== shapeId ? s : { ...s, cellsUserEdited: true, cells: newCells, ...(item.name ? { label: item.name } : {}) }));
     setCinemaLibraryModal(null);
   };
 
@@ -5462,7 +5508,7 @@ export default function App() {
     setShapes(prev => prev.map(s => {
       if (s.id !== shapeId) return s;
       const cur = getCellValue(s.cells, cellKey);
-      return {...s, cells: {...(s.cells??{}), [cellKey]: cur > 0 ? 0 : 1}};
+      return {...s, cellsUserEdited: true, cells: {...(s.cells??{}), [cellKey]: cur > 0 ? 0 : 1}};
     }));
   }, []);
 
@@ -5472,7 +5518,7 @@ export default function App() {
     pushHistory();
     setShapes(prev => prev.map(s => {
       if (s.id !== shapeId) return s;
-      return {...s, cells: {...(s.cells??{}), [cellKey]: n}};
+      return {...s, cellsUserEdited: true, cells: {...(s.cells??{}), [cellKey]: n}};
     }));
   }, []);
 
@@ -5619,6 +5665,12 @@ export default function App() {
         const baseShape = {...s, rowVar:newRowVar, colVar:newColVar, rowDomain:newRowDomain, colDomain:newColDomain, cells:newCells, w:nw, h:nh};
         if (s.resultVar) {
           baseShape.cells = populateCellsFromResultVar(baseShape, csvStoreR.current);
+        } else if (!s.cellsUserEdited) {
+          // Prévia automática a partir da decisão histórica (AS IS): caselas com
+          // aprovações herdam a política atual (baseline); caselas 100% reprovadas
+          // ficam não elegíveis. Sobrescrita por qualquer edição manual do usuário.
+          const preview = computeAsIsCells(baseShape, csvStoreR.current);
+          if (preview) baseShape.cells = preview;
         }
         return baseShape;
       }
@@ -6738,7 +6790,7 @@ export default function App() {
 
   const applyOptimResult = (shapeId, proposedCells) => {
     pushHistory();
-    setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, cells: proposedCells } : s));
+    setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, cellsUserEdited: true, cells: proposedCells } : s));
     setOptimModal(null);
   };
 
@@ -6777,7 +6829,7 @@ export default function App() {
   const applyJohnnyResult = (proposedByShape) => {
     pushHistory();
     setShapes(prev => prev.map(s =>
-      proposedByShape[s.id] ? { ...s, cells: proposedByShape[s.id] } : s
+      proposedByShape[s.id] ? { ...s, cellsUserEdited: true, cells: proposedByShape[s.id] } : s
     ));
     setJohnnyModal(null);
   };
@@ -10091,6 +10143,29 @@ export default function App() {
           frontier.forEach((pt,i) => { const d=Math.abs(pt.approvalRate-newRate); if(d<bestD){bestD=d;nearIdx=i;} });
           setJohnnyModal(m => ({...m, proposedByShape:newPBS, sliderApprovalIdx:nearIdx, activeCard:'personalizado'}));
         };
+        // Resgata a configuração baseada na decisão histórica (AS IS) para todos
+        // os cineminhas: caselas com aprovações ficam elegíveis (baseline); só as
+        // 100% reprovadas ficam não elegíveis. Sobrescreve o estado proposto.
+        const asIsAvailable = shapeMetas.some(meta => {
+          const csv = csvStoreR.current[meta.rowVar?.csvId || meta.colVar?.csvId];
+          return !!(csv && csv.headers.includes('__DECISAO_ORIGINAL'));
+        });
+        const restoreAsIs = () => {
+          const store = csvStoreR.current;
+          const newPBS = { ...proposedByShape };
+          for (const meta of shapeMetas) {
+            const cells = computeAsIsCells(meta, store);
+            if (cells) newPBS[meta.id] = cells;
+          }
+          let newApprQty = 0;
+          for (const [, m] of Object.entries(pooledMetrics)) {
+            if (isCellEligible(newPBS[m.shapeId]||{}, m.cellKey)) newApprQty += m.qty;
+          }
+          const newRate = totalQty > 0 ? newApprQty/totalQty : 0;
+          let nearIdx=0, bestD=Infinity;
+          frontier.forEach((pt,i) => { const d=Math.abs(pt.approvalRate-newRate); if(d<bestD){bestD=d;nearIdx=i;} });
+          setJohnnyModal(m => ({...m, proposedByShape:newPBS, sliderApprovalIdx:nearIdx, activeCard:'personalizado'}));
+        };
 
         // Cards
         const scen = scenarios;
@@ -10630,11 +10705,24 @@ export default function App() {
               {/* Footer */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                 padding:"12px 24px",borderTop:"1px solid #e2e8f0",flexShrink:0,background:"#fafafa"}}>
-                <button onClick={()=>setJohnnyModal(null)}
-                  style={{padding:"8px 18px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
-                    color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
-                  Cancelar
-                </button>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <button onClick={()=>setJohnnyModal(null)}
+                    style={{padding:"8px 18px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                      color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                    Cancelar
+                  </button>
+                  <button onClick={restoreAsIs} disabled={!asIsAvailable}
+                    title={asIsAvailable
+                      ? "Preencher com a decisão histórica (AS IS): caselas com aprovações ficam elegíveis; só as 100% reprovadas ficam não elegíveis"
+                      : "Nenhum dataset com decisão AS IS configurada"}
+                    style={{padding:"8px 16px",borderRadius:9,border:"1px solid #cbd5e1",
+                      background: asIsAvailable ? "#fff" : "#f8fafc",
+                      color: asIsAvailable ? "#475569" : "#cbd5e1",
+                      cursor: asIsAvailable ? "pointer" : "not-allowed",
+                      fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                    ↺ Resgatar AS IS
+                  </button>
+                </div>
                 <div style={{display:"flex",alignItems:"center",gap:12}}>
                   <span style={{fontSize:11,color:"#94a3b8"}}>
                     {`${Math.round(personalizado.approvalRate*100)}% aprovação · ${fmtQty(personalizado.approvedQty)} propostas`}
