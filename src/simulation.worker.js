@@ -1182,6 +1182,183 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
   return arrivals;
 }
 
+// ── Prévia AS IS contextualizada ao nó (respeita filtros a montante) ─────────────
+// `computeAsIsCells` (main, App.jsx) deriva a prévia de elegibilidade das caselas
+// sobre a base COMPLETA da interseção dos eixos — não vê os filtros a montante do
+// fluxo. Aqui a MESMA regra é aplicada, mas só sobre a população que EFETIVAMENTE
+// chega a cada cineminha-alvo pelo grafo de fluxo (losangos, Decision Lens e ports a
+// montante) — a prévia fica contextualizada ao nó. Percorre o fluxo com o mesmo walk
+// compilado de `computeCinemaArrivals`, acumulando volume APROVADO/REPROVADO
+// (`__DECISAO_ORIGINAL`) por casela dos alvos; casela = 1 (elegível), 0 só quando
+// 100% do volume decidido da interseção é REPROVADO (nenhuma aprovação). Retorna
+// `{[shapeId]: {[cellKey]: 0|1} | null}` — `null` quando o dataset do alvo não tem AS IS.
+function computeCinemaAsIsCells(shapes, conns, csvStore, targetIds) {
+  const targetSet = new Set(targetIds || []);
+  const acc = {}; // {[shapeId]: {[cellKey]: {ap, rp}}}
+  for (const s of shapes) {
+    if (s.type === 'cineminha' && targetSet.has(s.id)) acc[s.id] = {};
+  }
+  const result = {};
+  for (const id of targetIds || []) result[id] = null;
+  if (Object.keys(acc).length === 0) return result;
+
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  // (M8) rotas compiladas + "visited" por época + buffers de hit reutilizados — mesmo
+  // esquema do computeCinemaArrivals, só que coletando hits apenas nos cineminhas-alvo.
+  const routes = compileRoutes(shapes, conns, out);
+  const { decisionRoutes, cinemaRoutes, singleEdge } = routes;
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const lastVisit = new Int32Array(shapes.length);
+  let epoch = 0;
+  const hitShapeBuf = [], hitKeyBuf = [];
+
+  function collectCinemaHits(csv, r, startId, compiled) {
+    epoch++;
+    let cur = startId;
+    let hitLen = 0;
+    while (cur) {
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) break;
+      lastVisit[idx] = epoch;
+      const node = shapesMap[cur];
+      if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const cd = compiled.decision[cur];
+        let match;
+        if (cd.codes) match = cd.routeByCode[cd.codes[r]];
+        else {
+          const val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim();
+          match = decisionRoutes[cur]?.get(val);
+        }
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const cc = compiled.cinema[cur];
+        let cellKey, isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) break;
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0;
+          const ci = cc.colCodes ? cc.colCodes[r] : 0;
+          const p = ri * cc.nC + ci;
+          cellKey = cc.keyByPair[p];
+          isEligible = cc.eligByPair[p] === 1;
+        } else {
+          const rv = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const cv = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (!node.rowVar && !node.colVar) break;
+          const rKey = node.rowVar ? rv : '*';
+          const cKey = node.colVar ? cv : '*';
+          cellKey = `${rKey}|${cKey}`;
+          isEligible = isCellEligible(node.cells, cellKey);
+        }
+        if (acc[node.id] !== undefined) { hitShapeBuf[hitLen] = node.id; hitKeyBuf[hitLen] = cellKey; hitLen++; }
+        const rt = cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        const m = compiled.lens[cur];
+        if (m && !m(r)) break;
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else break;
+    }
+    return hitLen;
+  }
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const decIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    if (decIdx === -1) continue; // base sem AS IS — os hits nela não contribuem
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+    const compiled = compileNodesForCsv(shapes, csv, routes);
+
+    const types = csv.columnTypes || {};
+    const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
+    const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+
+    // AS IS por código do dicionário (O(distintos)) quando dict-encoded; senão leitura
+    // por linha (base legada string[][]). 1 = APROVADO, -1 = REPROVADO, 0 = ignora.
+    const decDictCol = dictColAt(csv, decIdx);
+    let decByCode = null;
+    if (decDictCol) {
+      decByCode = new Int8Array(decDictCol.dict.length);
+      for (let k = 0; k < decDictCol.dict.length; k++) {
+        const d = String(decDictCol.dict[k] ?? '').trim().toUpperCase();
+        decByCode[k] = d === 'APROVADO' ? 1 : d === 'REPROVADO' ? -1 : 0;
+      }
+    }
+
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      let dec;
+      if (decByCode) dec = decByCode[decDictCol.codes[r]];
+      else {
+        const d = (cellStr(csv, r, decIdx) ?? '').toString().trim().toUpperCase();
+        dec = d === 'APROVADO' ? 1 : d === 'REPROVADO' ? -1 : 0;
+      }
+      if (dec === 0) continue; // linha sem decisão AS IS não pesa na prévia
+      const hitLen = collectCinemaHits(csv, r, rootId, compiled);
+      if (hitLen === 0) continue;
+      const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+      for (let h = 0; h < hitLen; h++) {
+        const a = acc[hitShapeBuf[h]];
+        if (!a) continue;
+        const key = hitKeyBuf[h];
+        let cell = a[key];
+        if (!cell) cell = a[key] = { ap: 0, rp: 0 };
+        if (dec === 1) cell.ap += qty; else cell.rp += qty;
+      }
+    }
+  }
+
+  // Deriva as caselas sobre o domínio de cada alvo (mesma regra do computeAsIsCells):
+  // casela = 1 (elegível), 0 só quando 100% do volume decidido é REPROVADO. Caselas sem
+  // volume/decisão ficam elegíveis (1).
+  for (const id of targetIds) {
+    const shape = shapesMap[id];
+    if (!shape || shape.type !== 'cineminha') { result[id] = null; continue; }
+    const csvId = shape.rowVar?.csvId || shape.colVar?.csvId;
+    const csv = csvId ? csvStore[csvId] : null;
+    if (!csv || csv.headers.indexOf('__DECISAO_ORIGINAL') === -1) { result[id] = null; continue; }
+    const rDom = shape.rowDomain?.length > 0 ? shape.rowDomain : ['*'];
+    const cDom = shape.colDomain?.length > 0 ? shape.colDomain : ['*'];
+    const a = acc[id] || {};
+    const cells = {};
+    for (const rv of rDom) for (const cv of cDom) {
+      // chave de LOOKUP = como o walk montou a chave (valores trimados / '*' no eixo
+      // ausente); chave de SAÍDA = `${rv}|${cv}` (formato das caselas do shape).
+      const rKey = shape.rowVar ? String(rv).trim() : '*';
+      const cKey = shape.colVar ? String(cv).trim() : '*';
+      const c = a[`${rKey}|${cKey}`];
+      const ap = c ? c.ap : 0, rp = c ? c.rp : 0;
+      cells[`${rv}|${cv}`] = (rp > 0 && ap === 0) ? 0 : 1;
+    }
+    result[id] = cells;
+  }
+  return result;
+}
+
 // Para cada nó de fluxo (decision/cineminha), contabiliza quantos registros chegam
 // a ele por valor de domínio da(s) sua(s) variável(is), respeitando o roteamento a
 // montante (losangos, Decision Lens e ports). Usado para o "Configurar nó" do canvas:
@@ -2180,6 +2357,16 @@ function handleMessage(e) {
     return;
   }
 
+  // Prévia AS IS contextualizada ao nó (disparada ao atribuir variável de eixo a um
+  // cineminha, quando as caselas ainda não foram editadas manualmente). Diferente do
+  // computeAsIsCells síncrono da main (base completa), respeita os filtros a montante.
+  if (type === 'COMPUTE_ASIS_PREVIEW') {
+    const { shapes, conns = [], targetIds = [], reqTokens = {} } = e.data;
+    const cellsByShape = computeCinemaAsIsCells(shapes, conns, workerCsvStore, targetIds);
+    self.postMessage({ type: 'ASIS_PREVIEW_RESULT', cellsByShape, reqTokens });
+    return;
+  }
+
   if (type === 'COMPUTE_OPTIM') {
     const { shape } = e.data;
     const cellMetrics = computeCellMetrics(shape, workerCsvStore, workerInferenceRef);
@@ -2225,6 +2412,7 @@ export {
   computeAnalyticsDataset,
   computeSimulatedDecisions,
   computeCinemaArrivals,
+  computeCinemaAsIsCells,
   computeNodeArrivals,
   computeSimulationTick,
   computeLensPopulations,
