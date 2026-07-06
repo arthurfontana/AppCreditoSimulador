@@ -2258,7 +2258,7 @@ function KpiCard({ analyticsDataset, metricId, kpiA, kpiB, onChange }) {
 }
 
 // ── AnalyticsWidget — um gráfico configurável ─────────────────────────────────
-function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigChange, onTypeChange, onDelete, onDragStart, onResizeStart }) {
+function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigChange, onTypeChange, onDelete, onDuplicate, onDragStart, onResizeStart }) {
   const cfg = widget.config;
   const type = widget.type || "line";
   const isKpi = type === "kpi";
@@ -2405,6 +2405,11 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
             </span>
           )}
         </button>
+        {onDuplicate && (
+          <button onClick={() => onDuplicate(widget.id)} title="Duplicar gráfico (cria uma cópia independente com as mesmas configurações)"
+            style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff",
+              color: "#64748b", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>⧉</button>
+        )}
         <button onClick={() => onDelete(widget.id)} title="Remover gráfico"
           style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
             color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
@@ -2769,6 +2774,17 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
   }, [analyticsDataset]);
 
   const addWidget = () => setAnalyticsLayout(prev => [...prev, makeWidget("Novo gráfico")]);
+  const duplicateWidget = (id) => setAnalyticsLayout(prev => {
+    const src = prev.find(w => w.id === id);
+    if (!src) return prev;
+    // Deep clone da config (filters/rules, seriesStyles etc.) — desacopla do original.
+    const clonedConfig = JSON.parse(JSON.stringify(src.config || {}));
+    clonedConfig.title = `${clonedConfig.title || "Gráfico"} (cópia)`;
+    const copy = { ...src, id: uid(), config: clonedConfig, x: (src.x ?? 24) + 28, y: (src.y ?? 24) + 28 };
+    // Insere logo após o original na lista.
+    const idx = prev.findIndex(w => w.id === id);
+    return [...prev.slice(0, idx + 1), copy, ...prev.slice(idx + 1)];
+  });
   const removeWidget = (id) => setAnalyticsLayout(prev => prev.filter(w => w.id !== id));
   const changeConfig = (id, patch) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, config: { ...w.config, ...patch } } : w));
   const changeType = (id, type) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, type } : w));
@@ -2881,7 +2897,7 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
               {analyticsLayout.map(w => (
                 <div key={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 560, height: w.h ?? 500 }}>
                   <AnalyticsWidget widget={w} analyticsDataset={analyticsDataset} pageFilters={pageFilters}
-                    onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget}
+                    onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget} onDuplicate={duplicateWidget}
                     onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
                     onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
                 </div>
