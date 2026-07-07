@@ -2287,6 +2287,185 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
   };
 }
 
+// ── COMPUTE_POLICY_INSIGHTS — Copiloto Sessão 1 (lint estrutural, DEC-IA-006) ────
+// Achados são FATOS estruturais sobre o grafo do canvas ativo — nunca bloqueiam a
+// simulação (só informam). Reaproveita o `nodeArrivals`/`lensCounts` que o tick já
+// produz (via getTickResult, chamado pelo handler da mensagem) em vez de varrer a
+// base de novo: as sete regras abaixo dependem só de `shapes`/`conns` (topologia) +
+// os agregados já computados, nenhuma leitura adicional de csvStore. Cada achado:
+// `{severity:'error'|'warning'|'info', code, nodeId, msg, fix?}` — `fix` é só um
+// descritor (ex.: `{kind:'connect_terminal', nodeId}`); quem MATERIALIZA a correção
+// no canvas é a UI (padrão não-destrutivo dos otimizadores: proposta → botão aplica).
+const FLOW_TYPES = new Set(['decision', 'port', 'approved', 'rejected', 'as_is', 'cineminha', 'decision_lens']);
+const DECISION_LIKE_TYPES = new Set(['decision', 'cineminha', 'decision_lens']);
+
+function computePolicyInsights(shapes, conns, nodeArrivals = {}, lensCounts = {}) {
+  const findings = [];
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const { out, inc } = buildFlowGraph(shapes, conns);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+
+  // Regra 1 — porta solta: sem NENHUMA conexão de saída, a população daquele valor
+  // não é roteada — "some" silenciosamente da simulação (traverseRow retorna null).
+  for (const s of shapes) {
+    if (s.type !== 'port') continue;
+    if ((out[s.id] || []).length > 0) continue;
+    findings.push({
+      severity: 'error', code: 'port_dangling', nodeId: s.id,
+      msg: `Porta "${s.label || '?'}" sem conexão de saída — a população que chega aqui não é roteada (some da simulação).`,
+      fix: { kind: 'connect_terminal', nodeId: s.id },
+    });
+  }
+
+  // Regra 2 — nós inalcançáveis a partir das raízes (MESMO critério de entrada do
+  // PolicyIR/motor: nó decision/cineminha/lens sem aresta de entrada vinda de um port).
+  // BFS a partir das raízes sobre TODO o grafo (incl. ports/terminais, como pass-through).
+  const roots = shapes.filter(s =>
+    DECISION_LIKE_TYPES.has(s.type) && !(inc[s.id] || []).some(e => portIds.has(e.from))
+  );
+  const reachable = new Set();
+  const stack = roots.map(s => s.id);
+  while (stack.length) {
+    const id = stack.pop();
+    if (reachable.has(id)) continue;
+    reachable.add(id);
+    for (const e of (out[id] || [])) if (!reachable.has(e.to)) stack.push(e.to);
+  }
+  for (const s of shapes) {
+    if (DECISION_LIKE_TYPES.has(s.type) && !reachable.has(s.id)) {
+      findings.push({
+        severity: 'warning', code: 'unreachable_node', nodeId: s.id,
+        msg: `"${s.label || s.type}" não é alcançado a partir de nenhuma raiz do fluxo — provável fragmento desconectado.`,
+      });
+    }
+  }
+
+  // Regra 3 — ciclos: DFS tricolor sobre os nós de fluxo; back-edge para um nó
+  // IN_PROGRESS = ciclo (mesmo padrão de detecção de `validateFlow`, reimplementado
+  // aqui porque o worker não importa App.jsx). Canvas é pequeno (dezenas de shapes),
+  // então DFS recursivo simples é suficiente — sem a otimização iterativa de M13.
+  {
+    const state = new Map(); // ausente | 1 (in progress) | 2 (done)
+    const cycleNodes = new Set();
+    const dfs = (id) => {
+      state.set(id, 1);
+      for (const e of (out[id] || [])) {
+        const to = e.to;
+        const toShape = shapesMap[to];
+        if (!toShape || !FLOW_TYPES.has(toShape.type)) continue;
+        const st = state.get(to);
+        if (st === 1) { cycleNodes.add(to); cycleNodes.add(id); }
+        else if (st === undefined) dfs(to);
+      }
+      state.set(id, 2);
+    };
+    for (const s of shapes) {
+      if (FLOW_TYPES.has(s.type) && state.get(s.id) === undefined) dfs(s.id);
+    }
+    for (const id of cycleNodes) {
+      const s = shapesMap[id];
+      findings.push({
+        severity: 'error', code: 'cycle', nodeId: id,
+        msg: `"${s.label || s.type}" participa de um ciclo no fluxo (loop infinito) — a simulação nunca decide essas linhas.`,
+      });
+    }
+  }
+
+  // Regra 4 — chegada zero: valor de um losango (ou linha/coluna de um Cineminha) que
+  // nunca aparece na base (nodeArrivals já traz qty por valor, só sobre a população que
+  // efetivamente chega). Só avalia nós alcançáveis (regra 2 já cobre o caso contrário).
+  for (const s of shapes) {
+    if (s.type === 'decision') {
+      if (!reachable.has(s.id)) continue;
+      const arr = nodeArrivals[s.id]?.val || {};
+      const seen = new Set();
+      for (const e of (out[s.id] || [])) {
+        const val = (e.label ?? '').trim();
+        if (!val || seen.has(val)) continue;
+        seen.add(val);
+        if (!arr[val]) {
+          findings.push({
+            severity: 'warning', code: 'zero_arrival', nodeId: s.id,
+            msg: `"${s.label || s.variableCol || 'Decisão'}" — valor "${val}" nunca chega a este nó (0 propostas).`,
+            fix: { kind: 'open_domain_modal', nodeId: s.id },
+          });
+        }
+      }
+    } else if (s.type === 'cineminha') {
+      if (!reachable.has(s.id)) continue;
+      const arr = nodeArrivals[s.id] || { row: {}, col: {} };
+      if (s.rowVar) for (const v of (s.rowDomain || [])) {
+        if (!arr.row?.[v]) findings.push({
+          severity: 'warning', code: 'zero_arrival', nodeId: s.id,
+          msg: `"${s.label || 'Cineminha'}" — linha "${v}" (${s.rowVar.col}) nunca chega a este nó (0 propostas).`,
+          fix: { kind: 'open_domain_modal', nodeId: s.id },
+        });
+      }
+      if (s.colVar) for (const v of (s.colDomain || [])) {
+        if (!arr.col?.[v]) findings.push({
+          severity: 'warning', code: 'zero_arrival', nodeId: s.id,
+          msg: `"${s.label || 'Cineminha'}" — coluna "${v}" (${s.colVar.col}) nunca chega a este nó (0 propostas).`,
+          fix: { kind: 'open_domain_modal', nodeId: s.id },
+        });
+      }
+    }
+  }
+
+  // Regra 5 — lens vazio: as regras do Decision Lens não casam ninguém, mas há volume
+  // chegando (total > 0) — provável engano na configuração das regras.
+  for (const s of shapes) {
+    if (s.type !== 'decision_lens') continue;
+    const c = lensCounts[s.id];
+    if (c && c.total > 0 && c.count === 0) {
+      findings.push({
+        severity: 'warning', code: 'lens_empty', nodeId: s.id,
+        msg: `"${s.label || 'Decision Lens'}" — as regras não casam nenhuma linha da base (0 de ${c.total}).`,
+      });
+    }
+  }
+
+  // Regra 6 — mesma variável testada duas vezes no mesmo caminho: a partir de cada
+  // losango D, anda a jusante (BFS sobre `out`) até achar outro losango sobre a MESMA
+  // coluna/base — sinal de redundância (o corte já foi decidido lá atrás).
+  for (const d of shapes) {
+    if (d.type !== 'decision' || !d.variableCol) continue;
+    const seen = new Set([d.id]);
+    const bfsStack = (out[d.id] || []).map(e => e.to);
+    let hit = null;
+    while (bfsStack.length && !hit) {
+      const id = bfsStack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const node = shapesMap[id];
+      if (!node) continue;
+      if (node.type === 'decision' && node.variableCol === d.variableCol && node.csvId === d.csvId) { hit = node; break; }
+      for (const e of (out[id] || [])) if (!seen.has(e.to)) bfsStack.push(e.to);
+    }
+    if (hit) {
+      findings.push({
+        severity: 'warning', code: 'duplicate_variable_path', nodeId: hit.id,
+        msg: `"${hit.variableCol}" é testado de novo em "${hit.label || hit.variableCol}", depois de já decidido em "${d.label || d.variableCol}" — possível redundância.`,
+      });
+    }
+  }
+
+  // Regra 7 — caminho sem terminal: losango/Cineminha/lens sem NENHUMA saída conectada
+  // (diferente da regra 1 — aqui é o nó inteiro, não uma porta específica solta).
+  for (const s of shapes) {
+    if (!DECISION_LIKE_TYPES.has(s.type)) continue;
+    if ((out[s.id] || []).length > 0) continue;
+    findings.push({
+      severity: 'error', code: 'path_without_terminal', nodeId: s.id,
+      msg: `"${s.label || s.type}" não tem nenhuma saída conectada — todo o volume que chega aqui é perdido.`,
+      fix: { kind: 'connect_terminal', nodeId: s.id },
+    });
+  }
+
+  const SEV_ORDER = { error: 0, warning: 1, info: 2 };
+  findings.sort((a, b) => (SEV_ORDER[a.severity] ?? 3) - (SEV_ORDER[b.severity] ?? 3));
+  return findings;
+}
+
 // Lista de ArrayBuffers das colunas do dataset largo — transferíveis (zero-cópia) no
 // postMessage de ANALYTICS_RESULT. Cada coluna tem seu próprio buffer (nunca compartilhado),
 // então a lista é livre de duplicatas. Após a transferência os typed arrays do worker ficam
@@ -2386,6 +2565,16 @@ function handleMessage(e) {
     return;
   }
 
+  if (type === 'COMPUTE_POLICY_INSIGHTS') {
+    // Reusa o tick (getTickResult) — mesma chave de cache do RUN_SIMULATION/COMPUTE_OVERLAY
+    // do mesmo gesto de edição, então isto normalmente é uma leitura de cache, não uma
+    // nova varredura da base.
+    const { nodeArrivals, lensCounts } = getTickResult(e.data.shapes, e.data.conns);
+    const findings = computePolicyInsights(e.data.shapes, e.data.conns, nodeArrivals, lensCounts);
+    self.postMessage({ type: 'POLICY_INSIGHTS_RESULT', findings });
+    return;
+  }
+
   if (type === 'COMPUTE_JOHNNY') {
     const { shapes, cinemaIds, conns = [], lensPopulations = {}, riskLevels, hierarchyMode, inadMetric } = e.data;
     const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric, workerInferenceRef);
@@ -2416,6 +2605,7 @@ export {
   computeNodeArrivals,
   computeSimulationTick,
   computeLensPopulations,
+  computePolicyInsights,
   buildFlowGraph,
   buildInferenceResolver,
   resolveWeightCol,
