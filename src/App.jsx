@@ -3435,6 +3435,71 @@ export function applyPolicyPatch(patch, base = {}) {
   return { shapes: [...baseShapes, ...newShapes], conns: [...baseConns, ...newConns], idMap };
 }
 
+// ── Biblioteca de Políticas (Copiloto Sessão 2, docs/wiki/Copiloto-ConstrucaoAssistida.md) ──
+// Generalização do padrão já provado no `cinemaLibrary`: salva o PolicyIR (não o canvas
+// com posições) + metadados, e aplica com o mesmo fluxo de mapeamento de variáveis do
+// `cinemaImportModal` (fuzzy via `normalizeColName`, override manual). O aplicador
+// continua sendo o ÚNICO da DEC-IA-002 (`applyPolicyPatch`) — o mapeamento apenas
+// reescreve `variable`/`rowVar`/`colVar`/`rules[].col` do IR ANTES de chamar o aplicador,
+// não é um segundo caminho de materialização.
+//
+// `extractPolicyRequiredVars(ir)` lista, uma vez por NOME distinto de coluna (o "slot"
+// reutilizável do template — a mesma variável pode aparecer em vários nós), toda coluna
+// que o IR referencia: `kind:'decision'` para variável de losango/eixo de Cineminha
+// (precisa ser coluna tipada como Filtro no dataset-alvo) e `kind:'any'` para coluna de
+// regra de Decision Lens (que casa por NOME contra qualquer coluna carregada, de
+// qualquer tipo — mesma semântica de `rowMatchesLensRules`, sem csvId próprio). Se o
+// mesmo nome aparece nos dois papéis, prevalece `'decision'` (mais restritivo).
+export function extractPolicyRequiredVars(ir) {
+  const dsByCsvId = Object.fromEntries((ir?.datasets || []).map(d => [d.csvId, d]));
+  const byCol = new Map();
+  const add = (col, csvId, kind) => {
+    if (!col) return;
+    const prev = byCol.get(col);
+    if (!prev) {
+      byCol.set(col, { col, csvId: csvId ?? null, csvName: csvId ? (dsByCsvId[csvId]?.name ?? null) : null, kind });
+    } else if (kind === 'decision' && prev.kind !== 'decision') {
+      prev.kind = 'decision';
+    }
+  };
+  for (const n of ir?.nodes || []) {
+    if (n.kind === 'decision') add(n.variable?.col, n.variable?.csvId, 'decision');
+    else if (n.kind === 'cinema') {
+      add(n.rowVar?.col, n.rowVar?.csvId, 'decision');
+      add(n.colVar?.col, n.colVar?.csvId, 'decision');
+    } else if (n.kind === 'lens') {
+      for (const r of (n.rules || [])) add(r.col, null, 'any');
+    }
+  }
+  return [...byCol.values()];
+}
+
+// Materializa `mapping: {[origCol]: {col,csvId}|null}` (uma entrada por chave de
+// `extractPolicyRequiredVars`) de volta no IR — puro, sem tocar canvas. Variável sem
+// mapeamento (entrada ausente ou `null`) vira `null`/coluna `null`: o nó nasce SEM
+// variável (pendência visível — não some porta nem rota, só fica sem tráfego; o lint
+// da Sessão 1 já aponta isso como achado de "chegada zero" nos ports do nó, reaproveitado
+// em vez de reinventado). Nunca aplica mapeamento parcial silencioso de outra coluna.
+export function applyPolicyVarMapping(ir, mapping = {}) {
+  const mapVar = (v) => {
+    if (!v || !v.col) return v ?? null;
+    const m = mapping[v.col];
+    return m ? { col: m.col, csvId: m.csvId ?? null } : null;
+  };
+  const nodes = (ir?.nodes || []).map(n => {
+    if (n.kind === 'decision') return { ...n, variable: mapVar(n.variable) };
+    if (n.kind === 'cinema') return { ...n, rowVar: mapVar(n.rowVar), colVar: mapVar(n.colVar) };
+    if (n.kind === 'lens') {
+      return { ...n, rules: (n.rules || []).map(r => {
+        const m = mapping[r.col];
+        return { ...r, col: m ? m.col : null };
+      }) };
+    }
+    return n;
+  });
+  return { ...ir, nodes };
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [shapes, setShapes] = useState(() => {
@@ -3516,6 +3581,10 @@ export default function App() {
   const [cinemaLibrary,      setCinemaLibrary]      = useState([]);   // array of saved cineminha items
   const [cinemaLibraryModal, setCinemaLibraryModal] = useState(null); // null | {mode:'browse'|'save', shapeId, search, filterType, saveMeta, overwriteId, selectedLibIds}
   const [libWizard,          setLibWizard]          = useState(null); // null | wizard de importação de biblioteca
+  // Biblioteca de Políticas (Copiloto Sessão 2) — templates de PolicyIR reutilizáveis
+  const [policyLibrary,      setPolicyLibrary]      = useState([]);   // array de {id,name,description,tags,ir,requiredVars,savedAt}
+  const [policyLibraryModal, setPolicyLibraryModal] = useState(null); // null | {mode:'browse'|'save', search, saveMeta, overwriteId}
+  const [policyApplyModal,   setPolicyApplyModal]   = useState(null); // null | {itemId, name, ir, requiredVars, mapping:{[origCol]:{col,csvId}|null}}
   // Business Impact floating widget
   const [businessWidget, setBusinessWidget] = useState({ visible: false, x: 80, y: 80, w: 420, h: 520 });
   const tooltipTimer = useRef(null);
@@ -3547,6 +3616,7 @@ export default function App() {
   const flowImportRef      = useRef(null);
   const cinemaImportRef    = useRef(null);
   const libFileInputRef    = useRef(null);
+  const policyLibFileInputRef = useRef(null);
   const cinemaImportTarget = useRef(null);
   const prevToolR          = useRef(null);
   const axisModalR    = useRef(axisModal);  useEffect(()=>{axisModalR.current=axisModal},[axisModal]);
@@ -3559,6 +3629,7 @@ export default function App() {
   const johnnyModalR  = useRef(johnnyModal);useEffect(()=>{johnnyModalR.current=johnnyModal},[johnnyModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
+  const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
   const canvasesR       = useRef(canvases);        useEffect(()=>{canvasesR.current=canvases},         [canvases]);
   const activeCanvasIdR = useRef(activeCanvasId);  useEffect(()=>{activeCanvasIdR.current=activeCanvasId},[activeCanvasId]);
   const bwDragR = useRef(null);
@@ -5296,7 +5367,7 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.3",
+      schemaVersion: "2.4",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
@@ -5312,6 +5383,9 @@ export default function App() {
       analyticsGroupings,
       analyticsPageFilters,
       cinemaLibrary,
+      // Biblioteca de Políticas (Copiloto Sessão 2) — array de templates de PolicyIR
+      // (JSON puro: ir/requiredVars não têm Map/typed array, sem serialize dedicado).
+      policyLibrary,
       businessWidget,
       preferences: {
         enableDynThickness,
@@ -5407,6 +5481,8 @@ export default function App() {
     setAnalyticsGroupings(Array.isArray(data.analyticsGroupings) ? data.analyticsGroupings : []);
     setAnalyticsPageFilters(Array.isArray(data.analyticsPageFilters) ? data.analyticsPageFilters : []);
     setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
+    // schema ≤ 2.3 não tinha policyLibrary — default defensivo, projeto antigo não quebra.
+    setPolicyLibrary(Array.isArray(data.policyLibrary) ? data.policyLibrary : []);
     if (data.businessWidget) setBusinessWidget(data.businessWidget);
     if (data.viewport) setVp(data.viewport);
     if (data.activeTab) setActiveTab(data.activeTab);
@@ -5874,6 +5950,136 @@ export default function App() {
     a.download = `biblioteca-cineminhas-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  // ── Policy Library functions (Copiloto Sessão 2) ────────────────
+  // Candidatos de mapeamento por variável exigida do template: 'decision' só aceita
+  // colunas tipadas como Filtro (mesma restrição de quem pode ser eixo de losango/
+  // Cineminha); 'any' aceita qualquer coluna carregada (regra de Decision Lens casa
+  // por nome contra qualquer tipo).
+  const buildPolicyVarCandidates = (store) => {
+    const decision = [], any = [];
+    for (const [csvId, csv] of Object.entries(store || {})) {
+      for (const col of (csv.headers || [])) {
+        if (col === '__DECISAO_ORIGINAL') continue;
+        const entry = { col, csvId, csvName: csv.name };
+        any.push(entry);
+        if ((csv.columnTypes?.[col] || '') === 'decision') decision.push(entry);
+      }
+    }
+    return { decision, any };
+  };
+
+  // Auto-match via normalizeColName (fuzzy) — mesmo padrão da reconciliação de
+  // dataset (onImportConfirm) e do de-para da Tabela de Inferência.
+  const autoMatchPolicyVar = (reqVar, pool) => {
+    if (!pool.length) return null;
+    return pool.find(c => c.col === reqVar.col)
+      || pool.find(c => normalizeColName(c.col) === normalizeColName(reqVar.col))
+      || null;
+  };
+
+  const openPolicyLibrary = (mode = 'browse') => {
+    setPolicyLibraryModal({
+      mode, search: '',
+      saveMeta: { name: canvases[activeCanvasId]?.name || 'Política', description: '', tags: '' },
+      overwriteId: null,
+    });
+  };
+
+  const savePolicyToLibrary = () => {
+    const { saveMeta, overwriteId } = policyLibraryModal;
+    const ir = buildPolicyIR(shapesR.current, connsR.current, csvStoreR.current, { name: saveMeta.name || null });
+    const requiredVars = extractPolicyRequiredVars(ir);
+    const tags = (saveMeta.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    const item = {
+      id: overwriteId ?? uid(),
+      name: saveMeta.name || 'Política',
+      description: saveMeta.description || '',
+      tags,
+      ir,
+      requiredVars,
+      savedAt: new Date().toISOString(),
+    };
+    setPolicyLibrary(prev => overwriteId ? prev.map(it => it.id === overwriteId ? item : it) : [...prev, item]);
+    setPolicyLibraryModal(prev => prev ? { ...prev, mode: 'browse', overwriteId: null } : prev);
+  };
+
+  const deletePolicyFromLibrary = (itemId) => {
+    setPolicyLibrary(prev => prev.filter(it => it.id !== itemId));
+  };
+
+  // Abre o modal de mapeamento (padrão cinemaImportModal): auto-match por
+  // normalizeColName, pendência visível (mapping[col] = null) para o que não casou.
+  const openPolicyApplyModal = (item) => {
+    const requiredVars = item.requiredVars?.length ? item.requiredVars : extractPolicyRequiredVars(item.ir);
+    const { decision, any } = buildPolicyVarCandidates(csvStoreR.current);
+    const mapping = {};
+    for (const rv of requiredVars) {
+      mapping[rv.col] = autoMatchPolicyVar(rv, rv.kind === 'decision' ? decision : any);
+    }
+    setPolicyApplyModal({ itemId: item.id, name: item.name, ir: item.ir, requiredVars, mapping });
+    setPolicyLibraryModal(null);
+  };
+
+  // Materializa o template no canvas ativo: remapeia o IR (applyPolicyVarMapping)
+  // e ANEXA via o único aplicador da DEC-IA-002 (applyPolicyPatch). Variáveis sem
+  // mapeamento viram pendência visível (aviso + nós sem variável, sinalizados pelo
+  // lint do Copiloto Sessão 1 como chegada zero) — nunca erro nem aplicação parcial
+  // silenciosa de outra coluna. O posicionamento em camadas do aplicador já deixa o
+  // canvas legível; o usuário pode reorganizar com ⊹ Reorganizar se quiser.
+  const applyPolicyTemplate = () => {
+    const { ir, mapping, requiredVars } = policyApplyModal;
+    pushHistory();
+    const remapped = applyPolicyVarMapping(ir, mapping);
+    const { shapes: newShapes, conns: newConns } = applyPolicyPatch(remapped, { shapes: shapesR.current, conns: connsR.current });
+    setShapes(newShapes);
+    setConns(newConns);
+    const pending = requiredVars.filter(rv => !mapping[rv.col]);
+    setPolicyApplyModal(null);
+    setImportWarn(pending.length > 0
+      ? `Política aplicada com ${pending.length} variável${pending.length !== 1 ? 'is' : ''} sem mapeamento: ${pending.map(p => p.col).join(', ')}. Os nós correspondentes ficaram sem variável definida (0 chegadas — o Copiloto vai sinalizar); configure-os no canvas ou use ⊹ Reorganizar.`
+      : null);
+  };
+
+  // ── exportPolicyLibrary / onPolicyLibFileChange ─────────────────
+  const exportPolicyLibrary = () => {
+    const library = policyLibraryR.current;
+    if (library.length === 0) return;
+    const payload = { schemaVersion: '1.0', kind: 'policy-library', exportedAt: new Date().toISOString(), items: library };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `biblioteca-politicas-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const onPolicyLibFileChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (data.kind !== 'policy-library' || !Array.isArray(data.items)) {
+          setImportError("Arquivo inválido: não é uma biblioteca de políticas exportada por este sistema.");
+          return;
+        }
+        // IDs novos p/ evitar colisão com itens já salvos (mesmo padrão do import de fluxo).
+        const imported = data.items.map(it => ({
+          ...it,
+          id: uid(),
+          requiredVars: it.requiredVars?.length ? it.requiredVars : extractPolicyRequiredVars(it.ir),
+        }));
+        setPolicyLibrary(prev => [...prev, ...imported]);
+      } catch {
+        setImportError("Arquivo inválido: não foi possível ler o JSON. Verifique se o arquivo não está corrompido.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
   };
 
   // ── createDecisionNode ────────────────────────────────────────
@@ -8115,9 +8321,16 @@ export default function App() {
               onMouseLeave={e=>{e.currentTarget.style.borderColor="#a5b4fc";e.currentTarget.style.background="#fafafa";}}>
               <span style={{fontSize:16}}>⬆</span> Importar Fluxo
             </button>
+            <button onClick={()=>openPolicyLibrary('browse')}
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#818cf8";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#c7d2fe";}}>
+              <span style={{fontSize:16}}>📚</span> Políticas{policyLibrary.length>0?` (${policyLibrary.length})`:''}
+            </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
             <input ref={libFileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onLibFileChange}/>
+            <input ref={policyLibFileInputRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onPolicyLibFileChange}/>
           </div>
           {importWarn&&(
             <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#fffbeb",border:"1px solid #fde68a",fontSize:11,color:"#92400e",lineHeight:1.5,display:"flex",gap:6,alignItems:"flex-start"}}>
@@ -9192,6 +9405,91 @@ export default function App() {
                     Aplicar
                   </button>
                 )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ POLICY APPLY MODAL — mapeamento de variáveis (Copiloto Sessão 2) ═══════════════ */}
+      {policyApplyModal&&(()=>{
+        const { name, requiredVars, mapping } = policyApplyModal;
+        const { decision, any } = buildPolicyVarCandidates(csvStore);
+        const pendingCount = requiredVars.filter(rv => !mapping[rv.col]).length;
+        const selectStyle = {
+          width:"100%",padding:"7px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+          fontSize:12.5,fontFamily:"inherit",color:"#1e293b",background:"#fff",cursor:"pointer",outline:"none",
+        };
+        const setMap = (col, val) => setPolicyApplyModal(prev => prev ? { ...prev, mapping: { ...prev.mapping, [col]: val } } : prev);
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.45)",backdropFilter:"blur(4px)",zIndex:3500,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:560,maxHeight:"85vh",boxShadow:"0 24px 80px rgba(0,0,0,.2)",padding:"28px 32px",display:"flex",flexDirection:"column",gap:18,overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+                <div>
+                  <h2 style={{fontSize:17,fontWeight:700,color:"#1e293b",marginBottom:4}}>Aplicar Política</h2>
+                  <p style={{fontSize:12.5,color:"#64748b"}}>Mapeie as variáveis de "{name}" para o dataset atual.</p>
+                </div>
+                <button onClick={()=>setPolicyApplyModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:16,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
+              </div>
+
+              {pendingCount>0 && (
+                <div style={{padding:"10px 14px",borderRadius:10,background:"#fffbeb",border:"1px solid #fde68a",fontSize:12,color:"#92400e",lineHeight:1.5,flexShrink:0}}>
+                  ⚠ {pendingCount} variável{pendingCount!==1?'is':''} sem mapeamento — os nós correspondentes serão aplicados sem variável definida (ficam como pendência visível, sem tráfego, até você configurá-los).
+                </div>
+              )}
+
+              {requiredVars.length===0 ? (
+                <div style={{fontSize:12.5,color:"#64748b",fontStyle:"italic"}}>Esta política não referencia nenhuma variável — pode ser aplicada diretamente.</div>
+              ) : (
+                <div style={{display:"flex",flexDirection:"column",gap:12,overflowY:"auto",paddingRight:4}}>
+                  {requiredVars.map(rv => {
+                    const pool = rv.kind === 'decision' ? decision : any;
+                    const cur = mapping[rv.col];
+                    const isPending = !cur;
+                    return (
+                      <div key={rv.col}>
+                        <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:4,display:"flex",alignItems:"center",gap:6}}>
+                          <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:4,fontWeight:500}}>{rv.col}</code>
+                          <span style={{fontSize:10,fontWeight:500,color:"#94a3b8"}}>{rv.kind==='decision'?'variável de decisão':'coluna de regra (Lens)'}</span>
+                          {isPending && (
+                            <span style={{fontSize:10,fontWeight:700,color:"#b45309",background:"#fef3c7",border:"1px solid #fde68a",borderRadius:99,padding:"1px 8px"}}>
+                              ⚠ pendente
+                            </span>
+                          )}
+                        </div>
+                        {pool.length>0 ? (
+                          <select value={cur ? `${cur.csvId}::${cur.col}` : ""}
+                            onChange={e => {
+                              const v = e.target.value;
+                              setMap(rv.col, v ? pool.find(x=>`${x.csvId}::${x.col}`===v) || null : null);
+                            }}
+                            style={selectStyle}>
+                            <option value="">— Não mapear —</option>
+                            {pool.map(v=>(
+                              <option key={`${v.csvId}::${v.col}`} value={`${v.csvId}::${v.col}`}>{v.col} ({v.csvName})</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <div style={{fontSize:12,color:"#94a3b8",fontStyle:"italic"}}>
+                            Nenhuma coluna {rv.kind==='decision'?'de decisão ':''}disponível no dataset atual.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{display:"flex",justifyContent:"flex-end",gap:8,flexShrink:0}}>
+                <button onClick={()=>setPolicyApplyModal(null)}
+                  style={{padding:"8px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                  Cancelar
+                </button>
+                <button onClick={applyPolicyTemplate}
+                  style={{padding:"9px 22px",borderRadius:9,border:"none",background:"#4f46e5",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                  {pendingCount>0 ? `Aplicar mesmo assim (${pendingCount} pendente${pendingCount!==1?'s':''})` : 'Aplicar'}
+                </button>
               </div>
             </div>
           </div>
@@ -11521,6 +11819,191 @@ export default function App() {
                         Fechar
                       </button>
                     </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ POLICY LIBRARY MODAL — templates de PolicyIR (Copiloto Sessão 2) ═══════════════ */}
+      {policyLibraryModal&&(()=>{
+        const { mode, search, saveMeta, overwriteId } = policyLibraryModal;
+        const upd = (patch) => setPolicyLibraryModal(prev => ({ ...prev, ...patch }));
+        const updMeta = (patch) => setPolicyLibraryModal(prev => ({ ...prev, saveMeta: { ...prev.saveMeta, ...patch } }));
+        const isSaveMode = mode === 'save';
+        const filteredItems = policyLibrary.filter(it => {
+          if (!search.trim()) return true;
+          const q = search.toLowerCase();
+          return it.name.toLowerCase().includes(q)
+            || (it.description || '').toLowerCase().includes(q)
+            || (it.tags || []).some(t => t.toLowerCase().includes(q))
+            || (it.requiredVars || []).some(v => v.col.toLowerCase().includes(q));
+        });
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.5)",backdropFilter:"blur(4px)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:isSaveMode?520:700,maxHeight:"88vh",boxShadow:"0 24px 80px rgba(0,0,0,.22)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 28px 16px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <div style={{width:40,height:40,borderRadius:11,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{isSaveMode?'💾':'📚'}</div>
+                  <div>
+                    <h3 style={{fontSize:16,fontWeight:700,color:"#1e293b",marginBottom:2}}>{isSaveMode ? 'Salvar Política na Biblioteca' : 'Biblioteca de Políticas'}</h3>
+                    <p style={{fontSize:12,color:"#94a3b8"}}>{isSaveMode ? "Salva o fluxo do canvas ativo como template reutilizável (JSON canônico da política)" : `${policyLibrary.length} política${policyLibrary.length!==1?'s':''} salva${policyLibrary.length!==1?'s':''}`}</p>
+                  </div>
+                </div>
+                <button onClick={()=>setPolicyLibraryModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",color:"#94a3b8",cursor:"pointer",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>×</button>
+              </div>
+
+              {isSaveMode ? (
+                /* ── Save mode ── */
+                <div style={{padding:"20px 28px",display:"flex",flexDirection:"column",gap:16,overflowY:"auto"}}>
+                  <div>
+                    <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Nome *</label>
+                    <input value={saveMeta.name} onChange={e=>updMeta({name:e.target.value})}
+                      placeholder="Ex: Política de entrada PF"
+                      style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",boxSizing:"border-box",outline:"none"}}/>
+                  </div>
+                  <div>
+                    <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Descrição</label>
+                    <textarea value={saveMeta.description} onChange={e=>updMeta({description:e.target.value})}
+                      placeholder="Descreva o objetivo e contexto desta política…"
+                      rows={3}
+                      style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",boxSizing:"border-box",resize:"vertical",outline:"none"}}/>
+                  </div>
+                  <div>
+                    <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Tags <span style={{fontWeight:400,color:"#94a3b8"}}>(separadas por vírgula)</span></label>
+                    <input value={saveMeta.tags} onChange={e=>updMeta({tags:e.target.value})}
+                      placeholder="Ex: PF, entrada, varejo"
+                      style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",boxSizing:"border-box",outline:"none"}}/>
+                  </div>
+                  {policyLibrary.length > 0 && (
+                    <div>
+                      <label style={{fontSize:12,fontWeight:600,color:"#475569",display:"block",marginBottom:6}}>Sobrescrever política existente <span style={{fontWeight:400,color:"#94a3b8"}}>(opcional)</span></label>
+                      <select value={overwriteId??''} onChange={e=>upd({overwriteId:e.target.value||null})}
+                        style={{width:"100%",padding:"9px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",background:"#fff",outline:"none"}}>
+                        <option value="">— Salvar como nova —</option>
+                        {policyLibrary.map(it=>(<option key={it.id} value={it.id}>{it.name}</option>))}
+                      </select>
+                    </div>
+                  )}
+                  <div style={{padding:"10px 12px",borderRadius:9,background:"#f8fafc",border:"1px solid #f1f5f9",fontSize:11.5,color:"#64748b",lineHeight:1.5}}>
+                    Salva a estrutura da política (nós, rotas, regras) do canvas ativo — sem dados linha a linha nem posições. {shapes.length===0 ? '⚠ O canvas ativo está vazio.' : `${shapes.filter(s=>['decision','cineminha','decision_lens'].includes(s.type)).length} nó(s) de decisão no canvas ativo.`}
+                  </div>
+                </div>
+              ) : (
+                /* ── Browse mode ── */
+                <div style={{display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+                  <div style={{padding:"14px 28px 12px",borderBottom:"1px solid #f1f5f9",flexShrink:0,display:"flex",gap:10,alignItems:"center"}}>
+                    <input value={search} onChange={e=>upd({search:e.target.value})}
+                      placeholder="Buscar por nome, tag, variável…"
+                      style={{flex:1,padding:"8px 12px",borderRadius:9,border:"1.5px solid #e2e8f0",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+                    <button onClick={()=>upd({mode:'save',saveMeta:{name:canvases[activeCanvasId]?.name||'Política',description:'',tags:''},overwriteId:null})}
+                      disabled={shapes.length===0}
+                      title={shapes.length===0?"Canvas ativo vazio":"Salvar o canvas ativo como novo template"}
+                      style={{padding:"7px 14px",borderRadius:8,border:"1px solid #bbf7d0",background:shapes.length===0?"#f8fafc":"#f0fdf4",color:shapes.length===0?"#cbd5e1":"#15803d",cursor:shapes.length===0?"not-allowed":"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>
+                      💾 Salvar atual
+                    </button>
+                  </div>
+
+                  <div style={{flex:1,overflowY:"auto",padding:"12px 28px"}}>
+                    {filteredItems.length === 0 ? (
+                      <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"48px 0",gap:12,color:"#94a3b8"}}>
+                        <div style={{fontSize:40}}>{policyLibrary.length===0?'📭':'🔍'}</div>
+                        <div style={{fontSize:14,fontWeight:600}}>{policyLibrary.length===0?'Biblioteca vazia':'Nenhum resultado'}</div>
+                        <div style={{fontSize:12,textAlign:"center",maxWidth:280}}>
+                          {policyLibrary.length===0
+                            ? 'Monte um fluxo no canvas e clique em "💾 Salvar atual" para adicionar à biblioteca.'
+                            : 'Tente ajustar a busca.'}
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        {filteredItems.map(item => {
+                          const tags = item.tags || [];
+                          const reqVars = item.requiredVars || [];
+                          const nodeCount = (item.ir?.nodes || []).length;
+                          return (
+                            <div key={item.id}
+                              style={{border:"1.5px solid #e2e8f0",borderRadius:12,padding:"14px 16px",display:"flex",gap:14,alignItems:"flex-start",background:"#fafafa"}}>
+                              <div style={{width:36,height:36,borderRadius:9,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>📚</div>
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                                  <span style={{fontSize:13.5,fontWeight:700,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}</span>
+                                  <span style={{fontSize:10.5,fontWeight:600,padding:"2px 7px",borderRadius:99,background:"#f1f5f9",color:"#64748b",flexShrink:0}}>{nodeCount} nó{nodeCount!==1?'s':''}</span>
+                                </div>
+                                {item.description&&(
+                                  <div style={{fontSize:11.5,color:"#64748b",marginBottom:5,lineHeight:1.4}}>{item.description}</div>
+                                )}
+                                {tags.length>0&&(
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:reqVars.length?5:0}}>
+                                    {tags.map(t=>(<span key={t} style={{fontSize:10,padding:"2px 7px",borderRadius:99,background:"#f1f5f9",color:"#64748b",border:"1px solid #e2e8f0"}}>{t}</span>))}
+                                  </div>
+                                )}
+                                {reqVars.length>0&&(
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                                    {reqVars.map(v=>(
+                                      <span key={v.col} style={{fontSize:10,padding:"2px 7px",borderRadius:99,background:v.kind==='decision'?"#eff6ff":"#f5f3ff",color:v.kind==='decision'?"#3b82f6":"#7c3aed",border:`1px solid ${v.kind==='decision'?"#bfdbfe":"#ddd6fe"}`}}>{v.col}</span>
+                                    ))}
+                                  </div>
+                                )}
+                                <div style={{fontSize:10,color:"#cbd5e1",marginTop:5}}>Salvo em {new Date(item.savedAt).toLocaleDateString('pt-BR')}</div>
+                              </div>
+                              <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+                                <button onClick={()=>openPolicyApplyModal(item)}
+                                  title="Abre o mapeamento de variáveis e aplica no canvas ativo"
+                                  style={{padding:"6px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>
+                                  ▶ Aplicar
+                                </button>
+                                <button onClick={()=>deletePolicyFromLibrary(item.id)}
+                                  style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fecaca",background:"#fff",color:"#dc2626",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
+                                  Remover
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Footer */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 28px",borderTop:"1px solid #f1f5f9",flexShrink:0}}>
+                {isSaveMode ? (
+                  <>
+                    <button onClick={()=>upd({mode:'browse'})}
+                      style={{padding:"8px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                      ← Voltar
+                    </button>
+                    <button onClick={savePolicyToLibrary} disabled={!saveMeta.name.trim()||shapes.length===0}
+                      style={{padding:"9px 22px",borderRadius:9,border:"none",background:(saveMeta.name.trim()&&shapes.length>0)?"#4f46e5":"#c7d2fe",color:"#fff",cursor:(saveMeta.name.trim()&&shapes.length>0)?"pointer":"not-allowed",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                      {overwriteId ? '🔄 Substituir' : '💾 Salvar na Biblioteca'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                      <span style={{fontSize:11.5,color:"#94a3b8"}}>{filteredItems.length} resultado{filteredItems.length!==1?'s':''}</span>
+                      <button onClick={()=>policyLibFileInputRef.current?.click()}
+                        style={{padding:"6px 13px",borderRadius:7,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:500,display:"flex",alignItems:"center",gap:5}}>
+                        ↑ Importar Biblioteca
+                      </button>
+                      {policyLibrary.length > 0 && (
+                        <button onClick={exportPolicyLibrary}
+                          style={{padding:"6px 13px",borderRadius:7,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:500,display:"flex",alignItems:"center",gap:5}}>
+                          ↓ Exportar Biblioteca
+                        </button>
+                      )}
+                    </div>
+                    <button onClick={()=>setPolicyLibraryModal(null)}
+                      style={{padding:"8px 20px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit"}}>
+                      Fechar
+                    </button>
                   </>
                 )}
               </div>
