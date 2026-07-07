@@ -29,6 +29,7 @@ AppCreditoSimulador/
 │   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
 │   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
 │   ├── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
+│   ├── policyIR.test.js          # GATE Copiloto Sessão 0: roteamento via PolicyIR ≡ motor compilado (M8), round-trip IR→canvas→IR, IR sem posições/dados
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 ├── docs/
@@ -248,6 +249,8 @@ AppCreditoSimulador/
 - `matchLensRule(cellVal, operator, ruleVal)`: avalia uma regra de Decision Lens contra um valor de célula
 - `computeLensPopulation(rules, csvStore)`: calcula `{count, total}` ponderado por volume — usado só no preview síncrono do `lensModal` ao editar regras (o rótulo do nó `decision_lens` usa `lensCounts`, vindo do worker via M10)
 - `buildFlowGraph(shapes, conns)`: constrói lista de adjacências do grafo de fluxo para o motor de simulação e `autoLayout`
+- `buildPolicyIR(shapes, conns, csvStore, opts?)`: deriva o **PolicyIR** (JSON canônico da política — Copiloto Sessão 0, DEC-IA-002) do canvas — ver seção "PolicyIR"
+- `applyPolicyPatch(patch, base?)`: materializa um patch de PolicyIR de volta em `{shapes, conns, idMap}` (IDs via contador `_id`/`uid()` existente) — ver seção "PolicyIR"
 - `normalizeColName(s)`: normaliza nome de coluna para comparação fuzzy
 - `exportDiagnosticCSV(shapes, conns, csvStore)`: gera CSV de auditoria com métricas de funil por nó+valor (aprovação, volume, inadimplência) para diagnóstico da política
 - `pivotWidget(ds, config)`: pivot client-side genérico → `{state, data, series, metricDef, xCol, truncated}`; usado pelos gráficos do Analytics Workspace
@@ -707,6 +710,55 @@ O domínio completo continua guardado no shape (`rowDomain`/`colDomain`, ports).
 - **Campos no shape**: `decision.visibleVals`, `cineminha.visibleRow`/`visibleCol` (todos `null` por default = automático).
 - **Render**: `renderCinemaNode` usa `effectiveDomain` em `rDom`/`cDom`; ports de losango fora do domínio efetivo entram em `hiddenPortIds` (useMemo) e são pulados em `renderShape`/`renderConn`.
 - **Modal `domainModal`** (`null | {shapeId, draft:{val?|row?|col?: null|string[]}}`): aberto pelo botão **⚙ Domínio** na toolbar contextual do losango e do Cineminha. Lista com check + valor + qtd. que chegou (por valor), multi-seleção, e o toggle **"Mostrar apenas valores com volume"** (= modo automático). Mexer em qualquer check vira modo manual. `applyDomainConfig` grava os campos `visible*` no shape (com `pushHistory`).
+
+## PolicyIR — JSON canônico da política (Copiloto Sessão 0, DEC-IA-002)
+
+Representação canônica da política de crédito — a *lingua franca* do épico do
+Copiloto (`docs/wiki/Epicos-CopilotoIA.md`): templates, sugestões, Goal Seek,
+documentação e trocas com IA leem/escrevem PolicyIR. `shapes`/`conns` seguem sendo a
+fonte de verdade do canvas; o IR é **derivado** e patches de IR são materializados de
+volta por um **único aplicador**. Ambos são helpers globais exportados de `src/App.jsx`.
+
+- **`buildPolicyIR(shapes, conns, csvStore, opts?)`** → IR:
+  ```js
+  {
+    kind: "policy-ir", version: "1.0", name, generatedAt,
+    datasets: [{ csvId, name, columns: [{name, colType, varType, domainSize}] }], // metadados, SEM dados
+    nodes: [  // na ordem de `shapes` (preserva a eleição de raiz do motor)
+      { id, kind:'decision', label, variable:{col,csvId}, routes:[{values:[...], to}] },
+      { id, kind:'cinema',   label, cinemaType, rowVar, colVar, rowDomain, colDomain,
+        blockedCells:[...],  // SÓ as caselas não elegíveis, ordenadas (roteamento)
+        routes:{eligible, notEligible} },
+      { id, kind:'lens',     label, rules:[{col,operator,value,logic}], to },
+      { id, kind:'terminal', label, terminal:'approved'|'rejected'|'as_is' },
+    ],
+    entry: [nodeId...],  // raízes — mesmo critério do motor (sem aresta de entrada vinda de port)
+  }
+  ```
+  Regras: **sem perda de roteamento** (GATE), **JSON puro** (serializável/versionável),
+  **sem posições x/y e sem dados linha a linha**. O achatamento resolve cadeias de
+  ports (`decision→port→destino` vira `{values, to}`, com o mesmo trim/first-wins do
+  motor); rota sem destino → `to: null` (linha morre, como port sem saída). Grades
+  numéricas de casela (`setCinemaCellValue`) não entram — só elegibilidade
+  (`isCellEligible` → `blockedCells`).
+- **`applyPolicyPatch(patch, base = {shapes:[], conns:[]})`** → `{shapes, conns, idMap}`:
+  materializa um IR (completo ou parcial `{nodes}`) **anexando** ao canvas base, sem
+  mutá-lo. IDs novos via contador `_id` (`uid()`); `idMap` traduz id do IR → id criado;
+  rota cujo `to` não está no patch resolve contra `base.shapes` (patch pode conectar a
+  nós existentes). Recria ports no idioma padrão do canvas, marca `cellsUserEdited=true`
+  no Cineminha (bloqueia a prévia AS IS) e posiciona por camadas simples (longest-path)
+  — o usuário pode usar ⊹ Reorganizar.
+- **Export**: 3ª opção do modal **Exportar Fluxo** (seção Fluxo) — "JSON Canônico da
+  Política" (`doExportPolicyIR`, arquivo `politica_canonica_YYYY-MM-DD.policy.json`).
+- **GATE `tests/policyIR.test.js`**: sobre as fixtures do `compiledEngine.test.js`,
+  (1) roteamento via IR ≡ motor compilado M8 — agregados do tick, incremental,
+  `nodeArrivals` via `idMap` e decisão simulada **por linha**; (2) round-trip
+  IR→canvas→IR estável (igualdade estrutural módulo renomeação de IDs); (3) IR sem
+  chaves de layout/dados e com estrutura canônica exata; (4) patch parcial sobre
+  canvas existente sem colisão de IDs.
+- **Limite documentado**: aresta rotulada de losango **direto** para outro nó de fluxo
+  (sem port, fora do idioma da UI) volta materializada **com** port — preserva o
+  caminho da linha, mas pode mudar qual nó o motor elege como raiz.
 
 ## Salvar / Abrir Projeto (`.credito.json`)
 
@@ -1260,6 +1312,6 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 - **Sliders adicionais**: margem, rentabilidade ajustada ao risco (RAR), restrição de volume mínimo por segmento
 - **Fronteira Pareto multi-dimensional**: 3D (aprovação × inad.real × inad.inferida)
 - **Decision Lens — modo incremental**: comparação visual linha a linha das decisões mudadas
-- **Exportação**: JSON canônico da política para importação em motor de decisão em produção; exportação do canvas como PNG/SVG
+- **Exportação**: JSON canônico da política ✅ (PolicyIR — ver seção "PolicyIR"; 3ª opção do modal Exportar Fluxo); falta exportação do canvas como PNG/SVG
 - **Persistência**: export/import de projeto como `.credito.json` ✅ (ver "Salvar / Abrir Projeto") + auto-persistência em `sessionStorage` ✅ (ver "Auto-persistência de sessão"); falta auto-save durável em `localStorage` (sobrevive só à sessão do navegador)
 - **Cálculo de delta marginal**: "adicionar esta célula muda aprovação em +X pp e inad em +Y pp"

@@ -1,6 +1,6 @@
 # Épico: Copiloto de Política de Crédito (IA opcional, local-first)
 
-> **Status:** planejamento aprovado — nenhuma sessão implementada.
+> **Status:** Sessão 0 (PolicyIR) ✅ ENTREGUE — demais sessões em planejamento.
 > **Documentos das frentes:** [[Copiloto-ConstrucaoAssistida|1. Construção Assistida]] · [[Copiloto-SugestoesMelhoria|2. Sugestões de Melhoria]] · [[Copiloto-DocumentacaoAutomatica|3. Documentação Automática]]
 
 ## O que é
@@ -217,9 +217,20 @@ quando fizer sentido, na auto-persistência de `sessionStorage`.
 
 ## Níveis de maturidade
 
-### Nível 0 — Fundação (pré-requisito técnico)
+### Nível 0 — Fundação (pré-requisito técnico) — ✅ ENTREGUE (Sessão 0)
 - **PolicyIR**: `buildPolicyIR(shapes, conns, csvStore)` + serialização + aplicador de patches + GATE de equivalência de roteamento com o motor compilado (M8).
 - Sem UI nova visível (além do export do JSON canônico, que já quita um item do Roadmap).
+- **Como foi entregue**: `buildPolicyIR(shapes, conns, csvStore, opts?)` e
+  `applyPolicyPatch(patch, base?)` como helpers globais exportados em `src/App.jsx`
+  (IDs novos via o contador `_id`/`uid()` existente; retorna `{shapes, conns, idMap}`).
+  O IR achata as cadeias de ports (`decision→port→destino` vira `{values, to}`),
+  captura a elegibilidade do Cineminha em `blockedCells` (só roteamento — grades
+  numéricas de oferta não entram) e carrega `entry` (raízes, mesmo critério do motor)
+  e metadados de dataset SEM dados (N0). Export "JSON Canônico da Política" como 3ª
+  opção do modal Exportar Fluxo (`doExportPolicyIR`, arquivo `.policy.json`). GATE
+  `tests/policyIR.test.js`: roteamento via IR ≡ motor compilado (M8) sobre as fixtures
+  de `tests/compiledEngine.test.js` (incl. decisão simulada por linha), round-trip
+  IR→canvas→IR estável (módulo renomeação de IDs) e IR sem posições/dados.
 
 ### Nível 1 — Sistema totalmente local (produto completo sem IA)
 - **Frente 1**: lint/insights estruturais; biblioteca de políticas/templates com mapeamento de variáveis; sugestão de próximo nó por discriminância; autocompletar terminais.
@@ -250,7 +261,7 @@ IA em nada.
 
 | Sessão | Entrega | Frente | Nível |
 |---|---|---|---|
-| 0 | PolicyIR + export JSON canônico + GATE | fundação | 0 |
+| 0 | PolicyIR + export JSON canônico + GATE — ✅ ENTREGUE | fundação | 0 |
 | 1 | Lint/Insights estruturais (painel + `COMPUTE_POLICY_INSIGHTS`) | 1 | 1 |
 | 2 | Biblioteca de políticas/templates (salvar/aplicar com mapeamento) | 1 | 1 |
 | 3 | Sugestão de próximo nó (ranking por discriminância) | 1 | 1 |
