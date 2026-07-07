@@ -1386,6 +1386,14 @@ const CHART_TYPES = [
 // Métricas em que "menor é melhor" — orienta a cor do delta no KPI.
 const GOOD_WHEN_LOWER = new Set(["inadReal", "inadInferida"]);
 
+// Copiloto — lint estrutural (Sessão 1, DEC-IA-006). Estilo por severidade do achado
+// (findings vêm de COMPUTE_POLICY_INSIGHTS, sempre {severity, code, nodeId, msg, fix?}).
+const COPILOT_SEV_META = {
+  error:   { emoji: "🔴", color: "#b91c1c", bg: "#fef2f2", border: "#fecaca" },
+  warning: { emoji: "🟡", color: "#92400e", bg: "#fffbeb", border: "#fde68a" },
+  info:    { emoji: "🔵", color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
+};
+
 // Agrega uma métrica sobre um conjunto de linhas (dataset largo COLUNAR) para uma coluna
 // de decisão. Replica a semântica do motor: numeradores/denominadores só sobre aprovados.
 // `indices`: Int32Array|number[]|null — subconjunto de linhas; null = todas as linhas
@@ -3646,6 +3654,8 @@ export default function App() {
           hierarchyMode: prev?.hierarchyMode ?? 'cascata',
           inadMetric:    prev?.inadMetric    ?? 'inferida',
         }));
+      } else if (msgType === 'POLICY_INSIGHTS_RESULT') {
+        setCopilotFindings(e.data.findings || []);
       }
     };
     return () => worker.terminate();
@@ -3751,6 +3761,20 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'COMPUTE_OVERLAY', shapes: shapesR.current, conns: connsR.current });
     }, 300);
     return () => clearTimeout(simOverlayDebounceRef.current);
+  }, [shapes, conns, csvStore, inferenceRef]);
+
+  // ── Copiloto — lint estrutural (Sessão 1, DEC-IA-006) ──────────
+  // Achados efêmeros (não persistem — só refletem o estado atual do canvas ativo),
+  // recomputados no mesmo debounce da simulação. O worker reaproveita o tick
+  // (getTickResult) — nenhuma varredura extra da base.
+  const [copilotFindings, setCopilotFindings] = useState([]);
+  const copilotDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(copilotDebounceRef.current);
+    copilotDebounceRef.current = setTimeout(() => {
+      workerRef.current?.postMessage({ type: 'COMPUTE_POLICY_INSIGHTS', shapes: shapesR.current, conns: connsR.current });
+    }, 300);
+    return () => clearTimeout(copilotDebounceRef.current);
   }, [shapes, conns, csvStore, inferenceRef]);
 
   // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
@@ -5998,6 +6022,38 @@ export default function App() {
     setDomainModal(null);
   }, []); // eslint-disable-line
 
+  // ── Copiloto — "ir até o nó" + quick-fixes não-destrutivos (Sessão 1) ─────────
+  // Acha o shape pelo id (achados do Copiloto são sempre do canvas ativo — mesmo
+  // escopo shapes/conns que RUN_SIMULATION/COMPUTE_OVERLAY), seleciona e centraliza
+  // o viewport nele, mantendo o zoom atual.
+  const goToCopilotNode = useCallback((nodeId) => {
+    const s = shapesR.current.find(x => x.id === nodeId);
+    if (!s) return;
+    setSel(nodeId);
+    setMultiSel(new Set());
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
+    const cx = s.x + (s.w || 0) / 2, cy = s.y + (s.h || 0) / 2;
+    setVp(v => ({ s: v.s, x: svgEl.clientWidth / 2 - cx * v.s, y: svgEl.clientHeight / 2 - cy * v.s }));
+  }, []); // eslint-disable-line
+
+  // Quick-fix "conectar a um terminal": cria um terminal (Aprovado/Reprovado) e uma
+  // conexão a partir do nó/porta solta — mesmo padrão de criação usado pelo tool de
+  // terminal na toolbar. Não-destrutivo: só adiciona; pushHistory() antes.
+  const applyCopilotConnectTerminal = useCallback((nodeId, terminal) => {
+    const s = shapesR.current.find(x => x.id === nodeId);
+    if (!s) return;
+    pushHistory();
+    const id = uid();
+    const w = 120, h = 44;
+    const label = terminal === 'approved' ? 'Aprovado' : terminal === 'rejected' ? 'Reprovado' : 'AS IS';
+    const x = (s.x ?? 0) + (s.w || 0) + 90;
+    const y = (s.y ?? 0) + ((s.h || 0) - h) / 2;
+    setShapes(p => [...p, { id, type: terminal, x, y, w, h, label, color: '#ffffff' }]);
+    setConns(p => [...p, { id: uid(), from: nodeId, to: id }]);
+    setSel(id);
+  }, []); // eslint-disable-line
+
   // ── assignCinemaVar ───────────────────────────────────────────
   const assignCinemaVar = useCallback((shapeIdOrIds, col, csvId, axis) => {
     pushHistory();
@@ -8176,6 +8232,66 @@ export default function App() {
               <span style={{fontSize:16}}>🛢</span> Adicionar Decision Lens
             </button>
             <p style={{fontSize:10.5,color:"#cbd5e1",marginTop:6,lineHeight:1.4}}>Ou use a ferramenta 🔎 na barra lateral</p>
+          </div>
+        )}
+
+        {/* Copiloto — lint estrutural (Sessão 1, DEC-IA-006): achados por severidade,
+            "ir até o nó" e quick-fixes não-destrutivos. Efêmero (não persiste). */}
+        {shapes.length > 0 && (
+          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+              <p style={{fontSize:11,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.6,margin:0}}>🧭 Copiloto</p>
+              {copilotFindings.length>0 && (
+                <span style={{fontSize:10.5,fontWeight:700,color:"#64748b",background:"#f1f5f9",borderRadius:20,padding:"2px 8px"}}>
+                  {copilotFindings.length}
+                </span>
+              )}
+            </div>
+            {copilotFindings.length === 0 ? (
+              <div style={{padding:"9px 10px",borderRadius:8,background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:11.5,color:"#15803d",lineHeight:1.5,display:"flex",gap:6,alignItems:"center"}}>
+                <span>✅</span><span>Nenhum achado estrutural — fluxo consistente.</span>
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:300,overflowY:"auto"}}>
+                {copilotFindings.map((f,i) => {
+                  const meta = COPILOT_SEV_META[f.severity] || COPILOT_SEV_META.info;
+                  return (
+                    <div key={`${f.code}-${f.nodeId}-${i}`} style={{padding:"8px 10px",borderRadius:8,background:meta.bg,border:`1px solid ${meta.border}`,fontSize:11.5,color:meta.color,lineHeight:1.45}}>
+                      <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
+                        <span style={{flexShrink:0}}>{meta.emoji}</span>
+                        <span style={{flex:1}}>{f.msg}</span>
+                      </div>
+                      <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
+                        <button onClick={()=>goToCopilotNode(f.nodeId)}
+                          title="Selecionar e centralizar este nó no canvas"
+                          style={{padding:"3px 9px",borderRadius:6,border:`1px solid ${meta.border}`,background:"#fff",color:meta.color,cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                          🎯 Ir até o nó
+                        </button>
+                        {f.fix?.kind === 'connect_terminal' && (<>
+                          <button onClick={()=>applyCopilotConnectTerminal(f.fix.nodeId,'rejected')}
+                            title="Conectar esta saída a um novo terminal Reprovado"
+                            style={{padding:"3px 9px",borderRadius:6,border:"1px solid #fecaca",background:"#fff1f2",color:"#b91c1c",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                            ❌ Reprovado
+                          </button>
+                          <button onClick={()=>applyCopilotConnectTerminal(f.fix.nodeId,'approved')}
+                            title="Conectar esta saída a um novo terminal Aprovado"
+                            style={{padding:"3px 9px",borderRadius:6,border:"1px solid #bbf7d0",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                            ✅ Aprovado
+                          </button>
+                        </>)}
+                        {f.fix?.kind === 'open_domain_modal' && (
+                          <button onClick={()=>openDomainModal(f.fix.nodeId)}
+                            title="Abrir 'Configurar nó' para revisar/ocultar este valor"
+                            style={{padding:"3px 9px",borderRadius:6,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4338ca",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                            ⚙ Configurar nó
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
