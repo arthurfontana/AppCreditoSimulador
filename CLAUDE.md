@@ -1,11 +1,11 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~10920 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~11150 linhas)
 - Sem CSS externo — tudo inline styles
 - SVG puro para o canvas; matrizes interativas via `foreignObject` (sem biblioteca de diagramas)
 - **Recharts** para gráficos na aba Dashboard (exceção pontual ao ADR-003 — ver `DEC-AW-001`)
-- Web Worker (`src/simulation.worker.js`, ~2240 linhas) para cálculos pesados fora da thread principal
+- Web Worker (`src/simulation.worker.js`, ~2430 linhas) para cálculos pesados fora da thread principal
 - **`src/columnar.js`**: módulo de armazenamento colunar do `csvStore` (otimização de memória — Fases 0, 1, 2) + pipeline de importação vetorizado (M1 — parse direto para colunar, sem `string[][]`)
 - **Vitest** para testes (`tests/*.test.js`, jsdom) — `npm test`
 
@@ -17,8 +17,8 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 ```
 AppCreditoSimulador/
 ├── src/
-│   ├── App.jsx                   # Componente único — ~10920 linhas
-│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~2240 linhas)
+│   ├── App.jsx                   # Componente único — ~11150 linhas
+│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~2430 linhas)
 │   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
@@ -33,10 +33,14 @@ AppCreditoSimulador/
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
+│   ├── Proposta-Inferencia-Referencia.md  # Fonte de verdade da Inferência de Negados
 │   └── wiki/                     # Documentação sincronizada com GitHub Wiki
 │       ├── Arquitetura.md
 │       ├── Epicos-*.md
+│       ├── Copiloto-*.md
 │       ├── Otimizacao-Memoria.md # Plano de otimização de memória para datasets grandes
+│       ├── PERFORMANCE-ANALISE.md # Backlog de performance M1–M15 (Fases A–D)
+│       ├── SECURITY-AND-ENTERPRISE-READINESS.md
 │       ├── Roadmap.md
 │       ├── Decisoes.md
 │       └── _Sidebar.md
@@ -49,6 +53,10 @@ AppCreditoSimulador/
 │   ├── build-release.yml         # Build automático em push para main → commit em release/
 │   └── sync-wiki.yml             # Sincroniza docs/wiki/ com o GitHub Wiki
 ├── vite.config.js                # Build config + injeção de metadados de build
+├── vitest.config.js              # Config dos testes (jsdom)
+├── CONTRATO_INFERENCIA.md        # Contrato da Inferência de Negados (fonte de verdade junto da Proposta)
+├── Amostra_Fake.csv              # Amostra real usada pelo GATE tests/inferenceCascade.test.js
+├── INFERENCIA_REF_202509_202603.CSV  # Tabela de referência usada pelo mesmo GATE
 ├── package.json
 └── index.html
 ```
@@ -58,7 +66,7 @@ AppCreditoSimulador/
 ### Estado principal
 - `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `as_is`, `csv`, `simPanel`, `cineminha`, `decision_lens`, `frame`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
-- `csvStore`: `{[csvId]: {name, headers, rows, columnTypes, varTypes, asIsConfig}}`
+- `csvStore`: `{[csvId]: {name, headers, columns, rowCount, columnTypes, varTypes, asIsConfig, inferenceConfig}}` (formato colunar — ver "csvStore: entrada por dataset")
 - `wizard`: modal de importação em 3 passos — `{file, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId, decimalSep, decimalSepConfident, parsedHeaders, parsedColumns, parsedRowCount, previewRows}`. Desde o M1 **não guarda** `rawText` nem `string[][]`: o parse vai direto para colunas dict (`parsedColumns`), o preview é uma amostra de ~100 linhas (`previewRows`) e trocar delimitador/cabeçalho relê o `File` handle (`file`)
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
@@ -215,7 +223,7 @@ AppCreditoSimulador/
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
 - `SimIndicators`: exibe indicadores de simulação na sidebar direita — mostra resultado atual + comparativo com baseline AS IS quando disponível (`incrementalResult`)
 - `InferenceSignal({source, confiabVolume, weightMode, scale})`: sinalização da inferência por referência (Fase 3, refinada na Fase 4) — selo de origem + **selo de base de peso** (⚖️ Propostas/Aprovados/Misto, ver Toggle de Peso) + indicador "% do volume inferido com confiab ALTA" com barra empilhada, **legenda das faixas** e alerta em dois níveis (⚡ atenção 50–80% / ⚠ alerta <50%). Renderizado no `renderSimPanel` e no `businessWidget` (ver Sinalização de Confiabilidade)
-- `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
+- `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `addTextWidget`, `duplicateWidget(id)`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
 - `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
 - `KpiCard({analyticsDataset, metricId, kpiA, kpiB, onChange})`: indicador pontual comparando dois cenários (DEC-AW-008) — seletores Baseline (A) e Comparação (B) aceitam qualquer cenário (incl. AS IS); valor grande = B, baseline = A, delta `B − A` colorido pela direção da métrica (`GOOD_WHEN_LOWER`). A/B persistidos em `config.kpiA`/`kpiB`; default via `resolveKpiScenarios`
@@ -419,9 +427,9 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
 - **Sessão 1** (entregue): pipeline ponta a ponta com um gráfico de linha fixo (Recharts, DEC-AW-001).
 - **Sessão 2** (entregue): builder de dashboard configurável — gráficos de linha configuráveis + painel de campos arrastáveis.
   - **Estado** `analyticsLayout: WidgetConfig[]` em `App.jsx` — array de gráficos do dashboard. Cada `WidgetConfig`: `{id, type, x, y, w, h, config:{title, xDimension, metric, serieBy, kpiA?, kpiB?, filters?}}` (`kpiA`/`kpiB` só nos cards `kpi`, 5C; `filters: FilterCard[]` é o filtro de nível visual — ver Filtros). Não tem ref espelho (não usado em event listeners). Auto-init: ao chegar o 1º `analyticsDataset` com layout vazio, cria o gráfico padrão (Taxa de Aprovação × 1ª temporal, série por cenário).
-  - **`AnalysisTab`**: layout em 2 colunas — área de gráficos (scroll) + `FieldPanel` à direita. Header com botão **+ Adicionar gráfico**. Funções: `addWidget`, `removeWidget(id)`, `changeConfig(id, patch)`.
+  - **`AnalysisTab`**: layout em 2 colunas — área de gráficos (scroll) + `FieldPanel` à direita. Header com botão **+ Adicionar gráfico**. Funções: `addWidget`, `duplicateWidget(id)`, `removeWidget(id)`, `changeConfig(id, patch)`.
   - **`FieldPanel`**: chips arrastáveis — dimensões (temporais ⏱ primeiro, depois categóricas; `kind:'dim'`) e métricas (`kind:'metric'`). MIME `application/aw-field`.
-  - **`AnalyticsWidget`**: card com título editável, botão remover, barra de 3 `FieldWell` (Eixo X, Métrica, Série) e `LineChart`. Pivot memoizado por `[analyticsDataset, xDimension, metric, serieBy]`.
+  - **`AnalyticsWidget`**: card com título editável, botões duplicar (⧉) e remover, barra de 3 `FieldWell` (Eixo X, Métrica, Série) e `LineChart`. Pivot memoizado por `[analyticsDataset, xDimension, metric, serieBy]`.
   - **`FieldWell`**: drop zone (valida `kind` via `accept`) + `<select>` fallback. Destaca ao arrastar.
   - **`pivotWidget(ds, config)`**: `serieBy` aceita `__cenario__` (AS IS vs Simulado), `__none__` (linha única Simulado) ou nome de dimensão (série por valores distintos, teto `MAX_SERIES=12`). Eixo X temporal ordena via `parseTemporalKey`; senão numérico/A-Z.
   - **Métricas disponíveis**: `approvalRate`, `inadReal`, `inadInferida` (pct), `qty`, `approvedQty`, `approvedAltasInfer` (qty — Vol. Vendas Inferidas).
@@ -441,6 +449,10 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
   erros e sugere correções no menu de contexto); botão **ABC** liga/desliga (`config.spellCheck`,
   default `true`). Como vive dentro de `analyticsLayout`, já é persistido no Projeto e na
   `sessionStorage` sem mudança de schema.
+- **Duplicar widget**: `duplicateWidget(id)` (botão ⧉ no header de gráficos e caixas de
+  texto) — cria uma cópia independente com deep clone da `config` (filtros/regras
+  desacoplados do original), título com sufixo "(cópia)", offset de +28px em x/y e
+  inserida logo após o original na lista.
 - **Redimensionamento livre**: `startWidgetInteract` (resize) **não tem teto** de largura/
   altura — o usuário aumenta qualquer widget o quanto quiser; só há um piso por tipo
   (gráfico `340×340`, texto `160×100`) para o card não colapsar.
@@ -1240,7 +1252,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/claude-md-docs-7xvd3y`
+`claude/claude-md-docs-09v1ql`
 
 ## Roadmap futuro (não implementado)
 
