@@ -13,6 +13,8 @@
   - [[Copiloto-ConstrucaoAssistida|1. Construção Assistida]]
   - [[Copiloto-SugestoesMelhoria|2. Sugestões de Melhoria]]
   - [[Copiloto-DocumentacaoAutomatica|3. Documentação Automática]]
+  - [[Copiloto-DescobertaSegmentos|4. Descoberta de Segmentos]]
+  - [[Copilotos-Prompts-Sessoes|Prompts de Todas as Sessões]]
 - [[Roadmap]]
 
 ---

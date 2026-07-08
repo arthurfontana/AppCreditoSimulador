@@ -1,7 +1,7 @@
 # Épico: Copiloto de Política de Crédito (IA opcional, local-first)
 
 > **Status:** Sessão 0 (PolicyIR) ✅ ENTREGUE · Sessão 1 (Lint/Insights) ✅ ENTREGUE · Sessão 2 (Biblioteca de Políticas) ✅ ENTREGUE · Sessão 3 (Sugestão de próximo nó) ✅ ENTREGUE · Sessão 4 (Goal Seek) ✅ ENTREGUE · Sessão 5 (Simplificação) ✅ ENTREGUE · Sessão 6 (DocGen local) ✅ ENTREGUE — demais sessões em planejamento.
-> **Documentos das frentes:** [[Copiloto-ConstrucaoAssistida|1. Construção Assistida]] · [[Copiloto-SugestoesMelhoria|2. Sugestões de Melhoria]] · [[Copiloto-DocumentacaoAutomatica|3. Documentação Automática]]
+> **Documentos das frentes:** [[Copiloto-ConstrucaoAssistida|1. Construção Assistida]] · [[Copiloto-SugestoesMelhoria|2. Sugestões de Melhoria]] · [[Copiloto-DocumentacaoAutomatica|3. Documentação Automática]] · [[Copiloto-DescobertaSegmentos|4. Descoberta de Segmentos]]
 
 ## O que é
 
@@ -268,9 +268,17 @@ IA em nada.
 | 4 | Goal Seek estruturado (`COMPUTE_GOAL_SEEK` + modal de objetivo) — ✅ ENTREGUE | 2 | 1 |
 | 5 | Simplificação + prova de equivalência (`COMPUTE_SIMPLIFY` + modal) — ✅ ENTREGUE | 2 | 1 |
 | 6 | DocGen local (`COMPUTE_POLICY_DOC` + preview/print/download) — ✅ ENTREGUE | 3 | 1 |
+| 10 | Motor de Descoberta de Segmentos (`COMPUTE_SEGMENT_DISCOVERY` + `SegmentModel` + GATE) | 4 | 1 |
+| 11 | Painel de Oportunidades (modal de descoberta, cards, quadrante, navegação) | 4 | 1 |
+| 12 | Recomendações acionáveis + movimento "adicionar quebra" no Goal Seek + AS IS/anomalia | 4 | 1 |
 | 7 | Camada de Inteligência + `AIProvider` + configuração + Redactor/Auditoria | infra | 2 |
 | 8 | Enriquecimentos de IA por frente (NL→objetivo, NL→esqueleto, prosa executiva) | 1–3 | 2 |
-| 9 | Chat com a política (grounded) + planos compostos | 1–3 | 3 |
+| 13 | IA da Descoberta (rótulos, narrativa, hipóteses — batch/cache/menor modelo) | 4 | 2 |
+| 9 | Chat com a política (grounded) + planos compostos | 1–4 | 3 |
+
+As Sessões 10–12 (Frente 4) são 100% locais — podem ser executadas antes ou depois das
+Sessões 7–9 sem conflito; a Sessão 13 depende da infra da Sessão 7. Prompts e modelos
+recomendados por sessão em [[Copilotos-Prompts-Sessoes]].
 
 Prompts de abertura de cada sessão estão no documento da frente correspondente
 (Sessões 0 e 7, abaixo).
