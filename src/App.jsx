@@ -5,6 +5,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
 import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn } from "./columnar.js";
+import { applyGoalSeekMoves } from "./goalSeek.js";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -1170,6 +1171,18 @@ const CHART_TYPES = [
 ];
 // Métricas em que "menor é melhor" — orienta a cor do delta no KPI.
 const GOOD_WHEN_LOWER = new Set(["inadReal", "inadInferida"]);
+
+// Goal Seek (Copiloto Sessão 4, DEC-IA-005/006) — metadados de UI do objetivo estruturado.
+// `scale`: 'pp100' = escala 0–100 (approvalRate, já nessa escala no motor); 'ratio' =
+// 0–1 (inadReal/inadInferida — mesma escala dos sliders do optimModal/johnnyModal);
+// 'qty' = unidade absoluta (approvedAltasInfer, Vol. Vendas Inferidas).
+const GOAL_SEEK_TARGET_META = {
+  approvalRate:      { label: "Taxa de Aprovação",     scale: "pp100", fmt: v => fmtPct(v / 100) },
+  inadReal:          { label: "Inad. Real",            scale: "ratio", fmt: v => fmtPct(v) },
+  inadInferida:      { label: "Inad. Inferida",        scale: "ratio", fmt: v => fmtPct(v) },
+  approvedAltasInfer:{ label: "Vol. Vendas Inferidas", scale: "qty",   fmt: v => fmtQty(v) },
+};
+const GOAL_SEEK_TARGET_LABELS = Object.fromEntries(Object.entries(GOAL_SEEK_TARGET_META).map(([k, v]) => [k, v.label]));
 
 // Copiloto — lint estrutural (Sessão 1, DEC-IA-006). Estilo por severidade do achado
 // (findings vêm de COMPUTE_POLICY_INSIGHTS, sempre {severity, code, nodeId, msg, fix?}).
@@ -2874,12 +2887,20 @@ export function cloneCanvasWithNewIds(shapes, conns) {
   const idMap = {};
   for (const s of shapes) idMap[s.id] = uid();
   const newShapes = shapes.map(s => ({ ...s, id: idMap[s.id] }));
-  const newConns  = conns.map(c => ({
-    ...c, id: uid(),
-    from: idMap[c.from] ?? c.from,
-    to:   idMap[c.to]   ?? c.to,
-  }));
-  return { newShapes, newConns };
+  const connIdMap = {};
+  const newConns  = conns.map(c => {
+    const newId = uid();
+    connIdMap[c.id] = newId;
+    return {
+      ...c, id: newId,
+      from: idMap[c.from] ?? c.from,
+      to:   idMap[c.to]   ?? c.to,
+    };
+  });
+  // idMap traduz shapeId (e connId, via connIdMap) do canvas original → o clonado —
+  // usado por quem precisa reaplicar referências por ID sobre o clone (ex.: Goal Seek,
+  // Copiloto Sessão 4 — applyGoalSeekMoves usa shapeId/connId do canvas original).
+  return { newShapes, newConns, idMap: { ...idMap, ...connIdMap } };
 }
 
 // ── PolicyIR — representação canônica da política (Copiloto Sessão 0, DEC-IA-002) ──
@@ -3351,6 +3372,8 @@ export default function App() {
   const [optimModal,  setOptimModal]  = useState(null);   // null | optim obj
   // Johnny multi-cineminha optimizer modal
   const [johnnyModal, setJohnnyModal] = useState(null);   // null | johnny obj
+  // Goal Seek — Copiloto Sessão 4 (DEC-IA-005/006): busca de política inteira por objetivo
+  const [goalSeekModal, setGoalSeekModal] = useState(null); // null | {step:'form'|'loading'|'result', goal, constraints, ...GOAL_SEEK_RESULT}
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
@@ -3409,6 +3432,7 @@ export default function App() {
   const redoStackR    = useRef(redoStack);  useEffect(()=>{redoStackR.current=redoStack},  [redoStack]);
   const lensModalR    = useRef(lensModal);  useEffect(()=>{lensModalR.current=lensModal},  [lensModal]);
   const johnnyModalR  = useRef(johnnyModal);useEffect(()=>{johnnyModalR.current=johnnyModal},[johnnyModal]);
+  const goalSeekModalR = useRef(goalSeekModal); useEffect(()=>{goalSeekModalR.current=goalSeekModal},[goalSeekModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
@@ -3510,6 +3534,9 @@ export default function App() {
         }));
       } else if (msgType === 'POLICY_INSIGHTS_RESULT') {
         setCopilotFindings(e.data.findings || []);
+      } else if (msgType === 'GOAL_SEEK_RESULT') {
+        const { goal, baseline, frontier, moves, goalReached, bindingConstraint, result } = e.data;
+        setGoalSeekModal(m => (m ? { ...m, step: 'result', goal, baseline, frontier, moves, goalReached, bindingConstraint, result } : m));
       } else if (msgType === 'VARIABLE_RANKING_RESULT') {
         const { nodeId } = e.data;
         if (pendingRankingPortIdRef.current !== nodeId) return; // seleção mudou antes da resposta chegar
@@ -7220,6 +7247,65 @@ export default function App() {
     setJohnnyModal(null);
   };
 
+  // ── Goal Seek — Copiloto Sessão 4 (DEC-IA-005/006) ────────────────────────────
+  // Trava/destrava um nó (decision/cineminha/decision_lens) para o Goal Seek — nenhum
+  // movimento do catálogo toca um nó com `locked:true` (persiste via canvases, sem
+  // trabalho extra de schema — ver regra do CLAUDE.md).
+  const toggleShapeLock = (shapeId) => {
+    pushHistory();
+    setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, locked: !s.locked } : s));
+  };
+
+  const openGoalSeekModal = () => {
+    setGoalSeekModal({
+      step: 'form',
+      goal: { target: 'approvalRate', direction: 'increase', magnitude: 2, minimize: 'inadInferida' },
+      constraints: { maxInadReal: null, maxInadInf: null },
+    });
+  };
+
+  const runGoalSeek = () => {
+    const cur = goalSeekModalR.current;
+    if (!cur) return;
+    setGoalSeekModal(m => ({ ...m, step: 'loading' }));
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_GOAL_SEEK',
+      shapes: shapesR.current,
+      conns: connsR.current,
+      goal: cur.goal,
+      constraints: cur.constraints,
+      locks: [],
+    });
+  };
+
+  // Materializa os movimentos aceitos numa aba de canvas NOVA (padrão duplicateCanvas/
+  // Sub-sessão 5A) — não-destrutivo: a política de origem fica intocada, comparável
+  // no Dashboard/KPI A vs B. Aplica no CLONE via applyGoalSeekMoves (mesmo helper
+  // usado internamente pelo worker para a validação por re-simulação, DEC-IA-005).
+  const applyGoalSeekResult = () => {
+    const cur = goalSeekModalR.current;
+    if (!cur || !cur.moves || cur.moves.length === 0) return;
+    const curCanvasId = activeCanvasIdR.current;
+    const source = canvasesR.current[curCanvasId];
+    const srcShapes = shapesR.current, srcConns = connsR.current;
+    const { newShapes, newConns, idMap } = cloneCanvasWithNewIds(srcShapes, srcConns);
+    const { shapes: patchedShapes, conns: patchedConns } =
+      applyGoalSeekMoves(newShapes, newConns, cur.moves.map(m => m.apply), idMap);
+    const id = uid();
+    const label = `${GOAL_SEEK_TARGET_LABELS[cur.goal.target] || 'Objetivo'} ${cur.goal.direction === 'increase' ? '+' : '−'}`;
+    setCanvases(prev => ({
+      ...prev,
+      [curCanvasId]: { ...prev[curCanvasId], shapes: srcShapes, conns: srcConns },
+      [id]: { id, name: `${source?.name || 'Canvas'} · ${label}`, shapes: patchedShapes, conns: patchedConns, includeInDashboard: true },
+    }));
+    setShapes(patchedShapes); setConns(patchedConns);
+    setUndoStack([]); setRedoStack([]);
+    setSel(null); setMultiSel(new Set());
+    setActiveCanvasId(id);
+    setActiveTab('canvas');
+    setGoalSeekModal(null);
+  };
+
   // ── Sugestão de próximo nó (Copiloto Sessão 3) ─────────────────────────────
   // Dispara o ranking on-demand para a porta selecionada (não entra no tick de
   // edição/cache). `pendingRankingPortIdRef` descarta respostas obsoletas caso a
@@ -7575,6 +7661,14 @@ export default function App() {
                   whiteSpace:"nowrap",fontWeight:600}}>
                 💾 Salvar
               </button>
+              <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 2px"}}/>
+              <button onClick={()=>toggleShapeLock(sel)}
+                title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
+                style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
+                  background:selShape.locked?"#fef2f2":"#fff",color:selShape.locked?"#b91c1c":"#64748b",
+                  cursor:"pointer",fontSize:13,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                {selShape.locked ? "🔒" : "🔓"}
+              </button>
             </div>
           );
         })()}
@@ -7609,6 +7703,13 @@ export default function App() {
                 whiteSpace:"nowrap",fontWeight:600}}>
               ⚙ Domínio
             </button>
+            <button onClick={()=>toggleShapeLock(sel)}
+              title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
+              style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
+                background:selShape.locked?"#fef2f2":"#fff",color:selShape.locked?"#b91c1c":"#64748b",
+                cursor:"pointer",fontSize:13,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+              {selShape.locked ? "🔒" : "🔓"}
+            </button>
           </div>
         )}
 
@@ -7622,6 +7723,13 @@ export default function App() {
                 color:"#0891b2",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                 whiteSpace:"nowrap",fontWeight:600}}>
               🔎 Configurar
+            </button>
+            <button onClick={()=>toggleShapeLock(sel)}
+              title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
+              style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
+                background:selShape.locked?"#fef2f2":"#fff",color:selShape.locked?"#b91c1c":"#64748b",
+                cursor:"pointer",fontSize:13,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+              {selShape.locked ? "🔒" : "🔓"}
             </button>
           </div>
         )}
@@ -8105,6 +8213,13 @@ export default function App() {
               onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#818cf8";}}
               onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#c7d2fe";}}>
               <span style={{fontSize:16}}>📚</span> Políticas{policyLibrary.length>0?` (${policyLibrary.length})`:''}
+            </button>
+            <button onClick={openGoalSeekModal}
+              title="Declarar um objetivo (ex.: +2pp de aprovação) e deixar o motor buscar os movimentos que atingem"
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #fde68a",background:"#fffbeb",color:"#92400e",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#fffbeb";e.currentTarget.style.borderColor="#fde68a";}}>
+              <span style={{fontSize:16}}>🎯</span> Atingir Objetivo
             </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
@@ -11572,6 +11687,225 @@ export default function App() {
                     </div>
                   </>
                 )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ GOAL SEEK MODAL — objetivo estruturado (Copiloto Sessão 4) ═══════════════ */}
+      {goalSeekModal&&(()=>{
+        const { step, goal, constraints, baseline, frontier, moves, goalReached, bindingConstraint, result } = goalSeekModal;
+        const updGoal = (patch) => setGoalSeekModal(m => ({ ...m, goal: { ...m.goal, ...patch } }));
+        const updCons = (patch) => setGoalSeekModal(m => ({ ...m, constraints: { ...m.constraints, ...patch } }));
+        const targetMeta = GOAL_SEEK_TARGET_META[goal?.target] || GOAL_SEEK_TARGET_META.approvalRate;
+        const BINDING_LABEL = {
+          maxInadReal: 'Teto de Inad. Real atingido',
+          maxInadInf: 'Teto de Inad. Inferida atingido',
+          no_more_moves: 'Catálogo de movimentos esgotado',
+        };
+        const lockedCount = shapes.filter(s => s.locked).length;
+
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:760,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#fffbeb 0%,#fef3c7 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#fde68a",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>🎯</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Atingir Objetivo</h2>
+                    <p style={{fontSize:11,color:"#92400e"}}>Goal Seek da política inteira · {lockedCount>0?`${lockedCount} nó(s) travado(s) 🔒`:"sem nós travados"}</p>
+                  </div>
+                </div>
+                <button onClick={()=>setGoalSeekModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
+                {step==='form' && (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <p style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
+                      Declare o objetivo e as restrições. O motor busca uma sequência de movimentos
+                      concretos (abrir/fechar célula, trocar terminal de um segmento, relaxar/apertar
+                      regra de lens) que atinja o alvo — o resultado exibido é sempre uma <b>re-simulação
+                      real</b>, nunca uma estimativa.
+                    </p>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Alvo
+                        <select value={goal.target} onChange={e=>updGoal({target:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          {Object.entries(GOAL_SEEK_TARGET_META).map(([k,v])=>(
+                            <option key={k} value={k}>{v.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Direção
+                        <select value={goal.direction} onChange={e=>updGoal({direction:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value="increase">Aumentar</option>
+                          <option value="decrease">Diminuir</option>
+                        </select>
+                      </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Magnitude {targetMeta.scale==='ratio'?'(pp, ex.: 0.5 = 0,5pp)':targetMeta.scale==='pp100'?'(pp)':'(qty)'}
+                        <input type="number" step="any" value={goal.magnitude ?? ''}
+                          placeholder="vazio = máximo/mínimo possível"
+                          onChange={e=>updGoal({magnitude: e.target.value===''?null:Number(e.target.value)})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Minimizar colateralmente
+                        <select value={goal.minimize||'inadInferida'} onChange={e=>updGoal({minimize:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value="inadInferida">Inad. Inferida</option>
+                          <option value="inadReal">Inad. Real</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div style={{borderTop:"1px solid #f1f5f9",paddingTop:12}}>
+                      <p style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Restrições-teto (opcional)</p>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                        <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                          Teto Inad. Real (ratio 0–1)
+                          <input type="number" step="any" min="0" max="1" value={constraints.maxInadReal ?? ''}
+                            placeholder="sem teto"
+                            onChange={e=>updCons({maxInadReal: e.target.value===''?null:Number(e.target.value)})}
+                            style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                        </label>
+                        <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                          Teto Inad. Inferida (ratio 0–1)
+                          <input type="number" step="any" min="0" max="1" value={constraints.maxInadInf ?? ''}
+                            placeholder="sem teto"
+                            onChange={e=>updCons({maxInadInf: e.target.value===''?null:Number(e.target.value)})}
+                            style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                        </label>
+                      </div>
+                    </div>
+                    <button onClick={runGoalSeek}
+                      style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
+                        background:"#f59e0b",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                      🔎 Buscar
+                    </button>
+                  </div>
+                )}
+
+                {step==='loading' && (
+                  <div style={{padding:"40px 0",textAlign:"center",color:"#92400e",fontSize:13}}>
+                    Buscando movimentos que atingem o objetivo…
+                  </div>
+                )}
+
+                {step==='result' && (()=>{
+                  const baseVal = baseline?.[goal.target] ?? null;
+                  const resVal = result?.[goal.target] ?? null;
+                  return (
+                    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                      <div style={{display:"flex",gap:10,alignItems:"center",padding:"10px 14px",borderRadius:10,
+                        background: goalReached ? "#f0fdf4" : "#fffbeb",
+                        border: `1px solid ${goalReached ? "#bbf7d0" : "#fde68a"}`}}>
+                        <span style={{fontSize:18}}>{goalReached ? "✅" : "⚠"}</span>
+                        <div style={{fontSize:12,color: goalReached ? "#15803d" : "#92400e",lineHeight:1.5}}>
+                          {goalReached
+                            ? <b>Objetivo atingido.</b>
+                            : <><b>Objetivo não totalmente atingido</b> — melhor ponto alcançado abaixo.</>}
+                          {bindingConstraint && <> Restrição-gargalo: <b>{BINDING_LABEL[bindingConstraint] || bindingConstraint}</b>.</>}
+                        </div>
+                      </div>
+
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                        {[
+                          {k:'approvalRate', label:'Taxa de Aprovação'},
+                          {k:'inadReal', label:'Inad. Real'},
+                          {k:'inadInferida', label:'Inad. Inferida'},
+                        ].map(({k,label})=>{
+                          const meta = GOAL_SEEK_TARGET_META[k];
+                          const bv = baseline?.[k], rv = result?.[k];
+                          return (
+                            <div key={k} style={{padding:"10px 12px",borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc"}}>
+                              <div style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",marginBottom:4}}>{label}</div>
+                              <div style={{fontSize:15,fontWeight:700,color:"#1e293b"}}>{meta.fmt(rv)}</div>
+                              <div style={{fontSize:10.5,color:"#94a3b8"}}>era {meta.fmt(bv)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div>
+                        <p style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>
+                          Movimentos ({moves.length})
+                        </p>
+                        {moves.length===0 ? (
+                          <div style={{padding:"14px 10px",fontSize:12,color:"#94a3b8",textAlign:"center",border:"1px dashed #e2e8f0",borderRadius:10}}>
+                            Nenhum movimento disponível no catálogo (verifique travas 🔒 ou se já está no objetivo).
+                          </div>
+                        ) : (
+                          <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:220,overflowY:"auto"}}>
+                            {moves.map((mv,i)=>(
+                              <div key={mv.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",
+                                borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",fontSize:11.5}}>
+                                <span style={{width:20,height:20,borderRadius:6,background:"#fef3c7",color:"#92400e",
+                                  display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,flexShrink:0}}>{i+1}</span>
+                                <span style={{flex:1,color:"#334155"}}>{mv.label}</span>
+                                <span style={{color: mv.deltaApprovalRate>=0 ? "#16a34a" : "#dc2626",fontWeight:600,flexShrink:0}}>
+                                  {mv.deltaApprovalRate>=0?'+':''}{mv.deltaApprovalRate.toFixed(2)}pp aprov.
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {frontier?.length>1 && (()=>{
+                        const CW=440,CH=120,PL=8,PR=8,PT=8,PB=8;
+                        const plotW=CW-PL-PR, plotH=CH-PT-PB;
+                        const minR = Math.min(...frontier.map(p=>p.approvalRate));
+                        const maxR = Math.max(...frontier.map(p=>p.approvalRate));
+                        const span = Math.max(1e-6, maxR-minR);
+                        const cx=(i)=>PL+(i/Math.max(1,frontier.length-1))*plotW;
+                        const cy=(r)=>PT+(1-(r-minR)/span)*plotH;
+                        const pts = frontier.map((p,i)=>`${cx(i)},${cy(p.approvalRate)}`).join(' ');
+                        return (
+                          <div>
+                            <p style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>Trajetória (Taxa de Aprovação)</p>
+                            <svg width={CW} height={CH} style={{display:"block"}}>
+                              <polyline points={pts} fill="none" stroke="#f59e0b" strokeWidth={2}/>
+                              {frontier.map((p,i)=>(
+                                <circle key={i} cx={cx(i)} cy={cy(p.approvalRate)} r={i===frontier.length-1?4:2.5}
+                                  fill={i===frontier.length-1?"#f59e0b":"#fde68a"}/>
+                              ))}
+                            </svg>
+                          </div>
+                        );
+                      })()}
+
+                      <div style={{display:"flex",gap:8,justifyContent:"flex-end",borderTop:"1px solid #f1f5f9",paddingTop:12}}>
+                        <button onClick={()=>setGoalSeekModal(m=>({...m,step:'form'}))}
+                          style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                            color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                          ← Ajustar objetivo
+                        </button>
+                        <button onClick={applyGoalSeekResult} disabled={moves.length===0}
+                          style={{padding:"9px 18px",borderRadius:9,border:"none",
+                            background: moves.length===0 ? "#e2e8f0" : "#16a34a",
+                            color:"#fff",cursor: moves.length===0 ? "default" : "pointer",
+                            fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                          ✓ Aplicar como novo cenário
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </div>

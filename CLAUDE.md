@@ -18,14 +18,16 @@ Whiteboard interativo + simulador de regras de crédito. O usuário carrega um C
 AppCreditoSimulador/
 ├── src/
 │   ├── App.jsx                   # Componente único — ~11150 linhas
-│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny (~2430 linhas)
+│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny, Goal Seek (~2430 linhas)
 │   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
+│   ├── goalSeek.js                # applyGoalSeekMoves — materialização de movimentos do Goal Seek (compartilhado worker/main)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
 │   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget
 │   ├── asIsPreview.test.js       # GATE: prévia AS IS contextualizada (computeCinemaAsIsCells) vs. base completa (computeAsIsCells)
 │   ├── columnar.test.js          # GATE colunar: accessor, round-trip projeto, SharedArrayBuffer
 │   ├── compiledEngine.test.js    # GATE M8: motor compilado (colunar) equivale ao caminho por string (legado)
+│   ├── goalSeek.test.js          # GATE Copiloto Sessão 4: delta O(1) por movimento ≡ resimulação, precedência ordinal, restrições/travas, determinismo
 │   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
 │   ├── policyIR.test.js          # GATE Copiloto Sessão 0: roteamento via PolicyIR ≡ motor compilado (M8), round-trip IR→canvas→IR, IR sem posições/dados
 │   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
@@ -69,6 +71,7 @@ AppCreditoSimulador/
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
 - `optimModal`: modal de otimização do Cineminha (single) — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, matrixZoom, matrixPanX, matrixPanY}`
 - `johnnyModal`: otimizador multi-cineminha — `null | {pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, activeCard, proposedByShape, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, activeShapePreview, riskLevels, hierarchyMode, inadMetric}`
+- `goalSeekModal`: Goal Seek da política inteira (Copiloto Sessão 4) — `null | {step:'form'|'loading'|'result', goal, constraints, baseline?, frontier?, moves?, goalReached?, bindingConstraint?, result?}` (ver "Motor de Goal Seek")
 - `lensModal`: modal de edição do Decision Lens — `null | {shapeId, rules, population}`
 - `incrementalResult`: resultado comparativo AS IS vs. simulado — `null | {baseline, simulated, impacted}`
 - ~~`simulationOverlay`~~: **removido** (Otimização de Memória Fase 4). O overlay por-linha (`rowDecisions`, ~1MM objetos) era clonado do worker pra main a cada tick e guardado num estado que **ninguém lia** — fonte de OOM no Canvas. Hoje o worker calcula o `incrementalResult` localmente e **não** envia o overlay; o Dashboard usa seu próprio overlay memoizado (`cachedCanvasOverlay`), independente
@@ -332,6 +335,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_OPTIM` | `{shape}` | Roda `computeCellMetrics` + `buildParetoFrontier` + `extractScenarios`; responde com `OPTIM_RESULT` |
 | `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns}]` — abas marcadas (cenários, 5B). Populações de lens derivadas no worker (M10). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
+| `COMPUTE_GOAL_SEEK` | `{shapes, conns, goal, constraints, locks}` | Copiloto Sessão 4 — roda `computeGoalSeek` (catálogo de movimentos + busca gulosa com precedência/shrinkage/restrições + validação por re-simulação); responde com `GOAL_SEEK_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -342,6 +346,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
+| `GOAL_SEEK_RESULT` | `{goal, baseline, frontier, moves, goalReached, bindingConstraint, result}` — ver seção "Motor de Goal Seek" |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -357,6 +362,10 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric)`: greedy com restrição de precedência (DEC-JO-003/004) — constrói grafo de precedência com (a) monotonicidade interna por eixo ordinal e (b) aninhamento de cascata entre níveis de risco; a cada passo abre a célula liberada de menor inadimplência suavizada (shrinkage bayesiano); modo `independente` aplica só monotonicidade interna
 - `computeAnalyticsDataset(canvasInputs, csvStore)`: recebe N abas marcadas (`[{id, nome, shapes, conns}]`; populações de lens derivadas no worker — M10), roda `computeSimulatedDecisions` por canvas (overlay memoizado via `cachedCanvasOverlay`), faz **join por `(csvId, rowIdx)`** e emite o dataset analítico **largo colunar** (Fase 4): dict encoding por dimensão + `__DECISAO_AS_IS` global + uma coluna dict `__DECISAO_<canvasId>` por cenário + `Float64Array` por métrica intrínseca. Os `ArrayBuffer`s são transferidos (zero-cópia) no `ANALYTICS_RESULT`; `scenarios` = AS IS + uma entrada por aba (nome = nome da aba) — ver Analytics Workspace
 - `cachedCanvasOverlay(canvasId, shapes, conns, csvStore)`: overlay por canvas memoizado por hash de `shapes`/`conns` + `csvStoreVersion` (não reprocessa canvases intocados ao editar um só); deriva as populações de lens localmente no cache miss (M10)
+- `computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lensPopulations)`: busca gulosa com precedência sobre o catálogo de movimentos (Copiloto Sessão 4) — ver seção "Motor de Goal Seek"
+- `buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, lockedIds)`: catálogo de candidatos a movimento (`cinema_cell`, `decision_terminal`, `lens_threshold`) com precedência entre eles
+- `computeGoalSeekArrivals(shapes, conns, csvStore, lensPopulations, lensColByShape)`: walk compilado (M8) que agrega métricas por segmento `(nó de decisão, valor)` e, para lens elegíveis a `lens_threshold`, por valor bruto da coluna da regra
+- `computeGoalSeekBaseline(shapes, conns, csvStore)`: agregador paralelo a `runSimulation` que também expõe os somatórios brutos (`qtdAltasSum`, `inadRealSum`, etc.) — necessários para os deltas O(1) da busca
 
 ### M6 — Tick de edição: passe único em vez de ~4 varreduras da base (entregue)
 Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M6, Fase C do backlog). Cada gesto de edição
@@ -670,6 +679,100 @@ até clicar em **⚡ Aplicar**.
 
 ### Aplicar
 `applyJohnnyResult(proposedByShape)` — sobrescreve `cells` em múltiplos Cineminhas simultaneamente (grava `cellsUserEdited=true`).
+
+## Motor de Goal Seek (`goalSeekModal`, Copiloto Sessão 4)
+
+Generaliza o Johnny (acima) da célula de Cineminha para a **política inteira**: o usuário
+declara um objetivo estruturado e o motor busca uma sequência de movimentos concretos —
+não só abrir/fechar célula, mas também trocar o terminal de um segmento de losango e
+relaxar/apertar o limiar de uma regra de Decision Lens — que atinja o objetivo. Ver
+`docs/wiki/Copiloto-SugestoesMelhoria.md` (Sessão 4) e `docs/wiki/Epicos-CopilotoIA.md`
+(DEC-IA-005/006).
+
+### Catálogo de movimentos
+Cada candidato tem agregados de segmento conhecidos (mesma técnica de
+`computeCinemaArrivals`/`exportDiagnosticCSV`) — trocar o destino de um segmento muda os
+acumuladores globais por adição/subtração, sem re-simular a base a cada candidato:
+- **`cinema_cell`**: reusa `computeCinemaArrivals` — mesma mecânica do Johnny.
+- **`decision_terminal`**: um VALOR de losango cujo port resolve **diretamente** (seguindo
+  cadeias de port, como o `resolveThroughPorts` do PolicyIR) a um terminal Aprovado/
+  Reprovado — trocar esse terminal move o segmento inteiro sem ambiguidade. Segmentos que
+  resolvem em AS IS ficam fora do catálogo (o terminal depende de `__DECISAO_ORIGINAL`
+  por linha, não é um destino único).
+- **`lens_threshold`**: um Decision Lens de **uma** regra (`gte`/`gt`/`lte`/`lt`) cujo
+  único port de saída resolve direto a **Aprovado** — relaxa (admite o próximo valor que
+  hoje falha) ou aperta (remove o valor mais próximo da fronteira que hoje passa) por
+  **um passo** por execução. Lens com saída para Reprovado/AS IS ou com mais de uma regra
+  ficam fora do catálogo (extensível por design — mesmo precedente do movimento "adicionar
+  quebra" do épico, que também aguarda uma sessão futura).
+
+### Busca
+Greedy com precedência + shrinkage bayesiano (`SHRINK_K`, mesmo padrão do
+`computeJohnnyData`), generalizando o pool de "células" do Johnny para candidatos
+heterogêneos com direção (`toApproved`): candidatos que movem qty PARA o aprovado
+("expandir", usados quando a direção do objetivo é `increase`) ou PARA fora dele
+("contrair", usados em `decrease`). Precedência (`requires`) é construída por tipo:
+monotonicidade em eixo ordinal do Cineminha (idêntica ao Johnny) e em variável ordinal do
+losango (a ordem dos ports no canvas define a posição — não pula rank mesmo que um valor
+mais distante seja individualmente mais barato). Travas 🔒 (`shape.locked`, alternável na
+toolbar contextual de losango/Cineminha/Decision Lens; ou a lista `locks` da mensagem)
+excluem candidatos do nó inteiro **antes** da busca. Restrições de teto
+(`constraints.maxInadReal`/`maxInadInf`, ratio 0–1) são invioláveis — um movimento que
+estouraria o teto nunca entra na proposta; se nenhum candidato liberado cabe, a busca para
+e reporta `bindingConstraint` (`'maxInadReal'`\|`'maxInadInf'`\|`'no_more_moves'`).
+
+### Estado `goal`/`constraints` (payload de `COMPUTE_GOAL_SEEK`)
+```js
+goal = {
+  target: 'approvalRate'|'inadReal'|'inadInferida'|'approvedAltasInfer',
+  direction: 'increase'|'decrease',
+  magnitude: number|null,  // null = "mínimo"/"máximo" possível dentro das restrições
+  minimize: 'inadReal'|'inadInferida', // objetivo colateral que orienta a ordem dos candidatos
+}
+constraints = { maxInadReal: number|null, maxInadInf: number|null } // tetos, ratio 0–1
+```
+
+### Validação por re-simulação (DEC-IA-005)
+Ao final da busca (sucesso ou parcial), os movimentos aceitos são materializados de
+verdade — `applyGoalSeekMoves(shapes, conns, moves, idMap?)` em **`src/goalSeek.js`**
+(módulo compartilhado entre o worker e a main thread, que não se importam entre si: o
+worker usa para a validação interna, `idMap` omitido; a main usa para aplicar de verdade
+no clone do canvas, `idMap` de `cloneCanvasWithNewIds`) — e **re-simulados**
+(`runSimulation`). Nenhum número exibido no `goalSeekModal` tem origem só no delta
+incremental interno da busca — o campo `result` de `GOAL_SEEK_RESULT` vem sempre dessa
+re-simulação real.
+
+### Estado `goalSeekModal`
+```js
+{
+  step: 'form'|'loading'|'result',
+  goal, constraints,                 // objetivo em edição
+  baseline, frontier, moves,         // devolvidos por GOAL_SEEK_RESULT (step==='result')
+  goalReached, bindingConstraint, result,
+}
+```
+`moves[i]`: `{id, type, shapeId, label, qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, deltaApprovalRate, apply}` — `apply` é o patch mínimo que `applyGoalSeekMoves` materializa (`{type:'cinema_cell', shapeId, cellKey, newValue}` \| `{type:'decision_terminal', connId, newTo}` \| `{type:'lens_threshold', shapeId, ruleIndex, newValue}`).
+
+### Travas (`shape.locked`)
+Novo campo booleano em qualquer shape de fluxo (`decision`/`cineminha`/`decision_lens`),
+alternável pelo botão 🔒/🔓 na toolbar contextual de cada um. Persiste via `canvases` (não
+precisa de entrada própria no Projeto — é só mais um campo de shape, já coberto). Também
+respeitado pelos otimizadores futuros que quiserem checar `shape.locked`.
+
+### Ativação e aplicação
+Botão **🎯 Atingir Objetivo** na seção Fluxo do painel direito (`openGoalSeekModal`) abre
+o formulário; **🔎 Buscar** dispara `COMPUTE_GOAL_SEEK` (`runGoalSeek`); **✓ Aplicar como
+novo cenário** (`applyGoalSeekResult`) materializa os movimentos numa aba de canvas **nova**
+(`cloneCanvasWithNewIds` + `applyGoalSeekMoves`, mesmo padrão não-destrutivo do
+`duplicateCanvas` da Sub-sessão 5A) — a política de origem fica intocada, comparável
+imediatamente no Dashboard/KPI A vs B.
+
+### Teste
+`tests/goalSeek.test.js` — GATE: delta O(1) por movimento (dos três tipos do catálogo) ≡
+re-simulação completa via `runSimulation`; monotonicidade ordinal preservada mesmo quando
+o segmento mais barato não é o primeiro do domínio; nenhum ponto da fronteira viola
+teto/trava; objetivo inatingível reporta o melhor parcial + a restrição-gargalo;
+determinismo (mesma entrada ⇒ mesma proposta).
 
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 

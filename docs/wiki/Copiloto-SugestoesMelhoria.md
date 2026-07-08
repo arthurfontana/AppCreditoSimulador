@@ -2,6 +2,50 @@
 
 > Parte do épico [[Epicos-CopilotoIA|Copiloto de Política de Crédito]] (ler primeiro:
 > arquitetura em camadas, PolicyIR, DEC-IA-001..006, contrato anti-alucinação).
+>
+> **Status:** Sessão 4 (Goal Seek) ✅ ENTREGUE — Sessão 5 (Simplificação) em planejamento.
+
+## Sessão 4 — como foi entregue
+
+`COMPUTE_GOAL_SEEK` (worker, `src/simulation.worker.js`) generaliza o Johnny (célula de
+Cineminha) para um **catálogo heterogêneo de movimentos**, cada um com agregados de
+segmento conhecidos (mesma técnica de `computeCinemaArrivals`):
+
+- **`cinema_cell`**: reusa `computeCinemaArrivals` — mesma mecânica do Johnny.
+- **`decision_terminal`**: um VALOR de losango cujo port resolve **diretamente** (seguindo
+  cadeias de port, como `resolveThroughPorts` do PolicyIR) a um terminal Aprovado/Reprovado
+  — trocar esse terminal move o segmento inteiro sem ambiguidade. Segmentos que resolvem em
+  AS IS ficam fora (o terminal depende de `__DECISAO_ORIGINAL` por linha, não é um destino
+  único) — limitação documentada da Sessão 4.
+- **`lens_threshold`**: um Decision Lens de **uma** regra (`gte`/`gt`/`lte`/`lt`) cujo único
+  port de saída resolve direto a **Aprovado** — relaxa (admite o próximo valor que hoje
+  falha) ou aperta (remove o valor mais próximo da fronteira que hoje passa) por **um
+  passo** por execução. Lens com saída para Reprovado/AS IS ou com mais de uma regra ficam
+  fora — catálogo extensível por design, mesmo precedente do "adicionar quebra" citado
+  acima para uma sessão futura.
+
+Busca: greedy com precedência + shrinkage bayesiano (`SHRINK_K`, padrão `computeJohnnyData`),
+generalizando o pool de "células" do Johnny para candidatos heterogêneos com direção
+(`toApproved`). Travas 🔒 (`shape.locked`, alternável na toolbar contextual de losango/
+Cineminha/Decision Lens; ou a lista `locks` da mensagem) excluem candidatos do nó inteiro
+antes da busca. Restrições de teto (`maxInadReal`/`maxInadInf`) são invioláveis — um
+movimento que estouraria o teto nunca entra na proposta. Ao final (sucesso ou parcial), os
+movimentos aceitos são materializados de verdade (`applyGoalSeekMoves`, `src/goalSeek.js` —
+módulo compartilhado entre worker e main, já que não se importam entre si) e
+**re-simulados** (`runSimulation`) — nenhum número exibido tem origem só no delta
+incremental interno da busca (DEC-IA-005).
+
+UI: `goalSeekModal` (padrão `johnnyModal`) — formulário de objetivo estruturado (alvo:
+`approvalRate`/`inadReal`/`inadInferida`/`approvedAltasInfer`; direção; magnitude; tetos)
+→ fronteira (trajetória da taxa de aprovação) + lista de movimentos ranqueados → **Aplicar
+como novo cenário** via `cloneCanvasWithNewIds` (que passou a expor também `idMap`,
+usado para traduzir `shapeId`/`connId` dos movimentos para os IDs do canvas clonado) +
+`applyGoalSeekMoves`. Botão **🎯 Atingir Objetivo** na seção Fluxo do painel direito.
+
+GATE `tests/goalSeek.test.js`: delta O(1) por movimento ≡ re-simulação completa (para os
+três tipos do catálogo), monotonicidade ordinal (precedência, inclusive quando o segmento
+mais barato NÃO é o primeiro do domínio), nenhum ponto da fronteira viola teto/trava,
+objetivo inatingível reporta o melhor parcial + a restrição-gargalo, e determinismo.
 
 ## Contexto
 
