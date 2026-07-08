@@ -2287,6 +2287,415 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
   };
 }
 
+// ── COMPUTE_VARIABLE_RANKING — Copiloto Sessão 3 (sugestão de próximo nó) ────────
+// Dado um "anchor" (tipicamente uma porta solta selecionada pelo usuário), ranqueia as
+// variáveis candidatas (colunas tipadas Filtro) pelo poder discriminante sobre a
+// população que EFETIVAMENTE chega ao anchor — mesmo walk compilado do M8 usado por
+// computeNodeArrivals/computeCinemaArrivals (roteamento por código do dicionário),
+// generalizado para detectar a chegada a UM nó qualquer (não só cineminha).
+//
+// Métricas por candidata: Information Value (IV/WoE) contra inadimplência (real, com
+// fallback pra inferida quando a base não tem altas reais na população) + variância
+// ponderada (sempre calculável, usada quando o IV não pode ser — sem bads ou sem goods
+// na população) + razão max/min entre as taxas dos valores.
+//
+// Detecção de interação: para os top candidatos por IV, compara o IV conjunto (bins =
+// par de valores) contra a soma dos IVs individuais — IV(A×B) >> IV(A)+IV(B) sugere
+// Cineminha em vez de dois losangos em série.
+//
+// Autocompletar de terminal: taxa de inad. do segmento (população do anchor) vs. a
+// taxa média do dataset inteiro sugere ✅ Aprovado / ❌ Reprovado / ⟳ AS IS (sem sinal).
+//
+// Candidatos EXCLUEM variáveis já testadas em algum ancestral do anchor (losango ou
+// eixo de Cineminha) — mesmo espírito da regra de redundância do lint (Sessão 1,
+// duplicate_variable_path). Ranking é on-demand (1 mensagem por seleção), não a cada
+// tick — não entra no cache do getTickResult.
+
+const IV_EPS = 0.5;              // Laplace smoothing só no bin com good OU bad zerado
+const INTERACTION_RATIO = 1.25;      // IV conjunto precisa ser >= 1.25× a soma dos IVs
+const INTERACTION_MIN_GAP = 0.01;    // ...E o ganho absoluto precisa ser relevante
+const INTERACTION_MIN_ABS_IV = 0.05; // quando a soma dos IVs é ~0, usa piso absoluto
+const SEGMENT_LOW_RATIO = 0.8;       // segmento com inad. <= 80% da média → Aprovado
+const SEGMENT_HIGH_RATIO = 1.2;      // segmento com inad. >= 120% da média → Reprovado
+const MAX_INTERACTION_CANDIDATES = 4;
+const MAX_INTERACTION_PAIR_BINS = 4096;
+
+// IV clássico de crédito: bins = [{altas, maus}] (altas = convertidos/denominador,
+// maus = inadimplentes/numerador). good = altas-maus (clamp >= 0), bad = maus. Retorna
+// null quando não há bads OU não há goods na população inteira (sem separação
+// possível — nenhuma fórmula de IV se aplica). Épsilon de Laplace só no bin cujo good
+// OU bad é zero: não distorce o cálculo quando não há bins zerados (valor de controle
+// do GATE bate exato com a fórmula "de livro").
+function computeIV(bins) {
+  let totalGood = 0, totalBad = 0;
+  for (const b of bins) { totalGood += Math.max(0, b.altas - b.maus); totalBad += b.maus; }
+  if (totalGood <= 0 || totalBad <= 0) return null;
+  let iv = 0;
+  for (const b of bins) {
+    let good = Math.max(0, b.altas - b.maus), bad = b.maus;
+    if (good === 0 || bad === 0) { good += IV_EPS; bad += IV_EPS; }
+    const distGood = good / totalGood, distBad = bad / totalBad;
+    iv += (distGood - distBad) * Math.log(distGood / distBad);
+  }
+  return iv;
+}
+
+// Variância ponderada (peso = altas) da taxa de inad. entre os bins — alternativa mais
+// simples ao IV (Proposta/épico), sempre calculável mesmo quando o IV não pode ser
+// (ex.: população 100% boa ou 100% má, sem contraste bom/mau para a fórmula de WoE).
+function weightedVariance(bins) {
+  let totalAltas = 0, totalMaus = 0;
+  for (const b of bins) { totalAltas += b.altas; totalMaus += b.maus; }
+  if (totalAltas <= 0) return null;
+  const mean = totalMaus / totalAltas;
+  let acc = 0;
+  for (const b of bins) {
+    if (b.altas <= 0) continue;
+    const rate = b.maus / b.altas;
+    acc += b.altas * (rate - mean) * (rate - mean);
+  }
+  return acc / totalAltas;
+}
+
+// Razão entre a maior e a menor taxa de inad. entre os bins com volume — a alternativa
+// "mais simples" citada no épico (variância ou razão max/min).
+function maxMinRatio(bins) {
+  const rates = bins.filter(b => b.altas > 0).map(b => b.maus / b.altas);
+  if (rates.length < 2) return null;
+  const min = Math.min(...rates), max = Math.max(...rates);
+  if (min <= 0) return max > 0 ? Infinity : null;
+  return max / min;
+}
+
+// Lê qty/altas/maus (real) + altasInfer/inadIRaw (inferida, via colunas ou lookup em
+// cascata) de UMA linha — mesma leitura usada em runSimulation/computeCinemaArrivals.
+function readRowNums(csv, r, idxs, infResolve) {
+  const { qtyIdx, altasIdx, altasInferIdx, inadRIdx, inadIIdx } = idxs;
+  const qty   = qtyIdx   >= 0 ? (cellNum(csv, r, qtyIdx)   || 0) : 1;
+  const altas = altasIdx >= 0 ? (cellNum(csv, r, altasIdx) || 0) : 0;
+  const maus  = inadRIdx >= 0 ? (cellNum(csv, r, inadRIdx) || 0) : 0;
+  let altasInfer, inadIRaw;
+  if (infResolve) { const rr = infResolve(csv, r); altasInfer = rr.altasInfer; inadIRaw = rr.inadIRaw; }
+  else {
+    altasInfer = altasInferIdx >= 0 ? (cellNum(csv, r, altasInferIdx) || 0) : 0;
+    inadIRaw   = inadIIdx      >= 0 ? (cellNum(csv, r, inadIIdx)      || 0) : 0;
+  }
+  return { qty, altas, maus, altasInfer, inadIRaw };
+}
+
+// Coder de uma coluna candidata: 'code' (dict-encoded, O(distintos) na agregação —
+// caminho de produção) ou 'row' (base legada string[][]/coluna não dict-encoded —
+// caminho por-linha, mesmo fallback do M8 em compileDecisionNode/compileCinemaNode).
+function candidateCoder(csv, colIdx) {
+  const col = dictColAt(csv, colIdx);
+  if (col) return { mode: 'code', codes: col.codes, dict: trimmedDictVals(col.dict) };
+  return { mode: 'row', colIdx };
+}
+
+function candidateKeyOf(coder, csv, r) {
+  return coder.mode === 'code' ? coder.codes[r] : (cellStr(csv, r, coder.colIdx) ?? '').toString().trim();
+}
+
+function computeVariableRanking(shapes, conns, csvStore, anchorNodeId, inferenceRef) {
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const anchor = shapesMap[anchorNodeId];
+  if (!anchor) return { nodeId: anchorNodeId, error: 'anchor_not_found' };
+
+  const { out, inc } = buildFlowGraph(shapes, conns);
+
+  // Variáveis já testadas em algum ancestral do anchor (losango/eixo de Cineminha) —
+  // excluídas dos candidatos (mesmo espírito da regra 6 do lint, duplicate_variable_path).
+  const usedCols = new Set();
+  {
+    const seen = new Set([anchorNodeId]);
+    const stack = (inc[anchorNodeId] || []).map(e => e.from);
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const node = shapesMap[id];
+      if (node) {
+        if (node.type === 'decision' && node.variableCol) usedCols.add(`${node.csvId}::${node.variableCol}`);
+        if (node.type === 'cineminha') {
+          if (node.rowVar) usedCols.add(`${node.rowVar.csvId}::${node.rowVar.col}`);
+          if (node.colVar) usedCols.add(`${node.colVar.csvId}::${node.colVar.col}`);
+        }
+      }
+      for (const e of (inc[id] || [])) if (!seen.has(e.from)) stack.push(e.from);
+    }
+  }
+
+  // Raízes por csv — MESMO critério de computeNodeArrivals (TODAS as raízes; exclui
+  // nós logo abaixo de um Decision Lens), porque o que importa aqui é "quem chega ao
+  // anchor", não a aproximação de raiz única usada pelo funil de runSimulation.
+  const EMIT = new Set(['port', 'decision_lens', 'decision', 'cineminha']);
+  const nonRoot = new Set(conns.filter(c => EMIT.has(shapesMap[c.from]?.type)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !nonRoot.has(s.id)
+  );
+
+  const routes = compileRoutes(shapes, conns, out);
+  const { decisionRoutes, cinemaRoutes, singleEdge } = routes;
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+
+  // Walk compilado (M8) generalizado: em vez de coletar hits só em cineminhas-alvo
+  // (computeCinemaArrivals/computeCinemaAsIsCells), devolve se a linha passa por UM
+  // nó qualquer (o anchor, tipicamente uma porta) — mesma técnica de "visited" por
+  // época reutilizado entre linhas/raízes.
+  function reachesAnchor(csv, r, startId, compiled, lastVisit, epoch) {
+    let cur = startId;
+    while (cur) {
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) break;
+      lastVisit[idx] = epoch;
+      if (cur === anchorNodeId) return true;
+      const node = shapesMap[cur];
+      if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const cd = compiled.decision[cur];
+        let match;
+        if (cd.codes) match = cd.routeByCode[cd.codes[r]];
+        else {
+          const val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim();
+          match = decisionRoutes[cur]?.get(val);
+        }
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const cc = compiled.cinema[cur];
+        let isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) break;
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0;
+          const ci = cc.colCodes ? cc.colCodes[r] : 0;
+          isEligible = cc.eligByPair[ri * cc.nC + ci] === 1;
+        } else {
+          const rv = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const cv = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (!node.rowVar && !node.colVar) break;
+          const rKey = node.rowVar ? rv : '*';
+          const cKey = node.colVar ? cv : '*';
+          isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
+        }
+        const rt = cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        const m = compiled.lens[cur];
+        if (m && !m(r)) break;
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else break;
+    }
+    return false;
+  }
+
+  let winner = null;
+  const perCsv = {};
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const getColIdx = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col ? csv.headers.indexOf(col) : -1;
+    };
+    const idxs = {
+      qtyIdx: getColIdx('qty'), altasIdx: getColIdx('qtdAltas'), altasInferIdx: getColIdx('qtdAltasInfer'),
+      inadRIdx: getColIdx('inadReal'), inadIIdx: getColIdx('inadInferida'),
+    };
+    const infResolve = buildInferenceResolver(csv, inferenceRef);
+
+    const candidateCols = Object.entries(types)
+      .filter(([col, t]) => t === 'decision' && !usedCols.has(`${csvId}::${col}`))
+      .map(([col]) => col);
+    const candidateCoders = candidateCols.map(col => candidateCoder(csv, csv.headers.indexOf(col)));
+
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+
+    const baseReal  = { altas: 0, maus: 0 };
+    const baseInfer = { altasInfer: 0, inadIRaw: 0 };
+    const segReal   = { qty: 0, altas: 0, maus: 0 };
+    const segInfer  = { altasInfer: 0, inadIRaw: 0 };
+    const candBins  = candidateCols.map(() => new Map()); // key(código|string) -> {qty,altas,maus,altasInfer,inadIRaw}
+    const hitRows   = [];
+
+    const nRows = rowCount(csv);
+    let lastVisit = null, compiled = null;
+    if (csvRoots.length > 0) {
+      lastVisit = new Int32Array(shapes.length);
+      compiled = compileNodesForCsv(shapes, csv, routes);
+    }
+    let epoch = 0;
+
+    for (let r = 0; r < nRows; r++) {
+      const nums = readRowNums(csv, r, idxs, infResolve);
+      baseReal.altas += nums.altas; baseReal.maus += nums.maus;
+      baseInfer.altasInfer += nums.altasInfer; baseInfer.inadIRaw += nums.inadIRaw;
+
+      if (!compiled) continue; // csv sem raiz alcançando este anchor
+      let hit = false;
+      for (const root of csvRoots) {
+        epoch++;
+        if (reachesAnchor(csv, r, root.id, compiled, lastVisit, epoch)) { hit = true; break; }
+      }
+      if (!hit) continue;
+
+      hitRows.push(r);
+      segReal.qty += nums.qty; segReal.altas += nums.altas; segReal.maus += nums.maus;
+      segInfer.altasInfer += nums.altasInfer; segInfer.inadIRaw += nums.inadIRaw;
+
+      for (let ci = 0; ci < candidateCoders.length; ci++) {
+        const key = candidateKeyOf(candidateCoders[ci], csv, r);
+        const map = candBins[ci];
+        let bin = map.get(key);
+        if (!bin) { bin = { qty: 0, altas: 0, maus: 0, altasInfer: 0, inadIRaw: 0 }; map.set(key, bin); }
+        bin.qty += nums.qty; bin.altas += nums.altas; bin.maus += nums.maus;
+        bin.altasInfer += nums.altasInfer; bin.inadIRaw += nums.inadIRaw;
+      }
+    }
+
+    const entry = {
+      csvId, csv, idxs, infResolve, candidateCols, candidateCoders, candBins,
+      baseReal, baseInfer, segReal, segInfer, hitRows,
+    };
+    perCsv[csvId] = entry;
+    if (!winner || entry.segReal.qty > winner.segReal.qty) winner = entry;
+  }
+
+  if (!winner || winner.hitRows.length === 0) {
+    return { nodeId: anchorNodeId, error: 'no_population' };
+  }
+
+  const metric = winner.segReal.altas > 0 ? 'real' : (winner.segInfer.altasInfer > 0 ? 'inferida' : null);
+
+  const ranking = winner.candidateCols.map((col, ci) => {
+    const coder = winner.candidateCoders[ci];
+    const bins = [...winner.candBins[ci].entries()].map(([key, b]) => {
+      const value = coder.mode === 'code' ? coder.dict[key] : key;
+      const altas = metric === 'inferida' ? b.altasInfer : b.altas;
+      const maus  = metric === 'inferida' ? b.inadIRaw   : b.maus;
+      return { value, qty: b.qty, altas, maus, rate: altas > 0 ? maus / altas : null };
+    }).filter(b => b.qty > 0)
+      .sort((a, b) => String(a.value).localeCompare(String(b.value), 'pt-BR'));
+
+    const iv = metric ? computeIV(bins) : null;
+    const variance = weightedVariance(bins);
+    const ratio = maxMinRatio(bins);
+    const ratioFinite = ratio != null && isFinite(ratio) ? ratio : null;
+
+    let justification;
+    if (iv != null) {
+      const ratioTxt = ratioFinite != null ? `separa ${ratioFinite.toFixed(1)}× a inad. entre os valores · ` : '';
+      justification = `${ratioTxt}IV ${iv.toFixed(3)} sobre ${bins.length} valores distintos.`;
+    } else if (variance != null) {
+      justification = `Sem contraste bom/mau suficiente para IV nesta população — variância ponderada da inad.: ${variance.toFixed(4)}.`;
+    } else {
+      justification = `Sem volume de conversão suficiente para avaliar esta variável na população do port.`;
+    }
+
+    return { col, csvId: winner.csvId, iv, variance, maxMinRatio: ratioFinite, qty: winner.segReal.qty, bins, justification };
+  }).sort((a, b) => {
+    if (a.iv != null && b.iv != null) return b.iv - a.iv;
+    if (a.iv != null) return -1;
+    if (b.iv != null) return 1;
+    return (b.variance ?? -1) - (a.variance ?? -1);
+  });
+
+  // Detecção de interação (top candidatos por IV): IV conjunto vs. soma dos IVs
+  // individuais. Custo O(popRows × pares) — limitado a MAX_INTERACTION_CANDIDATES.
+  const topForInteraction = ranking.filter(r => r.iv != null).slice(0, MAX_INTERACTION_CANDIDATES);
+  const interactions = [];
+  for (let i = 0; i < topForInteraction.length; i++) {
+    for (let j = i + 1; j < topForInteraction.length; j++) {
+      const a = topForInteraction[i], b = topForInteraction[j];
+      const ciA = winner.candidateCols.indexOf(a.col);
+      const ciB = winner.candidateCols.indexOf(b.col);
+      const coderA = winner.candidateCoders[ciA], coderB = winner.candidateCoders[ciB];
+      const nDomA = coderA.mode === 'code' ? coderA.dict.length : null;
+      const nDomB = coderB.mode === 'code' ? coderB.dict.length : null;
+      if (nDomA != null && nDomB != null && nDomA * nDomB > MAX_INTERACTION_PAIR_BINS) continue;
+
+      const jointMap = new Map();
+      for (const r of winner.hitRows) {
+        const keyA = candidateKeyOf(coderA, winner.csv, r);
+        const keyB = candidateKeyOf(coderB, winner.csv, r);
+        const key = `${keyA}|${keyB}`;
+        let bin = jointMap.get(key);
+        if (!bin) { bin = { altas: 0, maus: 0 }; jointMap.set(key, bin); }
+        const nums = readRowNums(winner.csv, r, winner.idxs, winner.infResolve);
+        bin.altas += metric === 'inferida' ? nums.altasInfer : nums.altas;
+        bin.maus  += metric === 'inferida' ? nums.inadIRaw   : nums.maus;
+      }
+      const ivJoint = computeIV([...jointMap.values()]);
+      if (ivJoint == null) continue;
+      const ivSum = a.iv + b.iv;
+      const gap = ivJoint - ivSum;
+      const suggestCinema = ivSum <= INTERACTION_MIN_ABS_IV
+        ? ivJoint >= INTERACTION_MIN_ABS_IV
+        : (ivJoint >= ivSum * INTERACTION_RATIO && gap >= INTERACTION_MIN_GAP);
+      interactions.push({
+        colA: a.col, colB: b.col, ivA: a.iv, ivB: b.iv, ivJoint, suggestCinema,
+        justification: `IV(${a.col}×${b.col}) ${ivJoint.toFixed(3)} vs. IV(${a.col})+IV(${b.col}) ${ivSum.toFixed(3)}`
+          + (suggestCinema ? ' — interação forte: considere um Cineminha cruzando as duas variáveis.' : '.'),
+      });
+    }
+  }
+  interactions.sort((x, y) => (y.ivJoint - (y.ivA + y.ivB)) - (x.ivJoint - (x.ivA + x.ivB)));
+
+  // Autocompletar de terminal (épico, "Autocompletar"): taxa de inad. do segmento
+  // (população do anchor) vs. a taxa média do dataset INTEIRO (baseline, sem filtro de
+  // roteamento) — segmento sem sinal (sem altas/altasInfer) cai em AS IS.
+  const segRate = metric === 'inferida'
+    ? (winner.segInfer.altasInfer > 0 ? winner.segInfer.inadIRaw / winner.segInfer.altasInfer : null)
+    : (winner.segReal.altas > 0 ? winner.segReal.maus / winner.segReal.altas : null);
+  const baseRate = metric === 'inferida'
+    ? (winner.baseInfer.altasInfer > 0 ? winner.baseInfer.inadIRaw / winner.baseInfer.altasInfer : null)
+    : (winner.baseReal.altas > 0 ? winner.baseReal.maus / winner.baseReal.altas : null);
+
+  let suggestedTerminal = 'as_is', ratioToBase = null, segJustification;
+  if (segRate == null || baseRate == null || baseRate <= 0) {
+    segJustification = 'Sem sinal de inadimplência suficiente nesta população — mantenha como AS IS até haver dado histórico.';
+  } else {
+    ratioToBase = segRate / baseRate;
+    if (ratioToBase <= SEGMENT_LOW_RATIO) {
+      suggestedTerminal = 'approved';
+      segJustification = `Inad. do segmento ${(segRate * 100).toFixed(2)}% vs. média ${(baseRate * 100).toFixed(2)}% (${ratioToBase.toFixed(2)}×) — risco baixo, sugestão Aprovado.`;
+    } else if (ratioToBase >= SEGMENT_HIGH_RATIO) {
+      suggestedTerminal = 'rejected';
+      segJustification = `Inad. do segmento ${(segRate * 100).toFixed(2)}% vs. média ${(baseRate * 100).toFixed(2)}% (${ratioToBase.toFixed(2)}×) — risco alto, sugestão Reprovado.`;
+    } else {
+      segJustification = `Inad. do segmento ${(segRate * 100).toFixed(2)}% próxima da média ${(baseRate * 100).toFixed(2)}% (${ratioToBase.toFixed(2)}×) — sem sinal claro, sugestão AS IS.`;
+    }
+  }
+
+  return {
+    nodeId: anchorNodeId,
+    csvId: winner.csvId,
+    metric,
+    population: {
+      qty: winner.segReal.qty, altas: winner.segReal.altas, maus: winner.segReal.maus,
+      altasInfer: winner.segInfer.altasInfer, inadIRaw: winner.segInfer.inadIRaw,
+      rate: segRate, baselineRate: baseRate, ratio: ratioToBase,
+      suggestedTerminal, justification: segJustification,
+    },
+    ranking,
+    interactions,
+  };
+}
+
 // ── COMPUTE_POLICY_INSIGHTS — Copiloto Sessão 1 (lint estrutural, DEC-IA-006) ────
 // Achados são FATOS estruturais sobre o grafo do canvas ativo — nunca bloqueiam a
 // simulação (só informam). Reaproveita o `nodeArrivals`/`lensCounts` que o tick já
@@ -2582,6 +2991,15 @@ function handleMessage(e) {
     self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
   }
+
+  // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a seleção
+  // atual (porta solta), não entra no cache do tick.
+  if (type === 'COMPUTE_VARIABLE_RANKING') {
+    const { shapes, conns = [], anchor } = e.data;
+    const result = computeVariableRanking(shapes, conns, workerCsvStore, anchor?.nodeId, workerInferenceRef);
+    self.postMessage({ type: 'VARIABLE_RANKING_RESULT', ...result });
+    return;
+  }
 }
 
 // Só registra o handler em contexto de worker real; permite importar as funções
@@ -2606,6 +3024,7 @@ export {
   computeSimulationTick,
   computeLensPopulations,
   computePolicyInsights,
+  computeVariableRanking,
   buildFlowGraph,
   buildInferenceResolver,
   resolveWeightCol,
