@@ -30,6 +30,7 @@ AppCreditoSimulador/
 │   ├── compiledEngine.test.js    # GATE M8: motor compilado (colunar) equivale ao caminho por string (legado)
 │   ├── goalSeek.test.js          # GATE Copiloto Sessão 4: delta O(1) por movimento ≡ resimulação, precedência ordinal, restrições/travas, determinismo
 │   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
+│   ├── policyDoc.test.js         # GATE Copiloto Sessão 6: docModel ≡ motor (KPIs/funil), completude (todo nó/path), determinismo, degradação sem AS IS, privacidade (toggle de domínios), changelog via diffPolicyIR
 │   ├── policyIR.test.js          # GATE Copiloto Sessão 0: roteamento via PolicyIR ≡ motor compilado (M8), round-trip IR→canvas→IR, IR sem posições/dados
 │   ├── policySimplify.test.js    # GATE Copiloto Sessão 5: nó colapsável/chegada zero/regra sem efeito/variável re-testada ⇒ proposta prova diff=0; caso lossy ⇒ delta declarado bate com runSimulation
 │   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
@@ -74,6 +75,8 @@ AppCreditoSimulador/
 - `optimModal`: modal de otimização do Cineminha (single) — `null | {shapeId, cellMetrics, frontier, scenarios, activeCard, proposedCells, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, matrixZoom, matrixPanX, matrixPanY}`
 - `johnnyModal`: otimizador multi-cineminha — `null | {pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, activeCard, proposedByShape, sliderApprovalIdx, sliderInadReal, sliderInadInf, maxInadReal, maxInadInf, activeShapePreview, riskLevels, hierarchyMode, inadMetric}`
 - `goalSeekModal`: Goal Seek da política inteira (Copiloto Sessão 4) — `null | {step:'form'|'loading'|'result', goal, constraints, baseline?, frontier?, moves?, goalReached?, bindingConstraint?, result?}` (ver "Motor de Goal Seek")
+- `simplifyModal`: simplificação com prova de equivalência (Copiloto Sessão 5) — `null | {step:'loading'|'result', proposal, equivalence}` (ver "Simplificação com Prova de Equivalência")
+- `docModal`: documentação automática (Copiloto Sessão 6) — `null | {step:'form'|'loading'|'result', includeDomains, compareCanvasId, compareIr?, compareName?, docModel?}` (ver "Documentação Automática")
 - `lensModal`: modal de edição do Decision Lens — `null | {shapeId, rules, population}`
 - `incrementalResult`: resultado comparativo AS IS vs. simulado — `null | {baseline, simulated, impacted}`
 - ~~`simulationOverlay`~~: **removido** (Otimização de Memória Fase 4). O overlay por-linha (`rowDecisions`, ~1MM objetos) era clonado do worker pra main a cada tick e guardado num estado que **ninguém lia** — fonte de OOM no Canvas. Hoje o worker calcula o `incrementalResult` localmente e **não** envia o overlay; o Dashboard usa seu próprio overlay memoizado (`cachedCanvasOverlay`), independente
@@ -339,6 +342,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns}]` — abas marcadas (cenários, 5B). Populações de lens derivadas no worker (M10). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
 | `COMPUTE_GOAL_SEEK` | `{shapes, conns, goal, constraints, locks}` | Copiloto Sessão 4 — roda `computeGoalSeek` (catálogo de movimentos + busca gulosa com precedência/shrinkage/restrições + validação por re-simulação); responde com `GOAL_SEEK_RESULT` |
 | `COMPUTE_SIMPLIFY` | `{shapes, conns}` | Copiloto Sessão 5 — roda `computeSimplify` (detecção de candidatos + aceitação incremental validada por `computeSimplifyEquivalence` + prova de equivalência linha a linha); responde com `SIMPLIFY_RESULT` |
+| `COMPUTE_POLICY_DOC` | `{shapes, conns, ir, canvases, options}` | Copiloto Sessão 6 — `ir` chega PRONTO (`buildPolicyIR` só existe em `App.jsx`); `canvases: [{id, nome, shapes, conns}]` para a comparação de cenários (mesmo formato de `COMPUTE_ANALYTICS_DATASET`); `options: {includeDomains, activeCanvasId?, activeCanvasName?, compare?:{shapes,conns}}`. Roda `computePolicyDoc`; responde com `POLICY_DOC_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -351,6 +355,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
 | `GOAL_SEEK_RESULT` | `{goal, baseline, frontier, moves, goalReached, bindingConstraint, result}` — ver seção "Motor de Goal Seek" |
 | `SIMPLIFY_RESULT` | `{proposal, equivalence}` — ver seção "Simplificação com Prova de Equivalência" |
+| `POLICY_DOC_RESULT` | `{docModel}` — ver seção "Documentação Automática" |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -374,6 +379,14 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `detectSimplifyCandidates(shapes, conns, nodeArrivals, lensStats)`: catálogo de candidatos (`collapsible_node`, `zero_arrival_node`, `redundant_variable`; `lens_no_effect` reusa o `apply` de `collapsible_node`) — cada um com um patch `apply` materializável por `applySimplifyCandidates` (`src/policySimplify.js`)
 - `computeLensStats(shapes, conns, csvStore)`: walk dedicado (padrão `computeNodeArrivals`, generalizado a Decision Lens) — `{[lensId]: {arrived, passed}}`, base dos candidatos `zero_arrival_node`/`lens_no_effect` sobre lens (`nodeArrivals` não cobre lens)
 - `computeSimplifyEquivalence(origShapes, origConns, propShapes, propConns, csvStore)`: prova de equivalência — compara o desfecho **por linha** (`computeRowOutcomes`, mesma classificação de `runSimulation`) de duas políticas; `identical` só é `true` com `diffCount===0`; quando não, o `delta` vem de `runSimulation` antes/depois de verdade (nunca estimado)
+- `computePolicyDoc(shapes, conns, csvStore, ir, canvasInputs, options)`: ponto de entrada da Documentação Automática (Copiloto Sessão 6) — monta o `docModel` inteiro numa única passada; ver seção "Documentação Automática"
+- `computeFunnelByNode(shapes, conns, csvStore)`: funil por nó+valor — mesma travessia/acumulação de `exportDiagnosticCSV` (`App.jsx`), reimplementada aqui (worker não importa `App.jsx`) e estendida para atravessar `decision_lens` (a versão original de `exportDiagnosticCSV` para no primeiro lens do caminho — ver seção "Documentação Automática")
+- `redactFunnel(funnel, includeDomains)`: Contrato de Privacidade aplicado ao funil — sem `includeDomains`, agrega as linhas por NÓ (perde a granularidade por valor, que é N2)
+- `buildPolicyPaths(ir, maxPaths=500)`: regras achatadas raiz→terminal — DFS determinístico sobre o IR compondo as condições de cada nó no caminho (decisão enumera todas as rotas; Cineminha enumera os dois ramos); ciclo/destino ausente terminam o ramo com `terminal:null` + motivo, nunca inventam
+- `buildFlowNodes(ir, includeDomains)`: descrição por nó do IR (mapeamento 1:1 sobre `ir.nodes` — garante completude por construção); domínios (`routes[].values`, `rowDomain`/`colDomain`, `blockedCells`, `rule.value`) só entram com `includeDomains`
+- `computeReliability(funnelRows)`: substituto local do `InferenceSignal`/`confiabVolume` (feature removida — ver nota abaixo) — flags os segmentos do funil com menos de 30 altas (real ou inferida)
+- `computeScenarioComparison(canvasInputs, csvStore, baseline, activeSimulated, activeId, activeName)`: comparação de cenários reaproveitando o par `computeSimulatedDecisions`/`computeIncrementalResult` do pipeline 5B (sem montar o dataset largo colunar, que existe para pivot de gráfico, não para uma tabela de poucas linhas); `null` sem baseline AS IS
+- `buildGlossary(ir, csvStore, includeDomains)`: variáveis referenciadas no IR (mesma varredura de `extractPolicyRequiredVars`, reimplementada aqui) enriquecidas com metadados de `ir.datasets`; a lista de valores do domínio só é lida do `csvStore` com `includeDomains`
 
 ### M6 — Tick de edição: passe único em vez de ~4 varreduras da base (entregue)
 Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M6, Fase C do backlog). Cada gesto de edição
@@ -901,6 +914,143 @@ testando a primitiva `computeSimplifyEquivalence` direto, sem passar pelo detect
 `diffCount` e `delta` batem com o cálculo manual via `runSimulation` antes/depois;
 determinismo (mesma entrada ⇒ mesma proposta).
 
+## Documentação Automática (`docModal`, Copiloto Sessão 6)
+
+Gera, a partir da política viva (canvas + resultados de simulação), um documento
+executivo/técnico com sumário, fluxo em linguagem natural templateada, regras achatadas,
+funil por nó, comparação de cenários, confiabilidade amostral, glossário e changelog
+estrutural — sem IA generativa (a documentação de uma estrutura formal é serialização +
+templates, não geração criativa). Ver `docs/wiki/Copiloto-DocumentacaoAutomatica.md` e
+`docs/wiki/Epicos-CopilotoIA.md` (DEC-IA-006).
+
+### Separação dados/apresentação
+`COMPUTE_POLICY_DOC` (worker) devolve um **docModel** — árvore de seções com dados
+NUMÉRICOS CRUS, nunca prosa pronta. A apresentação (`renderDocMarkdown`/`renderDocHTML`,
+`src/App.jsx`) é feita por funções PURAS na main que só leem o docModel — separação que
+torna o Nível 2 (reescrita em prosa por IA) trivial (a IA recebe o docModel, não HTML) e o
+GATE mais robusto (determinismo/privacidade verificáveis só inspecionando string de saída).
+`buildPolicyIR` só existe em `App.jsx` (Sessão 0) — a main monta o IR ANTES de disparar
+`COMPUTE_POLICY_DOC` e ele viaja pronto no payload; o worker nunca importa `App.jsx` (mesmo
+motivo de `buildFlowGraph`/`matchLensRule` estarem duplicados lá).
+
+### `docModel`
+```js
+{
+  version, generatedAt, options: {includeDomains},
+  meta: {name, nodeCount, entryCount},
+  ir,                          // PolicyIR pass-through (buildPolicyIR, construído na main)
+  flowNodes,                   // 1 entrada por ir.nodes (bijeção — completude por construção)
+  paths: {list, truncated},    // regras achatadas raiz→terminal (buildPolicyPaths)
+  kpis: {simResult, incrementalResult},   // MESMO tick de edição (computeSimulationTick)
+  funnel: {rows, totals},      // funil por nó+valor (computeFunnelByNode + redactFunnel)
+  reliability: {minSample, lowSampleRows, hasLowSample},
+  scenarios: null | {rows},    // AS IS + cenário atual + abas marcadas (5B) — null sem AS IS
+  glossary,                    // variáveis referenciadas no IR + metadados de coluna
+  changelog?,                  // só quando o usuário escolheu "comparar com" — ver abaixo
+  compareKpis?,                // KPIs da política de comparação (worker) — insumo do changelog
+}
+```
+
+### Contrato de Privacidade aplicado ao papel (`options.includeDomains`)
+Domínios de valores (rótulos concretos: `R01`, `Digital`, chaves de célula do Cineminha,
+`rule.value` do lens) são N2 (Contrato de Privacidade, DEC-IA-004) — só entram no
+documento com o toggle ligado (desligado por padrão no `docModal`, já que o documento pode
+circular fora do sistema). Nomes de coluna e CONTAGENS (N0/N1) aparecem sempre. A
+redação acontece no worker, na montagem do docModel (não no renderer): `buildFlowNodes`
+troca `values`/`rowDomain`/`colDomain`/`blockedCells`/`rule.value` por `null` (mantendo
+`valueCount`/`totalCells`/`blockedCount`); `redactPathConditions` faz o mesmo nas condições
+dos paths; `redactFunnel` AGREGA o funil por nó (perde a granularidade por valor, que é
+domínio); `buildGlossary` só lê o dicionário do `csvStore` quando `includeDomains`. GATE:
+`tests/policyDoc.test.js` varre o Markdown/HTML gerados por nenhum literal de domínio da
+fixture.
+
+### Regras achatadas (`buildPolicyPaths`)
+DFS determinístico a partir de `ir.entry`, compondo as condições de cada nó no caminho:
+decisão enumera TODAS as rotas (já achatadas pelo IR); Cineminha enumera OS DOIS ramos
+(elegível/não elegível); lens segue a única saída. Ciclo (nó revisitado no mesmo caminho)
+ou destino ausente/inexistente terminam o ramo com `terminal:null` + `reason` — nunca
+lançam nem inventam um terminal. `maxPaths` (teto de segurança) sinaliza `truncated` em vez
+de travar numa política patológica.
+
+### Funil por nó+valor (`computeFunnelByNode`)
+Mesma travessia/acumulação de `exportDiagnosticCSV` (`App.jsx`) reimplementada no worker
+(que não importa `App.jsx`) — com uma diferença: `exportDiagnosticCSV` não tem um `case`
+para `decision_lens` no walk (para no primeiro lens do caminho), o que nunca foi notado
+porque o CSV de diagnóstico é sempre dominado por losangos/Cineminha em série;
+`computeFunnelByNode` ATRAVESSA lens corretamente (mesma semântica de
+`computeSimulationTick`/`runSimulation`: passa se a linha casa as regras, senão a linha não
+é roteada por este fluxo) — necessário porque o docModel documenta políticas com Decision
+Lens como raiz. `redactFunnel` agrega por nó quando os domínios estão desligados.
+
+### Comparação de cenários (`computeScenarioComparison`)
+Reaproveita o MESMO par de primitivas do pipeline 5B (`computeSimulatedDecisions` +
+`computeIncrementalResult`) em vez do dataset largo colunar inteiro (que existe para pivot
+de gráfico, não para uma tabela de poucas linhas): 1 overlay + 1 agregado por cenário
+incluído (`buildAnalyticsCanvasInputs()`, mesma função do Dashboard). `baseline` (AS IS) é
+o mesmo para todos os cenários — computado uma vez junto dos KPIs e reaproveitado. Sem AS
+IS configurado em nenhum dataset, `scenarios` é `null` e o documento declara "Baseline AS
+IS não configurada" (nunca omite a seção silenciosamente).
+
+### Confiabilidade da amostra (`computeReliability`)
+O épico documenta esta seção como um `InferenceSignal`/`confiabVolume` — sinalização que
+dependia da **Tabela de Inferência de Referência, removida do produto** (ver bump de
+schema 2.5). `computeReliability` mantém o ESPÍRITO da seção com o volume de altas já
+presente no funil: sinaliza segmentos com menos de 30 altas (real ou inferida) — piso de
+bom-senso estatístico para uma taxa não ser pura oscilação de amostra.
+
+### Changelog estrutural (`diffPolicyIR`, `App.jsx`)
+Função PURA que compara dois PolicyIR por `id` de nó — correto quando os dois IR vêm da
+MESMA linhagem de canvas (edição in-place, comparação com outra aba do mesmo estudo: os
+ids são estáveis). Comparar com um canvas clonado via `cloneCanvasWithNewIds` (ids todos
+novos) degrada para "tudo removido + tudo adicionado" — limitação documentada, mesmo
+padrão do "Limite documentado" do PolicyIR (Sessão 0). Retorna `{added, removed, changed,
+entryChanged}` — `changed[].fields` lista só os campos que mudaram (`{key, before,
+after}`). Reusável pelo chat (Nível 3) e pelo Goal Seek (exibir movimentos como "mudanças
+de IR"), como sugerido no épico.
+
+O CHANGELOG em si é montado na MAIN (não no worker): ao escolher "Comparar com" no
+`docModal`, `runPolicyDoc` constrói `compareIr` (via `buildPolicyIR` sobre o outro canvas)
+e envia `options.compare: {shapes, conns}` (só os dados, não o IR) — o worker roda o MESMO
+`computeSimulationTick` sobre essa segunda política e devolve `compareKpis` no
+`POLICY_DOC_RESULT`. O handler da main combina `diffPolicyIR(docModel.ir, compareIr)`
+(estrutural, síncrono) com `compareKpis` (numérico, do worker) em `docModel.changelog` —
+`diffPolicyIR` fica single-sourced em `App.jsx`, o worker só varre a base.
+
+### Estado `docModal`
+```js
+null | {
+  step: 'form' | 'loading' | 'result',
+  includeDomains,       // toggle de privacidade (default false)
+  compareCanvasId,      // id do canvas a comparar no changelog, ou null
+  compareIr?, compareName?,  // guardados ao disparar, para o handler montar o changelog
+  docModel?,             // devolvido por POLICY_DOC_RESULT
+}
+```
+Efêmero, **não persistido** — mesmo padrão não-persistido de `goalSeekModal`/
+`simplifyModal` (⚠️ regra do CLAUDE.md: não há nada CRIADO pelo usuário aqui, só uma
+composição transitória de exibição).
+
+### Ativação e exportação
+Botão **📄 Documentar Política** na seção Fluxo do painel direito (`openDocModal`) abre o
+formulário (toggle de domínios + seletor de comparação); **📄 Gerar Documento**
+(`runPolicyDoc`) dispara `COMPUTE_POLICY_DOC`; o resultado mostra uma prévia (`<iframe
+srcDoc>` do HTML renderizado) com **⬇ Markdown** (`downloadDocMarkdown`, padrão
+`doExportPolicyIR`: Blob + `<a download>`) e **🖨 Imprimir / PDF** (`printDocHTML`: abre o
+HTML numa nova janela e chama `window.print()` — o usuário salva como PDF pelo diálogo
+nativo do navegador).
+
+### Teste
+`tests/policyDoc.test.js` — GATE: números do docModel ≡ `computeSimulationTick` (e o
+renderer exibe os MESMOS tokens formatados, checagem literal de string); completude (todo
+nó do IR aparece uma vez em `flowNodes`; paths cobrem exatamente os terminais alcançáveis a
+partir das raízes); determinismo (duas gerações com a mesma entrada são idênticas, módulo
+`generatedAt`); degradação (sem AS IS ⇒ aviso explícito no texto, nunca omissão
+silenciosa); privacidade (toggle desligado ⇒ nenhum valor de domínio da fixture aparece no
+Markdown/HTML — contraste positivo com o toggle ligado); changelog (`diffPolicyIR` entre
+fixture A/A' com 1 célula de Cineminha mudada ⇒ exatamente essa mudança, delta de métricas
+batendo com `computeSimulationTick` antes/depois, e o mesmo delta reproduzido via
+`computePolicyDoc({..., options:{compare}})`).
+
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
 - Estado local (array) persistido em `localStorage` implicitamente (futuro)
@@ -1383,7 +1533,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/copiloto-session-5-simplify-4ejq8e`
+`claude/copiloto-session-6-docs-jye71z`
 
 ## Roadmap futuro (não implementado)
 

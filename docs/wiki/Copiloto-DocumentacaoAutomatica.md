@@ -2,6 +2,72 @@
 
 > Parte do épico [[Epicos-CopilotoIA|Copiloto de Política de Crédito]] (ler primeiro:
 > arquitetura em camadas, PolicyIR, DEC-IA-001..006, contrato de privacidade).
+>
+> **Status:** Sessão 6 (DocGen local) ✅ ENTREGUE.
+
+## Sessão 6 — como foi entregue
+
+`COMPUTE_POLICY_DOC` (worker, `src/simulation.worker.js`) devolve um **docModel** — árvore
+de seções com dados numéricos crus (nenhuma prosa pronta). O IR (`buildPolicyIR`, Sessão 0)
+só existe em `App.jsx`; a main o constrói e o envia PRONTO no payload — o worker computa só
+o que exige varrer a base:
+
+- **KPIs**: o mesmo `computeSimulationTick` do tick de edição (`simResult` +
+  `incrementalResult`, incl. `baseline`/`simulated`/`impacted` vs. AS IS).
+- **Fluxo da política** (`buildFlowNodes`): 1 entrada por nó do IR — bijeção, garante
+  completude por construção (todo nó/rota/casela do IR aparece exatamente uma vez).
+- **Regras achatadas** (`buildPolicyPaths`): DFS determinístico raiz→terminal sobre o IR,
+  compondo as condições de cada nó no caminho; ciclo/destino ausente terminam o ramo com
+  motivo declarado, nunca inventam um terminal.
+- **Funil por nó+valor** (`computeFunnelByNode`): mesma travessia de `exportDiagnosticCSV`
+  reimplementada no worker — e ESTENDIDA para atravessar `decision_lens` (a versão original
+  parava no primeiro lens do caminho), necessário para políticas com lens como raiz.
+- **Confiabilidade da amostra** (`computeReliability`): substituto local do
+  `InferenceSignal`/`confiabVolume` descritos originalmente nesta página — essa sinalização
+  dependia da Tabela de Inferência de Referência, **removida do produto** (schema 2.5).
+  Mantém o espírito (avisar amostra pequena) sinalizando segmentos do funil com menos de 30
+  altas (real ou inferida).
+- **Comparação de cenários** (`computeScenarioComparison`): reaproveita o par
+  `computeSimulatedDecisions`/`computeIncrementalResult` do pipeline 5B (não o dataset largo
+  colunar inteiro, que existe para pivot de gráfico) — AS IS + cenário atual + abas
+  marcadas (`includeInDashboard`, mesma função `buildAnalyticsCanvasInputs` do Dashboard).
+- **Glossário** (`buildGlossary`): variáveis referenciadas no IR enriquecidas com
+  `colType`/`varType`/`domainSize` de `ir.datasets`.
+
+**Contrato de Privacidade (item 3 da análise, N2)**: o toggle "Incluir domínios de
+valores" no `docModal` (desligado por padrão) controla se rótulos concretos (valores de
+rota, `rowDomain`/`colDomain`/`blockedCells` do Cineminha, `rule.value` do lens, o
+detalhamento por valor do funil) entram no documento — sempre com as CONTAGENS (N1)
+visíveis independente do toggle. A redação acontece na montagem do docModel
+(`buildFlowNodes`/`redactPathConditions`/`redactFunnel`/`buildGlossary`), não no renderer.
+
+**Renderers**: `renderDocMarkdown`/`renderDocHTML` (`App.jsx`) são funções PURAS — mesmo
+docModel ⇒ mesmo texto (módulo `generatedAt`). HTML self-contained (inline styles, ADR-002)
+aberto numa nova janela para `window.print()` (→ PDF via navegador); Markdown como
+download `.md` (mesmo padrão `Blob` + `<a download>` de `doExportPolicyIR`).
+
+**Changelog estrutural**: `diffPolicyIR(a, b)` (`App.jsx`) é uma função PURA que compara
+dois PolicyIR por `id` de nó (correto quando os dois vêm da MESMA linhagem de canvas — ids
+estáveis; comparar com um clone via `cloneCanvasWithNewIds` degrada para "tudo
+removido+adicionado", limitação documentada). No `docModal`, escolher "Comparar com" outro
+canvas monta `compareIr` na main e envia `options.compare:{shapes,conns}` — o worker roda o
+MESMO tick sobre essa segunda política (`compareKpis`) e a main combina
+`diffPolicyIR(ir, compareIr)` (estrutural) com `compareKpis` (numérico) no
+`docModel.changelog`.
+
+**UI**: botão **📄 Documentar Política** (seção Fluxo) abre o `docModal` — formulário
+(toggle de domínios + seletor de comparação) → prévia (`<iframe srcDoc>` do HTML) → **⬇
+Markdown** / **🖨 Imprimir / PDF**. Efêmero, não persistido (mesmo padrão de
+`goalSeekModal`/`simplifyModal`).
+
+**GATE** `tests/policyDoc.test.js`: números do docModel ≡ `computeSimulationTick` (com
+checagem literal dos tokens formatados no texto renderizado); completude (todo nó do IR em
+`flowNodes`; paths cobrem exatamente os terminais alcançáveis); determinismo (duas
+gerações idênticas, módulo `generatedAt`); degradação (sem AS IS ⇒ aviso explícito, nunca
+omissão silenciosa); privacidade (toggle desligado ⇒ nenhum valor de domínio da fixture no
+texto; contraste positivo com o toggle ligado); changelog (`diffPolicyIR` entre fixture
+A/A' com 1 célula de Cineminha mudada ⇒ exatamente essa mudança + delta de métricas
+correto, reproduzido também via `computePolicyDoc({options:{compare}})`).
 
 ## Contexto
 
