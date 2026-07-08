@@ -366,129 +366,6 @@ const normalizeColName = (s) => (s || "").toLowerCase().replace(/[\s_\-\.]+/g, "
 // sobre os DICIONÁRIOS das colunas (finalizeImportedColumns em src/columnar.js,
 // M1) — O(distintos) em vez de uma cópia integral da matriz de linhas.
 
-// ── Inferência de negados — indexação da Tabela de Referência (Fase 1) ──
-// Lê o artefato do SAS (delimitador ';', decimal '.') e o indexa UMA vez na
-// importação. Chaves, ordem de colapso e quantidade de níveis são derivados
-// DINAMICAMENTE de `vars_usadas` + cabeçalho (nunca nomes hardcoded — ver
-// CONTRATO_INFERENCIA.md §1 e Proposta §2). NÃO entra no csvStore.
-// Nomes normalizados das colunas de metadados/métricas fixas do artefato:
-const INF_META_NORMS = {
-  nivel:  'nivel',
-  confiab:'confiabilidade',
-  conv:   'taxaconversaoref',
-  fpd:    'taxafpdref',
-  nAprov: 'naprovados',
-  nConv:  'nconvertidos',
-  nMaus:  'nmaus',
-  vars:   'varsusadas',
-};
-export function indexInferenceRef(headers, rows, name) {
-  const idxByNorm = {};
-  headers.forEach((h, i) => { idxByNorm[normalizeColName(h)] = i; });
-  const col = (norm) => (norm in idxByNorm ? idxByNorm[norm] : -1);
-
-  const iNivel  = col(INF_META_NORMS.nivel);
-  const iConf   = col(INF_META_NORMS.confiab);
-  const iConv   = col(INF_META_NORMS.conv);
-  const iFpd    = col(INF_META_NORMS.fpd);
-  const iNAprov = col(INF_META_NORMS.nAprov);
-  const iNConv  = col(INF_META_NORMS.nConv);
-  const iNMaus  = col(INF_META_NORMS.nMaus);
-  const iVars   = col(INF_META_NORMS.vars);
-
-  const parseNum = (v) => { const n = parseFloat(String(v ?? '').trim()); return Number.isFinite(n) ? n : 0; };
-  const parseIntSafe = (v) => { const n = parseInt(String(v ?? '').trim(), 10); return Number.isFinite(n) ? n : null; };
-
-  // 1) keyCols: derivados da linha mais granular (maior `vars_usadas`).
-  //    A ordem em `vars_usadas` é a ordem de colapso (a última variável cai
-  //    primeiro), então keyCols[0] é a âncora (nunca colapsa).
-  let keyCols = [];
-  if (iVars >= 0) {
-    for (const r of rows) {
-      const raw = String(r[iVars] ?? '').trim();
-      if (!raw || raw.toUpperCase() === 'GLOBAL') continue;
-      const vs = raw.split(/\s+/).filter(Boolean);
-      if (vs.length > keyCols.length) keyCols = vs;
-    }
-  }
-  // Fallback (sem `vars_usadas`): tudo que não for coluna de metadado/métrica.
-  if (keyCols.length === 0) {
-    const metaNorms = new Set(Object.values(INF_META_NORMS));
-    keyCols = headers.filter(h => !metaNorms.has(normalizeColName(h)));
-  }
-  const keyIdx = keyCols.map(k => col(normalizeColName(k)));
-  const anchorCol = keyCols[0] || null;
-
-  const levels = {};        // {[nivel]: Map<keyConcat, premissa>}
-  const levelKeyCount = {}; // {[nivel]: nº de chaves usadas}
-  let global = null;
-
-  for (const r of rows) {
-    const conf    = iConf >= 0 ? String(r[iConf] ?? '').trim() : '';
-    const varsRaw = iVars >= 0 ? String(r[iVars] ?? '').trim() : '';
-    const premissa = {
-      conv:    iConv  >= 0 ? parseNum(r[iConv]) : 0,
-      fpd:     iFpd   >= 0 ? parseNum(r[iFpd])  : 0,
-      confiab: conf,
-      nAprov:  iNAprov >= 0 ? parseIntSafe(r[iNAprov]) : null,
-      nConv:   iNConv  >= 0 ? parseIntSafe(r[iNConv])  : null,
-      nMaus:   iNMaus  >= 0 ? parseIntSafe(r[iNMaus])  : null,
-    };
-    const isGlobal = conf.toUpperCase() === 'GLOBAL' || varsRaw.toUpperCase() === 'GLOBAL';
-    if (isGlobal) { global = premissa; continue; }
-
-    // Quantas chaves este nível usa (prefixo de keyCols).
-    let k;
-    if (varsRaw) k = varsRaw.split(/\s+/).filter(Boolean).length;
-    else {
-      k = 0;
-      for (let j = 0; j < keyIdx.length; j++) {
-        const v = keyIdx[j] >= 0 ? String(r[keyIdx[j]] ?? '').trim() : '';
-        if (v) k++; else break;
-      }
-    }
-    if (k <= 0) { if (!global) global = premissa; continue; }
-
-    const niv = iNivel >= 0 ? (parseIntSafe(r[iNivel]) ?? k) : k;
-    if (!levels[niv]) { levels[niv] = new Map(); levelKeyCount[niv] = k; }
-    const parts = [];
-    for (let j = 0; j < k; j++) parts.push(keyIdx[j] >= 0 ? String(r[keyIdx[j]] ?? '').trim() : '');
-    levels[niv].set(parts.join('|'), premissa);
-  }
-
-  return {
-    name: name || 'inferencia_ref',
-    importedAt: new Date().toISOString(),
-    keyCols,
-    anchorCol,
-    levels,
-    global,
-    levelKeyCount,
-    rowCount: rows.length,
-  };
-}
-
-// ── Serialização do índice de inferência (Salvar/Abrir Projeto) ──────────────
-// `inferenceRef.levels` é `{[nivel]: Map}` — JSON não serializa Map, então
-// convertemos para arrays de entradas na exportação e reconstruímos na carga.
-export function serializeInferenceRef(ref) {
-  if (!ref) return null;
-  const levels = {};
-  for (const [niv, map] of Object.entries(ref.levels || {})) {
-    levels[niv] = map instanceof Map ? Array.from(map.entries()) : map;
-  }
-  return { ...ref, levels };
-}
-
-export function deserializeInferenceRef(ser) {
-  if (!ser) return null;
-  const levels = {};
-  for (const [niv, entries] of Object.entries(ser.levels || {})) {
-    levels[niv] = entries instanceof Map ? entries : new Map(entries || []);
-  }
-  return { ...ser, levels };
-}
-
 // ── Serialização do Projeto em partes (M3 — Otimização de Memória) ──────────
 // `JSON.stringify(buildProjectPayload())` monta a base inteira (já em base64 —
 // ver columnar.js) numa ÚNICA string contígua: com várias colunas de uma base
@@ -1099,98 +976,6 @@ export function computeAsIsCells(shape, csvStore) {
     cells[key] = (rp > 0 && ap === 0) ? 0 : 1;
   }
   return cells;
-}
-
-// ── Sinalização de inferência por referência (Fase 3 / Proposta §4.5, CONTRATO §7) ──
-// Selo discreto de origem + indicador "% do volume inferido com confiab ALTA" com
-// alerta visual quando uma fatia relevante herdou premissa colapsada (caso PAP §7).
-// Renderiza um <div> — funciona tanto dentro de foreignObject (simPanel) quanto no
-// businessWidget. `scale` reaproveita o fator de escala do contexto (1 = padrão).
-function InferenceSignal({ source, confiabVolume, weightMode, scale = 1 }) {
-  if (source !== 'ref') return null;
-  const s = (v) => v * scale;
-
-  const BUCKETS = [
-    { key: 'ALTA',   label: 'Alta',   color: '#4ade80' },
-    { key: 'MEDIA',  label: 'Média',  color: '#fbbf24' },
-    { key: 'BAIXA',  label: 'Baixa',  color: '#fb923c' },
-    { key: 'GLOBAL', label: 'Global', color: '#f87171' },
-  ];
-  const cv = confiabVolume || {};
-  const total = BUCKETS.reduce((a, b) => a + (cv[b.key] || 0), 0);
-  const present = BUCKETS.filter(b => (cv[b.key] || 0) > 0);
-  const alta = cv.ALTA || 0;
-  const pctAlta = total > 0 ? alta / total : null;
-  // ≥80% ALTA = ok; 50–80% atenção; <50% alerta (fatia relevante herdou premissa colapsada).
-  const low = pctAlta !== null && pctAlta < 0.5;
-  const mid = pctAlta !== null && pctAlta >= 0.5 && pctAlta < 0.8;
-  const accent = pctAlta === null ? '#64748b' : low ? '#f87171' : mid ? '#fbbf24' : '#4ade80';
-  const tone = low ? { bg: 'rgba(248,113,113,0.07)', border: 'rgba(248,113,113,0.45)' }
-            : mid  ? { bg: 'rgba(251,191,36,0.07)',  border: 'rgba(251,191,36,0.40)' }
-                   : { bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.07)' };
-
-  // Base de peso (Fase 4): selo discreto para não confundir a leitura do número.
-  const wmLabel = weightMode === 'aprovados' ? 'Aprovados' : weightMode === 'misto' ? 'Misto' : 'Propostas';
-  const wmTitle = weightMode === 'aprovados'
-    ? 'Peso = volume de aprovados — leitura "FPD sobre aprovados".'
-    : weightMode === 'misto'
-    ? 'Estudos com bases de peso diferentes (propostas e aprovados).'
-    : 'Peso = volume total de propostas — leitura "abrir para os reprovados".';
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: s(6) }}>
-      {/* Selos: origem + base de peso */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: s(4) }}>
-        <span title="As taxas de conversão/inadimplência vêm da Tabela de Referência (lookup em cascata), não de colunas da base."
-          style={{ display: 'inline-flex', alignItems: 'center', gap: s(4), fontSize: s(8), fontWeight: 700, padding: `${s(2)}px ${s(8)}px`, borderRadius: s(20), background: 'rgba(129,140,248,0.15)', color: '#a5b4fc', letterSpacing: '0.03em' }}>
-          🧮 Inferência: Tabela de referência
-        </span>
-        <span title={wmTitle}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: s(4), fontSize: s(8), fontWeight: 700, padding: `${s(2)}px ${s(8)}px`, borderRadius: s(20), background: 'rgba(148,163,184,0.14)', color: '#cbd5e1', letterSpacing: '0.03em' }}>
-          ⚖️ Peso: {wmLabel}
-        </span>
-      </div>
-
-      {/* Indicador de confiabilidade */}
-      {total > 0 && (
-        <div style={{ background: tone.bg, border: `1px solid ${tone.border}`, borderRadius: s(8), padding: `${s(7)}px ${s(9)}px` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: s(5) }}>
-            <span style={{ fontSize: s(8), color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Confiab. da Inferência</span>
-            <span style={{ fontSize: s(14), fontWeight: 800, color: accent, lineHeight: 1 }}>
-              {(pctAlta * 100).toFixed(0)}%<span style={{ fontSize: s(7.5), color: '#64748b', fontWeight: 700, marginLeft: s(3) }}>ALTA</span>
-            </span>
-          </div>
-          {/* Barra empilhada por faixa de confiab */}
-          <div style={{ display: 'flex', height: s(5), borderRadius: s(3), overflow: 'hidden', background: 'rgba(255,255,255,0.05)' }}>
-            {BUCKETS.map(b => {
-              const v = cv[b.key] || 0;
-              if (!(v > 0)) return null;
-              return <div key={b.key} title={`${b.label}: ${(v / total * 100).toFixed(1)}% do volume inferido`} style={{ width: `${(v / total) * 100}%`, background: b.color }} />;
-            })}
-          </div>
-          {/* Legenda das faixas presentes */}
-          {present.length > 1 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: s(8), marginTop: s(5) }}>
-              {present.map(b => (
-                <span key={b.key} style={{ display: 'inline-flex', alignItems: 'center', gap: s(3), fontSize: s(7.5), color: '#94a3b8', fontWeight: 600 }}>
-                  <span style={{ width: s(6), height: s(6), borderRadius: s(2), background: b.color, display: 'inline-block' }} />
-                  {b.label} {(cv[b.key] / total * 100).toFixed(0)}%
-                </span>
-              ))}
-            </div>
-          )}
-          {(low || mid) && (
-            <div style={{ fontSize: s(7.5), color: low ? '#fca5a5' : '#fcd34d', marginTop: s(5), lineHeight: 1.35 }}>
-              {low ? '⚠' : '⚡'} {((1 - pctAlta) * 100).toFixed(0)}% do volume inferido herdou premissa colapsada (≠ ALTA).
-              {low
-                ? ' Cuidado com células de baixa amostra — ex.: canal PAP. Leia o número como estimativa, não como certo.'
-                : ' Parte da inferência veio de níveis mais gerais (ex.: canal PAP). Trate como aproximação.'}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 // ── SimIndicators — right panel simulation card ───────────────────────────────
@@ -3522,9 +3307,6 @@ export default function App() {
   const [wizard,     setWizard]     = useState(null);   // null | wizard obj
   const [importLoading, setImportLoading] = useState(null); // null | {phase:'reading'|'parsing', pct, filename} — progresso de carga/parse de CSV
   const [csvImportError, setCsvImportError] = useState(null); // string | null — erro ao carregar/processar uma base CSV
-  // Inferência de negados — Tabela de Referência (Fase 1, slot dedicado)
-  const [inferenceRef, setInferenceRef] = useState(null); // null | índice da tabela (ver indexInferenceRef / Proposta §4.1)
-  const [infRefError,  setInfRefError]  = useState(null); // string | null — erro de importação da tabela de referência
   // Analytics Workspace
   const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
@@ -3595,7 +3377,6 @@ export default function App() {
   const svgRef        = useRef(null);
   const fileInputRef  = useRef(null);
   const projectInputRef = useRef(null);
-  const infRefInputRef = useRef(null);
   // Feedback transitório do "Salvar Projeto" — null | {kind:'ok'|'err', msg}
   const [projectSaveNotice, setProjectSaveNotice] = useState(null);
   const dragR         = useRef(null);
@@ -3611,7 +3392,6 @@ export default function App() {
   const fromIdR     = useRef(fromId);     useEffect(()=>{fromIdR.current=fromId},  [fromId]);
   const editR       = useRef(edit);       useEffect(()=>{editR.current=edit},      [edit]);
   const csvStoreR   = useRef(csvStore);   useEffect(()=>{csvStoreR.current=csvStore},  [csvStore]);
-  const inferenceRefR = useRef(inferenceRef); useEffect(()=>{inferenceRefR.current=inferenceRef},[inferenceRef]);
   const activeCellR = useRef(activeCell); useEffect(()=>{activeCellR.current=activeCell},[activeCell]);
   const panelDragR  = useRef(panelDrag);  useEffect(()=>{panelDragR.current=panelDrag}, [panelDrag]);
   const editConnR   = useRef(editConn);   useEffect(()=>{editConnR.current=editConn},   [editConn]);
@@ -3757,12 +3537,6 @@ export default function App() {
     w.postMessage(payload, transfer);
   }, [csvStore]);
 
-  // Espelha a Tabela de Inferência no worker (Fase 2) — análogo ao UPDATE_CSV_STORE.
-  // O structured clone do postMessage preserva os Maps de `inferenceRef.levels`.
-  useEffect(() => {
-    workerRef.current?.postMessage({ type: 'UPDATE_INFERENCE_REF', inferenceRef });
-  }, [inferenceRef]);
-
   // ── Simulation engine (reactive) ──────────────────────────────
   // M12: índice O(1) de shapes por id — evita `shapes.find` O(n) em hot paths (renderConn
   // resolve `from`/`to` por conexão a cada frame de pan/zoom/drag; era O(conns × shapes)).
@@ -3785,7 +3559,7 @@ export default function App() {
   // são topologicamente idênticos sempre que topoKey não muda.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const flowErrors = useMemo(() => validateFlow(shapes, conns), [topoKey]);
-  const [simResult, setSimResult] = useState(() => ({ totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{}, inferenceSource:null, confiabVolume:null, inferenceWeightMode:null }));
+  const [simResult, setSimResult] = useState(() => ({ totalQty:0, approvedQty:0, rejectedQty:0, asIsQty:0, approvalRate:0, inadReal:null, inadInferida:null, edgeStats:{} }));
   // Espelhos para o autoLayout medir os "balões" das arestas sem closure stale.
   const simResultR        = useRef(simResult);        useEffect(()=>{simResultR.current=simResult},               [simResult]);
   const showEdgeVolR      = useRef(showEdgeVol);       useEffect(()=>{showEdgeVolR.current=showEdgeVol},           [showEdgeVol]);
@@ -3798,7 +3572,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'RUN_SIMULATION', shapes: shapesR.current, conns: connsR.current });
     }, 300);
     return () => clearTimeout(simDebounceRef.current);
-  }, [shapes, conns, csvStore, inferenceRef]);
+  }, [shapes, conns, csvStore]);
 
   // ── Engine de População Impactada (Feature 4) ─────────────────
   // M10: as populações de lens (Array<boolean> de ~1MM posições por lens×csv) deixaram de
@@ -3840,7 +3614,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'COMPUTE_OVERLAY', shapes: shapesR.current, conns: connsR.current });
     }, 300);
     return () => clearTimeout(simOverlayDebounceRef.current);
-  }, [shapes, conns, csvStore, inferenceRef]);
+  }, [shapes, conns, csvStore]);
 
   // ── Copiloto — lint estrutural (Sessão 1, DEC-IA-006) ──────────
   // Achados efêmeros (não persistem — só refletem o estado atual do canvas ativo),
@@ -3854,7 +3628,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'COMPUTE_POLICY_INSIGHTS', shapes: shapesR.current, conns: connsR.current });
     }, 300);
     return () => clearTimeout(copilotDebounceRef.current);
-  }, [shapes, conns, csvStore, inferenceRef]);
+  }, [shapes, conns, csvStore]);
 
   // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
   // Recomputado pelo worker quando a simulação muda; cacheado em analyticsDataset.
@@ -3886,7 +3660,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'COMPUTE_ANALYTICS_DATASET', canvases: buildAnalyticsCanvasInputs() });
     }, 300);
     return () => clearTimeout(analyticsDebounceRef.current);
-  }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs, inferenceRef, activeTab]);
+  }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs, activeTab]);
 
   // Persiste layout do dashboard na sessionStorage para sobreviver a reloads dentro da mesma sessão.
   useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
@@ -4773,7 +4547,7 @@ export default function App() {
           return;
         }
         setImportLoading(null);
-        setWizard({file,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,inferenceSource:'columns',keyMap:{},weightCol:null,weightMode:'propostas',normalizeScore:true,parsedHeaders:parsed.headers,parsedColumns:parsed.columns,parsedRowCount:parsed.rowCount,previewRows:parsed.previewRows,parsedDelimiter:delimiter,parsedHasHeader:true});
+        setWizard({file,filename:file.name,delimiter,detected:delimiter,confident,hasHeader:true,step:1,columnTypes:{},varTypes:{},asIsVar:null,asIsMapping:{},editCsvId:null,decimalSep,decimalSepConfident:decConfident,parsedHeaders:parsed.headers,parsedColumns:parsed.columns,parsedRowCount:parsed.rowCount,previewRows:parsed.previewRows,parsedDelimiter:delimiter,parsedHasHeader:true});
       } catch (err) {
         setImportLoading(null);
         setCsvImportError(`Falha ao processar "${file.name}": ${err?.message || err}`);
@@ -4818,35 +4592,6 @@ export default function App() {
       }
     };
     reader.readAsText(file);
-  };
-
-  // ── Import da Tabela de Inferência (slot dedicado — Fase 1) ──
-  // Parser fixo: delimitador ';', decimal '.'. NÃO entra no csvStore, não vira
-  // nó no canvas e não gera chips. Indexa UMA vez via indexInferenceRef.
-  const onInferenceRefFileChange = (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const text = ev.target.result;
-        const { headers, rows } = parseCSV(text, ';', true);
-        if (!headers.length || !rows.length) {
-          setInfRefError('Arquivo vazio ou ilegível.');
-          return;
-        }
-        const idx = indexInferenceRef(headers, rows, file.name);
-        if (!idx.keyCols.length) {
-          setInfRefError('Não foi possível identificar as colunas-chave (vars_usadas / cabeçalho).');
-          return;
-        }
-        setInferenceRef(idx);
-        setInfRefError(null);
-      } catch (err) {
-        setInfRefError('Falha ao processar a tabela: ' + (err?.message || err));
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
   };
 
   const onLibFileChange = (e) => {
@@ -4970,7 +4715,7 @@ export default function App() {
 
   const onImportConfirm = () => {
     if (!wizard) return;
-    const {filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId,decimalSep,inferenceSource,keyMap,weightCol,weightMode,normalizeScore}=wizard;
+    const {filename,delimiter,hasHeader,columnTypes,varTypes,asIsVar,asIsMapping,editCsvId,decimalSep}=wizard;
     const DORIGINAL_COL = '__DECISAO_ORIGINAL';
 
     // Auto-assign 'decision' to all columns without an explicit type
@@ -4979,19 +4724,6 @@ export default function App() {
       for (const h of headers) { if (!final[h]) final[h] = 'decision'; }
       return final;
     };
-
-    // Config de origem da inferência (Fase 1) — persistida por dataset.
-    // 'ref' só vale se a Tabela de Inferência ainda está carregada; senão
-    // degrada para 'columns' (comportamento atual 🔮/🎯).
-    // `normalizeScore` (Fase 2 §6): aplicar R99/vazio→R20 como chave transitória de
-    // lookup. Default true (fiel ao SAS); nunca muta dado/domínio/export.
-    const wantsRef = inferenceSource === 'ref' && !!inferenceRefR.current;
-    // `weightMode` (Fase 4 / CONTRATO §3.2): base de volume do peso —
-    // 'propostas' (default, "abrir para reprovados") usa o 📊 volume total;
-    // 'aprovados' ("FPD sobre aprovados") usa a coluna de aprovados.
-    const inferenceConfig = wantsRef
-      ? { source: 'ref', keyMap: keyMap || {}, weightCol: weightCol || null, weightMode: weightMode === 'aprovados' ? 'aprovados' : 'propostas', normalizeScore: normalizeScore !== false }
-      : { source: 'columns', keyMap: {}, weightCol: null, weightMode: 'propostas', normalizeScore: true };
 
     // ── Edit mode: update existing dataset, no new canvas nodes ──
     if (editCsvId) {
@@ -5027,7 +4759,7 @@ export default function App() {
 
       setCsvStore(store => ({
         ...store,
-        [editCsvId]: { ...prev, name: filename||prev.name, headers: finalHeaders, columns: editColumns, rowCount: n, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: newAsIsConfig, inferenceConfig }
+        [editCsvId]: { ...prev, name: filename||prev.name, headers: finalHeaders, columns: editColumns, rowCount: n, columnTypes: finalTypes, varTypes: varTypes||{}, asIsConfig: newAsIsConfig }
       }));
       setWizard(null);
       return;
@@ -5064,7 +4796,7 @@ export default function App() {
       for (const h of baseHeaders) newColumns[h] = typedColumns[h];
       newColumns[DORIGINAL_COL] = deriveMappedDictColumn(typedColumns[asIsVar], newRowCount, v => mapping[String(v ?? '')] || '');
     }
-    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,columns:newColumns,rowCount:newRowCount,columnTypes:finalTypes,varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null,inferenceConfig}}));
+    setCsvStore(prev=>({...prev,[csvId]:{name:filename,headers:finalHeaders,columns:newColumns,rowCount:newRowCount,columnTypes:finalTypes,varTypes:varTypes||{},asIsConfig:asIsVar?{col:asIsVar,mapping:asIsMapping||{}}:null}}));
 
     // Entrada recém-criada (para recomputar domínios na reconciliação abaixo —
     // os distintos saem dos dicionários, O(distintos), sem varrer linhas).
@@ -5216,11 +4948,6 @@ export default function App() {
       editCsvId: csvId,
       decimalSep: '.',
       decimalSepConfident: true,
-      inferenceSource: csv.inferenceConfig?.source || 'columns',
-      keyMap: csv.inferenceConfig?.keyMap || {},
-      weightCol: csv.inferenceConfig?.weightCol || null,
-      weightMode: csv.inferenceConfig?.weightMode === 'aprovados' ? 'aprovados' : 'propostas',
-      normalizeScore: csv.inferenceConfig?.normalizeScore !== false,
     });
   };
 
@@ -5375,7 +5102,7 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.4",
+      schemaVersion: "2.5",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
@@ -5386,7 +5113,6 @@ export default function App() {
       // Base colunar → arrays planos (typed arrays não são JSON nativo). Round-trip
       // coberto em tests/columnar.test.js.
       csvStore: serializeCsvStore(csvStore),
-      inferenceRef: serializeInferenceRef(inferenceRef),
       analyticsLayout,
       analyticsGroupings,
       analyticsPageFilters,
@@ -5483,8 +5209,6 @@ export default function App() {
     setShapes(canv[actId].shapes || []);
     setConns(canv[actId].conns || []);
     setCsvStore(deserializeCsvStore(data.csvStore || {}));
-    setInferenceRef(deserializeInferenceRef(data.inferenceRef));
-    setInfRefError(null);
     setAnalyticsLayout(Array.isArray(data.analyticsLayout) ? data.analyticsLayout : []);
     setAnalyticsGroupings(Array.isArray(data.analyticsGroupings) ? data.analyticsGroupings : []);
     setAnalyticsPageFilters(Array.isArray(data.analyticsPageFilters) ? data.analyticsPageFilters : []);
@@ -7336,12 +7060,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Sinalização de inferência por referência (Fase 3) */}
-            {simResult.inferenceSource === 'ref' && (
-              <div style={{padding:"0 10px 8px",flexShrink:0}}>
-                <InferenceSignal source={simResult.inferenceSource} confiabVolume={simResult.confiabVolume} weightMode={simResult.inferenceWeightMode} />
-              </div>
-            )}
 
             {/* Efeito da Mudança */}
             {hasInc && inc.impacted.qty > 0 && (
@@ -8166,12 +7884,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Sinalização de inferência por referência (Fase 3) */}
-                {simResult.inferenceSource === 'ref' && (
-                  <div style={{ padding: `0 ${s(11)}px ${s(8)}px` }}>
-                    <InferenceSignal source={simResult.inferenceSource} confiabVolume={simResult.confiabVolume} weightMode={simResult.inferenceWeightMode} scale={sf} />
-                  </div>
-                )}
 
                 {/* Risk/Growth balance bar */}
                 {!small && (
@@ -8370,52 +8082,6 @@ export default function App() {
             <span style={{fontSize:18}}>📂</span> Importar CSV
           </button>
           <input ref={fileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onFileChange}/>
-
-          {/* Tabela de Inferência — slot dedicado (Fase 1) */}
-          <button onClick={()=>infRefInputRef.current?.click()}
-            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:`1.5px dashed ${inferenceRef?"#a78bfa":"#cbd5e1"}`,background:inferenceRef?"#f5f3ff":"#fafafa",color:inferenceRef?"#7c3aed":"#475569",cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",transition:"all .15s",marginTop:8}}
-            onMouseEnter={e=>{e.currentTarget.style.borderColor="#7c3aed";e.currentTarget.style.color="#7c3aed";e.currentTarget.style.background="#f5f3ff";}}
-            onMouseLeave={e=>{e.currentTarget.style.borderColor=inferenceRef?"#a78bfa":"#cbd5e1";e.currentTarget.style.color=inferenceRef?"#7c3aed":"#475569";e.currentTarget.style.background=inferenceRef?"#f5f3ff":"#fafafa";}}>
-            <span style={{fontSize:16}}>🧮</span> {inferenceRef ? "Trocar Tabela de Inferência" : "Tabela de Inferência"}
-          </button>
-          <input ref={infRefInputRef} type="file" accept=".csv,text/csv,.CSV" style={{display:"none"}} onChange={onInferenceRefFileChange}/>
-          {inferenceRef && (
-            <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#f5f3ff",border:"1px solid #ddd6fe",fontSize:11,color:"#5b21b6",lineHeight:1.5}}>
-              <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"space-between"}}>
-                <span style={{fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={inferenceRef.name}>🧮 {inferenceRef.name}</span>
-                <button onClick={()=>{setInferenceRef(null);setInfRefError(null);}}
-                  title="Remover tabela de referência"
-                  style={{border:"none",background:"transparent",color:"#7c3aed",cursor:"pointer",fontSize:13,lineHeight:1,padding:0,flexShrink:0}}>✕</button>
-              </div>
-              <div style={{marginTop:3,color:"#7c3aed"}}>
-                {inferenceRef.keyCols.length} chave(s) · {Object.keys(inferenceRef.levels).length + (inferenceRef.global?1:0)} nível(is) · {inferenceRef.rowCount} linhas
-              </div>
-              <div style={{marginTop:2,color:"#8b5cf6",fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={inferenceRef.keyCols.join(' · ')}>
-                {inferenceRef.keyCols.join(' · ')}
-              </div>
-              {/* Fase 4 (§9.4): trocar/recarregar a referência recalcula automaticamente
-                  o overlay dos estudos que a usam, preservando o inferenceConfig de cada um. */}
-              {(()=>{ const n = Object.values(csvStore).filter(c=>c.inferenceConfig?.source==='ref').length;
-                return n>0 ? (
-                  <div style={{marginTop:6,paddingTop:6,borderTop:"1px dashed #ddd6fe",color:"#6d28d9",fontSize:10,lineHeight:1.4}}>
-                    🔄 {n} estudo(s) usando esta referência — trocar recalcula automaticamente (mantém o mapeamento de cada um).
-                  </div>
-                ) : null; })()}
-            </div>
-          )}
-          {/* Degradação: estudos em modo 'ref' ficam sem a tabela (caem p/ colunas 🔮/🎯)
-              quando a referência é removida; o inferenceConfig é preservado p/ recarga. */}
-          {!inferenceRef && (()=>{ const n = Object.values(csvStore).filter(c=>c.inferenceConfig?.source==='ref').length;
-            return n>0 ? (
-              <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#fffbeb",border:"1px solid #fde68a",fontSize:11,color:"#92400e",lineHeight:1.5}}>
-                ⚠ {n} estudo(s) configurado(s) para a Tabela de Inferência. Recarregue-a para retomar a inferência por cascata.
-              </div>
-            ) : null; })()}
-          {infRefError && (
-            <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#fff1f2",border:"1px solid #fecaca",fontSize:11,color:"#b91c1c",lineHeight:1.5}}>
-              ⚠ {infRefError}
-            </div>
-          )}
         </div>
 
         {/* Exportar / Importar Fluxo */}
@@ -10356,40 +10022,12 @@ export default function App() {
                 const hasReprovado = distinctVals.some(v => mapping[v]==='REPROVADO');
                 const allMapped = distinctVals.length > 0 && distinctVals.every(v => mapping[v]==='APROVADO'||mapping[v]==='REPROVADO'||mapping[v]==='IGNORAR');
 
-                // ── Origem da inferência (Fase 1) ──
-                const refLoaded = !!inferenceRef;
-                const useRefSource = wizard.inferenceSource === 'ref' && refLoaded;
-                const refKeyCols = inferenceRef?.keyCols || [];
-                // Sugestão de de-para base↔referência via normalizeColName.
-                const suggestBaseCol = (refKeyCol) => {
-                  const target = normalizeColName(refKeyCol);
-                  return allHeaders.find(h => normalizeColName(h) === target) || '';
-                };
-                // Ao escolher a fonte, manter o de-para anterior se válido; senão sugerir.
-                const setInferenceSource = (src) => {
-                  setWizard(w => {
-                    if (src !== 'ref') return { ...w, inferenceSource: src };
-                    const prevMap = w.keyMap || {};
-                    const km = {};
-                    for (const k of refKeyCols) {
-                      km[k] = (prevMap[k] !== undefined && prevMap[k] !== null) ? prevMap[k] : suggestBaseCol(k);
-                    }
-                    const wc = w.weightCol || selMetric['qty'] || '';
-                    return { ...w, inferenceSource: 'ref', keyMap: km, weightCol: wc, weightMode: w.weightMode === 'aprovados' ? 'aprovados' : 'propostas' };
-                  });
-                };
-                const setKeyMapEntry = (refKeyCol, baseCol) =>
-                  setWizard(w => ({ ...w, keyMap: { ...(w.keyMap||{}), [refKeyCol]: baseCol || '' } }));
-
                 const METRIC_DEFS = [
                   { type:'qty',           icon:'📊', label:'Volume de Propostas',    desc:'Contagem de propostas por grupo' },
                   { type:'qtdAltas',       icon:'📈', label:'Altas Reais',            desc:'Altas/vendas reais observadas' },
                   { type:'inadReal',       icon:'⚠️', label:'Inadimplência Real',     desc:'Atrasos históricos observados' },
-                  // 🔮/🎯 vêm da base só no modo "Colunas da base"; ocultos no modo "Tabela de referência".
-                  ...(useRefSource ? [] : [
-                    { type:'qtdAltasInfer',  icon:'🔮', label:'Conversões Inferidas',   desc:'Altas estimadas pelo modelo de inferência' },
-                    { type:'inadInferida',   icon:'🎯', label:'Inadimplência Inferida', desc:'Inadimplência estimada pelo modelo' },
-                  ]),
+                  { type:'qtdAltasInfer',  icon:'🔮', label:'Conversões Inferidas',   desc:'Altas estimadas pelo modelo de inferência' },
+                  { type:'inadInferida',   icon:'🎯', label:'Inadimplência Inferida', desc:'Inadimplência estimada pelo modelo' },
                 ];
 
                 return (
@@ -10420,127 +10058,6 @@ export default function App() {
                           </div>
                         ))}
                       </div>
-                    </div>
-
-                    {/* ── Origem da Inferência (Fase 1) ── */}
-                    <div style={{marginBottom:22}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
-                        <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.7}}>Origem da Inferência</span>
-                        <div style={{flex:1,height:1,background:"#f1f5f9"}}/>
-                        <span style={{fontSize:10,color:"#94a3b8",background:"#f8fafc",border:"1px solid #e2e8f0",padding:"1px 8px",borderRadius:10}}>altas / inadimplência</span>
-                      </div>
-                      <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                        {/* Colunas da própria base (comportamento atual) */}
-                        <label style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 12px",borderRadius:9,border:`1.5px solid ${!useRefSource?"#3b82f6":"#e2e8f0"}`,background:!useRefSource?"#eff6ff":"#fafafa",cursor:"pointer"}}>
-                          <input type="radio" name="inf-source" checked={!useRefSource} onChange={()=>setInferenceSource('columns')} style={{accentColor:"#3b82f6",marginTop:2}}/>
-                          <div>
-                            <div style={{fontSize:12.5,fontWeight:600,color:!useRefSource?"#1d4ed8":"#1e293b"}}>Colunas da própria base</div>
-                            <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.3}}>Mapear 🔮 Conversões Inferidas e 🎯 Inadimplência Inferida acima (comportamento atual).</div>
-                          </div>
-                        </label>
-                        {/* Tabela de referência */}
-                        <label style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 12px",borderRadius:9,border:`1.5px solid ${useRefSource?"#7c3aed":"#e2e8f0"}`,background:useRefSource?"#f5f3ff":(refLoaded?"#fafafa":"#f8fafc"),cursor:refLoaded?"pointer":"not-allowed",opacity:refLoaded?1:.65}}>
-                          <input type="radio" name="inf-source" disabled={!refLoaded} checked={useRefSource} onChange={()=>setInferenceSource('ref')} style={{accentColor:"#7c3aed",marginTop:2}}/>
-                          <div style={{flex:1}}>
-                            <div style={{fontSize:12.5,fontWeight:600,color:useRefSource?"#6d28d9":"#1e293b"}}>Tabela de referência 🧮</div>
-                            <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.3}}>
-                              {refLoaded
-                                ? `Usa a Tabela de Inferência carregada (${inferenceRef.name}) por cascata.`
-                                : "Carregue a Tabela de Inferência primeiro (botão 🧮 no painel)."}
-                            </div>
-                          </div>
-                        </label>
-                      </div>
-
-                      {useRefSource && (
-                        <div style={{marginTop:12,padding:"12px 14px",borderRadius:10,border:"1px solid #ddd6fe",background:"#faf5ff"}}>
-                          <p style={{fontSize:11,color:"#6d28d9",lineHeight:1.5,marginBottom:12}}>
-                            As taxas de conversão e inadimplência serão buscadas na tabela de referência por cascata
-                            (do nível mais granular ao GLOBAL). Informe a coluna da base correspondente a cada chave.
-                          </p>
-                          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                            {refKeyCols.map((rk,i)=>{
-                              const isAnchor = i === 0;
-                              const val = (wizard.keyMap||{})[rk] ?? '';
-                              return (
-                                <div key={rk} style={{display:"grid",gridTemplateColumns:"1fr 12px 1fr",alignItems:"center",gap:8}}>
-                                  <span style={{fontSize:12,fontWeight:600,color:"#5b21b6",fontFamily:"monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={rk}>
-                                    {rk}{isAnchor && <span style={{marginLeft:6,fontSize:9,fontWeight:700,color:"#7c3aed",background:"#ede9fe",padding:"1px 5px",borderRadius:8,letterSpacing:.3}}>ÂNCORA</span>}
-                                  </span>
-                                  <span style={{color:"#a78bfa",textAlign:"center"}}>→</span>
-                                  <select
-                                    value={val}
-                                    onChange={e=>setKeyMapEntry(rk, e.target.value)}
-                                    style={{padding:"6px 10px",borderRadius:8,border:`1.5px solid ${val?"#a78bfa":"#e2e8f0"}`,fontSize:12,fontFamily:"inherit",background:val?"#f5f3ff":"#fff",color:val?"#5b21b6":"#94a3b8",outline:"none",cursor:"pointer",fontWeight:val?600:400}}>
-                                    <option value="">— Ausente (desce um nível) —</option>
-                                    {allHeaders.map(h=>(<option key={h} value={h}>{h}</option>))}
-                                  </select>
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {/* ── Toggle de peso (Fase 4 / CONTRATO §3.2) ── */}
-                          {(()=>{
-                            const wMode = wizard.weightMode === 'aprovados' ? 'aprovados' : 'propostas';
-                            const suggestApprovedCol = () => allHeaders.find(h => h !== selMetric['qty'] && /aprov/i.test(h)) || '';
-                            const setWeightMode = (mode) => setWizard(w => {
-                              if (mode === 'aprovados') return { ...w, weightMode: 'aprovados', weightCol: w.weightCol || suggestApprovedCol() || null };
-                              return { ...w, weightMode: 'propostas', weightCol: null };
-                            });
-                            const defaultCol = wMode === 'aprovados' ? (suggestApprovedCol() || '—') : (selMetric['qty'] || '—');
-                            const TOGGLE = [
-                              { mode:'propostas', icon:'📋', title:'Propostas', sub:'abrir p/ reprovados' },
-                              { mode:'aprovados', icon:'✅', title:'Aprovados', sub:'FPD sobre aprovados' },
-                            ];
-                            return (
-                              <div style={{marginTop:12,paddingTop:12,borderTop:"1px dashed #ddd6fe"}}>
-                                <div style={{fontSize:12,fontWeight:600,color:"#5b21b6",marginBottom:8}}>⚖️ Peso (base de volume)</div>
-                                <div style={{display:"flex",gap:8}}>
-                                  {TOGGLE.map(t=>{
-                                    const on = wMode === t.mode;
-                                    return (
-                                      <button key={t.mode} type="button" onClick={()=>setWeightMode(t.mode)}
-                                        style={{flex:1,textAlign:"left",padding:"8px 10px",borderRadius:9,border:`1.5px solid ${on?"#7c3aed":"#e2e8f0"}`,background:on?"#f5f3ff":"#fff",cursor:"pointer",fontFamily:"inherit"}}>
-                                        <div style={{fontSize:12,fontWeight:700,color:on?"#6d28d9":"#475569"}}>{t.icon} {t.title}{t.mode==='propostas'&&<span style={{marginLeft:6,fontSize:8.5,fontWeight:700,color:"#7c3aed",background:"#ede9fe",padding:"1px 5px",borderRadius:8,letterSpacing:.3}}>PADRÃO</span>}</div>
-                                        <div style={{fontSize:10,color:on?"#8b5cf6":"#94a3b8",marginTop:2,lineHeight:1.3}}>{t.sub}</div>
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                                <div style={{display:"grid",gridTemplateColumns:"auto 12px 1fr",alignItems:"center",gap:8,marginTop:10}}>
-                                  <span style={{fontSize:11,color:"#8b5cf6"}}>Coluna de peso</span>
-                                  <span style={{color:"#a78bfa",textAlign:"center"}}>→</span>
-                                  <select
-                                    value={wizard.weightCol||''}
-                                    onChange={e=>setWizard(w=>({...w,weightCol:e.target.value||null}))}
-                                    style={{padding:"6px 10px",borderRadius:8,border:`1.5px solid ${wizard.weightCol?"#a78bfa":"#e2e8f0"}`,fontSize:12,fontFamily:"inherit",background:wizard.weightCol?"#f5f3ff":"#fff",color:wizard.weightCol?"#5b21b6":"#94a3b8",outline:"none",cursor:"pointer",fontWeight:wizard.weightCol?600:400}}>
-                                    <option value="">{`Automático: ${defaultCol}`}</option>
-                                    {allHeaders.map(h=>(<option key={h} value={h}>{h}</option>))}
-                                  </select>
-                                </div>
-                              </div>
-                            );
-                          })()}
-                          <label style={{display:"flex",alignItems:"flex-start",gap:9,marginTop:12,paddingTop:12,borderTop:"1px dashed #ddd6fe",cursor:"pointer"}}>
-                            <input
-                              type="checkbox"
-                              checked={wizard.normalizeScore !== false}
-                              onChange={e=>setWizard(w=>({...w,normalizeScore:e.target.checked}))}
-                              style={{accentColor:"#7c3aed",marginTop:2}}/>
-                            <div>
-                              <div style={{fontSize:12,fontWeight:600,color:"#5b21b6"}}>Normalizar score no lookup (R99/vazio → R20)</div>
-                              <div style={{fontSize:10.5,color:"#8b5cf6",lineHeight:1.4}}>
-                                Trata score ausente como a pior faixa, apenas como chave transitória de busca
-                                (fiel ao SAS). Não altera o dado, o domínio nem a exportação.
-                              </div>
-                            </div>
-                          </label>
-                          <p style={{fontSize:10,color:"#8b5cf6",marginTop:8,lineHeight:1.4}}>
-                            As taxas viram físicos por linha: altas = peso × conv; maus = peso × conv × fpd —
-                            agregados como ∑maus / ∑altas (Regras de Ouro do contrato).
-                          </p>
-                        </div>
-                      )}
                     </div>
 
                     {/* ── Decisão AS IS ── */}

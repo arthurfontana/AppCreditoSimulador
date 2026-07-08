@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { indexInferenceRef } from '../src/App.jsx';
 import { runSimulation } from '../src/simulation.worker.js';
 import {
   buildColumnar,
@@ -26,23 +25,12 @@ function parseSemicolon(text) {
   return { headers: split(lines[0]), rows: lines.slice(1).map(split) };
 }
 
-const REF_PATH  = join(process.cwd(), 'INFERENCIA_REF_202509_202603.CSV');
 const BASE_PATH = join(process.cwd(), 'Amostra_Fake.csv');
-
-const { headers: refHeaders, rows: refRows } = parseSemicolon(readFileSync(REF_PATH, 'utf8'));
-const ref = indexInferenceRef(refHeaders, refRows, 'INFERENCIA_REF.CSV');
 
 const { headers: baseHeaders, rows: baseRows } = parseSemicolon(readFileSync(BASE_PATH, 'utf8'));
 
-const KEY_MAP = {
-  FAIXA_SCORE:             'SCORE_HVI3',
-  OPERACAO:                'OPERACAO',
-  IDENTIFICA_GRUPO_MODELO: 'IDENTIFICA_GRUPO_MODELO',
-  CANAL_PCO_AJUSTADO:      'CANAL_PCO_AJUSTADO',
-};
 const WEIGHT_COL = 'QTD_PROPOSTA';
 const columnTypes = { [WEIGHT_COL]: 'qty' };
-const inferenceConfig = { source: 'ref', keyMap: KEY_MAP, weightCol: WEIGHT_COL, normalizeScore: true };
 
 // csv legado (string[][]) — o que os testes/o GATE sempre usaram.
 function makeLegacyCsv() {
@@ -53,7 +41,6 @@ function makeLegacyCsv() {
     columnTypes,
     varTypes: {},
     asIsConfig: null,
-    inferenceConfig,
   };
 }
 
@@ -130,22 +117,15 @@ describe('accessor — equivalência com o legado string[][]', () => {
 });
 
 describe('GATE colunar — runSimulation sobre base vetorizada bate o legado', () => {
-  it('mesma FPD inferida (∑maus/∑altas) e mesmos agregados que a base string[][]', () => {
-    const legacyRes = runSimulation(SHAPES, CONNS, { base: makeLegacyCsv() }, ref);
-    const colRes    = runSimulation(SHAPES, CONNS, { base: makeColumnarCsv() }, ref);
+  it('mesmos agregados (aprovação, inad.) que a base string[][]', () => {
+    const legacyRes = runSimulation(SHAPES, CONNS, { base: makeLegacyCsv() });
+    const colRes    = runSimulation(SHAPES, CONNS, { base: makeColumnarCsv() });
 
     expect(colRes.approvedQty).toBeGreaterThan(0);
     expect(colRes.approvedQty).toBeCloseTo(legacyRes.approvedQty, 6);
+    expect(colRes.approvedQty).toBeCloseTo(colRes.totalQty, 6); // lens sem regras aprova tudo
     expect(colRes.totalQty).toBeCloseTo(legacyRes.totalQty, 6);
     expect(colRes.inadInferida).toBeCloseTo(legacyRes.inadInferida, 12);
-    // Valor de controle documentado no GATE: FPD inferida ≈ 40,06%.
-    expect(colRes.inadInferida).toBeGreaterThan(0.40);
-    expect(colRes.inadInferida).toBeLessThan(0.41);
-    // Confiab e origem preservados.
-    expect(colRes.inferenceSource).toBe('ref');
-    for (const k of ['ALTA', 'MEDIA', 'BAIXA', 'GLOBAL']) {
-      expect(colRes.confiabVolume[k]).toBeCloseTo(legacyRes.confiabVolume[k], 4);
-    }
   });
 });
 
@@ -162,17 +142,15 @@ describe('Round-trip do Projeto (.credito.json) preservando a base colunar', () 
     expect(rcsv.columns[WEIGHT_COL].data).toBeInstanceOf(Float64Array);
     expect(rcsv.columns['OPERACAO'].codes).toBeInstanceOf(Int32Array);
     expect(rcsv.rowCount).toBe(baseRows.length);
-    // inferenceConfig e metadados sobrevivem intactos.
-    expect(rcsv.inferenceConfig).toEqual(inferenceConfig);
     expect(rcsv.headers).toEqual(baseHeaders);
 
     // Célula a célula = base original.
     const opIdx = baseHeaders.indexOf('OPERACAO');
     expect(cellStr(rcsv, 0, opIdx)).toBe(baseRows[0][opIdx]);
 
-    // E o simulador reproduz a mesma FPD após o round-trip.
-    const before = runSimulation(SHAPES, CONNS, store, ref);
-    const after  = runSimulation(SHAPES, CONNS, restored, ref);
+    // E o simulador reproduz o mesmo resultado após o round-trip.
+    const before = runSimulation(SHAPES, CONNS, store);
+    const after  = runSimulation(SHAPES, CONNS, restored);
     expect(after.inadInferida).toBeCloseTo(before.inadInferida, 12);
     expect(after.approvedQty).toBeCloseTo(before.approvedQty, 6);
   });
@@ -186,9 +164,10 @@ describe('Round-trip do Projeto (.credito.json) preservando a base colunar', () 
     expect(rcsv.rows).toBeUndefined();
     expect(rcsv.columns[WEIGHT_COL].data).toBeInstanceOf(Float64Array);
 
-    const res = runSimulation(SHAPES, CONNS, restored, ref);
-    expect(res.inadInferida).toBeGreaterThan(0.40);
-    expect(res.inadInferida).toBeLessThan(0.41);
+    const res = runSimulation(SHAPES, CONNS, restored);
+    const direct = runSimulation(SHAPES, CONNS, legacyStore);
+    expect(res.inadInferida).toBeCloseTo(direct.inadInferida, 12);
+    expect(res.approvedQty).toBeCloseTo(direct.approvedQty, 6);
   });
 
   // ── M3 (Otimização de Memória) — save/load em base64 ────────────────────────
@@ -299,12 +278,10 @@ describe('Fase 2 — buffers compartilhados (SharedArrayBuffer)', () => {
       expect(cellStr(sharedCsv, r, opIdx)).toBe(baseRows[r][opIdx]);
     }
 
-    const legacyRes = runSimulation(SHAPES, CONNS, { base: makeLegacyCsv() }, ref);
-    const sharedRes = runSimulation(SHAPES, CONNS, { base: sharedCsv }, ref);
+    const legacyRes = runSimulation(SHAPES, CONNS, { base: makeLegacyCsv() });
+    const sharedRes = runSimulation(SHAPES, CONNS, { base: sharedCsv });
     expect(sharedRes.approvedQty).toBeCloseTo(legacyRes.approvedQty, 6);
     expect(sharedRes.inadInferida).toBeCloseTo(legacyRes.inadInferida, 12);
-    expect(sharedRes.inadInferida).toBeGreaterThan(0.40);
-    expect(sharedRes.inadInferida).toBeLessThan(0.41);
     // não-SAB report
     expect(isSharedColumnar(makeColumnarCsv())).toBe(false);
   });
@@ -325,7 +302,7 @@ describe('Fase 2 — buffers compartilhados (SharedArrayBuffer)', () => {
     expect(rowCount(store.base)).toBe(baseRows.length);
 
     // E o simulador ainda roda sobre o mesmo store (nada foi neutralizado).
-    const res = runSimulation(SHAPES, CONNS, store, ref);
-    expect(res.inadInferida).toBeGreaterThan(0.40);
+    const res = runSimulation(SHAPES, CONNS, store);
+    expect(res.approvedQty).toBeCloseTo(res.totalQty, 6); // lens sem regras aprova tudo
   });
 });
