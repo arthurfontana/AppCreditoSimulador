@@ -1,8 +1,14 @@
 # Copilotos IA — Prompts de Todas as Sessões
 
-> **Ordem de execução**: Sessão 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9
+> **Ordem de execução**: Sessão 0 → 1 → 2 → 3 → 4 → 5 → 6 → **10 → 11 → 12** → 7 → 8 → **13** → 9
+> (as Sessões 10–12 são 100% locais e não dependem das Sessões 7–9; a 13 depende da 7.)
 >
-> Referência: [[Epicos-CopilotoIA|Épico Principal]] · [[Copiloto-ConstrucaoAssistida|Frente 1]] · [[Copiloto-SugestoesMelhoria|Frente 2]] · [[Copiloto-DocumentacaoAutomatica|Frente 3]]
+> Referência: [[Epicos-CopilotoIA|Épico Principal]] · [[Copiloto-ConstrucaoAssistida|Frente 1]] · [[Copiloto-SugestoesMelhoria|Frente 2]] · [[Copiloto-DocumentacaoAutomatica|Frente 3]] · [[Copiloto-DescobertaSegmentos|Frente 4]]
+>
+> **🏷️ Tag de modelo**: cada sessão indica o modelo recomendado para o desenvolvimento
+> (`Opus 4.8` para núcleos algorítmicos/matemática sutil e integrações multi-módulo;
+> `Sonnet 5` para UI sobre padrões consolidados e trabalho bem especificado). Sessões
+> sem tag foram escritas antes da convenção.
 
 ---
 
@@ -280,18 +286,181 @@ Releia o épico e o código antes de propor.
 
 ---
 
+## Sessão 10 — Motor de Descoberta de Segmentos
+
+**Documentação**: `docs/wiki/Copiloto-DescobertaSegmentos.md` (Frente 4, Nível 1 — MVP)
+
+**Pré-requisitos**: Sessões 0–5 (usa `computeIV` da Sessão 3, walk compilado M8, padrões do worker). **Não** depende das Sessões 7–9.
+
+**🏷️ Modelo recomendado**: `Opus 4.8` — núcleo algorítmico (beam search, testes estatísticos, FDR, dedup) com GATE numérico de valores de controle manuais.
+
+**O que vai entregar**:
+- `COMPUTE_SEGMENT_DISCOVERY` no worker → `SEGMENT_DISCOVERY_RESULT {segmentModel}`
+- Pipeline em funções exportadas: `discoverSegments` (beam 1D/2D sobre dicionários, escopo global ou por nó via walk compilado), `explainSegment` (decomposição WoE, lift, teste binomial + Benjamini–Hochberg), `prioritizeFindings` (score impacto × confiança × acionabilidade + dedup de aninhados)
+- Achados do MVP: `approvable_low_risk`, `approved_high_risk`, `heterogeneous_block`
+- Rigor estatístico: volume mínimo, shrinkage (`SHRINK_K`), FDR, teto de profundidade, `diagnostics` com contadores de descarte
+- GATE: `tests/segmentDiscovery.test.js`
+
+**Prompt**:
+```
+Vamos à Sessão 10 do Copiloto (motor de Descoberta de Segmentos), conforme
+docs/wiki/Copiloto-DescobertaSegmentos.md (DEC-SD-001/002) e
+docs/wiki/Epicos-CopilotoIA.md. Implemente COMPUTE_SEGMENT_DISCOVERY no worker
+devolvendo o SegmentModel (dados crus, padrão docModel): discoverSegments com beam
+search de conjunções LensRule 1D/2D sobre as colunas de decisão (agregação
+O(distintos) sobre os dicionários, NUNCA produto cartesiano cego; escopo global ou
+população de um nó via walk compilado M8, mesmo padrão de computeVariableRanking),
+explainSegment (decomposição WoE por condição reusando computeIV/bins da Sessão 3,
+lift vs. complemento, teste binomial + correção Benjamini–Hochberg) e
+prioritizeFindings (score impacto × confiança × acionabilidade, shrinkage SHRINK_K,
+dedup de segmentos aninhados sem ganho incremental, diagnostics com contadores de
+descarte). Achados desta sessão: approvable_low_risk, approved_high_risk,
+heterogeneous_block. Sem UI nesta sessão (só o motor + GATE). GATE
+tests/segmentDiscovery.test.js: subgrupo plantado em fixture sintética é encontrado
+com as condições exatas e fixture homogênea devolve zero achados; agregados de cada
+achado ≡ agregação manual via matchLensRule; p-value bate com valor de controle
+manual; FDR descarta o ruído da fixture de múltiplas comparações; shrinkage rebaixa
+nicho minúsculo; escopo por nó ≡ sub-base filtrada manualmente; dedup; determinismo.
+Releia o épico, a frente e o código antes de propor.
+```
+
+---
+
+## Sessão 11 — Painel de Oportunidades (UI da Descoberta)
+
+**Documentação**: `docs/wiki/Copiloto-DescobertaSegmentos.md` (Frente 4, Nível 1 — MVP)
+
+**Pré-requisitos**: Sessão 10
+
+**🏷️ Modelo recomendado**: `Sonnet 5` — UI sobre padrões consolidados (`goalSeekModal`/`simplifyModal`, Recharts do Dashboard), motor já pronto e testado.
+
+**O que vai entregar**:
+- Botão **🔍 Descobrir Segmentos** na seção Fluxo (escopo global) e **🔍 Descobrir aqui** na toolbar contextual de nó (escopo = população do nó)
+- `segmentDiscoveryModal` (efêmero, padrão `goalSeekModal`): formulário mínimo com defaults → loading → cards de oportunidade ranqueados (regra + métricas com referência + barra de contribuições + selos de confiança + diagnostics)
+- Quadrante volume × risco (Recharts, dentro do modal — exceção DEC-AW-001)
+- **👁 Ver no Dashboard** (converte `SegmentDef.conditions` em `FilterCard[]` de página) e **ver no fluxo** (highlight reusando o "ir até o nó" do lint)
+- Achado informativo 🔵 no painel Copiloto apontando para a Descoberta (link, não segunda lista)
+
+**Prompt**:
+```
+Vamos à Sessão 11 do Copiloto (UI da Descoberta de Segmentos), conforme
+docs/wiki/Copiloto-DescobertaSegmentos.md. A Sessão 10 entregou
+COMPUTE_SEGMENT_DISCOVERY e o SegmentModel. Implemente o segmentDiscoveryModal
+(efêmero, padrão goalSeekModal: form mínimo com defaults → loading → resultado),
+os dois pontos de entrada (🔍 Descobrir Segmentos na seção Fluxo, escopo global;
+🔍 Descobrir aqui na toolbar contextual de losango/Cineminha/lens/terminal, escopo =
+população do nó), os cards de oportunidade (condições em linguagem de regra, métricas
+sempre com referência e lift, barra de decomposição das contribuições, selos de
+confiança, contadores de diagnostics visíveis), o quadrante volume × risco em
+Recharts dentro do modal (clique no ponto foca o card), a ação "👁 Ver no Dashboard"
+(SegmentDef.conditions → FilterCard[] de filtro de página — mesmo formato LensRule) e
+o "ver no fluxo" reusando o highlight do lint. Adicione o achado informativo 🔵 no
+painel Copiloto linkando para a Descoberta (sem duplicar a lista). Nenhuma
+persistência nova (modal efêmero). Sem IA. Releia a frente e o código antes de propor.
+```
+
+---
+
+## Sessão 12 — Recomendações Acionáveis + Integração Goal Seek
+
+**Documentação**: `docs/wiki/Copiloto-DescobertaSegmentos.md` (Frente 4, fase intermediária)
+
+**Pré-requisitos**: Sessões 10, 11 (e 4 — Goal Seek)
+
+**🏷️ Modelo recomendado**: `Opus 4.8` — integra PolicyIR/applyPolicyPatch/applyGoalSeekMoves e exige GATE de delta re-simulado (matemática de validação sutil).
+
+**O que vai entregar**:
+- `buildSegmentRecommendations` no worker: cada achado → patch (lens de exceção via `applyPolicyPatch`; movimento do catálogo do Goal Seek via `applyGoalSeekMoves` quando o segmento coincide com célula/valor/limiar existente; quebra via fluxo da Sessão 3 para `heterogeneous_block`)
+- Delta de cada recomendação validado por **re-simulação real** (top-N apenas), exibido no card
+- **✓ Aplicar como novo cenário** (`cloneCanvasWithNewIds`, política de origem intocada) e **🎯 Enviar ao Goal Seek** (objetivo pré-carregado)
+- Movimento **"adicionar quebra"** no catálogo do Goal Seek (pendência da Sessão 4, gerada pelo achado `heterogeneous_block`)
+- Achados `asis_divergence` (decomposição rToA/aToR por segmento sobre o overlay existente) e `anomaly` (desvio robusto por valor/safra) — sem patch, só navegação
+- Selo de estabilidade temporal (split-half quando há coluna `temporal`) + sparkline no card
+- Travas 🔒 respeitadas (ação desabilitada com motivo)
+- GATE estendido: `tests/segmentDiscovery.test.js`
+
+**Prompt**:
+```
+Vamos à Sessão 12 do Copiloto (recomendações acionáveis da Descoberta), conforme
+docs/wiki/Copiloto-DescobertaSegmentos.md (DEC-SD-003) e
+docs/wiki/Copiloto-SugestoesMelhoria.md. Implemente buildSegmentRecommendations no
+worker: para cada achado, gere o patch correspondente SEM criar segundo aplicador
+(DEC-IA-002) — lens de exceção materializada por applyPolicyPatch; quando o segmento
+coincide com célula/valor/limiar existente, use o formato de movimento do Goal Seek e
+applyGoalSeekMoves; heterogeneous_block vira criação de losango/Cineminha no padrão
+da Sessão 3. Valide o delta dos top-N achados por re-simulação real (runSimulation
+sobre clone com o patch — mesmo contrato DEC-IA-005 do Goal Seek) e exiba só deltas
+validados. UI: "✓ Aplicar como novo cenário" via cloneCanvasWithNewIds e "🎯 Enviar
+ao Goal Seek" com objetivo pré-carregado. Adicione ao catálogo do Goal Seek o
+movimento "adicionar quebra" (pendência declarada da Sessão 4), gerado pelo achado
+heterogeneous_block. Acrescente os achados asis_divergence (decomposição do
+rToA/aToR por segmento, reusando computeSimulatedDecisions/incrementalResult) e
+anomaly (desvio robusto mediana/MAD por valor e por safra quando há coluna temporal)
+— ambos sem patch, com navegação (filtro de Dashboard/highlight). Selo de
+estabilidade split-half temporal + sparkline no card; travas 🔒 desabilitam a ação
+com motivo declarado. Estenda tests/segmentDiscovery.test.js: delta exibido ≡
+runSimulation antes/depois para cada tipo de recomendação; movimento "adicionar
+quebra" ≡ criação manual equivalente; asis_divergence bate com o incrementalResult
+agregado; nó travado ⇒ não-acionável; determinismo. Releia a frente, o épico e o
+código antes de propor.
+```
+
+---
+
+## Sessão 13 — Enriquecimento de IA da Descoberta
+
+**Documentação**: `docs/wiki/Copiloto-DescobertaSegmentos.md` (Frente 4, Nível 2 — DEC-SD-004)
+
+**Pré-requisitos**: Sessões 10–12 **e Sessão 7** (AIProvider/ContextBuilder/Validator/Redactor)
+
+**🏷️ Modelo recomendado**: `Sonnet 5` para o desenvolvimento (adapters sobre infra pronta). Em runtime: `Haiku 4.5` para rótulos/narrativas curtas (batch), `Sonnet 5` para hipóteses de causa e tom de comitê.
+
+**O que vai entregar**:
+- **✨ Nomear segmentos** (batch: top-N achados numa chamada estruturada JSON in/out; rótulo exibido AO LADO da regra formal, nunca no lugar)
+- **✨ Explicar achado** (narrativa executiva sob demanda, por card — lazy, nunca automática)
+- **✨ Hipóteses de causa** (claramente rotuladas como hipótese)
+- Cache local por hash do achado (condições + métricas arredondadas) — reabrir o modal não re-chama a IA
+- Contexto via ContextBuilder (N0/N1; N2 só com opt-in); Validator rejeita texto citando número inexistente no SegmentModel
+- Degradação limpa: sem provedor, cards usam regra formal + templates de frase
+- GATE de contrato (payload nunca contém N3; divergência numérica rejeitada)
+
+**Prompt**:
+```
+Vamos à Sessão 13 do Copiloto (IA da Descoberta de Segmentos), conforme
+docs/wiki/Copiloto-DescobertaSegmentos.md (DEC-SD-004) e docs/wiki/Epicos-CopilotoIA.md
+(DEC-IA-003/004/005). A Sessão 7 entregou AIProvider/ContextBuilder/Validator/
+Redactor. Implemente os três enriquecimentos do segmentDiscoveryModal: ✨ Nomear
+segmentos (batch dos top-N achados em UMA chamada estruturada JSON in/out — otimização
+de custo; rótulo sempre exibido ao lado da regra formal), ✨ Explicar achado (narrativa
+executiva por card, sob demanda/lazy, nunca automática na abertura do modal) e
+✨ Hipóteses de causa (rotuladas visualmente como hipótese, nunca afirmadas como fato).
+Contexto montado exclusivamente pelo ContextBuilder (N0/N1, N2 só com o opt-in
+existente; payload por achado < 4KB); cache local por hash do achado (condições +
+métricas arredondadas); botões ✨ só aparecem com provedor configurado e capability
+compatível; degradação limpa para regra formal + templates sem provedor. GATE de
+contrato: payload enviado nunca contém N3 nem linhas do csvStore; texto citando
+métrica inexistente no SegmentModel é rejeitado pelo Validator antes de exibir.
+Releia a frente, o épico e o código antes de propor.
+```
+
+---
+
 ## Checklist de Execução
 
-- [ ] **Sessão 0** — PolicyIR ✅
-- [ ] **Sessão 1** — Lint/Insights
-- [ ] **Sessão 2** — Biblioteca de políticas
-- [ ] **Sessão 3** — Sugestão de próximo nó
-- [ ] **Sessão 4** — Goal Seek
-- [ ] **Sessão 5** — Simplificação
-- [ ] **Sessão 6** — DocGen
-- [ ] **Sessão 7** — Camada de IA
-- [ ] **Sessão 8** — Enriquecimentos IA
-- [ ] **Sessão 9** — Chat
+- [x] **Sessão 0** — PolicyIR ✅
+- [x] **Sessão 1** — Lint/Insights ✅
+- [x] **Sessão 2** — Biblioteca de políticas ✅
+- [x] **Sessão 3** — Sugestão de próximo nó ✅
+- [x] **Sessão 4** — Goal Seek ✅
+- [x] **Sessão 5** — Simplificação ✅
+- [x] **Sessão 6** — DocGen ✅
+- [ ] **Sessão 10** — Motor de Descoberta de Segmentos 🏷️ `Opus 4.8`
+- [ ] **Sessão 11** — Painel de Oportunidades (UI) 🏷️ `Sonnet 5`
+- [ ] **Sessão 12** — Recomendações Acionáveis + Goal Seek 🏷️ `Opus 4.8`
+- [ ] **Sessão 7** — Camada de IA 🏷️ `Opus 4.8`
+- [ ] **Sessão 8** — Enriquecimentos IA 🏷️ `Sonnet 5`
+- [ ] **Sessão 13** — IA da Descoberta 🏷️ `Sonnet 5`
+- [ ] **Sessão 9** — Chat 🏷️ `Opus 4.8`
 
 ---
 
@@ -312,11 +481,20 @@ Sessão 5 (Simplify) ← reusa Goal Seek + IR
     ↓
 Sessão 6 (DocGen) ← reusa tudo acima (IR + agregados)
     ↓
+Sessão 10 (Descoberta: motor) ← reusa computeIV (S3), walk M8, SHRINK_K (Johnny)
+    ↓
+Sessão 11 (Descoberta: UI) ← reusa goalSeekModal/lint-highlight/FilterCard
+    ↓
+Sessão 12 (Descoberta: recomendações) ← reusa applyPolicyPatch (S0),
+    │                                    applyGoalSeekMoves (S4), overlay AS IS
+    ↓
 Sessão 7 (Infra IA) ← nenhuma dependência funcional, só estrutural
     ↓
 Sessão 8 (Enriquecimentos IA) ← reusa Sessões 1–6 + Infra 7
     ↓
-Sessão 9 (Chat) ← reusa tudo
+Sessão 13 (IA da Descoberta) ← reusa SegmentModel (S10–12) + Infra 7
+    ↓
+Sessão 9 (Chat) ← reusa tudo (incl. SegmentModel como artefato groundável)
 ```
 
 ---
@@ -334,4 +512,4 @@ Cada sessão segue o mesmo template:
 
 ---
 
-**Última atualização**: 2026-07-07
+**Última atualização**: 2026-07-08 (Sessões 10–13 — Frente 4: Descoberta de Segmentos, com tags de modelo)
