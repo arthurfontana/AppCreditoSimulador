@@ -27,15 +27,12 @@ AppCreditoSimulador/
 │   ├── columnar.test.js          # GATE colunar: accessor, round-trip projeto, SharedArrayBuffer
 │   ├── compiledEngine.test.js    # GATE M8: motor compilado (colunar) equivale ao caminho por string (legado)
 │   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
-│   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
-│   ├── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
 │   ├── policyIR.test.js          # GATE Copiloto Sessão 0: roteamento via PolicyIR ≡ motor compilado (M8), round-trip IR→canvas→IR, IR sem posições/dados
 │   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
-│   ├── Proposta-Inferencia-Referencia.md  # Fonte de verdade da Inferência de Negados
 │   └── wiki/                     # Documentação sincronizada com GitHub Wiki
 │       ├── Arquitetura.md
 │       ├── Epicos-*.md
@@ -56,9 +53,7 @@ AppCreditoSimulador/
 │   └── sync-wiki.yml             # Sincroniza docs/wiki/ com o GitHub Wiki
 ├── vite.config.js                # Build config + injeção de metadados de build
 ├── vitest.config.js              # Config dos testes (jsdom)
-├── CONTRATO_INFERENCIA.md        # Contrato da Inferência de Negados (fonte de verdade junto da Proposta)
-├── Amostra_Fake.csv              # Amostra real usada pelo GATE tests/inferenceCascade.test.js
-├── INFERENCIA_REF_202509_202603.CSV  # Tabela de referência usada pelo mesmo GATE
+├── Amostra_Fake.csv              # Amostra real usada por GATEs (ex.: tests/compiledEngine.test.js)
 ├── package.json
 └── index.html
 ```
@@ -68,7 +63,7 @@ AppCreditoSimulador/
 ### Estado principal
 - `shapes`: formas no canvas — tipos: `rect`, `circle`, `diamond`, `decision`, `port`, `approved`, `rejected`, `as_is`, `csv`, `simPanel`, `cineminha`, `decision_lens`, `frame`
 - `conns`: conexões/setas entre shapes — `{id, from, to, label?}`
-- `csvStore`: `{[csvId]: {name, headers, columns, rowCount, columnTypes, varTypes, asIsConfig, inferenceConfig}}` (formato colunar — ver "csvStore: entrada por dataset")
+- `csvStore`: `{[csvId]: {name, headers, columns, rowCount, columnTypes, varTypes, asIsConfig}}` (formato colunar — ver "csvStore: entrada por dataset")
 - `wizard`: modal de importação em 3 passos — `{file, filename, delimiter, hasHeader, step: 1|2|3, columnTypes, varTypes, asIsVar, asIsMapping, editCsvId, decimalSep, decimalSepConfident, parsedHeaders, parsedColumns, parsedRowCount, previewRows}`. Desde o M1 **não guarda** `rawText` nem `string[][]`: o parse vai direto para colunas dict (`parsedColumns`), o preview é uma amostra de ~100 linhas (`previewRows`) e trocar delimitador/cabeçalho relê o `File` handle (`file`)
 - `vp`: viewport — `{x, y, s}` (posição + zoom)
 - `axisModal`: modal de seleção de eixo do Cineminha — `null | {shapeId, col, csvId}`
@@ -91,8 +86,6 @@ AppCreditoSimulador/
 - `canvases`: store multi-canvas (Sub-sessão 5A, DEC-AW-007) — `{[id]: {id, name, shapes, conns, includeInDashboard}}`; `shapes`/`conns` são o **working copy** do canvas ativo
 - `activeCanvasId`: ID do canvas ativo
 - `renamingCanvasId` / `renameValue` / `canvasTabMenu`: estado UI da barra de abas de canvas
-- `inferenceRef`: tabela de referência de inferência de negados, indexada uma vez na importação (Fase 1; ver Inferência de Negados) — `null | InferenceRefIndex`
-- `infRefError`: erro de importação da Tabela de Inferência — `null | string`
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -187,7 +180,6 @@ AppCreditoSimulador/
   columnTypes,   // {[colName]: COL_TYPE}
   varTypes,      // {[colName]: 'categorical'|'ordinal'}
   asIsConfig,    // null | { col: string, mapping: {[value]: 'APROVADO'|'REPROVADO'|'IGNORAR'} }
-  inferenceConfig, // { source:'columns'|'ref', keyMap:{[refKeyCol]:baseCol}, weightCol, weightMode:'propostas'|'aprovados', normalizeScore } — origem da inferência (ver Inferência de Negados)
 }
 // ColDef (em src/columnar.js):
 //   { kind: 'num', data: Float64Array }  — para colunas métricas (qty, qtdAltas, etc.)
@@ -225,7 +217,6 @@ AppCreditoSimulador/
 ### Componentes globais (fora do componente principal)
 - `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
 - `SimIndicators`: exibe indicadores de simulação na sidebar direita — mostra resultado atual + comparativo com baseline AS IS quando disponível (`incrementalResult`)
-- `InferenceSignal({source, confiabVolume, weightMode, scale})`: sinalização da inferência por referência (Fase 3, refinada na Fase 4) — selo de origem + **selo de base de peso** (⚖️ Propostas/Aprovados/Misto, ver Toggle de Peso) + indicador "% do volume inferido com confiab ALTA" com barra empilhada, **legenda das faixas** e alerta em dois níveis (⚡ atenção 50–80% / ⚠ alerta <50%). Renderizado no `renderSimPanel` e no `businessWidget` (ver Sinalização de Confiabilidade)
 - `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `addTextWidget`, `duplicateWidget(id)`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
 - `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
@@ -264,7 +255,7 @@ AppCreditoSimulador/
 ### Padrão de refs
 Toda variável de estado crítica tem um ref espelho para uso em event listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atualizado imediatamente.
 
-Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `inferenceRefR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
+Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`, `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`, `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`, `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
 
 ## Reorganização Automática (Auto Layout)
 
@@ -335,7 +326,6 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | type | payload | O que faz |
 |------|---------|-----------|
 | `UPDATE_CSV_STORE` | `{csvStore}` | Atualiza o cache do csvStore no worker (evita re-serialização a cada tick) |
-| `UPDATE_INFERENCE_REF` | `{inferenceRef}` | Espelha o índice da Tabela de Inferência no worker (Fase 2); usado pelo lookup em cascata quando `inferenceConfig.source==='ref'` |
 | `RUN_SIMULATION` | `{shapes, conns}` | Lê (ou computa) o tick via `getTickResult` (M6, ver abaixo) e responde com `SIMULATION_RESULT` |
 | `COMPUTE_OVERLAY` | `{shapes, conns}` | Lê (ou computa) o mesmo tick via `getTickResult` (M6) e responde com `OVERLAY_RESULT` |
 | `COMPUTE_ASIS_PREVIEW` | `{shapes, conns, targetIds, reqTokens}` | Prévia AS IS **contextualizada ao nó** (respeita filtros a montante). Roda `computeCinemaAsIsCells` sobre os cineminhas em `targetIds`; responde com `ASIS_PREVIEW_RESULT`. Disparada por `assignCinemaVar` — ver Prévia AS IS |
@@ -346,7 +336,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 ### Mensagens de saída
 | type | payload |
 |------|---------|
-| `SIMULATION_RESULT` | `{result: SimulationResult}` — inclui `inferenceSource` e `confiabVolume` (Fase 3) + `inferenceWeightMode` (Fase 4) |
+| `SIMULATION_RESULT` | `{result: SimulationResult}` |
 | `OVERLAY_RESULT` | `{incrementalResult, nodeArrivals, lensCounts}` — `nodeArrivals: {[nodeId]: {val\|row\|col: {[valor]: qty}}}` (ver Domínio Exibido); `lensCounts: {[lensId]: {count, total}}` (M10). **Não** envia mais o `overlay` por-linha (Otimização de Memória Fase 4) nem as populações de lens por-linha |
 | `ASIS_PREVIEW_RESULT` | `{cellsByShape, reqTokens}` — `cellsByShape: {[shapeId]: {[cellKey]: 0\|1} \| null}` (null = dataset sem AS IS); `reqTokens` ecoado para a main descartar respostas obsoletas (ver Prévia AS IS) |
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
@@ -354,7 +344,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
 
 ### Funções no worker
-- `computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
+- `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
 - `runSimulation(shapes, conns, csvStore)`: percorre todas as linhas de todos os CSVs pelo grafo, acumula métricas e retorna `SimulationResult`. Continua existindo/exportada sem alteração (usada pelos GATEs numéricos e por quem precisar do resultado isolado) — o tick de edição passa a usar `computeSimulationTick`, não esta função diretamente
 - `computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations)`: compara decisão simulada vs. `__DECISAO_ORIGINAL` por linha. Usada pelo `cachedCanvasOverlay` do Dashboard (overlay por canvas, independente do tick de edição). Desde o M8 roteia por **códigos do dicionário** em base colunar (fallback por string no legado) — ver seção M8
 - `computeIncrementalResult(overlay, csvStore)`: agrega `baseline`, `simulated` e `impacted` a partir do overlay. Continua existindo/exportada sem alteração
@@ -406,12 +396,6 @@ seguir inteiros. Primitivas (em `simulation.worker.js`):
 - `compileLensMatcher`: `passByCode: Uint8Array` por regra (matchLensRule avaliado uma
   vez por valor distinto; regra sobre coluna ausente vira constante; coluna não-dict cai
   no matchLensRule por-linha), combinadas com o mesmo AND/OR de `rowMatchesLensRules`.
-- `buildInferenceResolver` ganhou caminho compilado de **chaves**: trim +
-  `normalizeScoreKey` rodam uma vez por valor distinto de cada coluna-chave; por linha a
-  chave completa é concatenada com cortes de prefixo registrados e a cascata lê
-  `full.slice(0, corte)` — **mesma cascata, mesmos físicos** (a lógica de inferência não
-  muda; só a representação/estratégia de execução). `confiab` normalizado é cacheado por
-  premissa.
 Consumidores compilados: `computeSimulationTick` (tick de edição), `computeSimulatedDecisions`
 (overlay do Dashboard), `computeCinemaArrivals` (Johnny) e `computeLensPopulations`.
 Colunas não dict-encoded (legado `string[][]` dos testes, eixo sobre coluna métrica) caem
@@ -419,9 +403,9 @@ no caminho por-linha de antes — mesma matemática nos dois caminhos. `runSimul
 `computeNodeArrivals` e `computeIncrementalResult` seguem **sem alteração** como
 referências de controle dos GATEs. GATE de equivalência colunar×legado (decision com
 trim/duplicata/ciclo, cineminha 2D/1D/offer/fora-de-domínio/eixo-métrico, lens com
-todos os operadores, AS IS, multi-csv e inferência ref sobre a amostra real) em
-`tests/compiledEngine.test.js`. Ordem de grandeza (1MM linhas, bench local): tick fundido
-compilado ~0,7s contra ~1,4s de **um único** passe por string; overlay do Dashboard ~0,2s.
+todos os operadores, AS IS e multi-csv) em `tests/compiledEngine.test.js`. Ordem de
+grandeza (1MM linhas, bench local): tick fundido compilado ~0,7s contra ~1,4s de
+**um único** passe por string; overlay do Dashboard ~0,2s.
 
 ## Analytics Workspace (aba Dashboard)
 
@@ -535,12 +519,9 @@ que já chega filtrado pela página. 100% client-side (não toca o worker).
 - `validateFlow`: inclui `cineminha` e `decision_lens` no conjunto de nós de fluxo válidos; DFS para detecção de ciclos
 - `runSimulation` / `traverseRow`: para nós `cineminha`, faz lookup em `cells` com a chave `${rowVal}|${colVal}` e roteia para o port pelo `cinemaType`; para nós `decision_lens`, avalia `rules` contra a linha; para nós `as_is`, lê `__DECISAO_ORIGINAL`
 - Para cada linha aprovada, acumula `inadRealSum`, `qtdAltasSum`, `qtdAltasInferSum` e `inadInferidaSum`
-- Retorna `{ totalQty, approvedQty, rejectedQty, asIsQty, approvalRate, inadReal, inadInferida, edgeStats, inferenceSource, confiabVolume }`
+- Retorna `{ totalQty, approvedQty, rejectedQty, asIsQty, approvalRate, inadReal, inadInferida, edgeStats }`
   - `inadReal = ∑ inadRRaw / ∑ qtdAltas` (null se qtdAltasSum = 0)
   - `inadInferida = ∑ inadIRaw / ∑ qtdAltasInfer` (fallback: `/ approvedQty` se qtdAltasInferSum = 0)
-  - `inferenceSource`: `'ref'` se algum dataset usa a Tabela de Inferência, senão `null` (Fase 3)
-  - `confiabVolume`: `{ ALTA, MEDIA, BAIXA, GLOBAL }` — altas inferidas acumuladas por faixa de confiab da premissa usada (só em modo `ref`, senão `null`); base do indicador "% do volume inferido com confiab ALTA" (ver Sinalização de Confiabilidade)
-  - `inferenceWeightMode`: `'propostas'|'aprovados'|'misto'|null` — base de peso dos datasets em modo `ref` (Fase 4; `misto` se divergentes); alimenta o selo de peso do `InferenceSignal` (ver Toggle de Peso)
 - Reconciliação de dataset (`onImportConfirm`): ao trocar CSV, o sistema faz match normalizado de variáveis em nós `cineminha`, recomputa domínios e preserva os estados de elegibilidade existentes
 
 ## Wizard de importação (3 passos)
@@ -785,9 +766,9 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"2.4", kind:"credito-project", generatedAt,
+  Monta o snapshot `{schemaVersion:"2.5", kind:"credito-project", generatedAt,
   activeTab, viewport, panelCollapsed, canvases, activeCanvasId, csvStore,
-  inferenceRef, analyticsLayout, analyticsGroupings, analyticsPageFilters,
+  analyticsLayout, analyticsGroupings, analyticsPageFilters,
   cinemaLibrary, policyLibrary, businessWidget, preferences}`.
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
@@ -814,15 +795,11 @@ parou.
   sobe o contador `_id` (varre shapes/conns/ids de todos os canvas) p/ evitar colisão,
   restaura todo o estado (cada seção com default defensivo — seções ausentes não zeram
   o resto), reseta seleção/edição e os stacks de undo/redo (que são por canvas e
-  ficariam inconsistentes após trocar todos os canvas). Os effects de
-  `csvStore`/`inferenceRef` reenviam `UPDATE_CSV_STORE`/`UPDATE_INFERENCE_REF` ao worker.
+  ficariam inconsistentes após trocar todos os canvas). O effect de `csvStore`
+  reenvia `UPDATE_CSV_STORE` ao worker.
   A leitura do arquivo (`onProjectFileChange`) continua via `FileReader.readAsText` +
   `JSON.parse` — o ganho de memória do M3 é no *tamanho* do JSON (base64, sem números
   boxed), não numa leitura streaming do lado do load.
-- **`serializeInferenceRef` / `deserializeInferenceRef`** (helpers globais exportados):
-  `inferenceRef.levels` é `{[nivel]: Map}` — JSON não serializa `Map`, então converte
-  para arrays de entradas na exportação e reconstrói os `Map`s na carga. Round-trip
-  coberto em `tests/inferenceRef.test.js`.
 - **`serializeCsvStore` / `deserializeCsvStore`** (em `src/columnar.js`, importados em `App.jsx`):
   Typed arrays (`Float64Array`, `Int32Array`) não são JSON nativo. Desde a M3 (Otimização
   de Memória), `serializeCsvStore` converte-os para **base64 dos bytes crus** (em vez de
@@ -860,9 +837,9 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"2.4"`** (bumped no Copiloto Sessão 2 — `policyLibrary`).
+   Versão atual: **`"2.5"`** (bumped na remoção da Tabela de Inferência de Referência).
 4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
-   adicionar serialize/deserialize dedicados (padrão de `serializeInferenceRef` e
+   adicionar serialize/deserialize dedicados (padrão de
    `serializeCsvStore`/`deserializeCsvStore`) e cobrir o round-trip em teste.
 5. Se também deve sobreviver a reload na mesma sessão, adicionar à
    auto-persistência de `sessionStorage` (ver seção abaixo).
@@ -870,11 +847,10 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
 **Checklist do que hoje é salvo** (mantê-lo em dia): canvas e todos os shapes/conns
 de **todas** as abas (losangos, Cineminhas, Decision Lens e suas `rules`, frames,
 terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados completas
-(`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `inferenceConfig`) ·
-Tabela de Inferência (`inferenceRef`) · Dashboard (`analyticsLayout`,
-`analyticsGroupings`, `analyticsPageFilters`) · biblioteca de Cineminhas
-(`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de negócio ·
-preferências de aresta/espessura · viewport · aba ativa · painel colapsado.
+(`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`) · Dashboard
+(`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
+Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
+negócio · preferências de aresta/espessura · viewport · aba ativa · painel colapsado.
 
 ## Auto-persistência de sessão (`sessionStorage`)
 
@@ -891,7 +867,7 @@ Além do save/load explícito, parte do estado é persistida automaticamente em
 - **`aw_groupings_v1`**: `analyticsGroupings` (dimensões derivadas).
 - **`aw_page_filters_v1`**: `analyticsPageFilters` (filtro de página do Dashboard).
 
-`csvStore`, `inferenceRef` e `cinemaLibrary` **não** vão para `sessionStorage`
+`csvStore` e `cinemaLibrary` **não** vão para `sessionStorage`
 (muito grandes / precisam do Projeto `.credito.json`). Init/gravação são
 defensivos (`try/catch`), então quota estourada ou JSON inválido nunca quebram o boot.
 
@@ -1077,150 +1053,6 @@ passos, preview, progresso e validações idênticos). GATE:
 legado (parse `string[][]` → `normalizeDecimalSep` → append `__DECISAO_ORIGINAL` →
 `buildColumnar`) reimplementado como controle, incl. aspas/CRLF/ragged/decimal
 vírgula/colisão de normalização/`hasHeader=false`/`retypeColumn`.
-
-## Inferência de Negados (Tabela de Referência)
-
-Fonte alternativa para os números de inferência (🔮 Conv. Inferida e 🎯 Inad.
-Inferida). Em vez de ler colunas prontas da base, deriva conv/fpd por linha via
-**lookup em cascata** numa tabela de referência gerada no SAS. Fontes de verdade:
-`docs/Proposta-Inferencia-Referencia.md` + `CONTRATO_INFERENCIA.md`.
-
-**Faseamento — Fase 1 (entregue): carga + estado + mapeamento + config. Fase 2
-(entregue): lookup em cascata + injeção dos físicos no worker + normalização de
-score como chave transitória. Fase 3 (entregue): sinalização de confiabilidade na
-UI (ver Sinalização de Confiabilidade). Fase 4 (entregue): toggle de peso
-(`n_propostas` ↔ `n_aprovados`), recálculo automático na troca/recarga da referência
-e refinamento visual do selo/alerta (ver Toggle de Peso e ADR DEC-IR-004).**
-
-### Slot dedicado de import
-- Botão **🧮 Tabela de Inferência** no painel direito (seção Dados), separado do
-  import de base. Parser fixo: delimitador `;`, decimal `.`.
-- **Não** entra no `csvStore`, não vira nó no canvas, não gera chips.
-- `onInferenceRefFileChange` parseia + indexa via `indexInferenceRef` e grava em
-  `inferenceRef` (erros em `infRefError`).
-
-### `indexInferenceRef(headers, rows, name)` (helper global, exportado)
-Indexa o artefato **uma vez**, derivando chaves/níveis **dinamicamente** (nunca
-nomes hardcoded). Retorna o `InferenceRefIndex`:
-```js
-{
-  name, importedAt,
-  keyCols: string[],      // derivado da maior `vars_usadas` (ordem = colapso; última cai primeiro)
-  anchorCol: string,      // keyCols[0] (nunca colapsa)
-  levels: { [nivel]: Map<keyConcat, { conv, fpd, confiab, nAprov, nConv, nMaus }> },
-  global: premissa|null,  // linha GLOBAL
-  levelKeyCount: { [nivel]: number },  // nº de chaves (prefixo de keyCols) por nível
-  rowCount,
-}
-```
-O CSV real tem 4 chaves (`FAIXA_SCORE`, `OPERACAO`, `IDENTIFICA_GRUPO_MODELO`,
-`CANAL_PCO_AJUSTADO`) e 5 níveis (1..4 + GLOBAL). Validado em `tests/inferenceRef.test.js`.
-
-### Seletor de origem no wizard (Passo 2)
-Seção **Origem da Inferência** com duas opções:
-- **Colunas da própria base** (default): mapeia 🔮/🎯 como hoje.
-- **Tabela de referência**: desabilitada se `!inferenceRef`. Ao escolher, oculta
-  os slots 🔮/🎯 e mostra o **mapeamento de chaves** base↔referência (um `select`
-  por `keyCol`, pré-preenchido por `normalizeColName`, com override manual) + o
-  **toggle de peso** (📋 Propostas / ✅ Aprovados, ver Toggle de Peso) + o seletor de
-  coluna de **peso** (default automático pela base de peso escolhida).
-
-### Toggle de Peso (Fase 4 — CONTRATO §3.2)
-Define a **base de volume** do peso usado nos físicos da inferência:
-- **📋 Propostas** (default, `weightMode:'propostas'`): peso = 📊 volume total de
-  propostas (`n_propostas`) — semântica **"abrir para os reprovados"** (quanto de altas
-  e maus apareceria se a política passasse a aprovar aquelas propostas).
-- **✅ Aprovados** (`weightMode:'aprovados'`): peso = volume de aprovados (`n_aprovados`)
-  — semântica **"FPD sobre aprovados"**.
-- Resolução da coluna (worker `resolveWeightCol(cfg, headers, qtyCol)`): `weightCol`
-  explícito **sempre vence** (override avançado); senão modo `aprovados` usa a coluna de
-  aprovados via heurística `findApprovedCol` (`/aprov/i`, excluindo a `qty`), e modo
-  `propostas` usa a 📊 `qty`. O wizard pré-preenche o `weightCol` ao trocar p/ aprovados.
-- `runSimulation` devolve `inferenceWeightMode: 'propostas'|'aprovados'|'misto'|null`
-  (misto = datasets em modo `ref` com bases diferentes); alimenta o selo de peso do
-  `InferenceSignal`. **Não muda a matemática** além da coluna de peso escolhida.
-
-### `inferenceConfig` (persistido em `csvStore[csvId]`)
-`{ source: 'columns'|'ref', keyMap: {[refKeyCol]: baseCol}, weightCol, weightMode:'propostas'|'aprovados', normalizeScore }`.
-Gravado no `onImportConfirm` (import novo e edição). `source:'ref'` degrada para
-`'columns'` se a Tabela de Inferência não estiver mais carregada. Restaurado no
-`onEditDataset`. `weightMode` (default `'propostas'`) é a base de peso (ver Toggle de
-Peso). `normalizeScore` (default `true`) liga a normalização de score no lookup (§6,
-abaixo) — checkbox no wizard quando `source==='ref'`.
-
-### Troca/recarga da referência com estudo montado (Fase 4 — Proposta §9.4)
-Trocar ou recarregar a Tabela de Inferência **recalcula automaticamente** os estudos
-que a usam (os effects debounced de sim/overlay/analytics têm `inferenceRef` nas deps;
-o worker recebe `UPDATE_INFERENCE_REF` antes do recompute). O `inferenceConfig` de cada
-dataset vive no `csvStore` e é **preservado** — não é tocado ao mexer na referência.
-Remover a referência degrada os estudos em modo `ref` para o comportamento de colunas
-🔮/🎯, mas o `inferenceConfig` fica salvo para retomar ao recarregar. O painel da Tabela
-de Inferência mostra **quantos estudos** usam a referência (e um aviso quando há estudos
-configurados sem referência carregada).
-
-### Lookup em cascata + físicos (Fase 2 — worker)
-- A `inferenceRef` é espelhada no worker via mensagem **`UPDATE_INFERENCE_REF`**
-  (análoga a `UPDATE_CSV_STORE`; o `structured clone` do `postMessage` preserva os
-  `Map`s de `levels`). App reenvia a cada mudança de `inferenceRef`; as três effects
-  debounced (sim/overlay/analytics) incluem `inferenceRef` nas deps para recomputar.
-- **`buildInferenceResolver(csv, inferenceRef)`** (worker): retorna `null` fora do
-  modo `ref` (o chamador lê as colunas 🔮/🎯 como antes — retrocompatível). Em modo
-  `ref`, retorna `(row) => { altasInfer, inadIRaw }`:
-  - monta a chave pelas colunas mapeadas (`keyMap`), aplica `normalizeScoreKey` na
-    âncora (score) quando `normalizeScore !== false`;
-  - **cascata** `cascadeLookupPremissa`: desce do nível mais granular (mais chaves)
-    ao GLOBAL, para no primeiro `Map` que casar (chave ausente desce naturalmente);
-  - **físicos** (CONTRATO §3.2): `altasInfer = peso × conv`, `inadIRaw = peso × conv × fpd`,
-    `peso` = coluna resolvida por `resolveWeightCol` (`weightCol` explícito → senão a
-    base do `weightMode`: 📊 `qty` em propostas, coluna de aprovados em aprovados — ver
-    Toggle de Peso).
-- O resolvedor alimenta **os acumuladores que já existem** (`qtdAltasInferSum`,
-  `inadInferidaSum`) em `runSimulation`, `computeIncrementalResult`,
-  `computeCellMetrics`, `computeCinemaArrivals` e `computeAnalyticsDataset` — nenhuma
-  agregação nova. As **Regras de Ouro** (CONTRATO §4) valem por construção: somam-se
-  os físicos por linha e o agregador faz `∑inadIRaw / ∑qtdAltasInfer` (nunca divide
-  maus por contagem de aprovados, nunca multiplica somas).
-- **`normalizeScoreKey(s)`**: `R99`/vazio → `R20`, **apenas** como chave transitória
-  de lookup (§6) — nunca muta dado, domínio ou export.
-- Painel/otimizador/dashboard são intocados: só consomem os mesmos acumuladores.
-
-### GATE de aceite (validação numérica)
-`tests/inferenceCascade.test.js` roda a cascata sobre a amostra real
-(`Amostra_Fake.csv` × `INFERENCIA_REF_*.CSV`) e confere o `∑maus/∑altas` agregado
-do resolvedor (e de `runSimulation` aprovando tudo) contra uma cascata de
-**controle reimplementada do zero** lendo as linhas cruas da referência. Valor de
-controle documentado: ∑altas ≈ 418.775, ∑maus ≈ 167.753, **FPD inferida ≈ 40,06%**.
-
-### Restrições respeitadas
-- Não quebra o fluxo atual de colunas 🔮/🎯 (fonte alternativa, retrocompatível).
-- Não altera domínios, dado exibido nem export — score normalizado só na chave.
-
-### Sinalização de Confiabilidade (Fase 3 — Proposta §4.5, CONTRATO §7)
-Sinaliza, **sem mudar a matemática**, quando uma fatia relevante do estudo herdou
-premissa colapsada (≠ `ALTA`) — em especial o caso do canal **PAP** (CONTRATO §7).
-
-- **Worker** (`runSimulation`): `buildInferenceResolver` devolve também o `confiab`
-  (uppercased) da premissa usada por linha. Sobre as linhas **aprovadas** em modo
-  `ref`, acumula `confiabVolume = { ALTA, MEDIA, BAIXA, GLOBAL }` ponderado pelas
-  **altas inferidas** (`qtdAltasInfer` — mesma grandeza do "volume inferido"). Retorna
-  `inferenceSource: 'ref'|null` e `confiabVolume: {...}|null`. Faixa desconhecida cai
-  em `GLOBAL` (mais conservador). Nenhum acumulador novo na matemática da inferência.
-- **UI** — componente global `InferenceSignal({ source, confiabVolume, weightMode, scale })`
-  (refinado na Fase 4 — Proposta §9.5): renderiza um `<div>` (serve em `foreignObject`
-  do `simPanel` e no `businessWidget`, reaproveitando o fator de escala `scale`). Mostra:
-  - **Selo discreto** `🧮 Inferência: Tabela de referência` quando `source === 'ref'`
-    (para não confundir a origem do número) + **selo de base de peso** `⚖️ Peso:
-    Propostas/Aprovados/Misto` (ver Toggle de Peso).
-  - **Indicador "% do volume inferido com confiab ALTA"** + barra empilhada por faixa +
-    **legenda** das faixas presentes (quando há mais de uma). A cor do indicador e a
-    moldura do card seguem o nível: verde ≥ 80%, âmbar 50–80% (⚡ atenção), vermelho
-    < 50% (⚠ **alerta**). Ambos os níveis colapsados exibem aviso textual mencionando o
-    caso PAP e instruindo a ler como estimativa.
-  - Renderizado no `renderSimPanel` e no `businessWidget`, sempre a partir do
-    `simResult` (não do `incrementalResult`).
-- **GATE**: `tests/inferenceCascade.test.js` confere o `confiabVolume` agregado de
-  `runSimulation` contra um controle independente (mesmo padrão da FPD). Na amostra
-  real, 100% do volume resolve em `ALTA` (todas as linhas batem no nível 1).
 
 ## Decision Lens
 

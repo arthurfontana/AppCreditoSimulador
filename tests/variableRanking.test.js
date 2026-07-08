@@ -3,7 +3,7 @@ import { computeVariableRanking } from '../src/simulation.worker.js';
 
 // ── GATE Sessão 3 do Copiloto (sugestão de próximo nó — ranking por discriminância) ──
 // docs/wiki/Copiloto-ConstrucaoAssistida.md. `computeVariableRanking(shapes, conns,
-// csvStore, anchorNodeId, inferenceRef)` é uma função PURA: dado um anchor (porta
+// csvStore, anchorNodeId)` é uma função PURA: dado um anchor (porta
 // solta), ranqueia as colunas Filtro candidatas pelo IV/WoE (+ variância ponderada e
 // razão max/min) sobre a população que efetivamente chega ao anchor, detecta
 // interação entre as top candidatas e sugere um terminal por risco do segmento.

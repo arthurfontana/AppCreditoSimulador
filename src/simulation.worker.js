@@ -36,176 +36,6 @@ function isCellEligible(cells, key) {
   return getCellValue(cells, key) > 0;
 }
 
-// ── Inferência de negados via Tabela de Referência — lookup em cascata (Fase 2) ──
-// Fonte alternativa para 🔮 Conv. Inferida e 🎯 Inad. Inferida (Proposta §4 /
-// CONTRATO §3). Em vez de ler colunas prontas, deriva conv/fpd por linha via lookup
-// em cascata na inferenceRef e alimenta EXATAMENTE os acumuladores que já existem
-// (qtdAltasInferSum, inadInferidaSum). Nenhuma agregação nova.
-
-// Score vazio / R99 / sem score → R20 (pior faixa), APENAS como chave transitória
-// de lookup (CONTRATO §3.1, Proposta §6). Nunca muta dado, domínio nem export.
-function normalizeScoreKey(s) {
-  const v = String(s ?? '').trim();
-  return (!v || v.toUpperCase() === 'R99') ? 'R20' : v;
-}
-
-// Desce do nível mais granular (mais chaves) ao GLOBAL; para no primeiro que casar.
-function cascadeLookupPremissa(ref, levelOrder, parts) {
-  for (const niv of levelOrder) {
-    const k = ref.levelKeyCount?.[niv] || 0;
-    if (k <= 0) continue;
-    const map = ref.levels?.[niv];
-    if (!map) continue;
-    const hit = map.get(parts.slice(0, k).join('|'));
-    if (hit) return hit;
-  }
-  return ref.global || null;
-}
-
-// Heurística de coluna de aprovados (modo de peso 'aprovados', Fase 4) — usada como
-// fallback quando não há `weightCol` explícito. Casa cabeçalhos como QTD_APROVADOS,
-// n_aprovados, etc., excluindo a coluna de volume (📊 qty) para não colidir.
-function findApprovedCol(headers, excludeCol) {
-  return (headers || []).find(h => h !== excludeCol && /aprov/i.test(h)) || null;
-}
-
-// Resolve a coluna de peso (CONTRATO §3.2, toggle Fase 4):
-//   - `weightCol` explícito sempre vence (override avançado);
-//   - modo 'aprovados' ("FPD sobre aprovados") → coluna de aprovados (heurística);
-//   - modo 'propostas' (default, "abrir para reprovados") → 📊 volume total (qty).
-function resolveWeightCol(cfg, headers, qtyCol) {
-  if (cfg?.weightCol) return cfg.weightCol;
-  if (cfg?.weightMode === 'aprovados') return findApprovedCol(headers, qtyCol) || qtyCol;
-  return qtyCol;
-}
-
-// Constrói um resolvedor por-linha para um csv. Retorna null quando o dataset NÃO está
-// em modo 'ref' (o chamador então lê as colunas 🔮/🎯 como hoje — retrocompatível).
-// Em modo 'ref', (row) => { altasInfer, inadIRaw } com os físicos do CONTRATO §3.2:
-//   altasInfer = peso × conv ;  inadIRaw = peso × conv × fpd     (peso = coluna de volume)
-// As Regras de Ouro (CONTRATO §4) são satisfeitas POR CONSTRUÇÃO: somam-se os físicos
-// linha a linha; o agregador existente faz ∑inadIRaw / ∑qtdAltasInfer (nunca divide
-// maus por contagem de aprovados, nunca multiplica somas).
-function buildInferenceResolver(csv, inferenceRef) {
-  const cfg = csv?.inferenceConfig;
-  if (!cfg || cfg.source !== 'ref' || !inferenceRef || !inferenceRef.keyCols) return null;
-  const ref = inferenceRef;
-  const types = csv.columnTypes || {};
-  const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
-  const weightCol = resolveWeightCol(cfg, csv.headers, qtyCol);
-  const weightIdx = weightCol ? csv.headers.indexOf(weightCol) : -1;
-  const keyMap = cfg.keyMap || {};
-  // Índice na base de cada keyCol da referência (na ordem de colapso). -1 = ausente
-  // → a cascata naturalmente desce de nível (chave vazia não casa nos níveis granulares).
-  const keyBaseIdx = ref.keyCols.map(rk => {
-    const baseCol = keyMap[rk];
-    return baseCol ? csv.headers.indexOf(baseCol) : -1;
-  });
-  // Níveis ordenados do mais granular (mais chaves) ao mais geral.
-  const levelOrder = Object.keys(ref.levels || {})
-    .map(Number)
-    .sort((a, b) => (ref.levelKeyCount?.[b] || 0) - (ref.levelKeyCount?.[a] || 0));
-  const normScore = cfg.normalizeScore !== false; // default: aplicar (fiel ao SAS)
-
-  // Faixa de confiab normalizada, cacheada POR PREMISSA (as premissas são objetos
-  // estáveis do índice) — evita trim/toUpperCase por linha. Mesma expressão do
-  // caminho original: premissa nula / confiab ausente ou em branco → 'GLOBAL'.
-  // (Fase 3 / Proposta §4.5, CONTRATO §7 — sinaliza premissa colapsada ≠ ALTA.)
-  const confiabCache = new Map();
-  const confiabOf = (p) => {
-    if (!p || !p.confiab) return 'GLOBAL';
-    let v = confiabCache.get(p);
-    if (v === undefined) { v = String(p.confiab).trim().toUpperCase() || 'GLOBAL'; confiabCache.set(p, v); }
-    return v;
-  };
-
-  // ── (M8) Caminho compilado sobre a base colunar ───────────────────────────────
-  // As colunas-chave já são dict-encoded (Fase 1): trim + normalizeScoreKey rodam UMA
-  // vez por valor distinto (O(distintos)); por linha resta ler `codes[r]` e concatenar
-  // a chave completa registrando os cortes de prefixo — a cascata lê `full.slice(0,
-  // corte)` em vez de alocar `parts.slice(0,k).join('|')` por nível. MESMA cascata,
-  // MESMOS físicos (peso × conv / peso × conv × fpd) — só a montagem da chave muda.
-  // O modo legado (string[][], GATEs) e chaves sobre coluna não-dict seguem no
-  // caminho genérico abaixo.
-  let compiledKeys = null;
-  if (isColumnar(csv)) {
-    compiledKeys = new Array(keyBaseIdx.length);
-    for (let j = 0; j < keyBaseIdx.length; j++) {
-      const bi = keyBaseIdx[j];
-      if (bi < 0) {
-        // Chave ausente na base → parte vazia constante (âncora normaliza '' → R20).
-        compiledKeys[j] = { codes: null, vals: null, fixed: (j === 0 && normScore) ? normalizeScoreKey('') : '' };
-        continue;
-      }
-      const col = csv.columns[csv.headers[bi]];
-      if (!col || col.kind !== 'dict') { compiledKeys = null; break; }
-      const vals = new Array(col.dict.length);
-      for (let k = 0; k < col.dict.length; k++) {
-        let v = String(col.dict[k] ?? '').trim();
-        if (j === 0 && normScore) v = normalizeScoreKey(v); // keyCols[0] = âncora = score
-        vals[k] = v;
-      }
-      compiledKeys[j] = { codes: col.codes, vals, fixed: '' };
-    }
-  }
-  if (compiledKeys) {
-    const L = keyBaseIdx.length;
-    // Níveis pré-filtrados na MESMA ordem da cascata; `k` clampado a L porque
-    // `parts.slice(0, k)` de um array de L partes nunca passa de L (chave = full).
-    const cascade = [];
-    for (const niv of levelOrder) {
-      const k = ref.levelKeyCount?.[niv] || 0;
-      if (k <= 0) continue;
-      const map = ref.levels?.[niv];
-      if (!map) continue;
-      cascade.push({ k: Math.min(k, L), map });
-    }
-    const cutLen = new Int32Array(L); // buffer reutilizado por linha (worker single-thread)
-    return (a, r) => {
-      const peso = weightIdx >= 0 ? (cellNum(a, r, weightIdx) || 0) : 0;
-      let full = '';
-      for (let j = 0; j < L; j++) {
-        const ck = compiledKeys[j];
-        const v = ck.codes ? ck.vals[ck.codes[r]] : ck.fixed;
-        full = j === 0 ? v : full + '|' + v;
-        cutLen[j] = full.length;
-      }
-      let p = null;
-      for (let i = 0; i < cascade.length; i++) {
-        const lv = cascade[i];
-        p = lv.map.get(lv.k >= L ? full : full.slice(0, cutLen[lv.k - 1]));
-        if (p) break;
-      }
-      if (!p) p = ref.global || null;
-      const conv = p?.conv || 0, fpd = p?.fpd || 0;
-      return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd, confiab: confiabOf(p) };
-    };
-  }
-
-  // Resolvedor dual-mode (Fase 1 — accessor colunar):
-  //   - legado (GATE / testes): resolve(row) — `a` é a linha string[], `r` undefined;
-  //   - produção: resolve(csv, r) — `a` é o csv colunar, `r` o índice da linha.
-  // Ambos leem os MESMOS índices de coluna; o legado usa `a[idx]`, a produção lê pelo
-  // accessor (cellStr/cellNum). Físicos e cascata inalterados.
-  return (a, r) => {
-    const legacy = r === undefined;
-    let peso = 0;
-    if (weightIdx >= 0) peso = legacy ? (parseFloat(a[weightIdx]) || 0) : (cellNum(a, r, weightIdx) || 0);
-    const parts = new Array(keyBaseIdx.length);
-    for (let j = 0; j < keyBaseIdx.length; j++) {
-      const bi = keyBaseIdx[j];
-      let v = '';
-      if (bi >= 0) v = legacy ? String(a[bi] ?? '').trim() : String(cellStr(a, r, bi) ?? '').trim();
-      if (j === 0 && normScore) v = normalizeScoreKey(v); // keyCols[0] = âncora = score
-      parts[j] = v;
-    }
-    const p = cascadeLookupPremissa(ref, levelOrder, parts);
-    const conv = p?.conv || 0, fpd = p?.fpd || 0;
-    // confiab propagado da premissa usada (Fase 3 / Proposta §4.5, CONTRATO §7).
-    return { altasInfer: peso * conv, inadIRaw: peso * conv * fpd, confiab: confiabOf(p) };
-  };
-}
-
 function matchLensRule(cellVal, operator, ruleVal) {
   const cv = String(cellVal ?? '').trim();
   const rv = String(ruleVal ?? '').trim();
@@ -494,7 +324,7 @@ function buildFlowGraph(shapes, conns) {
   return { out, inc };
 }
 
-function runSimulation(shapes, conns, csvStore, inferenceRef) {
+function runSimulation(shapes, conns, csvStore) {
   const { out } = buildFlowGraph(shapes, conns);
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const TERM = new Set(['approved', 'rejected', 'as_is']);
@@ -571,12 +401,6 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
 
   let totalQty = 0, approvedQty = 0, rejectedQty = 0, asIsQty = 0;
   let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
-  // Confiabilidade da inferência por referência (Fase 3): volume inferido (altas)
-  // acumulado por faixa de confiab da premissa usada. Só quando algum dataset está
-  // em modo 'ref'; alimenta o indicador "% do volume inferido com confiab ALTA".
-  let anyRefSource = false;
-  const refWeightModes = new Set(); // modos de peso dos datasets em modo 'ref' (Fase 4)
-  const confiabVolume = { ALTA: 0, MEDIA: 0, BAIXA: 0, GLOBAL: 0 };
 
   for (const [csvId, csv] of Object.entries(csvStore)) {
     const types = csv.columnTypes || {};
@@ -590,8 +414,6 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     const inadRealIdx      = colIdx('inadReal');
     const inadInferidaIdx  = colIdx('inadInferida');
     const dOrigIdx         = csv.headers.indexOf('__DECISAO_ORIGINAL');
-    const infResolve       = buildInferenceResolver(csv, inferenceRef);
-    if (infResolve) { anyRefSource = true; refWeightModes.add(csv.inferenceConfig?.weightMode === 'aprovados' ? 'aprovados' : 'propostas'); }
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
@@ -606,13 +428,8 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
       const qty          = qtyIdx          >= 0 ? (cellNum(csv, r, qtyIdx)          || 0) : 1;
       const qtdAltas     = qtdAltasIdx     >= 0 ? (cellNum(csv, r, qtdAltasIdx)     || 0) : 0;
       const inadR        = inadRealIdx     >= 0 ? (cellNum(csv, r, inadRealIdx)     || 0) : 0;
-      // 🔮/🎯: das colunas (modo 'columns') ou derivados do lookup em cascata (modo 'ref').
-      let qtdAltasInfer, inadI, rowConfiab = null;
-      if (infResolve) { const rr = infResolve(csv, r); qtdAltasInfer = rr.altasInfer; inadI = rr.inadIRaw; rowConfiab = rr.confiab; }
-      else {
-        qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
-        inadI         = inadInferidaIdx  >= 0 ? (cellNum(csv, r, inadInferidaIdx)  || 0) : 0;
-      }
+      const qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
+      const inadI         = inadInferidaIdx  >= 0 ? (cellNum(csv, r, inadInferidaIdx)  || 0) : 0;
       totalQty += qty;
       const { result: res, path } = traverseRow(csv, r, rootId);
       let isApproved = res === 'approved', isRejected = res === 'rejected';
@@ -628,11 +445,6 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
         qtdAltasInferSum += qtdAltasInfer;
         inadRealSum      += inadR;
         inadInferidaSum  += inadI;
-        // Pondera a confiab pela mesma grandeza do "volume inferido" (altas inferidas).
-        if (rowConfiab !== null && qtdAltasInfer > 0) {
-          if (rowConfiab in confiabVolume) confiabVolume[rowConfiab] += qtdAltasInfer;
-          else confiabVolume.GLOBAL += qtdAltasInfer; // faixa desconhecida → mais conservador
-        }
       } else if (isRejected) rejectedQty += qty;
 
       for (const cid of path) {
@@ -677,11 +489,6 @@ function runSimulation(shapes, conns, csvStore, inferenceRef) {
     approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
     inadReal, inadInferida,
     edgeStats,
-    // Sinalização de origem/confiabilidade da inferência (Fase 3).
-    inferenceSource: anyRefSource ? 'ref' : null,
-    confiabVolume: anyRefSource ? confiabVolume : null,
-    // Base de peso usada na inferência (Fase 4): 'propostas' | 'aprovados' | 'misto'.
-    inferenceWeightMode: anyRefSource ? (refWeightModes.size === 1 ? [...refWeightModes][0] : 'misto') : null,
   };
 }
 
@@ -825,7 +632,7 @@ function computeSimulatedDecisions(shapes, conns, csvStore, lensPopulations) {
   return hasAnyDecisaoCol ? overlay : null;
 }
 
-function computeIncrementalResult(overlay, csvStore, inferenceRef) {
+function computeIncrementalResult(overlay, csvStore) {
   if (!overlay) return null;
 
   const bl  = { approvedQty: 0, rejectedQty: 0, totalQty: 0, qtdAltasSum: 0, qtdAltasInferSum: 0, inadRRaw: 0, inadIRaw: 0 };
@@ -846,7 +653,6 @@ function computeIncrementalResult(overlay, csvStore, inferenceRef) {
     const inadRIdx      = getIdx('inadReal');
     const inadIIdx      = getIdx('inadInferida');
     const dOrigIdx      = csv.headers.indexOf('__DECISAO_ORIGINAL');
-    const infResolve    = buildInferenceResolver(csv, inferenceRef);
 
     const nRows = Math.min(simCodes.length, rowCount(csv));
     for (let ri = 0; ri < nRows; ri++) {
@@ -858,12 +664,8 @@ function computeIncrementalResult(overlay, csvStore, inferenceRef) {
       const qty        = qtyIdx       >= 0 ? (cellNum(csv, ri, qtyIdx)       || 1) : 1;
       const altas      = altasIdx     >= 0 ? (cellNum(csv, ri, altasIdx)     || 0) : 0;
       const inadR      = inadRIdx     >= 0 ? (cellNum(csv, ri, inadRIdx)     || 0) : 0;
-      let altasInfer, inadI;
-      if (infResolve) { const r = infResolve(csv, ri); altasInfer = r.altasInfer; inadI = r.inadIRaw; }
-      else {
-        altasInfer = altasInferIdx >= 0 ? (cellNum(csv, ri, altasInferIdx) || 0) : 0;
-        inadI      = inadIIdx      >= 0 ? (cellNum(csv, ri, inadIIdx)      || 0) : 0;
-      }
+      const altasInfer = altasInferIdx >= 0 ? (cellNum(csv, ri, altasInferIdx) || 0) : 0;
+      const inadI      = inadIIdx      >= 0 ? (cellNum(csv, ri, inadIIdx)      || 0) : 0;
 
       bl.totalQty += qty;
       if (decisaoOriginal === 'APROVADO') {
@@ -920,7 +722,7 @@ function computeIncrementalResult(overlay, csvStore, inferenceRef) {
   };
 }
 
-function computeCellMetrics(shape, csvStore, inferenceRef) {
+function computeCellMetrics(shape, csvStore) {
   if (!shape || shape.type !== 'cineminha') return {};
   const { rowVar, colVar, rowDomain, colDomain } = shape;
   const csvId = rowVar?.csvId || colVar?.csvId;
@@ -936,7 +738,6 @@ function computeCellMetrics(shape, csvStore, inferenceRef) {
   const colCI = colVar ? csv.headers.indexOf(colVar.col) : -1;
   const qtyI = getIdx('qty'), altasI = getIdx('qtdAltas'), altasInferI = getIdx('qtdAltasInfer');
   const inadRI = getIdx('inadReal'), inadII = getIdx('inadInferida');
-  const infResolve = buildInferenceResolver(csv, inferenceRef);
   const rDom = rowDomain?.length > 0 ? rowDomain : ['*'];
   const cDom = colDomain?.length > 0 ? colDomain : ['*'];
   const acc = {};
@@ -952,12 +753,8 @@ function computeCellMetrics(shape, csvStore, inferenceRef) {
     const qty        = qtyI       >= 0 ? (cellNum(csv, r, qtyI)       || 0) : 1;
     const altas      = altasI     >= 0 ? (cellNum(csv, r, altasI)     || 0) : 0;
     const inadR      = inadRI     >= 0 ? (cellNum(csv, r, inadRI)     || 0) : 0;
-    let altasInfer, inadI;
-    if (infResolve) { const rr = infResolve(csv, r); altasInfer = rr.altasInfer; inadI = rr.inadIRaw; }
-    else {
-      altasInfer = altasInferI >= 0 ? (cellNum(csv, r, altasInferI) || 0) : 0;
-      inadI      = inadII      >= 0 ? (cellNum(csv, r, inadII)      || 0) : 0;
-    }
+    const altasInfer = altasInferI >= 0 ? (cellNum(csv, r, altasInferI) || 0) : 0;
+    const inadI      = inadII      >= 0 ? (cellNum(csv, r, inadII)      || 0) : 0;
     acc[key].qty          += qty;
     acc[key].qtdAltas     += altas;
     acc[key].qtdAltasInfer+= altasInfer;
@@ -1035,7 +832,7 @@ function extractScenarios(frontier) {
 // that actually arrive at each cell via routing (respecting upstream decisions,
 // ports and decision_lens nodes). Designed to be reused by Session C.
 // Returns: { [shapeId]: { [cellKey]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, mix} } }
-function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferenceRef) {
+function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations) {
   const { out } = buildFlowGraph(shapes, conns);
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const TERM = new Set(['approved', 'rejected', 'as_is']);
@@ -1131,7 +928,6 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
     const inadRIdx    = getColIdx('inadReal');
     const inadIIdx    = getColIdx('inadInferida');
     const mixIdx      = getColIdx('mixRisco');
-    const infResolve  = buildInferenceResolver(csv, inferenceRef);
 
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision')      return d.csvId === csvId;
@@ -1155,12 +951,8 @@ function computeCinemaArrivals(shapes, conns, csvStore, lensPopulations, inferen
       const qty      = qtyIdx      >= 0 ? (cellNum(csv, r, qtyIdx)      || 0) : 1;
       const altas    = altasIdx    >= 0 ? (cellNum(csv, r, altasIdx)    || 0) : 0;
       const inadR    = inadRIdx    >= 0 ? (cellNum(csv, r, inadRIdx)    || 0) : 0;
-      let altasInf, inadI;
-      if (infResolve) { const rr = infResolve(csv, r); altasInf = rr.altasInfer; inadI = rr.inadIRaw; }
-      else {
-        altasInf = altasInfIdx >= 0 ? (cellNum(csv, r, altasInfIdx) || 0) : 0;
-        inadI    = inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
-      }
+      const altasInf = altasInfIdx >= 0 ? (cellNum(csv, r, altasInfIdx) || 0) : 0;
+      const inadI    = inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
       const mixVal = mixVals ? mixVals[mixDictCol.codes[r]]
         : mixIdx >= 0 ? (cellStr(csv, r, mixIdx) ?? '').toString().trim() : '';
 
@@ -1476,7 +1268,7 @@ function computeNodeArrivals(shapes, conns, csvStore, lensPopulations) {
 // `cachedCanvasOverlay` do Dashboard e pelos testes/GATEs) — esta função é só o caminho
 // fundido usado pelo tick de edição (RUN_SIMULATION + COMPUTE_OVERLAY). Equivalência
 // numérica coberta em `tests/simulationTick.test.js`.
-function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopulations) {
+function computeSimulationTick(shapes, conns, csvStore, lensPopulations) {
   const { out } = buildFlowGraph(shapes, conns);
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const TERM = new Set(['approved', 'rejected', 'as_is']);
@@ -1607,9 +1399,6 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
 
   let totalQty = 0, approvedQty = 0, rejectedQty = 0, asIsQty = 0;
   let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
-  let anyRefSource = false;
-  const refWeightModes = new Set();
-  const confiabVolume = { ALTA: 0, MEDIA: 0, BAIXA: 0, GLOBAL: 0 };
   const edgeAcc = {};
   const initEdge = (cid) => {
     if (!edgeAcc[cid]) edgeAcc[cid] = { qty: 0, approvedQty: 0, rejectedQty: 0, asIsQty: 0, inadRealSum: 0, inadInferidaSum: 0, qtdAltasSum: 0, qtdAltasInferSum: 0 };
@@ -1634,14 +1423,6 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
     const dOrigIdx         = csv.headers.indexOf('__DECISAO_ORIGINAL');
     const hasAsIsCol       = dOrigIdx >= 0;
     if (hasAsIsCol) hasAnyDecisaoCol = true;
-
-    const infResolve = buildInferenceResolver(csv, inferenceRef);
-    // Espelha runSimulation: anyRefSource/refWeightModes são setados ANTES do `continue`
-    // por csvRoots vazio — um csv sem raiz própria ainda sinaliza a origem da inferência.
-    if (globalSimRoots && infResolve) {
-      anyRefSource = true;
-      refWeightModes.add(csv.inferenceConfig?.weightMode === 'aprovados' ? 'aprovados' : 'propostas');
-    }
 
     const csvMatch = (d) => {
       if (d.type === 'decision')      return d.csvId === csvId;
@@ -1672,12 +1453,8 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
       const qty      = qtyIdx      >= 0 ? (cellNum(csv, r, qtyIdx)      || 0) : 1;
       const qtdAltas = qtdAltasIdx >= 0 ? (cellNum(csv, r, qtdAltasIdx) || 0) : 0;
       const inadR    = inadRealIdx >= 0 ? (cellNum(csv, r, inadRealIdx) || 0) : 0;
-      let qtdAltasInfer, inadI, rowConfiab = null;
-      if (infResolve) { const rr = infResolve(csv, r); qtdAltasInfer = rr.altasInfer; inadI = rr.inadIRaw; rowConfiab = rr.confiab; }
-      else {
-        qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
-        inadI         = inadInferidaIdx  >= 0 ? (cellNum(csv, r, inadInferidaIdx)  || 0) : 0;
-      }
+      const qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
+      const inadI         = inadInferidaIdx  >= 0 ? (cellNum(csv, r, inadInferidaIdx)  || 0) : 0;
 
       let res = null;
       if (doSim) {
@@ -1699,10 +1476,6 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
           qtdAltasInferSum += qtdAltasInfer;
           inadRealSum      += inadR;
           inadInferidaSum  += inadI;
-          if (rowConfiab !== null && qtdAltasInfer > 0) {
-            if (rowConfiab in confiabVolume) confiabVolume[rowConfiab] += qtdAltasInfer;
-            else confiabVolume.GLOBAL += qtdAltasInfer;
-          }
         } else if (isRejected) rejectedQty += qty;
 
         for (let i = 0; i < pathLen; i++) {
@@ -1792,9 +1565,6 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
           totalQty, approvedQty, rejectedQty, asIsQty,
           approvalRate: totalQty > 0 ? (approvedQty / totalQty) * 100 : 0,
           inadReal, inadInferida, edgeStats,
-          inferenceSource: anyRefSource ? 'ref' : null,
-          confiabVolume: anyRefSource ? confiabVolume : null,
-          inferenceWeightMode: anyRefSource ? (refWeightModes.size === 1 ? [...refWeightModes][0] : 'misto') : null,
         };
       })();
 
@@ -1835,12 +1605,12 @@ function computeSimulationTick(shapes, conns, csvStore, inferenceRef, lensPopula
 // riskLevels: {[shapeId]: number} — maior = mais restritivo (DEC-JO-002)
 // hierarchyMode: 'cascata'|'independente' (DEC-JO-003)
 // inadMetric: 'inferida'|'real' (DEC-JO-004)
-function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric, inferenceRef) {
+function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric) {
   const cinemaIdSet = new Set(cinemaIds);
   const cinemas = allShapes.filter(s => cinemaIdSet.has(s.id) && s.type === 'cineminha');
   if (cinemas.length === 0) return null;
 
-  const arrivals = computeCinemaArrivals(allShapes, conns, csvStore, lensPopulations, inferenceRef);
+  const arrivals = computeCinemaArrivals(allShapes, conns, csvStore, lensPopulations);
 
   // Collect ordinal info per cineminha (needed for precedence and fallback rank)
   const cinemaOrdInfo = {};
@@ -2110,7 +1880,7 @@ const ANALYTICS_NUM_FIELDS = ['qty', 'qtdAltas', 'inadRRaw', 'qtdAltasInfer', 'i
 // de lens são derivadas no worker a partir das regras dos shapes (M10), não vêm da main.
 // Métricas intrínsecas vêm do agrupamento (uma vez); cada canvas emite sua coluna de decisão,
 // unidas por (csvId, rowIdx) — datasets compartilhados ⇒ agrupamentos idênticos entre cenários.
-function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
+function computeAnalyticsDataset(canvasInputs, csvStore) {
   const inputs = Array.isArray(canvasInputs) ? canvasInputs : [];
 
   // Poda entradas de canvases que não estão mais marcados (evita crescimento do cache).
@@ -2177,7 +1947,6 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
     const altasInferIdx = getIdx('qtdAltasInfer');
     const inadRIdx      = getIdx('inadReal');
     const inadIIdx      = getIdx('inadInferida');
-    const infResolve    = buildInferenceResolver(csv, inferenceRef);
     const dimIdxMap = {};
     for (const h of dimCols) dimIdxMap[h] = csv.headers.indexOf(h);
 
@@ -2232,11 +2001,8 @@ function computeAnalyticsDataset(canvasInputs, csvStore, inferenceRef) {
       numData.qty[w]      = qtyIdx   >= 0 ? (cellNum(csv, rowIdx, qtyIdx)   || 0) : 1;
       numData.qtdAltas[w] = altasIdx >= 0 ? (cellNum(csv, rowIdx, altasIdx) || 0) : 0;
       numData.inadRRaw[w] = inadRIdx >= 0 ? (cellNum(csv, rowIdx, inadRIdx) || 0) : 0;
-      if (infResolve) { const r = infResolve(csv, rowIdx); numData.qtdAltasInfer[w] = r.altasInfer; numData.inadIRaw[w] = r.inadIRaw; }
-      else {
-        numData.qtdAltasInfer[w] = altasInferIdx >= 0 ? (cellNum(csv, rowIdx, altasInferIdx) || 0) : 0;
-        numData.inadIRaw[w]      = inadIIdx      >= 0 ? (cellNum(csv, rowIdx, inadIIdx)      || 0) : 0;
-      }
+      numData.qtdAltasInfer[w] = altasInferIdx >= 0 ? (cellNum(csv, rowIdx, altasInferIdx) || 0) : 0;
+      numData.inadIRaw[w]      = inadIIdx      >= 0 ? (cellNum(csv, rowIdx, inadIIdx)      || 0) : 0;
       // Join por (csvId, rowIdx): cada canvas marcado contribui sua coluna de decisão.
       // Overlay tipado (M2): lê o código da linha e decodifica (DEC_SAME → própria AS IS).
       if (asIsTranslate) {
@@ -2367,19 +2133,15 @@ function maxMinRatio(bins) {
   return max / min;
 }
 
-// Lê qty/altas/maus (real) + altasInfer/inadIRaw (inferida, via colunas ou lookup em
-// cascata) de UMA linha — mesma leitura usada em runSimulation/computeCinemaArrivals.
-function readRowNums(csv, r, idxs, infResolve) {
+// Lê qty/altas/maus (real) + altasInfer/inadIRaw (inferida, via colunas) de UMA linha —
+// mesma leitura usada em runSimulation/computeCinemaArrivals.
+function readRowNums(csv, r, idxs) {
   const { qtyIdx, altasIdx, altasInferIdx, inadRIdx, inadIIdx } = idxs;
   const qty   = qtyIdx   >= 0 ? (cellNum(csv, r, qtyIdx)   || 0) : 1;
   const altas = altasIdx >= 0 ? (cellNum(csv, r, altasIdx) || 0) : 0;
   const maus  = inadRIdx >= 0 ? (cellNum(csv, r, inadRIdx) || 0) : 0;
-  let altasInfer, inadIRaw;
-  if (infResolve) { const rr = infResolve(csv, r); altasInfer = rr.altasInfer; inadIRaw = rr.inadIRaw; }
-  else {
-    altasInfer = altasInferIdx >= 0 ? (cellNum(csv, r, altasInferIdx) || 0) : 0;
-    inadIRaw   = inadIIdx      >= 0 ? (cellNum(csv, r, inadIIdx)      || 0) : 0;
-  }
+  const altasInfer = altasInferIdx >= 0 ? (cellNum(csv, r, altasInferIdx) || 0) : 0;
+  const inadIRaw   = inadIIdx      >= 0 ? (cellNum(csv, r, inadIIdx)      || 0) : 0;
   return { qty, altas, maus, altasInfer, inadIRaw };
 }
 
@@ -2396,7 +2158,7 @@ function candidateKeyOf(coder, csv, r) {
   return coder.mode === 'code' ? coder.codes[r] : (cellStr(csv, r, coder.colIdx) ?? '').toString().trim();
 }
 
-function computeVariableRanking(shapes, conns, csvStore, anchorNodeId, inferenceRef) {
+function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const anchor = shapesMap[anchorNodeId];
   if (!anchor) return { nodeId: anchorNodeId, error: 'anchor_not_found' };
@@ -2511,7 +2273,6 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId, inference
       qtyIdx: getColIdx('qty'), altasIdx: getColIdx('qtdAltas'), altasInferIdx: getColIdx('qtdAltasInfer'),
       inadRIdx: getColIdx('inadReal'), inadIIdx: getColIdx('inadInferida'),
     };
-    const infResolve = buildInferenceResolver(csv, inferenceRef);
 
     const candidateCols = Object.entries(types)
       .filter(([col, t]) => t === 'decision' && !usedCols.has(`${csvId}::${col}`))
@@ -2541,7 +2302,7 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId, inference
     let epoch = 0;
 
     for (let r = 0; r < nRows; r++) {
-      const nums = readRowNums(csv, r, idxs, infResolve);
+      const nums = readRowNums(csv, r, idxs);
       baseReal.altas += nums.altas; baseReal.maus += nums.maus;
       baseInfer.altasInfer += nums.altasInfer; baseInfer.inadIRaw += nums.inadIRaw;
 
@@ -2568,7 +2329,7 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId, inference
     }
 
     const entry = {
-      csvId, csv, idxs, infResolve, candidateCols, candidateCoders, candBins,
+      csvId, csv, idxs, candidateCols, candidateCoders, candBins,
       baseReal, baseInfer, segReal, segInfer, hitRows,
     };
     perCsv[csvId] = entry;
@@ -2635,7 +2396,7 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId, inference
         const key = `${keyA}|${keyB}`;
         let bin = jointMap.get(key);
         if (!bin) { bin = { altas: 0, maus: 0 }; jointMap.set(key, bin); }
-        const nums = readRowNums(winner.csv, r, winner.idxs, winner.infResolve);
+        const nums = readRowNums(winner.csv, r, winner.idxs);
         bin.altas += metric === 'inferida' ? nums.altasInfer : nums.altas;
         bin.maus  += metric === 'inferida' ? nums.inadIRaw   : nums.maus;
       }
@@ -2892,7 +2653,6 @@ function analyticsDatasetTransfer(dataset) {
 // ── Worker state ─────────────────────────────────────────────────────────────
 let workerCsvStore = {};
 let csvStoreVersion = 0;             // bump a cada UPDATE_CSV_STORE — invalida caches de overlay
-let workerInferenceRef = null;       // índice da Tabela de Inferência (UPDATE_INFERENCE_REF)
 const analyticsOverlayCache = {};    // {[canvasId]: {key, overlay}} — cache por canvas (5B)
 
 // Cache single-slot do tick de edição (M6): RUN_SIMULATION e COMPUTE_OVERLAY chegam do
@@ -2906,7 +2666,7 @@ function getTickResult(shapes, conns) {
   if (tickCache.key === key) return tickCache.value;
   const { populations, counts } = getLensPopulations(shapes, workerCsvStore);
   const { simResult, incrementalResult, nodeArrivals } =
-    computeSimulationTick(shapes, conns, workerCsvStore, workerInferenceRef, populations);
+    computeSimulationTick(shapes, conns, workerCsvStore, populations);
   const value = { simResult, incrementalResult, nodeArrivals, lensCounts: counts };
   tickCache = { key, value };
   return value;
@@ -2918,13 +2678,6 @@ function handleMessage(e) {
   if (type === 'UPDATE_CSV_STORE') {
     workerCsvStore = e.data.csvStore;
     csvStoreVersion++;
-    return;
-  }
-
-  // Tabela de Inferência (Fase 2) — análogo a UPDATE_CSV_STORE. O structured clone
-  // do postMessage preserva os Maps de `levels`, então o índice chega íntegro.
-  if (type === 'UPDATE_INFERENCE_REF') {
-    workerInferenceRef = e.data.inferenceRef || null;
     return;
   }
 
@@ -2957,7 +2710,7 @@ function handleMessage(e) {
 
   if (type === 'COMPUTE_OPTIM') {
     const { shape } = e.data;
-    const cellMetrics = computeCellMetrics(shape, workerCsvStore, workerInferenceRef);
+    const cellMetrics = computeCellMetrics(shape, workerCsvStore);
     const frontier    = buildParetoFrontier(cellMetrics);
     const scenarios   = extractScenarios(frontier);
     const maxInadReal = Math.max(0, ...Object.values(cellMetrics).map(m => m.inadReal     ?? 0));
@@ -2967,7 +2720,7 @@ function handleMessage(e) {
   }
 
   if (type === 'COMPUTE_ANALYTICS_DATASET') {
-    const dataset = computeAnalyticsDataset(e.data.canvases, workerCsvStore, workerInferenceRef);
+    const dataset = computeAnalyticsDataset(e.data.canvases, workerCsvStore);
     // Transfere os ArrayBuffers das colunas (zero-cópia) — o dataset largo não é retido
     // no worker, então neutralizá-los aqui é seguro e evita a cópia do structured clone.
     self.postMessage({ type: 'ANALYTICS_RESULT', dataset }, analyticsDatasetTransfer(dataset));
@@ -2986,7 +2739,7 @@ function handleMessage(e) {
 
   if (type === 'COMPUTE_JOHNNY') {
     const { shapes, cinemaIds, conns = [], lensPopulations = {}, riskLevels, hierarchyMode, inadMetric } = e.data;
-    const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric, workerInferenceRef);
+    const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric);
     if (!result) { self.postMessage({ type: 'JOHNNY_RESULT', error: 'no_data' }); return; }
     self.postMessage({ type: 'JOHNNY_RESULT', ...result });
     return;
@@ -2996,7 +2749,7 @@ function handleMessage(e) {
   // atual (porta solta), não entra no cache do tick.
   if (type === 'COMPUTE_VARIABLE_RANKING') {
     const { shapes, conns = [], anchor } = e.data;
-    const result = computeVariableRanking(shapes, conns, workerCsvStore, anchor?.nodeId, workerInferenceRef);
+    const result = computeVariableRanking(shapes, conns, workerCsvStore, anchor?.nodeId);
     self.postMessage({ type: 'VARIABLE_RANKING_RESULT', ...result });
     return;
   }
@@ -3010,7 +2763,6 @@ if (typeof self !== 'undefined' && typeof self.postMessage === 'function') {
 
 // Permite que o csvStore do worker seja semeado em testes (em produção vem de UPDATE_CSV_STORE).
 function __setWorkerCsvStoreForTest(store) { workerCsvStore = store || {}; csvStoreVersion++; }
-function __setWorkerInferenceRefForTest(ref) { workerInferenceRef = ref || null; }
 
 export {
   runSimulation,
@@ -3026,10 +2778,5 @@ export {
   computePolicyInsights,
   computeVariableRanking,
   buildFlowGraph,
-  buildInferenceResolver,
-  resolveWeightCol,
-  findApprovedCol,
-  normalizeScoreKey,
   __setWorkerCsvStoreForTest,
-  __setWorkerInferenceRefForTest,
 };

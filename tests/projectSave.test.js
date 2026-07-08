@@ -33,7 +33,6 @@ describe('M3 · buildProjectJSONChunks', () => {
       canvases: { c1: { id: 'c1', name: 'Canvas 1', shapes: [{ id: 's1', type: 'approved' }], conns: [] } },
       activeCanvasId: 'c1',
       csvStore: serializeCsvStore(makeCsvStore()),
-      inferenceRef: null,
       analyticsLayout: [],
       analyticsGroupings: [],
       analyticsPageFilters: [],

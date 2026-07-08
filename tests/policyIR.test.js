@@ -27,10 +27,10 @@ function toColumnarStore(store) {
   return out;
 }
 
-function tickOf(shapes, conns, csvStore, inferenceRef = null) {
+function tickOf(shapes, conns, csvStore) {
   const { populations } = computeLensPopulations(shapes, csvStore);
   return {
-    tick: computeSimulationTick(shapes, conns, csvStore, inferenceRef, populations),
+    tick: computeSimulationTick(shapes, conns, csvStore, populations),
     populations,
   };
 }
@@ -58,13 +58,13 @@ function canonIR(ir) {
 // GATE central: (1) roteamento original ≡ roteamento do canvas materializado do IR
 // (agregados, incremental, chegadas por nó via idMap e decisão POR LINHA) e
 // (2) round-trip IR→canvas→IR estável. Retorna os artefatos p/ asserts extras.
-function assertIREquivalent(shapes, conns, legacyStore, inferenceRef = null) {
+function assertIREquivalent(shapes, conns, legacyStore) {
   const csvStore = toColumnarStore(legacyStore);
   const ir = buildPolicyIR(shapes, conns, csvStore);
   const { shapes: irShapes, conns: irConns, idMap } = applyPolicyPatch(ir);
 
-  const orig = tickOf(shapes, conns, csvStore, inferenceRef);
-  const mat = tickOf(irShapes, irConns, csvStore, inferenceRef);
+  const orig = tickOf(shapes, conns, csvStore);
+  const mat = tickOf(irShapes, irConns, csvStore);
 
   // Agregados do tick (edgeStats fica de fora: é chaveado por IDs de conexão,
   // que são novos por construção no canvas materializado).
@@ -411,57 +411,6 @@ describe('PolicyIR · terminal AS IS + múltiplos csvs', () => {
     expect(tick.simResult.approvedQty).toBe(10);
     expect(tick.simResult.rejectedQty).toBe(20);
     expect(tick.simResult.asIsQty).toBe(30);
-  });
-});
-
-describe('PolicyIR · inferência por referência (tick em modo ref)', () => {
-  it('IR materializado preserva confiabVolume/inferenceSource do motor', () => {
-    const synthRef = {
-      name: 'REF', importedAt: 0,
-      keyCols: ['SCORE'], anchorCol: 'SCORE',
-      levels: {
-        1: new Map([
-          ['R01', { conv: 0.5, fpd: 0.1, confiab: 'ALTA' }],
-          ['R20', { conv: 0.3, fpd: 0.2, confiab: 'BAIXA' }],
-        ]),
-      },
-      global: { conv: 0.4, fpd: 0.15, confiab: 'GLOBAL' },
-      levelKeyCount: { 1: 1 },
-      rowCount: 2,
-    };
-    const legacyStore = {
-      base: {
-        name: 'base',
-        headers: ['COLX', 'SCORE_BASE', 'qty', '__DECISAO_ORIGINAL'],
-        rows: [
-          ['A', 'R01', '100', 'APROVADO'],
-          ['A', 'R99', '50', 'REPROVADO'],
-          ['B', '', '20', ''],
-          ['A', 'R07', '30', 'APROVADO'],
-        ],
-        columnTypes: { COLX: 'decision', qty: 'qty' },
-        varTypes: {},
-        asIsConfig: { col: 'DECISAO_HIST', mapping: {} },
-        inferenceConfig: { source: 'ref', keyMap: { SCORE: 'SCORE_BASE' }, weightCol: 'qty', weightMode: 'propostas', normalizeScore: true },
-      },
-    };
-    const shapes = [
-      { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
-      { id: 'pA', type: 'port', label: 'A' },
-      { id: 'pB', type: 'port', label: 'B' },
-      { id: 'AP', type: 'approved' },
-      { id: 'RJ', type: 'rejected' },
-    ];
-    const conns = [
-      { id: 'c1', from: 'D', to: 'pA', label: 'A' },
-      { id: 'c2', from: 'D', to: 'pB', label: 'B' },
-      { id: 'c3', from: 'pA', to: 'AP' },
-      { id: 'c4', from: 'pB', to: 'RJ' },
-    ];
-    const { tick } = assertIREquivalent(shapes, conns, legacyStore, synthRef);
-    expect(tick.simResult.inferenceSource).toBe('ref');
-    expect(tick.simResult.confiabVolume.ALTA).toBeGreaterThan(0);
-    expect(tick.simResult.confiabVolume.GLOBAL).toBeGreaterThan(0);
   });
 });
 

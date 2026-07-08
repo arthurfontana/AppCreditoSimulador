@@ -14,23 +14,23 @@ import {
 // arquivo confere, para cada cenário, que a saída do passe único bate EXATAMENTE (deep
 // equal) com a composição das quatro funções originais — que continuam intocadas/exportadas
 // e são o "valor de controle" aqui.
-function computeViaOldPath(shapes, conns, csvStore, inferenceRef) {
-  const simResult = runSimulation(shapes, conns, csvStore, inferenceRef);
+function computeViaOldPath(shapes, conns, csvStore) {
+  const simResult = runSimulation(shapes, conns, csvStore);
   const { populations } = computeLensPopulations(shapes, csvStore);
   const overlay = computeSimulatedDecisions(shapes, conns, csvStore, populations);
-  const incrementalResult = computeIncrementalResult(overlay, csvStore, inferenceRef);
+  const incrementalResult = computeIncrementalResult(overlay, csvStore);
   const nodeArrivals = computeNodeArrivals(shapes, conns, csvStore, null);
   return { simResult, incrementalResult, nodeArrivals };
 }
 
-function computeViaNewPath(shapes, conns, csvStore, inferenceRef) {
+function computeViaNewPath(shapes, conns, csvStore) {
   const { populations } = computeLensPopulations(shapes, csvStore);
-  return computeSimulationTick(shapes, conns, csvStore, inferenceRef, populations);
+  return computeSimulationTick(shapes, conns, csvStore, populations);
 }
 
-function assertEquivalent(shapes, conns, csvStore, inferenceRef = null) {
-  const oldRes = computeViaOldPath(shapes, conns, csvStore, inferenceRef);
-  const newRes = computeViaNewPath(shapes, conns, csvStore, inferenceRef);
+function assertEquivalent(shapes, conns, csvStore) {
+  const oldRes = computeViaOldPath(shapes, conns, csvStore);
+  const newRes = computeViaNewPath(shapes, conns, csvStore);
   expect(newRes.simResult).toEqual(oldRes.simResult);
   expect(newRes.incrementalResult).toEqual(oldRes.incrementalResult);
   expect(newRes.nodeArrivals).toEqual(oldRes.nodeArrivals);
@@ -226,54 +226,5 @@ describe('M6 · computeSimulationTick — equivalência com o caminho antigo (4 
       approvalRate: 0, inadReal: null, inadInferida: null, edgeStats: {},
     });
     expect(oldRes.incrementalResult.baseline).toEqual(oldRes.incrementalResult.simulated);
-  });
-
-  it('inferência via Tabela de Referência (modo ref): confiabVolume, anyRefSource e inferenceWeightMode', () => {
-    const inferenceRef = {
-      name: 'REF', importedAt: 0,
-      keyCols: ['SCORE'], anchorCol: 'SCORE',
-      levels: {
-        1: new Map([
-          ['R01', { conv: 0.5, fpd: 0.1, confiab: 'ALTA' }],
-          ['R20', { conv: 0.3, fpd: 0.2, confiab: 'BAIXA' }],
-        ]),
-      },
-      global: { conv: 0.4, fpd: 0.15, confiab: 'GLOBAL' },
-      levelKeyCount: { 1: 1 },
-      rowCount: 2,
-    };
-    const csvStore = {
-      base: {
-        name: 'base',
-        headers: ['COLX', 'SCORE_BASE', 'qty', '__DECISAO_ORIGINAL'],
-        rows: [
-          ['A', 'R01', '100', 'APROVADO'], // score direto, confiab ALTA
-          ['A', 'R99', '50',  'REPROVADO'], // normaliza para R20, confiab BAIXA
-          ['B', '',    '20',  ''],          // score vazio → normaliza para R20 também
-        ],
-        columnTypes: { COLX: 'decision', qty: 'qty' },
-        varTypes: {},
-        asIsConfig: { col: 'DECISAO_HIST', mapping: {} },
-        inferenceConfig: { source: 'ref', keyMap: { SCORE: 'SCORE_BASE' }, weightCol: 'qty', weightMode: 'propostas', normalizeScore: true },
-      },
-    };
-    const shapes = [
-      { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
-      { id: 'pA', type: 'port', label: 'A' },
-      { id: 'pB', type: 'port', label: 'B' },
-      { id: 'AP', type: 'approved' },
-      { id: 'RJ', type: 'rejected' },
-    ];
-    const conns = [
-      { id: 'c1', from: 'D',  to: 'pA', label: 'A' },
-      { id: 'c2', from: 'D',  to: 'pB', label: 'B' },
-      { id: 'c3', from: 'pA', to: 'AP' },
-      { id: 'c4', from: 'pB', to: 'RJ' },
-    ];
-
-    const { oldRes } = assertEquivalent(shapes, conns, csvStore, inferenceRef);
-    expect(oldRes.simResult.inferenceSource).toBe('ref');
-    expect(oldRes.simResult.inferenceWeightMode).toBe('propostas');
-    expect(oldRes.simResult.confiabVolume.ALTA).toBeGreaterThan(0);
   });
 });

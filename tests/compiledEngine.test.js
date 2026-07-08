@@ -1,7 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { indexInferenceRef } from '../src/App.jsx';
 import {
   runSimulation,
   computeSimulatedDecisions,
@@ -10,7 +7,6 @@ import {
   computeSimulationTick,
   computeLensPopulations,
   computeCinemaArrivals,
-  buildInferenceResolver,
 } from '../src/simulation.worker.js';
 import { buildColumnar } from '../src/columnar.js';
 
@@ -32,10 +28,10 @@ function toColumnarStore(store) {
   return out;
 }
 
-function tickOf(shapes, conns, csvStore, inferenceRef = null) {
+function tickOf(shapes, conns, csvStore) {
   const { populations, counts } = computeLensPopulations(shapes, csvStore);
   return {
-    tick: computeSimulationTick(shapes, conns, csvStore, inferenceRef, populations),
+    tick: computeSimulationTick(shapes, conns, csvStore, populations),
     populations,
     counts,
   };
@@ -44,10 +40,10 @@ function tickOf(shapes, conns, csvStore, inferenceRef = null) {
 // Compara TODOS os artefatos do motor entre a base legada (caminho por string) e a
 // mesma base colunar (caminho compilado): tick fundido, populações/contagens de lens,
 // overlay tipado, chegadas de cineminha — e cruza com as referências não-compiladas.
-function assertCompiledEquivalent(shapes, conns, legacyStore, inferenceRef = null) {
+function assertCompiledEquivalent(shapes, conns, legacyStore) {
   const colStore = toColumnarStore(legacyStore);
-  const legacy = tickOf(shapes, conns, legacyStore, inferenceRef);
-  const compiled = tickOf(shapes, conns, colStore, inferenceRef);
+  const legacy = tickOf(shapes, conns, legacyStore);
+  const compiled = tickOf(shapes, conns, colStore);
 
   expect(compiled.tick.simResult).toEqual(legacy.tick.simResult);
   expect(compiled.tick.incrementalResult).toEqual(legacy.tick.incrementalResult);
@@ -71,17 +67,17 @@ function assertCompiledEquivalent(shapes, conns, legacyStore, inferenceRef = nul
       expect(Array.from(ovCompiled[csvId].sim)).toEqual(Array.from(ovLegacy[csvId].sim));
     }
     // incremental derivado do overlay compilado = incremental do tick legado
-    expect(computeIncrementalResult(ovCompiled, colStore, inferenceRef))
+    expect(computeIncrementalResult(ovCompiled, colStore))
       .toEqual(legacy.tick.incrementalResult);
   }
 
   // chegadas de cineminha (Johnny)
-  const arrLegacy = computeCinemaArrivals(shapes, conns, legacyStore, null, inferenceRef);
-  const arrCompiled = computeCinemaArrivals(shapes, conns, colStore, null, inferenceRef);
+  const arrLegacy = computeCinemaArrivals(shapes, conns, legacyStore, null);
+  const arrCompiled = computeCinemaArrivals(shapes, conns, colStore, null);
   expect(arrCompiled).toEqual(arrLegacy);
 
   // referências NÃO-compiladas (intocadas) sobre a MESMA base colunar
-  expect(compiled.tick.simResult).toEqual(runSimulation(shapes, conns, colStore, inferenceRef));
+  expect(compiled.tick.simResult).toEqual(runSimulation(shapes, conns, colStore));
   expect(compiled.tick.nodeArrivals).toEqual(computeNodeArrivals(shapes, conns, colStore, null));
 
   return { legacy, compiled };
@@ -393,115 +389,6 @@ describe('M8 · terminal AS IS + múltiplos csvs', () => {
     expect(compiled.tick.simResult.approvedQty).toBe(10);
     expect(compiled.tick.simResult.rejectedQty).toBe(20);
     expect(compiled.tick.simResult.asIsQty).toBe(30);
-  });
-});
-
-// ── Inferência por referência: caminho compilado de chaves (dicionário) ─────────
-describe('M8 · inferência ref — chaves compiladas sobre o dicionário', () => {
-  const REF_PATH = join(process.cwd(), 'INFERENCIA_REF_202509_202603.CSV');
-  const BASE_PATH = join(process.cwd(), 'Amostra_Fake.csv');
-  const parseSemicolon = (text) => {
-    const lines = text.split(/\r?\n/).filter(l => l.trim());
-    const split = l => l.split(';').map(c => c.trim());
-    return { headers: split(lines[0]), rows: lines.slice(1).map(split) };
-  };
-  const { headers: refHeaders, rows: refRows } = parseSemicolon(readFileSync(REF_PATH, 'utf8'));
-  const ref = indexInferenceRef(refHeaders, refRows, 'INFERENCIA_REF.CSV');
-  const { headers: baseHeaders, rows: baseRows } = parseSemicolon(readFileSync(BASE_PATH, 'utf8'));
-
-  const KEY_MAP = {
-    FAIXA_SCORE: 'SCORE_HVI3',
-    OPERACAO: 'OPERACAO',
-    IDENTIFICA_GRUPO_MODELO: 'IDENTIFICA_GRUPO_MODELO',
-    CANAL_PCO_AJUSTADO: 'CANAL_PCO_AJUSTADO',
-  };
-  const legacyCsv = {
-    name: 'Amostra_Fake.csv',
-    headers: baseHeaders,
-    rows: baseRows,
-    columnTypes: { QTD_PROPOSTA: 'qty' },
-    varTypes: {},
-    asIsConfig: null,
-    inferenceConfig: { source: 'ref', keyMap: KEY_MAP, weightCol: 'QTD_PROPOSTA', normalizeScore: true },
-  };
-
-  it('resolvedor compilado (colunar) = resolvedor legado linha a linha (amostra real)', () => {
-    const colStore = toColumnarStore({ base: legacyCsv });
-    const rLegacy = buildInferenceResolver(legacyCsv, ref);
-    const rCompiled = buildInferenceResolver(colStore.base, ref);
-    for (let r = 0; r < baseRows.length; r++) {
-      const a = rLegacy(baseRows[r]);
-      const b = rCompiled(colStore.base, r);
-      expect(b.altasInfer).toBeCloseTo(a.altasInfer, 9);
-      expect(b.inadIRaw).toBeCloseTo(a.inadIRaw, 9);
-      expect(b.confiab).toBe(a.confiab);
-    }
-  });
-
-  it('chave ausente na base (keyMap sem coluna) desce a cascata igual nos dois caminhos', () => {
-    const partialMap = { FAIXA_SCORE: 'SCORE_HVI3', OPERACAO: 'OPERACAO' }; // 2 de 4 chaves
-    const legacyPartial = { ...legacyCsv, inferenceConfig: { ...legacyCsv.inferenceConfig, keyMap: partialMap } };
-    const colStore = toColumnarStore({ base: legacyPartial });
-    const rLegacy = buildInferenceResolver(legacyPartial, ref);
-    const rCompiled = buildInferenceResolver(colStore.base, ref);
-    let altasL = 0, altasC = 0, mausL = 0, mausC = 0;
-    for (let r = 0; r < baseRows.length; r++) {
-      const a = rLegacy(baseRows[r]);
-      const b = rCompiled(colStore.base, r);
-      altasL += a.altasInfer; mausL += a.inadIRaw;
-      altasC += b.altasInfer; mausC += b.inadIRaw;
-    }
-    expect(altasC).toBeCloseTo(altasL, 6);
-    expect(mausC).toBeCloseTo(mausL, 6);
-  });
-
-  it('tick completo em modo ref (com R99/normalização sintéticos) bate o legado', () => {
-    const synthRef = {
-      name: 'REF', importedAt: 0,
-      keyCols: ['SCORE'], anchorCol: 'SCORE',
-      levels: {
-        1: new Map([
-          ['R01', { conv: 0.5, fpd: 0.1, confiab: 'ALTA' }],
-          ['R20', { conv: 0.3, fpd: 0.2, confiab: 'BAIXA' }],
-        ]),
-      },
-      global: { conv: 0.4, fpd: 0.15, confiab: 'GLOBAL' },
-      levelKeyCount: { 1: 1 },
-      rowCount: 2,
-    };
-    const csvStore = {
-      base: {
-        name: 'base',
-        headers: ['COLX', 'SCORE_BASE', 'qty', '__DECISAO_ORIGINAL'],
-        rows: [
-          ['A', 'R01', '100', 'APROVADO'],
-          ['A', 'R99', '50', 'REPROVADO'],  // normaliza → R20 (BAIXA)
-          ['B', '', '20', ''],              // vazio → R20
-          ['A', 'R07', '30', 'APROVADO'],   // sem premissa de nível 1 → GLOBAL (aprova via porta A)
-        ],
-        columnTypes: { COLX: 'decision', qty: 'qty' },
-        varTypes: {},
-        asIsConfig: { col: 'DECISAO_HIST', mapping: {} },
-        inferenceConfig: { source: 'ref', keyMap: { SCORE: 'SCORE_BASE' }, weightCol: 'qty', weightMode: 'propostas', normalizeScore: true },
-      },
-    };
-    const shapes = [
-      { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
-      { id: 'pA', type: 'port', label: 'A' },
-      { id: 'pB', type: 'port', label: 'B' },
-      { id: 'AP', type: 'approved' },
-      { id: 'RJ', type: 'rejected' },
-    ];
-    const conns = [
-      { id: 'c1', from: 'D', to: 'pA', label: 'A' },
-      { id: 'c2', from: 'D', to: 'pB', label: 'B' },
-      { id: 'c3', from: 'pA', to: 'AP' },
-      { id: 'c4', from: 'pB', to: 'RJ' },
-    ];
-    const { compiled } = assertCompiledEquivalent(shapes, conns, csvStore, synthRef);
-    expect(compiled.tick.simResult.inferenceSource).toBe('ref');
-    expect(compiled.tick.simResult.confiabVolume.ALTA).toBeGreaterThan(0);
-    expect(compiled.tick.simResult.confiabVolume.GLOBAL).toBeGreaterThan(0); // linha R07 caiu no GLOBAL
   });
 });
 
