@@ -1,6 +1,6 @@
 # Épico: Copiloto de Política de Crédito (IA opcional, local-first)
 
-> **Status:** Sessão 0 (PolicyIR) ✅ ENTREGUE · Sessão 1 (Lint/Insights) ✅ ENTREGUE — demais sessões em planejamento.
+> **Status:** Sessão 0 (PolicyIR) ✅ ENTREGUE · Sessão 1 (Lint/Insights) ✅ ENTREGUE · Sessão 2 (Biblioteca de Políticas) ✅ ENTREGUE · Sessão 3 (Sugestão de próximo nó) ✅ ENTREGUE — demais sessões em planejamento.
 > **Documentos das frentes:** [[Copiloto-ConstrucaoAssistida|1. Construção Assistida]] · [[Copiloto-SugestoesMelhoria|2. Sugestões de Melhoria]] · [[Copiloto-DocumentacaoAutomatica|3. Documentação Automática]]
 
 ## O que é
@@ -263,8 +263,8 @@ IA em nada.
 |---|---|---|---|
 | 0 | PolicyIR + export JSON canônico + GATE — ✅ ENTREGUE | fundação | 0 |
 | 1 | Lint/Insights estruturais (painel + `COMPUTE_POLICY_INSIGHTS`) — ✅ ENTREGUE | 1 | 1 |
-| 2 | Biblioteca de políticas/templates (salvar/aplicar com mapeamento) | 1 | 1 |
-| 3 | Sugestão de próximo nó (ranking por discriminância) | 1 | 1 |
+| 2 | Biblioteca de políticas/templates (salvar/aplicar com mapeamento) — ✅ ENTREGUE | 1 | 1 |
+| 3 | Sugestão de próximo nó (ranking por discriminância) — ✅ ENTREGUE | 1 | 1 |
 | 4 | Goal Seek estruturado (`COMPUTE_GOAL_SEEK` + modal de objetivo) | 2 | 1 |
 | 5 | Simplificação + prova de equivalência | 2 | 1 |
 | 6 | DocGen local (`COMPUTE_POLICY_DOC` + preview/print/download) | 3 | 1 |

@@ -3571,6 +3571,8 @@ export default function App() {
   const [johnnyModal, setJohnnyModal] = useState(null);   // null | johnny obj
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
+  // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
+  const [variableRankingModal, setVariableRankingModal] = useState(null); // null | {portId, loading} | {portId, ...VARIABLE_RANKING_RESULT}
   // Cineminha toolbar dropdown
   const [cinemaDropdownOpen, setCinemaDropdownOpen] = useState(false);
   const [cinemaDropdownPos,  setCinemaDropdownPos]  = useState({x:0,y:0});
@@ -3637,6 +3639,7 @@ export default function App() {
   // ── Web Worker — simulation off the main thread ───────────────
   const workerRef = useRef(null);
   const pendingOptimShapeIdRef = useRef(null);
+  const pendingRankingPortIdRef = useRef(null);
   // Prévia AS IS contextualizada (assignCinemaVar): token por shape p/ ignorar
   // respostas obsoletas do worker (reatribuição posterior antes da resposta chegar).
   const asIsPreviewTokenRef = useRef({});
@@ -3727,6 +3730,11 @@ export default function App() {
         }));
       } else if (msgType === 'POLICY_INSIGHTS_RESULT') {
         setCopilotFindings(e.data.findings || []);
+      } else if (msgType === 'VARIABLE_RANKING_RESULT') {
+        const { nodeId } = e.data;
+        if (pendingRankingPortIdRef.current !== nodeId) return; // seleção mudou antes da resposta chegar
+        pendingRankingPortIdRef.current = null;
+        setVariableRankingModal({ portId: nodeId, ...e.data });
       }
     };
     return () => worker.terminate();
@@ -7494,6 +7502,95 @@ export default function App() {
     setJohnnyModal(null);
   };
 
+  // ── Sugestão de próximo nó (Copiloto Sessão 3) ─────────────────────────────
+  // Dispara o ranking on-demand para a porta selecionada (não entra no tick de
+  // edição/cache). `pendingRankingPortIdRef` descarta respostas obsoletas caso a
+  // seleção mude antes da resposta chegar (mesmo padrão do optimModal).
+  const openVariableRanking = useCallback((portId) => {
+    pendingRankingPortIdRef.current = portId;
+    setVariableRankingModal({ portId, loading: true });
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_VARIABLE_RANKING',
+      shapes: shapesR.current,
+      conns: connsR.current,
+      anchor: { nodeId: portId },
+    });
+  }, []); // eslint-disable-line
+
+  // Cria um losango conectado a partir da porta selecionada, já com os ports
+  // automáticos por valor distinto — mesmo idioma de createDecisionNode, mas
+  // encadeado (conexão de entrada = a própria porta, sem rótulo).
+  const applyRankingCreateDecision = useCallback((portId, col, csvId) => {
+    const port = shapesR.current.find(s => s.id === portId);
+    const csv = csvStoreR.current[csvId];
+    if (!port || !csv) return;
+    const colIdx = csv.headers.indexOf(col);
+    if (colIdx === -1) return;
+    pushHistory();
+    const distinctVals = distinctColValues(csv, colIdx).slice(0, MAX_DISTINCT);
+    const decId = uid();
+    const dx = port.x + port.w + 90, dy = port.y + port.h / 2 - SH / 2;
+    const decisionShape = { id: decId, type: 'decision', x: dx, y: dy, w: SW, h: SH, label: col, color: '#fef3c7', variableCol: col, csvId, visibleVals: null };
+    const PORT_W = 80, PORT_H = 32, GAP = 14;
+    const n = distinctVals.length;
+    const totalH = n * PORT_H + Math.max(0, n - 1) * GAP;
+    const px = dx + SW + 90;
+    const ports = distinctVals.map((val, i) => ({
+      id: uid(), type: 'port', x: px, y: dy + SH / 2 - totalH / 2 + i * (PORT_H + GAP), w: PORT_W, h: PORT_H, label: val, color: '#f0fdf4',
+    }));
+    setShapes(prev => [...prev, decisionShape, ...ports]);
+    setConns(prev => [
+      ...prev,
+      { id: uid(), from: portId, to: decId },
+      ...ports.map(p => ({ id: uid(), from: decId, to: p.id, label: p.label })),
+    ]);
+    setSel(decId);
+    setMultiSel(new Set());
+    setVariableRankingModal(null);
+  }, []); // eslint-disable-line
+
+  // Cria um Cineminha cruzando as duas variáveis da interação detectada, conectado a
+  // partir da porta selecionada. Caselas nascem elegíveis por padrão (não-destrutivo,
+  // sempre revisável — o usuário pode rodar ⚙ Otimizar Decisão ou ↺ Resgatar AS IS
+  // depois; a prévia AS IS contextualizada do assignCinemaVar não se aplica aqui
+  // porque o nó nasce com os dois eixos já atribuídos de uma vez).
+  const applyRankingCreateCinema = useCallback((portId, colA, colB, csvId) => {
+    const port = shapesR.current.find(s => s.id === portId);
+    const csv = csvStoreR.current[csvId];
+    if (!port || !csv) return;
+    const rowIdx = csv.headers.indexOf(colA), colIdx = csv.headers.indexOf(colB);
+    if (rowIdx === -1 || colIdx === -1) return;
+    pushHistory();
+    const rowDomain = sortDomain(distinctColValues(csv, rowIdx));
+    const colDomain = sortDomain(distinctColValues(csv, colIdx));
+    const { w: cw, h: ch } = computeCinemaSize(rowDomain, colDomain);
+    const id = uid();
+    const cx = port.x + port.w + 90, cy = port.y + port.h / 2 - ch / 2;
+    const cells = {};
+    for (const rv of rowDomain) for (const cv of colDomain) cells[`${rv}|${cv}`] = true;
+    const cinemaShape = {
+      id, type: 'cineminha', x: cx, y: cy, w: cw, h: ch, label: 'Cineminha', color: '#fff', cinemaType: 'eligibility',
+      rowVar: { col: colA, csvId }, colVar: { col: colB, csvId }, rowDomain, colDomain, cells, resultVar: null,
+      metadata: { type: 'eligibility', identifiers: {}, dimensions: { rowVariable: colA, columnVariable: colB }, variables: {}, source: 'copilot-ranking', description: '', tags: [], version: 1 },
+      cellsUserEdited: false,
+    };
+    const cfg = getCinemaType('eligibility');
+    const PORT_W = 100, PORT_H = 32;
+    const eligId = uid(), notId = uid();
+    const eligPort = { id: eligId, type: 'port', x: cx + cw + 36, y: cy + ch / 2 - PORT_H - 6, w: PORT_W, h: PORT_H, label: cfg.ports[0].label, color: cfg.ports[0].color };
+    const notPort  = { id: notId,  type: 'port', x: cx + cw + 36, y: cy + ch / 2 + 6,          w: PORT_W, h: PORT_H, label: cfg.ports[1].label, color: cfg.ports[1].color };
+    setShapes(prev => [...prev, cinemaShape, eligPort, notPort]);
+    setConns(prev => [
+      ...prev,
+      { id: uid(), from: portId, to: id },
+      { id: uid(), from: id, to: eligId, label: cfg.ports[0].label },
+      { id: uid(), from: id, to: notId,  label: cfg.ports[1].label },
+    ]);
+    setSel(id);
+    setMultiSel(new Set());
+    setVariableRankingModal(null);
+  }, []); // eslint-disable-line
+
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
   // ────────────────────────────────────────────────────────────────────────────
@@ -7807,6 +7904,22 @@ export default function App() {
                 color:"#0891b2",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                 whiteSpace:"nowrap",fontWeight:600}}>
               🔎 Configurar
+            </button>
+          </div>
+        )}
+
+        {/* Porta solta toolbar (Copiloto Sessão 3) — sugestão de próximo nó só faz
+            sentido numa porta sem NENHUMA conexão de saída (mesmo critério do lint
+            port_dangling); portas já conectadas seguem sem toolbar contextual. */}
+        {selShape?.type==='port'&&multiSel.size<=1&&conns.filter(c=>c.from===sel).length===0&&(
+          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
+            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+            border:"1px solid #ddd6fe",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
+            <button onClick={()=>openVariableRanking(sel)}
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
+                color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              💡 Sugerir próximo passo
             </button>
           </div>
         )}
@@ -8721,6 +8834,127 @@ export default function App() {
                   style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#3b82f6",
                     color:"#fff",cursor:"pointer",fontSize:12.5,fontFamily:"inherit",fontWeight:700}}>
                   Aplicar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ VARIABLE RANKING MODAL — "Sugerir próximo passo" (Copiloto Sessão 3) ═══ */}
+      {variableRankingModal&&(()=>{
+        const m = variableRankingModal;
+        const port = shapes.find(s => s.id === m.portId);
+        const TERMINAL_LABEL = { approved: '✅ Aprovado', rejected: '❌ Reprovado', as_is: '⟳ AS IS' };
+        return (
+          <div onMouseDown={()=>setVariableRankingModal(null)}
+            style={{position:"fixed",inset:0,zIndex:4000,background:"rgba(15,23,42,.45)",
+              display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+            <div onMouseDown={e=>e.stopPropagation()}
+              style={{width:520,maxHeight:"84vh",display:"flex",flexDirection:"column",
+                background:"#fff",borderRadius:14,boxShadow:"0 20px 60px rgba(0,0,0,.25)",overflow:"hidden"}}>
+              {/* Header */}
+              <div style={{padding:"16px 20px",borderBottom:"1px solid #e2e8f0"}}>
+                <div style={{fontSize:15,fontWeight:700,color:"#1e293b"}}>💡 Sugerir próximo passo</div>
+                <div style={{fontSize:11.5,color:"#94a3b8",marginTop:2}}>
+                  Porta "{trunc(port?.label||'?',30)}" — ranking de variáveis pelo poder discriminante sobre a população que chega aqui
+                </div>
+              </div>
+
+              {/* Body */}
+              <div style={{padding:"14px 20px 6px",overflow:"auto",flex:1}}>
+                {m.loading&&(
+                  <div style={{padding:"32px 0",textAlign:"center",color:"#94a3b8",fontSize:12.5}}>Calculando ranking…</div>
+                )}
+                {!m.loading&&m.error==='no_population'&&(
+                  <div style={{padding:"24px 0",textAlign:"center",color:"#94a3b8",fontSize:12.5}}>
+                    Nenhuma linha da base chega a esta porta com o fluxo atual — verifique o roteamento a montante.
+                  </div>
+                )}
+                {!m.loading&&m.error==='anchor_not_found'&&(
+                  <div style={{padding:"24px 0",textAlign:"center",color:"#94a3b8",fontSize:12.5}}>
+                    Porta não encontrada no canvas atual.
+                  </div>
+                )}
+                {!m.loading&&!m.error&&(<>
+                  {/* Autocompletar terminal — risco do segmento */}
+                  <div style={{marginBottom:16,padding:"10px 12px",borderRadius:10,
+                    background:"#f8fafc",border:"1px solid #e2e8f0"}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:.4,marginBottom:6}}>
+                      ⟳ Autocompletar terminal · {fmtQty(m.population.qty)} propostas neste segmento
+                    </div>
+                    <div style={{fontSize:12,color:"#475569",lineHeight:1.5,marginBottom:8}}>{m.population.justification}</div>
+                    <div style={{display:"flex",gap:6}}>
+                      {['approved','rejected','as_is'].map(t=>(
+                        <button key={t} onClick={()=>applyCopilotConnectTerminal(m.portId, t)}
+                          style={{flex:1,padding:"6px 8px",borderRadius:7,fontFamily:"inherit",fontSize:11.5,cursor:"pointer",
+                            fontWeight: m.population.suggestedTerminal===t ? 700 : 500,
+                            border: m.population.suggestedTerminal===t ? "1.5px solid #6d28d9" : "1px solid #e2e8f0",
+                            background: m.population.suggestedTerminal===t ? "#f5f3ff" : "#fff",
+                            color: m.population.suggestedTerminal===t ? "#6d28d9" : "#64748b"}}>
+                          {TERMINAL_LABEL[t]}{m.population.suggestedTerminal===t?' ★':''}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Interações — sugestão de Cineminha */}
+                  {m.interactions&&m.interactions.filter(i=>i.suggestCinema).length>0&&(
+                    <div style={{marginBottom:16}}>
+                      <div style={{fontSize:11,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:.4,marginBottom:6}}>
+                        ⊞ Interação detectada
+                      </div>
+                      {m.interactions.filter(i=>i.suggestCinema).map((it,i)=>(
+                        <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,
+                          border:"1px solid #c7d2fe",background:"#eef2ff",marginBottom:6}}>
+                          <div style={{flex:1,fontSize:12,color:"#3730a3",lineHeight:1.4}}>
+                            <b>{it.colA} × {it.colB}</b><br/>
+                            <span style={{color:"#4f46e5"}}>{it.justification}</span>
+                          </div>
+                          <button onClick={()=>applyRankingCreateCinema(m.portId, it.colA, it.colB, m.csvId)}
+                            style={{padding:"6px 12px",borderRadius:7,border:"1px solid #4f46e5",background:"#4f46e5",
+                              color:"#fff",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:700,whiteSpace:"nowrap"}}>
+                            ⊞ Criar Cineminha
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Ranking de variáveis candidatas */}
+                  <div style={{fontSize:11,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:.4,marginBottom:6}}>
+                    📊 Ranking de variáveis {m.metric&&`(métrica ${m.metric==='inferida'?'inferida':'real'})`}
+                  </div>
+                  {m.ranking.length===0&&(
+                    <div style={{padding:"16px 0",textAlign:"center",color:"#94a3b8",fontSize:12.5}}>
+                      Sem variáveis candidatas — todas já foram testadas neste caminho.
+                    </div>
+                  )}
+                  {m.ranking.map((r,i)=>(
+                    <div key={r.col} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,
+                      border:"1px solid #e2e8f0",marginBottom:6,background:i===0?"#fefce8":"#fff"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:12.5,fontWeight:700,color:"#1e293b"}}>
+                          {i===0?'🏆 ':''}{r.col}
+                        </div>
+                        <div style={{fontSize:11.5,color:"#64748b",lineHeight:1.4,marginTop:1}}>{r.justification}</div>
+                      </div>
+                      <button onClick={()=>applyRankingCreateDecision(m.portId, r.col, r.csvId)}
+                        style={{padding:"6px 12px",borderRadius:7,border:"1px solid #f59e0b",background:"#fffbeb",
+                          color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",fontWeight:700,whiteSpace:"nowrap"}}>
+                        ◇ Criar losango
+                      </button>
+                    </div>
+                  ))}
+                </>)}
+              </div>
+
+              {/* Footer */}
+              <div style={{padding:"12px 20px",borderTop:"1px solid #e2e8f0",display:"flex",justifyContent:"flex-end"}}>
+                <button onClick={()=>setVariableRankingModal(null)}
+                  style={{padding:"7px 16px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    color:"#64748b",cursor:"pointer",fontSize:12.5,fontFamily:"inherit",fontWeight:600}}>
+                  Fechar
                 </button>
               </div>
             </div>
