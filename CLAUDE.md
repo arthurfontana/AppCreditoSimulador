@@ -742,6 +742,25 @@ no clone do canvas, `idMap` de `cloneCanvasWithNewIds`) — e **re-simulados**
 incremental interno da busca — o campo `result` de `GOAL_SEEK_RESULT` vem sempre dessa
 re-simulação real.
 
+### Taxa de aprovação escopada à política (denominador = população decidida)
+A **taxa de aprovação** do Goal Seek (baseline, fronteira e `result`) é medida sobre a
+**população que a política de fato decide** — as linhas que chegam a QUALQUER terminal
+(Aprovado/Reprovado/AS IS) — e **não** sobre a base inteira. Numa política **parcial**
+(atrás de um Decision Lens que restringe a sub-população, ex.: só certas safras/ADABAS),
+a base inteira dilui a taxa a ponto de torná-la ininteligível: aprovar 72,8% do que a
+política decide aparecia como "3,35%" porque ~95% das linhas ficavam fora do escopo mas
+no denominador. `computeGoalSeekBaseline` acumula `decidedQty` (soma de `qty` das linhas
+com `res != null`); `goalSeekRatios` divide `approvedQty / decidedQty` (fallback
+`totalQty` p/ retrocompat); o delta O(1) só mexe em `decidedQty` para movimentos
+`lens_threshold` (que admitem/removem linhas do escopo) — `cinema_cell`/`decision_terminal`
+mantêm o denominador fixo (a linha já estava no escopo, só troca de terminal). O
+`result.approvalRate` é reescopado a partir da re-simulação (`approvedQty /
+(approvedQty+rejectedQty+asIsQty)`). Sem filtro a montante `decidedQty == totalQty` e a
+taxa coincide com a de `runSimulation` (o GATE `tests/goalSeek.test.js` é invariante).
+**Nota:** o SimPanel/`incrementalResult` e o gráfico do Dashboard continuam com denominador
+de base inteira (contrato de vários GATEs) — daí a mesma política aparecer como ~3% no
+painel e ~73% escopada no Goal Seek. Alinhar o SimPanel a esse escopo é um follow-up.
+
 ### Estado `goalSeekModal`
 ```js
 {

@@ -2332,7 +2332,7 @@ function computeGoalSeekBaseline(shapes, conns, csvStore) {
     return null;
   }
 
-  let totalQty = 0, approvedQty = 0;
+  let totalQty = 0, approvedQty = 0, decidedQty = 0;
   let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
 
   for (const [csvId, csv] of Object.entries(csvStore)) {
@@ -2358,6 +2358,12 @@ function computeGoalSeekBaseline(shapes, conns, csvStore) {
       const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
       totalQty += qty;
       const res = resolveRow(csv, r, rootId, compiled);
+      // "Decidido" = a linha chegou a QUALQUER terminal (approved/rejected/as_is) — i.e.
+      // está DENTRO do escopo da política. Linhas que retornam null (filtradas por um
+      // Decision Lens a montante, ou valor sem rota) NÃO são decididas por esta política.
+      // Esse é o denominador correto da taxa de aprovação do Goal Seek: aprovados sobre a
+      // população que a política de fato decide, não sobre a base inteira (ver goalSeekRatios).
+      if (res != null) decidedQty += qty;
       let isApproved = res === 'approved', isRejected = res === 'rejected';
       if (res === 'as_is') {
         const orig = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase() : '';
@@ -2373,12 +2379,18 @@ function computeGoalSeekBaseline(shapes, conns, csvStore) {
     }
   }
 
-  return { totalQty, approvedQty, qtdAltasSum, qtdAltasInferSum, inadRealSum, inadInferidaSum };
+  return { totalQty, approvedQty, decidedQty, qtdAltasSum, qtdAltasInferSum, inadRealSum, inadInferidaSum };
 }
 
 function goalSeekRatios(raw) {
+  // Denominador da taxa de aprovação = população DECIDIDA pela política (dentro do escopo),
+  // não a base inteira. Numa política parcial (atrás de um Decision Lens que restringe a
+  // sub-população — ex.: só certas safras/ADABAS), a base inteira dilui a taxa a ponto de
+  // torná-la ininteligível (ex.: 3,35% quando a política aprova 72,8% do que decide). Fallback
+  // para totalQty quando decidedQty não foi computado (mantém retrocompat de qualquer chamador).
+  const decided = (typeof raw.decidedQty === 'number') ? raw.decidedQty : raw.totalQty;
   return {
-    approvalRate: raw.totalQty > 0 ? (raw.approvedQty / raw.totalQty) * 100 : 0,
+    approvalRate: decided > 0 ? (raw.approvedQty / decided) * 100 : 0,
     inadReal:     raw.qtdAltasSum      > 0 ? raw.inadRealSum     / raw.qtdAltasSum      : null,
     inadInferida: raw.qtdAltasInferSum > 0 ? raw.inadInferidaSum / raw.qtdAltasInferSum
                 : raw.approvedQty      > 0 ? raw.inadInferidaSum / raw.approvedQty      : null,
@@ -2452,6 +2464,12 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
   const sign = wantsApproved ? 1 : -1;
   const applyDelta = (c) => ({
     totalQty: running.totalQty,
+    // Abrir/fechar célula de Cineminha ou trocar terminal de um segmento de losango NÃO
+    // muda o tamanho da população decidida (a linha já estava no escopo — só troca de
+    // aprovado↔reprovado). Já relaxar/apertar um Decision Lens ADMITE/REMOVE linhas do
+    // escopo (a saída do lens vai direto pra Aprovado — ver buildGoalSeekCandidates), então
+    // o denominador (decididos) acompanha o numerador (aprovados) no mesmo sinal.
+    decidedQty: running.decidedQty + (c.type === 'lens_threshold' ? sign * c.qty : 0),
     approvedQty: running.approvedQty + sign * c.qty,
     qtdAltasSum: running.qtdAltasSum + sign * c.qtdAltas,
     qtdAltasInferSum: running.qtdAltasInferSum + sign * c.qtdAltasInfer,
@@ -2505,6 +2523,13 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
   const { shapes: patchedShapes, conns: patchedConns } = applyGoalSeekMoves(shapes, conns, moves.map(m => m.apply));
   const validated = runSimulation(patchedShapes, patchedConns, csvStore);
 
+  // Taxa de aprovação do resultado no MESMO escopo do baseline (aprovados sobre a população
+  // decidida = approved + rejected + as_is residual), não sobre a base inteira que
+  // `runSimulation` usa. Sem escopo, políticas parciais reportam taxas diluídas (ex.: 3,5%)
+  // que não conversam com o baseline (3,35%) nem com o Dashboard (~73%). Os demais campos
+  // (inadReal/inadInferida) já são intrinsecamente escopados à população aprovada.
+  const validatedDecided = validated.approvedQty + validated.rejectedQty + validated.asIsQty;
+
   return {
     goal: { target, direction, magnitude, minimize: minimizeField },
     baseline,
@@ -2513,7 +2538,7 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
     goalReached,
     bindingConstraint,
     result: {
-      approvalRate: validated.approvalRate,
+      approvalRate: validatedDecided > 0 ? (validated.approvedQty / validatedDecided) * 100 : 0,
       inadReal: validated.inadReal,
       inadInferida: validated.inadInferida,
       approvedQty: validated.approvedQty,
