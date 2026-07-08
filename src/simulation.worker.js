@@ -6,6 +6,7 @@
 // as células via cellStr/cellNum/rowCount, que funcionam tanto sobre a base
 // colunar (produção) quanto sobre o legado string[][] (testes / GATE).
 import { cellStr, cellNum, rowCount, isColumnar } from './columnar.js';
+import { applyGoalSeekMoves } from './goalSeek.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -1839,6 +1840,689 @@ function computeJohnnyData(allShapes, cinemaIds, conns, csvStore, lensPopulation
   };
 }
 
+// ── Goal Seek (Copiloto Sessão 4, DEC-IA-005/006) ────────────────────────────────
+// Generaliza o Johnny (acima) da célula de Cineminha para a política INTEIRA: o
+// usuário declara um objetivo estruturado (alvo + direção + magnitude, restrições-teto,
+// travas 🔒) e o motor busca uma sequência de MOVIMENTOS concretos — não só abrir/fechar
+// célula, mas também trocar o terminal de um segmento (nó de decisão, valor) e
+// relaxar/apertar o limiar de uma regra de Decision Lens — que atinja o objetivo.
+//
+// Catálogo de movimentos (cada um = um segmento com agregados conhecidos, na mesma
+// veia de computeCinemaArrivals/exportDiagnosticCSV — "trocar o destino de um segmento
+// muda os acumuladores globais por adição/subtração, sem re-simular a base"):
+//   - cinema_cell:       reusa computeCinemaArrivals (mesma mecânica do Johnny acima).
+//   - decision_terminal: um VALOR de um losango cujo port (seguindo cadeias de port,
+//                        como buildPolicyIR/resolveThroughPorts) resolve DIRETAMENTE a
+//                        um terminal Aprovado/Reprovado — trocar esse terminal move o
+//                        segmento inteiro de um lado para o outro, sem ambiguidade (a
+//                        segmentação por valor já garante que 100% da linha segue o
+//                        mesmo caminho). Segmentos que resolvem em AS IS ficam de fora
+//                        (o terminal AS IS depende de __DECISAO_ORIGINAL por linha —
+//                        não é um destino único), documentado como limitação da Sessão 4.
+//   - lens_threshold:    um Decision Lens de UMA regra (operador gte/gt/lte/lt) cujo
+//                        único port de saída resolve diretamente a Aprovado — relaxar
+//                        (admite o próximo valor que hoje falha) ou apertar (remove o
+//                        valor mais próximo da fronteira que hoje passa) por UM passo.
+//                        Lens cujo port leva a Reprovado/AS IS, ou com mais de uma
+//                        regra, ficam fora (catálogo extensível por design — mesmo
+//                        precedente do "adicionar quebra" no épico).
+//
+// Busca: greedy com precedência (padrão Johnny/DEC-JO-003/004) + shrinkage bayesiano —
+// generaliza o pool de "células" do Johnny para um pool heterogêneo de movimentos, cada
+// um com direção (`toApproved`) e magnitude (qty/qtdAltas/qtdAltasInfer/inadRRaw/inadIRaw).
+// Travas 🔒 (`shape.locked` ou a lista `locks` da mensagem) excluem candidatos do nó
+// inteiro ANTES da busca. Restrições de teto (`maxInadReal`/`maxInadInf`) são invioláveis:
+// um movimento que estouraria o teto nunca é aplicado (nem contabilizado no resultado).
+// Ao final (sucesso ou parcial), os movimentos aceitos são materializados de verdade
+// (applyGoalSeekMoves, src/goalSeek.js) e RE-SIMULADOS (runSimulation) — nenhum número
+// exibido tem origem só no delta incremental interno da busca (DEC-IA-005). GATE de
+// equivalência delta×resimulação em tests/goalSeek.test.js.
+
+const LENS_ORDINAL_OPS = new Set(['gte', 'gt', 'lte', 'lt']);
+const GOAL_SEEK_TERMINAL_LABEL = { approved: 'Aprovado', rejected: 'Reprovado' };
+
+// Segue cadeias de ports "puros" (única saída) a partir de um destino `startTo`,
+// devolvendo o TERMINAL (approved/rejected/as_is) em que a cadeia resolve, e o id da
+// ÚLTIMA conexão percorrida (cuja `to` é o próprio terminal) — é essa conexão que um
+// movimento decision_terminal/lens_threshold reaponta para trocar o destino do segmento.
+// `null` quando a cadeia não resolve num terminal direto (vai para outro nó de fluxo,
+// ciclo de ports ou destino inexistente) — esses segmentos ficam fora do catálogo.
+function resolveDirectTerminalConn(shapesMap, connFromMap, startTo, startConnId) {
+  let curTo = startTo, curConnId = startConnId;
+  const seen = new Set();
+  while (curTo != null) {
+    const node = shapesMap[curTo];
+    if (!node) return null;
+    if (node.type === 'approved' || node.type === 'rejected' || node.type === 'as_is') {
+      return { terminal: node.type, terminalId: curTo, connId: curConnId };
+    }
+    if (node.type !== 'port') return null;
+    if (seen.has(curTo)) return null;
+    seen.add(curTo);
+    const next = (connFromMap[curTo] || [])[0];
+    if (!next) return null;
+    curConnId = next.id;
+    curTo = next.to;
+  }
+  return null;
+}
+
+// Walk único (mesmo esquema compilado M8 de computeCinemaArrivals) que coleta, além dos
+// hits de Cineminha (já cobertos por computeCinemaArrivals — reusado à parte), os
+// agregados por SEGMENTO de:
+//   - decisionArrivals: {[nodeId]: {[valor]: {qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw}}}
+//     — métricas das linhas que chegam ao losango COM aquele valor (respeitando o
+//     roteamento a montante), independente de a rota existir ou não.
+//   - lensColArrivals: {[lensId]: {[valorBruto]: {...}}} — para os Decision Lens
+//     elegíveis a lens_threshold (`lensColByShape`), métricas por valor BRUTO da coluna
+//     da regra, entre as linhas que chegam ao lens (passando ou não as regras hoje).
+function computeGoalSeekArrivals(shapes, conns, csvStore, lensPopulations, lensColByShape) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  const decisionArrivals = {};
+  const lensColArrivals = {};
+  for (const s of shapes) {
+    if (s.type === 'decision') decisionArrivals[s.id] = {};
+    if (s.type === 'decision_lens' && lensColByShape[s.id]) lensColArrivals[s.id] = {};
+  }
+  if (Object.keys(decisionArrivals).length === 0 && Object.keys(lensColArrivals).length === 0) {
+    return { decisionArrivals, lensColArrivals };
+  }
+
+  const routes = compileRoutes(shapes, conns, out);
+  const { decisionRoutes, cinemaRoutes, singleEdge } = routes;
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const lastVisit = new Int32Array(shapes.length);
+  let epoch = 0;
+  const decHitShapeBuf = [], decHitValBuf = [];
+  const lensHitShapeBuf = [], lensHitValBuf = [];
+
+  function walkRow(csv, r, startId, compiled, lensColIdxMap) {
+    epoch++;
+    let cur = startId;
+    let decLen = 0, lensLen = 0;
+    while (cur) {
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) break;
+      lastVisit[idx] = epoch;
+      const node = shapesMap[cur];
+      if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const cd = compiled.decision[cur];
+        let val, match;
+        if (cd.codes) { const code = cd.codes[r]; val = cd.valByCode[code]; match = cd.routeByCode[code]; }
+        else {
+          val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim();
+          match = decisionRoutes[cur]?.get(val);
+        }
+        if (decisionArrivals[cur]) { decHitShapeBuf[decLen] = cur; decHitValBuf[decLen] = val; decLen++; }
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const cc = compiled.cinema[cur];
+        let isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) break;
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0;
+          const ci = cc.colCodes ? cc.colCodes[r] : 0;
+          isEligible = cc.eligByPair[ri * cc.nC + ci] === 1;
+        } else {
+          const rv = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const cv = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (!node.rowVar && !node.colVar) break;
+          const rKey = node.rowVar ? rv : '*';
+          const cKey = node.colVar ? cv : '*';
+          isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
+        }
+        const rt = cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        const lensColIdx = lensColIdxMap ? lensColIdxMap[cur] : undefined;
+        if (lensColIdx !== undefined && lensColIdx >= 0) {
+          const rawVal = cellStr(csv, r, lensColIdx) ?? '';
+          lensHitShapeBuf[lensLen] = cur; lensHitValBuf[lensLen] = rawVal; lensLen++;
+        }
+        const m = compiled.lens[cur];
+        if (m && !m(r)) break;
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else break;
+    }
+    return { decLen, lensLen };
+  }
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const getColIdx = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx = getColIdx('qty'), altasIdx = getColIdx('qtdAltas'), altasInfIdx = getColIdx('qtdAltasInfer'),
+      inadRIdx = getColIdx('inadReal'), inadIIdx = getColIdx('inadInferida');
+
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+    const compiled = compileNodesForCsv(shapes, csv, routes);
+    const lensColIdxMap = {};
+    for (const [lensId, colName] of Object.entries(lensColByShape)) {
+      lensColIdxMap[lensId] = csv.headers.indexOf(colName);
+    }
+
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const { decLen, lensLen } = walkRow(csv, r, rootId, compiled, lensColIdxMap);
+      if (decLen === 0 && lensLen === 0) continue;
+      const qty      = qtyIdx      >= 0 ? (cellNum(csv, r, qtyIdx)      || 0) : 1;
+      const altas    = altasIdx    >= 0 ? (cellNum(csv, r, altasIdx)    || 0) : 0;
+      const inadR    = inadRIdx    >= 0 ? (cellNum(csv, r, inadRIdx)    || 0) : 0;
+      const altasInf = altasInfIdx >= 0 ? (cellNum(csv, r, altasInfIdx) || 0) : 0;
+      const inadI    = inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
+      for (let h = 0; h < decLen; h++) {
+        const acc = decisionArrivals[decHitShapeBuf[h]];
+        const val = decHitValBuf[h];
+        if (!acc[val]) acc[val] = { qty: 0, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0 };
+        acc[val].qty += qty; acc[val].qtdAltas += altas; acc[val].qtdAltasInfer += altasInf;
+        acc[val].inadRRaw += inadR; acc[val].inadIRaw += inadI;
+      }
+      for (let h = 0; h < lensLen; h++) {
+        const acc = lensColArrivals[lensHitShapeBuf[h]];
+        const val = lensHitValBuf[h];
+        if (!acc[val]) acc[val] = { qty: 0, qtdAltas: 0, qtdAltasInfer: 0, inadRRaw: 0, inadIRaw: 0 };
+        acc[val].qty += qty; acc[val].qtdAltas += altas; acc[val].qtdAltasInfer += altasInf;
+        acc[val].inadRRaw += inadR; acc[val].inadIRaw += inadI;
+      }
+    }
+  }
+
+  return { decisionArrivals, lensColArrivals };
+}
+
+// Novo limiar de uma regra gte/gt/lte/lt para incluir ('relax') ou excluir ('tighten')
+// exatamente `distinct[idx]` do conjunto que passa, mantendo o vizinho mais próximo do
+// lado oposto no estado atual (gte/lte usam o próprio valor — inclusivos; gt/lt usam o
+// PONTO MÉDIO entre os dois distintos vizinhos — exclusivos, evita reabrir/fechar mais
+// de um valor por movimento quando os distintos não são uniformemente espaçados).
+function computeNewLensThreshold(operator, distinct, idx, kind) {
+  const isUpperPass = operator === 'gte' || operator === 'gt';
+  const inclusive = operator === 'gte' || operator === 'lte';
+  const v = distinct[idx].n;
+  if (kind === 'relax') {
+    if (isUpperPass) {
+      if (inclusive) return v;
+      const lo = idx > 0 ? distinct[idx - 1].n : v - 1;
+      return (lo + v) / 2;
+    }
+    if (inclusive) return v;
+    const hi = idx < distinct.length - 1 ? distinct[idx + 1].n : v + 1;
+    return (v + hi) / 2;
+  }
+  // tighten
+  if (isUpperPass) {
+    if (inclusive) {
+      const hi = idx < distinct.length - 1 ? distinct[idx + 1].n : v + 1;
+      return hi;
+    }
+    return v;
+  }
+  if (inclusive) {
+    const lo = idx > 0 ? distinct[idx - 1].n : v - 1;
+    return lo;
+  }
+  return v;
+}
+
+// Catálogo de candidatos a movimento (ver comentário de topo). `lockedIds` = union de
+// `shape.locked` persistido + a lista `locks` da mensagem COMPUTE_GOAL_SEEK.
+function buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, lockedIds) {
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const { out } = buildFlowGraph(shapes, conns);
+  const connFromMap = {};
+  for (const c of conns) {
+    if (!connFromMap[c.from]) connFromMap[c.from] = [];
+    connFromMap[c.from].push({ to: c.to, id: c.id, label: c.label ?? '' });
+  }
+  const locked = new Set([
+    ...(lockedIds || []),
+    ...shapes.filter(s => s.locked).map(s => s.id),
+  ]);
+
+  const candidates = [];
+
+  // ── 1) Cineminha cells — reusa computeCinemaArrivals (mesma mecânica do Johnny) ──
+  const cinemaArrivals = computeCinemaArrivals(shapes, conns, csvStore, lensPopulations);
+  for (const shape of shapes) {
+    if (shape.type !== 'cineminha' || locked.has(shape.id)) continue;
+    const csvId = shape.rowVar?.csvId || shape.colVar?.csvId;
+    const csv = csvId ? csvStore[csvId] : null;
+    const varTypes = csv?.varTypes || {};
+    const rowIsOrd = shape.rowVar ? varTypes[shape.rowVar.col] === 'ordinal' : false;
+    const colIsOrd = shape.colVar ? varTypes[shape.colVar.col] === 'ordinal' : false;
+    const rDom = shape.rowDomain?.length > 0 ? shape.rowDomain : ['*'];
+    const cDom = shape.colDomain?.length > 0 ? shape.colDomain : ['*'];
+    const arr = cinemaArrivals[shape.id] || {};
+    const byPos = {};
+    for (let ri = 0; ri < rDom.length; ri++) {
+      for (let ci = 0; ci < cDom.length; ci++) {
+        const cellKey = `${rDom[ri]}|${cDom[ci]}`;
+        const m = arr[cellKey];
+        if (!m || m.qty === 0) continue;
+        const curElig = isCellEligible(shape.cells, cellKey);
+        const id = `cinema:${shape.id}:${cellKey}`;
+        const cand = {
+          id, type: 'cinema_cell', shapeId: shape.id,
+          label: `${curElig ? 'Fechar' : 'Abrir'} célula "${cellKey.replace('|', ' × ')}" em ${shape.label || 'Cineminha'}`,
+          toApproved: !curElig,
+          qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer, inadRRaw: m.inadRRaw, inadIRaw: m.inadIRaw,
+          requires: [],
+          apply: { type: 'cinema_cell', shapeId: shape.id, cellKey, newValue: curElig ? 0 : 1 },
+        };
+        candidates.push(cand);
+        byPos[`${ri}|${ci}`] = cand;
+      }
+    }
+    if (rowIsOrd || colIsOrd) {
+      for (let ri = 0; ri < rDom.length; ri++) {
+        for (let ci = 0; ci < cDom.length; ci++) {
+          const cand = byPos[`${ri}|${ci}`];
+          if (!cand) continue;
+          const neighborPos = cand.toApproved
+            ? [rowIsOrd ? `${ri - 1}|${ci}` : null, colIsOrd ? `${ri}|${ci - 1}` : null]
+            : [rowIsOrd ? `${ri + 1}|${ci}` : null, colIsOrd ? `${ri}|${ci + 1}` : null];
+          for (const np of neighborPos) {
+            if (!np) continue;
+            const neighbor = byPos[np];
+            if (neighbor && neighbor.toApproved === cand.toApproved) cand.requires.push(neighbor.id);
+          }
+        }
+      }
+    }
+  }
+
+  // ── 2) Decision-node terminal swaps (valor cujo port resolve DIRETO a um terminal) ──
+  const routes = compileRoutes(shapes, conns, out);
+
+  // ── 3) Lens threshold — determina estruturalmente (sem dados) quais lens qualificam ──
+  const lensColByShape = {};
+  for (const shape of shapes) {
+    if (shape.type !== 'decision_lens' || locked.has(shape.id)) continue;
+    const rules = shape.rules || [];
+    if (rules.length !== 1) continue;
+    const rule = rules[0];
+    if (!LENS_ORDINAL_OPS.has(rule.operator)) continue;
+    const edge = (connFromMap[shape.id] || [])[0];
+    if (!edge) continue;
+    const info = resolveDirectTerminalConn(shapesMap, connFromMap, edge.to, edge.id);
+    if (!info || info.terminal !== 'approved') continue; // v1: só quando o "passa" leva a Aprovado (ver comentário de topo)
+    lensColByShape[shape.id] = rule.col;
+  }
+
+  const { decisionArrivals, lensColArrivals } = computeGoalSeekArrivals(shapes, conns, csvStore, lensPopulations, lensColByShape);
+
+  for (const shape of shapes) {
+    if (shape.type !== 'decision' || locked.has(shape.id)) continue;
+    const csv = shape.csvId ? csvStore[shape.csvId] : null;
+    if (!csv) continue;
+    const isOrdinal = csv.varTypes?.[shape.variableCol] === 'ordinal';
+    const routeMap = routes.decisionRoutes[shape.id];
+    if (!routeMap) continue;
+    const arr = decisionArrivals[shape.id] || {};
+    const byIdx = {};
+    let i = 0;
+    for (const [val, route] of routeMap.entries()) {
+      const idxHere = i++;
+      if (!route || route.to == null) continue;
+      const m = arr[val];
+      if (!m || m.qty === 0) continue;
+      const info = resolveDirectTerminalConn(shapesMap, connFromMap, route.to, route.cid);
+      if (!info || info.terminal === 'as_is') continue;
+      const targetTerminal = info.terminal === 'approved' ? 'rejected' : 'approved';
+      const targetShape = shapes.find(s => s.type === targetTerminal);
+      if (!targetShape) continue;
+      const cand = {
+        id: `decision:${shape.id}:${val}`, type: 'decision_terminal', shapeId: shape.id, value: val,
+        label: `${shape.label || shape.variableCol} = "${val}": mover de ${GOAL_SEEK_TERMINAL_LABEL[info.terminal]} para ${GOAL_SEEK_TERMINAL_LABEL[targetTerminal]}`,
+        toApproved: targetTerminal === 'approved',
+        qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer, inadRRaw: m.inadRRaw, inadIRaw: m.inadIRaw,
+        requires: [],
+        apply: { type: 'decision_terminal', connId: info.connId, newTo: targetShape.id },
+      };
+      candidates.push(cand);
+      byIdx[idxHere] = cand;
+    }
+    if (isOrdinal) {
+      const idxs = Object.keys(byIdx).map(Number).sort((a, b) => a - b);
+      for (const idx of idxs) {
+        const cand = byIdx[idx];
+        const neighbor = byIdx[cand.toApproved ? idx - 1 : idx + 1];
+        if (neighbor && neighbor.toApproved === cand.toApproved) cand.requires.push(neighbor.id);
+      }
+    }
+  }
+
+  // ── Lens threshold candidates (1 passo de relax + 1 de tighten por lens elegível) ──
+  for (const [lensId, colName] of Object.entries(lensColByShape)) {
+    const shape = shapesMap[lensId];
+    const rule = (shape.rules || [])[0];
+    if (!rule) continue;
+    const arr = lensColArrivals[lensId] || {};
+    const distinct = Object.keys(arr)
+      .map(raw => ({ raw, n: parseFloat(raw) }))
+      .filter(o => !isNaN(o.n) && arr[o.raw].qty > 0)
+      .sort((a, b) => a.n - b.n);
+    if (distinct.length === 0) continue;
+    const isUpperPass = rule.operator === 'gte' || rule.operator === 'gt';
+    const passFlags = distinct.map(o => matchLensRule(String(o.n), rule.operator, rule.value));
+    let relaxIdx = -1, tightenIdx = -1;
+    if (isUpperPass) {
+      for (let k = distinct.length - 1; k >= 0; k--) if (!passFlags[k]) { relaxIdx = k; break; }
+      for (let k = 0; k < distinct.length; k++) if (passFlags[k]) { tightenIdx = k; break; }
+    } else {
+      for (let k = 0; k < distinct.length; k++) if (!passFlags[k]) { relaxIdx = k; break; }
+      for (let k = distinct.length - 1; k >= 0; k--) if (passFlags[k]) { tightenIdx = k; break; }
+    }
+    const mk = (kind, idx) => {
+      if (idx < 0) return null;
+      const m = arr[distinct[idx].raw];
+      if (!m || m.qty === 0) return null;
+      const newRuleValue = computeNewLensThreshold(rule.operator, distinct, idx, kind);
+      return {
+        id: `lens:${lensId}:${kind}`, type: 'lens_threshold', shapeId: lensId, kind,
+        label: `${kind === 'relax' ? 'Relaxar' : 'Apertar'} regra de "${shape.label || 'Decision Lens'}" (${colName} ${rule.operator} ${newRuleValue})`,
+        toApproved: kind === 'relax',
+        qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer, inadRRaw: m.inadRRaw, inadIRaw: m.inadIRaw,
+        requires: [],
+        apply: { type: 'lens_threshold', shapeId: lensId, ruleIndex: 0, newValue: String(newRuleValue) },
+      };
+    };
+    const relaxCand = mk('relax', relaxIdx);
+    const tightenCand = mk('tighten', tightenIdx);
+    if (relaxCand) candidates.push(relaxCand);
+    if (tightenCand) candidates.push(tightenCand);
+  }
+
+  return candidates;
+}
+
+// Mesma agregação de runSimulation (approvedQty/qtdAltasSum/.../inadInferidaSum), mas
+// expõe os SOMATÓRIOS BRUTOS (não só as razões finais) — necessários para atualizar os
+// totais incrementalmente (O(1) por movimento) durante a busca gulosa. `runSimulation`
+// não expõe esses brutos e seu formato de retorno é um contrato de GATE usado por vários
+// testes (compiledEngine/simulationTick/policyIR) — em vez de arriscar essa superfície,
+// este é um agregador PARALELO e menor, mesmo padrão de duplicação já usado neste
+// arquivo (computeCinemaArrivals/computeNodeArrivals/computeCinemaAsIsCells também
+// reimplementam o walk em vez de estender uma função existente).
+function computeGoalSeekBaseline(shapes, conns, csvStore) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+  const routes = compileRoutes(shapes, conns, out);
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const lastVisit = new Int32Array(shapes.length);
+  let epoch = 0;
+
+  function resolveRow(csv, r, startId, compiled) {
+    epoch++;
+    let cur = startId;
+    while (cur) {
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) return null;
+      lastVisit[idx] = epoch;
+      const node = shapesMap[cur]; if (!node) return null;
+      if (TERM.has(node.type)) return node.type;
+      if (node.type === 'decision') {
+        const cd = compiled.decision[cur];
+        let match;
+        if (cd.codes) match = cd.routeByCode[cd.codes[r]];
+        else {
+          const val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim();
+          match = routes.decisionRoutes[cur]?.get(val);
+        }
+        if (!match) return null;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const cc = compiled.cinema[cur];
+        let isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) return null;
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0, ci = cc.colCodes ? cc.colCodes[r] : 0;
+          isEligible = cc.eligByPair[ri * cc.nC + ci] === 1;
+        } else {
+          const rv = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const cv = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (!node.rowVar && !node.colVar) return null;
+          isEligible = isCellEligible(node.cells, `${node.rowVar ? rv : '*'}|${node.colVar ? cv : '*'}`);
+        }
+        const rt = routes.cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
+        if (!match) return null;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        const m = compiled.lens[cur]; if (m && !m(r)) return null;
+        const match = routes.singleEdge[cur]; if (!match) return null; cur = match.to;
+      } else if (node.type === 'port') {
+        const match = routes.singleEdge[cur]; if (!match) return null; cur = match.to;
+      } else return null;
+    }
+    return null;
+  }
+
+  let totalQty = 0, approvedQty = 0;
+  let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const colIdx = (type) => {
+      const col = Object.entries(types).find(([, t]) => t === type)?.[0];
+      return col ? csv.headers.indexOf(col) : -1;
+    };
+    const qtyIdx = colIdx('qty'), altasIdx = colIdx('qtdAltas'), altasInfIdx = colIdx('qtdAltasInfer'),
+      inadRIdx = colIdx('inadReal'), inadIIdx = colIdx('inadInferida');
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+    const compiled = compileNodesForCsv(shapes, csv, routes);
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+      totalQty += qty;
+      const res = resolveRow(csv, r, rootId, compiled);
+      let isApproved = res === 'approved', isRejected = res === 'rejected';
+      if (res === 'as_is') {
+        const orig = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase() : '';
+        if (orig === 'APROVADO') isApproved = true; else if (orig === 'REPROVADO') isRejected = true;
+      }
+      if (isApproved) {
+        approvedQty += qty;
+        qtdAltasSum      += altasIdx    >= 0 ? (cellNum(csv, r, altasIdx)    || 0) : 0;
+        qtdAltasInferSum += altasInfIdx >= 0 ? (cellNum(csv, r, altasInfIdx) || 0) : 0;
+        inadRealSum      += inadRIdx    >= 0 ? (cellNum(csv, r, inadRIdx)    || 0) : 0;
+        inadInferidaSum  += inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
+      }
+    }
+  }
+
+  return { totalQty, approvedQty, qtdAltasSum, qtdAltasInferSum, inadRealSum, inadInferidaSum };
+}
+
+function goalSeekRatios(raw) {
+  return {
+    approvalRate: raw.totalQty > 0 ? (raw.approvedQty / raw.totalQty) * 100 : 0,
+    inadReal:     raw.qtdAltasSum      > 0 ? raw.inadRealSum     / raw.qtdAltasSum      : null,
+    inadInferida: raw.qtdAltasInferSum > 0 ? raw.inadInferidaSum / raw.qtdAltasInferSum
+                : raw.approvedQty      > 0 ? raw.inadInferidaSum / raw.approvedQty      : null,
+    approvedAltasInfer: raw.qtdAltasInferSum,
+  };
+}
+
+const GOAL_SEEK_TARGETS = new Set(['approvalRate', 'inadReal', 'inadInferida', 'approvedAltasInfer']);
+
+// COMPUTE_GOAL_SEEK — busca gulosa com precedência sobre o catálogo de movimentos.
+// goal: {target, direction:'increase'|'decrease', magnitude:number|null, minimize?}
+// constraints: {maxInadReal?:number, maxInadInf?:number} (tetos, ratio 0–1; null/ausente = sem teto)
+// locks: string[] (shapeIds travados, além de shape.locked persistido no canvas)
+function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lensPopulations) {
+  const g = goal || {};
+  const target = GOAL_SEEK_TARGETS.has(g.target) ? g.target : 'approvalRate';
+  const direction = g.direction === 'decrease' ? 'decrease' : 'increase';
+  const magnitude = (typeof g.magnitude === 'number' && isFinite(g.magnitude)) ? g.magnitude : null;
+  const minimizeField = g.minimize === 'inadReal' ? 'inadReal' : 'inadInferida';
+  const cons = constraints || {};
+  const maxInadReal = (typeof cons.maxInadReal === 'number') ? cons.maxInadReal : null;
+  const maxInadInf  = (typeof cons.maxInadInf  === 'number') ? cons.maxInadInf  : null;
+
+  const rawBaseline = computeGoalSeekBaseline(shapes, conns, csvStore);
+  const baseline = goalSeekRatios(rawBaseline);
+
+  const wantsApproved = direction === 'increase';
+  const allCandidates = buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, locks);
+  const pool = allCandidates.filter(c => c.toApproved === wantsApproved);
+  const candById = Object.fromEntries(pool.map(c => [c.id, c]));
+
+  // Suavização bayesiana (padrão Johnny/SHRINK_K): evita que um movimento de baixo
+  // volume (ruído amostral) fure a fila por inadimplência aparentemente extrema.
+  let poolRaw = 0, poolDen = 0, poolQty = 0;
+  for (const c of pool) {
+    poolQty += c.qty;
+    if (minimizeField === 'inadReal') { poolRaw += c.inadRRaw; poolDen += c.qtdAltas; }
+    else { poolRaw += c.inadIRaw; poolDen += (c.qtdAltasInfer > 0 ? c.qtdAltasInfer : c.qty); }
+  }
+  const poolAvg = poolDen > 0 ? poolRaw / poolDen : 0;
+  const SHRINK_K = Math.max(1, (poolQty / Math.max(1, pool.length)) * 0.1);
+  const smoothed = (c) => minimizeField === 'inadReal'
+    ? ((c.inadRRaw || 0) + poolAvg * SHRINK_K) / ((c.qtdAltas || 0) + SHRINK_K)
+    : ((c.inadIRaw || 0) + poolAvg * SHRINK_K) / ((c.qtdAltasInfer > 0 ? c.qtdAltasInfer : c.qty || 0) + SHRINK_K);
+
+  const remaining = {}, dependents = {};
+  for (const c of pool) { remaining[c.id] = 0; dependents[c.id] = []; }
+  for (const c of pool) {
+    for (const reqId of c.requires) {
+      if (!candById[reqId]) continue; // não está neste pool (já satisfeito/direção oposta) — vácuo
+      remaining[c.id]++;
+      dependents[reqId].push(c.id);
+    }
+  }
+  const liberated = new Set(pool.filter(c => remaining[c.id] === 0).map(c => c.id));
+
+  let running = { ...rawBaseline };
+  const frontier = [{ ...goalSeekRatios(running), approvedQty: running.approvedQty, totalQty: running.totalQty, move: null }];
+  const moves = [];
+  let bindingConstraint = null;
+
+  const initialTargetVal = goalSeekRatios(running)[target];
+  const isReached = () => {
+    if (magnitude === null) return false;
+    const cur = goalSeekRatios(running)[target];
+    if (cur === null || initialTargetVal === null) return false;
+    const goalAbs = direction === 'increase' ? initialTargetVal + magnitude : initialTargetVal - magnitude;
+    return direction === 'increase' ? cur >= goalAbs : cur <= goalAbs;
+  };
+
+  const sign = wantsApproved ? 1 : -1;
+  const applyDelta = (c) => ({
+    totalQty: running.totalQty,
+    approvedQty: running.approvedQty + sign * c.qty,
+    qtdAltasSum: running.qtdAltasSum + sign * c.qtdAltas,
+    qtdAltasInferSum: running.qtdAltasInferSum + sign * c.qtdAltasInfer,
+    inadRealSum: running.inadRealSum + sign * c.inadRRaw,
+    inadInferidaSum: running.inadInferidaSum + sign * c.inadIRaw,
+  });
+
+  while (!isReached()) {
+    const ordered = [...liberated].map(id => candById[id]).sort((a, b) => {
+      const sa = smoothed(a), sb = smoothed(b);
+      const diff = wantsApproved ? sa - sb : sb - sa;
+      if (diff !== 0) return diff;
+      if (b.qty !== a.qty) return b.qty - a.qty;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    let chosen = null, rejectedReason = null;
+    for (const c of ordered) {
+      const nextRaw = applyDelta(c);
+      const nextRatios = goalSeekRatios(nextRaw);
+      const breachReal = maxInadReal != null && nextRatios.inadReal != null && nextRatios.inadReal > maxInadReal;
+      const breachInf  = maxInadInf  != null && nextRatios.inadInferida != null && nextRatios.inadInferida > maxInadInf;
+      if (breachReal || breachInf) {
+        if (!rejectedReason) rejectedReason = breachReal ? 'maxInadReal' : 'maxInadInf';
+        continue;
+      }
+      chosen = { cand: c, nextRaw };
+      break;
+    }
+    if (!chosen) {
+      bindingConstraint = ordered.length === 0 ? 'no_more_moves' : (rejectedReason || 'no_more_moves');
+      break;
+    }
+    const { cand, nextRaw } = chosen;
+    const prevRatios = goalSeekRatios(running);
+    running = nextRaw;
+    liberated.delete(cand.id);
+    for (const depId of dependents[cand.id]) { remaining[depId]--; if (remaining[depId] === 0) liberated.add(depId); }
+    moves.push({
+      id: cand.id, type: cand.type, shapeId: cand.shapeId, label: cand.label,
+      qty: cand.qty, qtdAltas: cand.qtdAltas, qtdAltasInfer: cand.qtdAltasInfer,
+      inadRRaw: cand.inadRRaw, inadIRaw: cand.inadIRaw,
+      deltaApprovalRate: goalSeekRatios(running).approvalRate - prevRatios.approvalRate,
+      apply: cand.apply,
+    });
+    frontier.push({ ...goalSeekRatios(running), approvedQty: running.approvedQty, totalQty: running.totalQty, move: cand.id });
+  }
+
+  const goalReached = magnitude === null ? moves.length > 0 : isReached();
+
+  // ── Validação final por re-simulação (DEC-IA-005) ──────────────────────────────
+  const { shapes: patchedShapes, conns: patchedConns } = applyGoalSeekMoves(shapes, conns, moves.map(m => m.apply));
+  const validated = runSimulation(patchedShapes, patchedConns, csvStore);
+
+  return {
+    goal: { target, direction, magnitude, minimize: minimizeField },
+    baseline,
+    frontier,
+    moves,
+    goalReached,
+    bindingConstraint,
+    result: {
+      approvalRate: validated.approvalRate,
+      inadReal: validated.inadReal,
+      inadInferida: validated.inadInferida,
+      approvedQty: validated.approvedQty,
+      totalQty: validated.totalQty,
+      approvedAltasInfer: running.qtdAltasInferSum,
+    },
+  };
+}
+
 // ── Analytics dataset (Analytics Workspace) ───────────────────────────────────
 // Emits the canonical wide dataset (DEC-AW-003): one row per CSV grouping, with
 // the original dimensions + intrinsic metrics + one decision column per scenario.
@@ -2745,6 +3429,16 @@ function handleMessage(e) {
     return;
   }
 
+  // Goal Seek (Copiloto Sessão 4) — busca on-demand para o objetivo declarado no
+  // goalSeekModal; não entra no cache do tick (não é um gesto de edição recorrente).
+  if (type === 'COMPUTE_GOAL_SEEK') {
+    const { shapes, conns = [], goal, constraints = {}, locks = [] } = e.data;
+    const { populations } = getLensPopulations(shapes, workerCsvStore);
+    const result = computeGoalSeek(shapes, conns, workerCsvStore, goal, constraints, locks, populations);
+    self.postMessage({ type: 'GOAL_SEEK_RESULT', ...result });
+    return;
+  }
+
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a seleção
   // atual (porta solta), não entra no cache do tick.
   if (type === 'COMPUTE_VARIABLE_RANKING') {
@@ -2777,6 +3471,13 @@ export {
   computeLensPopulations,
   computePolicyInsights,
   computeVariableRanking,
+  computeJohnnyData,
   buildFlowGraph,
+  computeGoalSeek,
+  buildGoalSeekCandidates,
+  computeGoalSeekArrivals,
+  computeGoalSeekBaseline,
+  computeNewLensThreshold,
+  resolveDirectTerminalConn,
   __setWorkerCsvStoreForTest,
 };
