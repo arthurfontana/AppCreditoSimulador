@@ -3783,6 +3783,458 @@ function computeSimplify(shapes, conns, csvStore, nodeArrivals) {
   };
 }
 
+// ── COMPUTE_POLICY_DOC — Documentação Automática (Copiloto Sessão 6, DEC-IA-006) ──
+// O worker devolve um "modelo de documento" (docModel): árvore de seções com dados
+// NUMÉRICOS CRUS (nenhum texto pronto) — a apresentação (Markdown/HTML) é feita por
+// funções puras na main (renderDocMarkdown/renderDocHTML, src/App.jsx), que só leem o
+// docModel (nunca o worker/csvStore). O IR (PolicyIR) chega PRONTO no payload — só
+// `buildPolicyIR` existe (em App.jsx); o worker nunca a importa (mesmo motivo de
+// `buildFlowGraph`/`matchLensRule` estarem duplicados aqui) — e usa o IR só como
+// insumo ESTRUTURAL para paths achatados/glossário. Os números que exigem varrer a
+// base (KPIs, funil por nó+valor, confiabilidade amostral, comparação de cenários)
+// são computados aqui, reaproveitando as mesmas primitivas do resto do worker.
+
+// Funil por nó+valor — mesma travessia/acumulação de `exportDiagnosticCSV` (src/App.jsx),
+// reimplementada aqui (o worker não importa App.jsx) para alimentar o docModel com
+// números do motor. Retorna as mesmas colunas do CSV de diagnóstico, já com os ratios
+// calculados (a formatação textual fica a cargo do renderer).
+function computeFunnelByNode(shapes, conns, csvStore) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+  if (rootNodes.length === 0) return { rows: [], totals: null };
+
+  const nodeValAcc = {};
+  const nodeOrder = {};
+  let stepCounter = 0;
+
+  function getNodeLabel(node) {
+    if (node.type === 'decision') return node.label || node.variableCol || node.id;
+    if (node.type === 'cineminha') return node.label || 'Cineminha';
+    if (node.type === 'decision_lens') return node.label || 'Decision Lens';
+    return node.label || node.id;
+  }
+  function accKey(nodeId, val) { return `${nodeId}__${val}`; }
+  function initAcc(nodeId, val, nodeName) {
+    const k = accKey(nodeId, val);
+    if (!nodeValAcc[k]) {
+      if (nodeOrder[nodeId] === undefined) nodeOrder[nodeId] = stepCounter++;
+      nodeValAcc[k] = {
+        nodeId, nodeName, stepOrder: nodeOrder[nodeId], value: val,
+        qty: 0, approvedQty: 0, rejectedQty: 0,
+        qtdAltasSum: 0, qtdAltasInferSum: 0, inadRealSum: 0, inadInferidaSum: 0,
+      };
+    }
+    return k;
+  }
+  function traverseRow(csv, r, startId) {
+    const headers = csv.headers;
+    let cur = startId;
+    const visited = new Set();
+    const stops = [];
+    while (cur) {
+      if (visited.has(cur)) break;
+      visited.add(cur);
+      const node = shapesMap[cur]; if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const ci = headers.indexOf(node.variableCol);
+        const val = (ci >= 0 ? (cellStr(csv, r, ci) ?? '') : '').trim();
+        stops.push({ nodeId: cur, val, nodeName: getNodeLabel(node) });
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const ri = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const ci = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rv = node.rowVar && ri >= 0 ? (cellStr(csv, r, ri) ?? '').trim() : '*';
+        const cv = node.colVar && ci >= 0 ? (cellStr(csv, r, ci) ?? '').trim() : '*';
+        const cellKey = `${rv}|${cv}`;
+        stops.push({ nodeId: cur, val: cellKey, nodeName: getNodeLabel(node) });
+        const isEligible = isCellEligible(node.cells, cellKey);
+        const typeCfg = getCinemaType(node.cinemaType);
+        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
+        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        // Não gera "stop" (lens não é uma dimensão de valor no funil, mesmo espírito de
+        // exportDiagnosticCSV) — só precisa deixar a linha atravessar quando passa nas
+        // regras, senão os nós A JUSANTE do lens nunca seriam alcançados (linha não roteia,
+        // mesma semântica de runSimulation/computeSimulationTick para decision_lens).
+        if (!rowMatchesLensRules(csv, r, node.rules || [])) break;
+        const edges = out[cur] || []; if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || []; if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else break;
+    }
+    const termNode = shapesMap[cur];
+    const result = termNode && TERM.has(termNode.type) ? termNode.type : null;
+    return { stops, result };
+  }
+
+  let totalQty = 0, totalApproved = 0, totalRejected = 0;
+  let gQtdAltasSum = 0, gQtdAltasInferSum = 0, gInadRealSum = 0, gInadInferidaSum = 0;
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const colIdx = (type) => { const col = Object.entries(types).find(([, t]) => t === type)?.[0]; return col ? csv.headers.indexOf(col) : -1; };
+    const qtyIdx = colIdx('qty'), qtdAltasIdx = colIdx('qtdAltas'), qtdAltasInferIdx = colIdx('qtdAltasInfer');
+    const inadRealIdx = colIdx('inadReal'), inadInferidaIdx = colIdx('inadInferida');
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision') return d.csvId === csvId;
+      if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      return true;
+    });
+    if (csvRoots.length === 0) continue;
+    const rootId = csvRoots[0].id;
+
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+      const qtdAltas = qtdAltasIdx >= 0 ? (cellNum(csv, r, qtdAltasIdx) || 0) : 0;
+      const qtdAltasInfer = qtdAltasInferIdx >= 0 ? (cellNum(csv, r, qtdAltasInferIdx) || 0) : 0;
+      const inadR = inadRealIdx >= 0 ? (cellNum(csv, r, inadRealIdx) || 0) : 0;
+      const inadI = inadInferidaIdx >= 0 ? (cellNum(csv, r, inadInferidaIdx) || 0) : 0;
+      totalQty += qty;
+
+      const { stops, result } = traverseRow(csv, r, rootId);
+      let isApproved = result === 'approved';
+      let isRejected = result === 'rejected';
+      if (result === 'as_is') {
+        const orig = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase() : '';
+        if (orig === 'APROVADO') isApproved = true;
+        else if (orig === 'REPROVADO') isRejected = true;
+      }
+      if (isApproved) { totalApproved += qty; gQtdAltasSum += qtdAltas; gQtdAltasInferSum += qtdAltasInfer; gInadRealSum += inadR; gInadInferidaSum += inadI; }
+      else if (isRejected) totalRejected += qty;
+
+      for (const { nodeId, val, nodeName } of stops) {
+        const k = initAcc(nodeId, val, nodeName);
+        const a = nodeValAcc[k];
+        a.qty += qty;
+        if (isApproved) { a.approvedQty += qty; a.qtdAltasSum += qtdAltas; a.qtdAltasInferSum += qtdAltasInfer; a.inadRealSum += inadR; a.inadInferidaSum += inadI; }
+        else if (isRejected) a.rejectedQty += qty;
+      }
+    }
+  }
+
+  const rows = Object.values(nodeValAcc)
+    .sort((a, b) => a.stepOrder - b.stepOrder || a.nodeName.localeCompare(b.nodeName) || a.value.localeCompare(b.value))
+    .map(a => ({
+      ...a,
+      approvalRate: a.qty > 0 ? a.approvedQty / a.qty : null,
+      inadReal: a.qtdAltasSum > 0 ? a.inadRealSum / a.qtdAltasSum : null,
+      inadInferida: a.qtdAltasInferSum > 0 ? a.inadInferidaSum / a.qtdAltasInferSum
+                  : a.approvedQty > 0 ? a.inadInferidaSum / a.approvedQty : null,
+    }));
+
+  const totals = {
+    qty: totalQty, approvedQty: totalApproved, rejectedQty: totalRejected,
+    approvalRate: totalQty > 0 ? totalApproved / totalQty : null,
+    inadReal: gQtdAltasSum > 0 ? gInadRealSum / gQtdAltasSum : null,
+    inadInferida: gQtdAltasInferSum > 0 ? gInadInferidaSum / gQtdAltasInferSum
+                : totalApproved > 0 ? gInadInferidaSum / totalApproved : null,
+  };
+  return { rows, totals };
+}
+
+// Regras achatadas raiz→terminal (item 2 do épico — anexo técnico p/ auditoria/implantação).
+// DFS determinístico a partir de `ir.entry`, compondo as condições de cada nó no caminho.
+// Cineminha enumera AMBOS os ramos (elegível/não elegível); decisão enumera TODAS as rotas
+// (uma por grupo de valores já achatado pelo IR). Ciclo (nó revisitado no MESMO caminho) e
+// destino ausente/inexistente terminam o ramo com `terminal: null` + motivo — nunca lançam
+// nem inventam um terminal. `maxPaths` é um teto de segurança (política patológica/ciclo
+// amplo) — paths além do teto são omitidos e `truncated=true` é sinalizado (documento nunca
+// trava, mas nunca finge completude que não tem).
+function buildPolicyPaths(ir, maxPaths = 500) {
+  const byId = new Map((ir?.nodes || []).map(n => [n.id, n]));
+  const list = [];
+  let truncated = false;
+
+  function walk(nodeId, conditions, visited) {
+    if (list.length >= maxPaths) { truncated = true; return; }
+    if (nodeId == null) { list.push({ conditions, terminal: null, terminalId: null, terminalLabel: null, reason: 'sem_destino' }); return; }
+    const node = byId.get(nodeId);
+    if (!node) { list.push({ conditions, terminal: null, terminalId: null, terminalLabel: null, reason: 'destino_inexistente' }); return; }
+    if (node.kind === 'terminal') { list.push({ conditions, terminal: node.terminal, terminalId: node.id, terminalLabel: node.label }); return; }
+    if (visited.has(nodeId)) { list.push({ conditions, terminal: null, terminalId: null, terminalLabel: null, reason: 'ciclo' }); return; }
+    const nextVisited = new Set(visited); nextVisited.add(nodeId);
+    if (node.kind === 'decision') {
+      if (!node.routes || node.routes.length === 0) {
+        list.push({ conditions, terminal: null, terminalId: null, terminalLabel: null, reason: 'sem_rotas' });
+        return;
+      }
+      for (const route of node.routes) {
+        walk(route.to, [...conditions, { kind: 'decision', nodeId, label: node.label, col: node.variable?.col ?? null, values: [...route.values] }], nextVisited);
+      }
+    } else if (node.kind === 'cinema') {
+      walk(node.routes?.eligible ?? null, [...conditions, { kind: 'cinema', nodeId, label: node.label, eligible: true }], nextVisited);
+      walk(node.routes?.notEligible ?? null, [...conditions, { kind: 'cinema', nodeId, label: node.label, eligible: false }], nextVisited);
+    } else if (node.kind === 'lens') {
+      walk(node.to ?? null, [...conditions, { kind: 'lens', nodeId, label: node.label, rules: node.rules }], nextVisited);
+    }
+  }
+
+  for (const rootId of (ir?.entry || [])) walk(rootId, [], new Set());
+  return { list, truncated };
+}
+
+// Contrato de Privacidade (DEC-IA-004), aplicado ao PAPEL: com o toggle de domínios
+// desligado, nenhum valor de domínio (N2) pode sobreviver no docModel — nomes de coluna e
+// contagens continuam (N0/N1), só os VALORES concretos são trocados por contagem.
+function redactPathConditions(list, includeDomains) {
+  if (includeDomains) return list;
+  return list.map(p => ({
+    ...p,
+    conditions: p.conditions.map(c => {
+      if (c.kind === 'decision') return { ...c, valueCount: c.values.length, values: null };
+      if (c.kind === 'lens') return { ...c, rules: (c.rules || []).map(r => ({ ...r, value: null })) };
+      return c; // cinema: elegível/não-elegível é um booleano estrutural, não um valor de domínio
+    }),
+  }));
+}
+
+// Descrição por nó do IR para a seção "Fluxo da Política" — mapeamento 1:1 sobre `ir.nodes`
+// (bijeção, garante completude por construção: todo nó/regra/célula do IR aparece exatamente
+// uma vez). Domínios (routes[].values, rowDomain/colDomain, blockedCells, rule.value) só
+// entram quando `includeDomains` — sempre expõe as CONTAGENS (N1), nunca os valores (N2).
+function buildFlowNodes(ir, includeDomains) {
+  return (ir?.nodes || []).map(n => {
+    const base = { id: n.id, kind: n.kind, label: n.label };
+    if (n.kind === 'decision') {
+      return {
+        ...base,
+        variable: n.variable,
+        routeCount: n.routes.length,
+        valueCount: n.routes.reduce((s, r) => s + r.values.length, 0),
+        routes: n.routes.map(r => ({
+          to: r.to, valueCount: r.values.length,
+          values: includeDomains ? [...r.values] : null,
+        })),
+      };
+    }
+    if (n.kind === 'cinema') {
+      const rowN = n.rowDomain?.length || 1, colN = n.colDomain?.length || 1;
+      const totalCells = (n.rowVar || n.colVar) ? rowN * colN : 0;
+      return {
+        ...base,
+        cinemaType: n.cinemaType, rowVar: n.rowVar, colVar: n.colVar,
+        rowDomainSize: n.rowDomain?.length || 0, colDomainSize: n.colDomain?.length || 0,
+        totalCells, blockedCount: (n.blockedCells || []).length,
+        rowDomain: includeDomains ? [...(n.rowDomain || [])] : null,
+        colDomain: includeDomains ? [...(n.colDomain || [])] : null,
+        blockedCells: includeDomains ? [...(n.blockedCells || [])] : null,
+        routes: { ...n.routes },
+      };
+    }
+    if (n.kind === 'lens') {
+      return {
+        ...base,
+        ruleCount: (n.rules || []).length,
+        rules: (n.rules || []).map(r => ({ col: r.col, operator: r.operator, logic: r.logic, value: includeDomains ? r.value : null })),
+        to: n.to,
+      };
+    }
+    return { ...base, terminal: n.terminal };
+  });
+}
+
+// Contrato de Privacidade aplicado ao funil: a granularidade por VALOR (`funnelRows[].value`,
+// ex. "G1", "F2|LOJA") é, ela própria, domínio N2. Com o toggle desligado, agrega por NÓ
+// (soma os valores do mesmo nó) — o documento ainda mostra o funil (contagens/taxas, N1),
+// só não expõe QUAL valor gerou cada linha. `reliability` reusa este mesmo array já redigido
+// (chamador único), então a confiabilidade também nunca vaza valor de domínio.
+function redactFunnel(funnel, includeDomains) {
+  if (includeDomains) return funnel;
+  const byNode = new Map();
+  for (const r of funnel.rows) {
+    let acc = byNode.get(r.nodeId);
+    if (!acc) {
+      acc = {
+        nodeId: r.nodeId, nodeName: r.nodeName, stepOrder: r.stepOrder, value: null,
+        qty: 0, approvedQty: 0, rejectedQty: 0,
+        qtdAltasSum: 0, qtdAltasInferSum: 0, inadRealSum: 0, inadInferidaSum: 0,
+      };
+      byNode.set(r.nodeId, acc);
+    }
+    acc.qty += r.qty; acc.approvedQty += r.approvedQty; acc.rejectedQty += r.rejectedQty;
+    acc.qtdAltasSum += r.qtdAltasSum; acc.qtdAltasInferSum += r.qtdAltasInferSum;
+    acc.inadRealSum += r.inadRealSum; acc.inadInferidaSum += r.inadInferidaSum;
+  }
+  const rows = [...byNode.values()]
+    .sort((a, b) => a.stepOrder - b.stepOrder)
+    .map(a => ({
+      ...a,
+      approvalRate: a.qty > 0 ? a.approvedQty / a.qty : null,
+      inadReal: a.qtdAltasSum > 0 ? a.inadRealSum / a.qtdAltasSum : null,
+      inadInferida: a.qtdAltasInferSum > 0 ? a.inadInferidaSum / a.qtdAltasInferSum
+                  : a.approvedQty > 0 ? a.inadInferidaSum / a.approvedQty : null,
+    }));
+  return { rows, totals: funnel.totals };
+}
+
+// Substituto local do `InferenceSignal`/`confiabVolume` documentados no épico (docs/wiki/
+// Copiloto-DocumentacaoAutomatica.md) — essa sinalização dependia da "Tabela de Inferência
+// de Referência", removida do produto (ver CLAUDE.md, bump de schema 2.5). Mantém o ESPÍRITO
+// da seção (avisar quando um número vem de amostra pequena) usando o volume de altas
+// REAIS/inferidas já presente no funil — mesmo piso de bom-senso estatístico (n>=30) usado
+// informalmente em crédito para uma taxa não ser pura oscilação de amostra.
+const RELIABILITY_MIN_SAMPLE = 30;
+function computeReliability(funnelRows) {
+  const lowSampleRows = (funnelRows || [])
+    .filter(r => r.qtdAltasSum > 0 || r.qtdAltasInferSum > 0)
+    .filter(r => r.qtdAltasSum < RELIABILITY_MIN_SAMPLE || r.qtdAltasInferSum < RELIABILITY_MIN_SAMPLE)
+    .map(r => ({ nodeId: r.nodeId, nodeName: r.nodeName, value: r.value, qtdAltasSum: r.qtdAltasSum, qtdAltasInferSum: r.qtdAltasInferSum }));
+  return { minSample: RELIABILITY_MIN_SAMPLE, lowSampleRows, hasLowSample: lowSampleRows.length > 0 };
+}
+
+// Comparação de cenários (item 4 do épico) — reaproveita o MESMO par de primitivas do
+// pipeline 5B (computeSimulatedDecisions + computeIncrementalResult) em vez de montar o
+// dataset largo colunar inteiro (que existe para PIVOT de gráfico, não para uma tabela de
+// poucas linhas): 1 overlay + 1 agregado por cenário incluído. `baseline` é o mesmo AS IS
+// para todos os cenários (deriva só do csvStore, não do canvas) — computado uma vez pelo
+// chamador (mesmo tick do KPI) e reaproveitado. Sem AS IS configurado em NENHUM dataset,
+// `baseline` chega `null` e a função devolve `null` — a seção declara "sem baseline" no
+// docModel em vez de omitir silenciosamente (degradação do épico).
+function computeScenarioComparison(canvasInputs, csvStore, baseline, activeSimulated, activeId, activeName) {
+  if (!baseline) return null;
+  const rows = [{ id: 'as_is', nome: 'AS IS', ...baseline }];
+  const seen = new Set();
+  if (activeSimulated) {
+    rows.push({ id: activeId || 'ativo', nome: activeName || 'Cenário Atual', ...activeSimulated });
+    if (activeId) seen.add(activeId);
+  }
+  for (const ci of (canvasInputs || [])) {
+    if (seen.has(ci.id)) continue;
+    seen.add(ci.id);
+    const { populations } = computeLensPopulations(ci.shapes, csvStore);
+    const overlay = computeSimulatedDecisions(ci.shapes, ci.conns, csvStore, populations);
+    const inc = computeIncrementalResult(overlay, csvStore);
+    if (!inc) continue;
+    rows.push({ id: ci.id, nome: ci.nome, ...inc.simulated });
+  }
+  return { rows };
+}
+
+// Glossário (item 6 do épico) — mesma varredura de `extractPolicyRequiredVars` (App.jsx,
+// Copiloto Sessão 2), reimplementada aqui (worker não importa App.jsx) e enriquecida com os
+// metadados de coluna já presentes em `ir.datasets` (Contrato N0 — nomes/tipos/tamanho de
+// domínio, sem dados). A lista de VALORES do domínio (N2) só é lida do csvStore quando
+// `includeDomains` — nunca por padrão.
+function extractPolicyDocVars(ir) {
+  const byKey = new Map();
+  const add = (col, csvId, kind) => {
+    if (!col) return;
+    const key = `${csvId ?? ''} ${col}`;
+    const prev = byKey.get(key);
+    if (!prev) byKey.set(key, { col, csvId: csvId ?? null, kind });
+    else if (kind === 'decision' && prev.kind !== 'decision') prev.kind = 'decision';
+  };
+  for (const n of (ir?.nodes || [])) {
+    if (n.kind === 'decision') add(n.variable?.col, n.variable?.csvId, 'decision');
+    else if (n.kind === 'cinema') {
+      add(n.rowVar?.col, n.rowVar?.csvId, 'decision');
+      add(n.colVar?.col, n.colVar?.csvId, 'decision');
+    } else if (n.kind === 'lens') {
+      for (const r of (n.rules || [])) add(r.col, null, 'any');
+    }
+  }
+  return [...byKey.values()];
+}
+
+function buildGlossary(ir, csvStore, includeDomains) {
+  const vars = extractPolicyDocVars(ir);
+  const datasets = ir?.datasets || [];
+  return vars.map(v => {
+    let colMeta = null, csvName = null, csvId = v.csvId;
+    if (csvId) {
+      const ds = datasets.find(d => d.csvId === csvId);
+      colMeta = ds?.columns?.find(c => c.name === v.col) ?? null;
+      csvName = ds?.name ?? null;
+    }
+    // kind 'any' (regra de lens) não tem csvId próprio — casa por NOME em qualquer dataset
+    // carregado, mesma semântica de rowMatchesLensRules/extractPolicyRequiredVars.
+    if (!colMeta) {
+      for (const d of datasets) {
+        const found = d.columns.find(c => c.name === v.col);
+        if (found) { colMeta = found; csvName = d.name; csvId = d.csvId; break; }
+      }
+    }
+    let values = null;
+    if (includeDomains && csvId && csvStore[csvId] && isColumnar(csvStore[csvId])) {
+      const col = csvStore[csvId].columns[v.col];
+      if (col && col.kind === 'dict') values = col.dict.filter(x => x !== '' && x != null);
+    }
+    return {
+      col: v.col, csvId, csvName, role: v.kind,
+      colType: colMeta?.colType ?? null, varType: colMeta?.varType ?? null,
+      domainSize: colMeta?.domainSize ?? null,
+      values,
+    };
+  }).sort((a, b) => a.col.localeCompare(b.col) || (a.csvId || '').localeCompare(b.csvId || ''));
+}
+
+// Ponto de entrada de COMPUTE_POLICY_DOC — monta o docModel inteiro numa única passada
+// (mesma base, mesmo IR) para garantir uma FOTOGRAFIA consistente (determinismo do GATE):
+// duas chamadas com os MESMOS shapes/conns/ir/options produzem o MESMO docModel (módulo
+// `generatedAt`). `ir` chega pronto (buildPolicyIR só existe em App.jsx). Quando
+// `options.compare` é dado (canvas de comparação para o changelog), computa também os KPIs
+// dessa segunda política no MESMO passe — o diff estrutural (`diffPolicyIR`) e a montagem do
+// changelog ficam a cargo da main (só ela tem o IR da comparação pronto e a função de diff).
+function computePolicyDoc(shapes, conns, csvStore, ir, canvasInputs, options = {}) {
+  const includeDomains = !!options.includeDomains;
+  const { populations } = computeLensPopulations(shapes, csvStore);
+  const { simResult, incrementalResult } = computeSimulationTick(shapes, conns, csvStore, populations);
+
+  const funnel = redactFunnel(computeFunnelByNode(shapes, conns, csvStore), includeDomains);
+  const reliability = computeReliability(funnel.rows);
+  const scenarios = computeScenarioComparison(
+    canvasInputs, csvStore,
+    incrementalResult?.baseline ?? null, incrementalResult?.simulated ?? null,
+    options.activeCanvasId ?? null, options.activeCanvasName ?? null,
+  );
+  const glossary = buildGlossary(ir, csvStore, includeDomains);
+  const { list: rawPaths, truncated: pathsTruncated } = buildPolicyPaths(ir);
+  const paths = redactPathConditions(rawPaths, includeDomains);
+  const flowNodes = buildFlowNodes(ir, includeDomains);
+
+  const docModel = {
+    version: '1.0',
+    generatedAt: new Date().toISOString(),
+    options: { includeDomains },
+    meta: {
+      name: options.name ?? ir?.name ?? null,
+      nodeCount: (ir?.nodes || []).length,
+      entryCount: (ir?.entry || []).length,
+    },
+    ir,
+    flowNodes,
+    paths: { list: paths, truncated: pathsTruncated },
+    kpis: { simResult, incrementalResult },
+    funnel,
+    reliability,
+    scenarios,
+    glossary,
+  };
+
+  if (options.compare && options.compare.shapes) {
+    const cmpPop = computeLensPopulations(options.compare.shapes, csvStore).populations;
+    const cmpTick = computeSimulationTick(options.compare.shapes, options.compare.conns || [], csvStore, cmpPop);
+    docModel.compareKpis = { simResult: cmpTick.simResult, incrementalResult: cmpTick.incrementalResult };
+  }
+
+  return docModel;
+}
+
 // Lista de ArrayBuffers das colunas do dataset largo — transferíveis (zero-cópia) no
 // postMessage de ANALYTICS_RESULT. Cada coluna tem seu próprio buffer (nunca compartilhado),
 // então a lista é livre de duplicatas. Após a transferência os typed arrays do worker ficam
@@ -3921,6 +4373,17 @@ function handleMessage(e) {
     self.postMessage({ type: 'VARIABLE_RANKING_RESULT', ...result });
     return;
   }
+
+  // Documentação Automática (Copiloto Sessão 6) — geração on-demand ao abrir o modal de
+  // composição; não entra no cache do tick (não é um gesto de edição recorrente). `ir`
+  // chega pronto no payload (buildPolicyIR só existe em App.jsx); `canvases` são as abas
+  // marcadas incluídas na comparação de cenários (mesmo formato de COMPUTE_ANALYTICS_DATASET).
+  if (type === 'COMPUTE_POLICY_DOC') {
+    const { shapes, conns = [], ir, canvases = [], options = {} } = e.data;
+    const docModel = computePolicyDoc(shapes, conns, workerCsvStore, ir, canvases, options);
+    self.postMessage({ type: 'POLICY_DOC_RESULT', docModel });
+    return;
+  }
 }
 
 // Só registra o handler em contexto de worker real; permite importar as funções
@@ -3957,5 +4420,13 @@ export {
   detectSimplifyCandidates,
   computeSimplifyEquivalence,
   computeLensStats,
+  computeFunnelByNode,
+  redactFunnel,
+  buildPolicyPaths,
+  buildFlowNodes,
+  computeReliability,
+  computeScenarioComparison,
+  buildGlossary,
+  computePolicyDoc,
   __setWorkerCsvStoreForTest,
 };

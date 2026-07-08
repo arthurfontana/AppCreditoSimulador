@@ -3316,6 +3316,415 @@ export function applyPolicyVarMapping(ir, mapping = {}) {
   return { ...ir, nodes };
 }
 
+// ── Documentação Automática (Copiloto Sessão 6, DEC-IA-006) ──────────────────
+// O worker (COMPUTE_POLICY_DOC/POLICY_DOC_RESULT) devolve o docModel — árvore de
+// seções com dados NUMÉRICOS CRUS, nunca prosa pronta. As funções abaixo são a
+// APRESENTAÇÃO: puras (mesmo docModel ⇒ mesmo texto, sem tocar worker/csvStore),
+// para que o Nível 2 (reescrita em prosa por IA) receba o docModel e não HTML, e para
+// que o GATE (tests/policyDoc.test.js) possa verificar determinismo/privacidade só
+// inspecionando string de saída.
+
+// Diff estrutural entre dois PolicyIR (item 5 do épico — changelog) — reusável pelo
+// chat (Nível 3) e pelo Goal Seek (exibir movimentos como "mudanças de IR"), como
+// sugerido no épico. Casa nós pelo `id` — correto quando os dois IR vêm da MESMA
+// linhagem de canvas (edição in-place, undo/redo, comparação com um snapshot salvo:
+// os ids são estáveis nesses casos). Comparar com um canvas clonado via
+// `cloneCanvasWithNewIds` (ids todos novos) degrada para "tudo removido + tudo
+// adicionado" — limitação documentada, mesmo padrão do "Limite documentado" do IR.
+export function diffPolicyIR(a, b) {
+  const nodesA = new Map((a?.nodes || []).map(n => [n.id, n]));
+  const nodesB = new Map((b?.nodes || []).map(n => [n.id, n]));
+  const added = [], removed = [], changed = [];
+
+  const fieldsOf = (na, nb) => {
+    const fields = [];
+    const cmp = (key, va, vb) => { if (JSON.stringify(va) !== JSON.stringify(vb)) fields.push({ key, before: va, after: vb }); };
+    cmp('label', na.label, nb.label);
+    if (na.kind === 'decision') { cmp('variable', na.variable, nb.variable); cmp('routes', na.routes, nb.routes); }
+    else if (na.kind === 'cinema') {
+      cmp('cinemaType', na.cinemaType, nb.cinemaType);
+      cmp('rowVar', na.rowVar, nb.rowVar); cmp('colVar', na.colVar, nb.colVar);
+      cmp('rowDomain', na.rowDomain, nb.rowDomain); cmp('colDomain', na.colDomain, nb.colDomain);
+      cmp('blockedCells', na.blockedCells, nb.blockedCells);
+      cmp('routes', na.routes, nb.routes);
+    } else if (na.kind === 'lens') { cmp('rules', na.rules, nb.rules); cmp('to', na.to, nb.to); }
+    else if (na.kind === 'terminal') { cmp('terminal', na.terminal, nb.terminal); }
+    return fields;
+  };
+
+  for (const [id, nb] of nodesB) {
+    const na = nodesA.get(id);
+    if (!na) { added.push({ id, kind: nb.kind, label: nb.label }); continue; }
+    if (na.kind !== nb.kind) {
+      changed.push({ id, kind: nb.kind, label: nb.label, fields: [{ key: 'kind', before: na.kind, after: nb.kind }] });
+      continue;
+    }
+    const fields = fieldsOf(na, nb);
+    if (fields.length > 0) changed.push({ id, kind: nb.kind, label: nb.label, fields });
+  }
+  for (const [id, na] of nodesA) {
+    if (!nodesB.has(id)) removed.push({ id, kind: na.kind, label: na.label });
+  }
+
+  const entryA = a?.entry || [], entryB = b?.entry || [];
+  const entryChanged = entryA.length !== entryB.length || entryA.some((id, i) => id !== entryB[i]);
+
+  return { added, removed, changed, entryChanged };
+}
+
+// Hash não-criptográfico curto (FNV-1a 32-bit) — só para o carimbo de rastreabilidade
+// do documento ("hash da política"), nunca para integridade/segurança.
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+function hashPolicyIR(ir) {
+  const { generatedAt, ...rest } = ir || {};
+  return fnv1a(JSON.stringify(rest));
+}
+
+const LENS_OP_LABEL = Object.fromEntries(LENS_OPERATORS.map(o => [o.value, o.label]));
+const fmtPct100 = (v) => v == null ? 'N/A' : `${v.toFixed(2)}%`;
+const fmtDelta100 = (v) => v == null ? 'N/A' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}pp`;
+
+function describeLensRule(rule) {
+  const opLabel = LENS_OP_LABEL[rule.operator] || rule.operator;
+  const valueText = rule.value == null ? '(valor omitido)' : `"${rule.value}"`;
+  return `${rule.col ?? '?'} ${opLabel} ${valueText}`;
+}
+function describeLensRules(rules) {
+  if (!rules || rules.length === 0) return '(sem regras — deixa passar 100% do volume)';
+  let out = describeLensRule(rules[0]);
+  for (let i = 1; i < rules.length; i++) out += (rules[i - 1].logic === 'OR' ? ' OU ' : ' E ') + describeLensRule(rules[i]);
+  return out;
+}
+// Condição de um path achatado (raiz→terminal) — texto plano, reusado por Markdown/HTML.
+function describeCondition(cond) {
+  if (cond.kind === 'decision') {
+    return cond.values
+      ? `${cond.col || cond.label} ∈ {${cond.values.join(', ')}}`
+      : `${cond.col || cond.label} (${cond.valueCount} valor(es), domínio omitido)`;
+  }
+  if (cond.kind === 'cinema') return `${cond.label}: ${cond.eligible ? 'elegível' : 'não elegível'}`;
+  if (cond.kind === 'lens') return `${cond.label}: ${describeLensRules(cond.rules)}`;
+  return cond.label || '?';
+}
+const PATH_REASON_LABEL = {
+  ciclo: 'ciclo no fluxo (loop) — não finaliza',
+  sem_destino: 'sem destino conectado — não finaliza',
+  destino_inexistente: 'destino inexistente — não finaliza',
+  sem_rotas: 'sem rotas configuradas — não finaliza',
+};
+function describeFlowNode(fn) {
+  if (fn.kind === 'decision') {
+    const routesText = fn.routes.map(r => {
+      const dest = r.to || '(sem destino)';
+      const vals = r.values ? `{${r.values.join(', ')}}` : `${r.valueCount} valor(es) (domínio omitido)`;
+      return `${vals} → ${dest}`;
+    }).join('; ');
+    return `Segmenta as propostas por **${fn.variable?.col || fn.label}**: ${routesText || '(sem rotas)'}.`;
+  }
+  if (fn.kind === 'cinema') {
+    const axis = [fn.rowVar?.col, fn.colVar?.col].filter(Boolean).join(' × ') || '(sem eixos configurados)';
+    const cellsText = fn.blockedCells
+      ? `${fn.blockedCells.length} de ${fn.totalCells} combinação(ões) não elegível(is): ${fn.blockedCells.join(', ') || '(nenhuma)'}`
+      : `${fn.blockedCount} de ${fn.totalCells} combinação(ões) não elegível(is) (domínio omitido)`;
+    return `Matriz cruzada (Cineminha) sobre **${axis}**: ${cellsText}.`;
+  }
+  if (fn.kind === 'lens') return `Filtra a população por: ${describeLensRules(fn.rules)}.`;
+  if (fn.kind === 'terminal') {
+    if (fn.terminal === 'approved') return `Encerra o caminho como **Aprovado**.`;
+    if (fn.terminal === 'rejected') return `Encerra o caminho como **Reprovado**.`;
+    return `Encerra o caminho mantendo a **decisão histórica (AS IS)**.`;
+  }
+  return '';
+}
+function describePath(p) {
+  const conds = p.conditions.map(describeCondition).join(' E ') || '(sem condições — raiz é terminal)';
+  if (p.terminal) return `SE ${conds} ⇒ ${POLICY_TERMINAL_LABELS[p.terminal] || p.terminal}`;
+  return `SE ${conds} ⇒ (${PATH_REASON_LABEL[p.reason] || 'sem finalização'})`;
+}
+
+function mdTable(headers, rows) {
+  const line = (cells) => `| ${cells.join(' | ')} |`;
+  return [line(headers), line(headers.map(() => '---')), ...rows.map(line)].join('\n');
+}
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+function mdBoldToHtml(s) {
+  return escHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+function htmlTable(headers, rows) {
+  const th = headers.map(h => `<th>${escHtml(h)}</th>`).join('');
+  const trs = rows.map(r => `<tr>${r.map(c => `<td>${escHtml(c)}</td>`).join('')}</tr>`).join('');
+  return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`;
+}
+
+// Renderiza o docModel como Markdown — download `.md` (item 7 do épico). Determinístico:
+// mesmo docModel ⇒ mesma string (exceto `generatedAt`, carimbado à parte).
+export function renderDocMarkdown(docModel) {
+  if (!docModel) return '';
+  const { meta, ir, flowNodes, paths, kpis, funnel, reliability, scenarios, glossary, changelog, options } = docModel;
+  const L = [];
+  const p = (s = '') => L.push(s);
+
+  p(`# Documento de Política de Crédito${meta?.name ? ` — ${meta.name}` : ''}`);
+  p('');
+  p(`_Gerado em ${new Date(docModel.generatedAt).toLocaleString('pt-BR')} · build #${BUILD_NUMBER} (${BUILD_HASH}) · hash da política: ${hashPolicyIR(ir)}${options?.includeDomains ? '' : ' · domínios de valores omitidos'}_`);
+  p('');
+
+  p('## Sumário Executivo');
+  p('');
+  const { simResult, incrementalResult } = kpis || {};
+  if (simResult) {
+    p(`- **Taxa de Aprovação (simulada):** ${fmtPct100(simResult.approvalRate)}`);
+    p(`- **Inad. Real:** ${fmtPct(simResult.inadReal)}`);
+    p(`- **Inad. Inferida:** ${fmtPct(simResult.inadInferida)}`);
+    p(`- **Volume total:** ${fmtQty(simResult.totalQty)} (✅ ${fmtQty(simResult.approvedQty)} · ❌ ${fmtQty(simResult.rejectedQty)}${simResult.asIsQty ? ` · ⟳ ${fmtQty(simResult.asIsQty)}` : ''})`);
+  }
+  if (incrementalResult) {
+    p('');
+    p('**Comparativo vs. AS IS**');
+    p('');
+    p(mdTable(
+      ['', 'AS IS', 'Simulado', 'Delta'],
+      [
+        ['Taxa de Aprovação', fmtPct100(incrementalResult.baseline.approvalRate), fmtPct100(incrementalResult.simulated.approvalRate), fmtDelta100(incrementalResult.impacted.approvalDelta)],
+        ['Inad. Real', fmtPct(incrementalResult.baseline.inadReal), fmtPct(incrementalResult.simulated.inadReal), ''],
+        ['Inad. Inferida', fmtPct(incrementalResult.baseline.inadInferida), fmtPct(incrementalResult.simulated.inadInferida), ''],
+      ],
+    ));
+    p('');
+    p(`População impactada: ${fmtQty(incrementalResult.impacted.qty)} (${fmtPct100(incrementalResult.impacted.pct)}) — ${fmtQty(incrementalResult.impacted.rToA)} promovida(s) (Reprovado→Aprovado), ${fmtQty(incrementalResult.impacted.aToR)} rejeitada(s) a mais (Aprovado→Reprovado).`);
+  } else {
+    p('');
+    p('_Baseline AS IS não configurada — sem comparativo disponível._');
+  }
+  p('');
+
+  p('## Fluxo da Política');
+  p('');
+  if (!flowNodes || flowNodes.length === 0) {
+    p('_Canvas vazio — nenhum nó de fluxo._');
+  } else {
+    for (const fn of flowNodes) p(`- **${fn.label}** _(${fn.kind})_ — ${describeFlowNode(fn)}`);
+  }
+  p('');
+
+  p('## Regras Achatadas (raiz → terminal)');
+  p('');
+  if (!paths || paths.list.length === 0) {
+    p('_Sem caminhos — nenhuma raiz de fluxo configurada._');
+  } else {
+    paths.list.forEach((path, i) => p(`${i + 1}. ${describePath(path)}`));
+    if (paths.truncated) p('');
+    if (paths.truncated) p('_(lista truncada — política com combinações demais para listar por completo)_');
+  }
+  p('');
+
+  p('## Funil por Nó e Valor');
+  p('');
+  if (!funnel || funnel.rows.length === 0) {
+    p('_Sem dados de funil — nenhuma raiz de fluxo configurada._');
+  } else {
+    p(mdTable(
+      ['Nó', 'Valor', 'Volume', 'Aprovado', 'Reprovado', 'Taxa Aprov.', 'Inad. Real', 'Inad. Inferida'],
+      funnel.rows.map(r => [r.nodeName, r.value ?? '(agregado por nó)', fmtQty(r.qty), fmtQty(r.approvedQty), fmtQty(r.rejectedQty), fmtPct(r.approvalRate), fmtPct(r.inadReal), fmtPct(r.inadInferida)]),
+    ));
+    if (funnel.totals) {
+      p('');
+      p(`**Total:** ${fmtQty(funnel.totals.qty)} propostas · ${fmtPct100((funnel.totals.approvalRate ?? 0) * 100)} aprovação · Inad. Real ${fmtPct(funnel.totals.inadReal)} · Inad. Inferida ${fmtPct(funnel.totals.inadInferida)}`);
+    }
+  }
+  p('');
+
+  p('## Confiabilidade da Amostra');
+  p('');
+  if (!reliability || !reliability.hasLowSample) {
+    p(`_Nenhum segmento com amostra abaixo de ${reliability?.minSample ?? 30} altas — números estatisticamente estáveis._`);
+  } else {
+    p(`⚠ Os segmentos abaixo têm menos de ${reliability.minSample} altas (real ou inferida) — leia as taxas com cautela (alta variância amostral):`);
+    p('');
+    p(mdTable(['Nó', 'Valor', 'Altas Reais', 'Altas Inferidas'], reliability.lowSampleRows.map(r => [r.nodeName, r.value ?? '(agregado por nó)', fmtQty(r.qtdAltasSum), fmtQty(r.qtdAltasInferSum)])));
+  }
+  p('');
+
+  p('## Comparação de Cenários');
+  p('');
+  if (!scenarios) {
+    p('_Baseline AS IS não configurada — comparação de cenários indisponível._');
+  } else {
+    p(mdTable(
+      ['Cenário', 'Taxa de Aprovação', 'Inad. Real', 'Inad. Inferida'],
+      scenarios.rows.map(r => [r.nome, fmtPct100(r.approvalRate), fmtPct(r.inadReal), fmtPct(r.inadInferida)]),
+    ));
+  }
+  p('');
+
+  if (changelog) {
+    p('## Changelog Estrutural');
+    p('');
+    p(`Comparado com: **${changelog.compareName || 'versão anterior'}**`);
+    p('');
+    const { added, removed, changed, entryChanged } = changelog.irDiff;
+    if (added.length === 0 && removed.length === 0 && changed.length === 0 && !entryChanged) {
+      p('_Nenhuma diferença estrutural._');
+    } else {
+      if (added.length) { p('**Adicionados:**'); for (const n of added) p(`- ${n.label} (${n.kind})`); p(''); }
+      if (removed.length) { p('**Removidos:**'); for (const n of removed) p(`- ${n.label} (${n.kind})`); p(''); }
+      if (changed.length) {
+        p('**Alterados:**');
+        for (const n of changed) for (const f of n.fields) p(`- ${n.label} (${n.kind}) — campo \`${f.key}\` mudou`);
+        p('');
+      }
+      if (entryChanged) p('- Raízes do fluxo (`entry`) mudaram.');
+    }
+    p('');
+    p(mdTable(
+      ['', 'Antes', 'Depois'],
+      [
+        ['Taxa de Aprovação', fmtPct100(changelog.before.kpis.approvalRate), fmtPct100(changelog.after.kpis.approvalRate)],
+        ['Inad. Real', fmtPct(changelog.before.kpis.inadReal), fmtPct(changelog.after.kpis.inadReal)],
+        ['Inad. Inferida', fmtPct(changelog.before.kpis.inadInferida), fmtPct(changelog.after.kpis.inadInferida)],
+      ],
+    ));
+    p('');
+  }
+
+  p('## Glossário de Variáveis');
+  p('');
+  if (!glossary || glossary.length === 0) {
+    p('_Nenhuma variável referenciada._');
+  } else {
+    p(mdTable(
+      ['Coluna', 'Base', 'Papel', 'Tipo', 'Tipo de Variável', 'Domínio'],
+      glossary.map(g => [
+        g.col, g.csvName || '—', g.role === 'decision' ? 'Decisão' : 'Regra (Lens)',
+        COL_TYPES.find(t => t.value === g.colType)?.label || g.colType || '—',
+        g.varType || '—',
+        g.values ? g.values.join(', ') : (g.domainSize != null ? `${g.domainSize} valor(es)` : '—'),
+      ]),
+    ));
+  }
+
+  return L.join('\n');
+}
+
+// Renderiza o docModel como HTML self-contained (inline styles — ADR-002) para abrir em
+// nova janela e `window.print()` (→ PDF via navegador). Mesmo conteúdo/números do Markdown.
+export function renderDocHTML(docModel) {
+  if (!docModel) return '<html><body>Sem documento.</body></html>';
+  const { meta, ir, flowNodes, paths, kpis, funnel, reliability, scenarios, glossary, changelog, options } = docModel;
+  const S = [];
+  const h = (level, text) => S.push(`<h${level} style="font-family:system-ui,sans-serif;color:#1e293b;">${mdBoldToHtml(text)}</h${level}>`);
+  const para = (text) => S.push(`<p style="font-family:system-ui,sans-serif;color:#334155;line-height:1.6;">${mdBoldToHtml(text)}</p>`);
+  const tableStyle = `<style>
+    table{border-collapse:collapse;width:100%;margin:8px 0 16px;font-family:system-ui,sans-serif;font-size:13px;}
+    th,td{border:1px solid #cbd5e1;padding:6px 10px;text-align:left;}
+    th{background:#f1f5f9;color:#334155;}
+    body{max-width:900px;margin:32px auto;padding:0 16px;}
+    ul{font-family:system-ui,sans-serif;color:#334155;line-height:1.7;}
+    @media print { body{margin:0;padding:16px;} }
+  </style>`;
+
+  S.push(`<!doctype html><html><head><meta charset="utf-8"><title>Documento de Política${meta?.name ? ` — ${escHtml(meta.name)}` : ''}</title>${tableStyle}</head><body>`);
+  h(1, `Documento de Política de Crédito${meta?.name ? ` — ${meta.name}` : ''}`);
+  S.push(`<p style="font-family:system-ui,sans-serif;color:#94a3b8;font-size:12px;">Gerado em ${escHtml(new Date(docModel.generatedAt).toLocaleString('pt-BR'))} · build #${escHtml(BUILD_NUMBER)} (${escHtml(BUILD_HASH)}) · hash da política: ${hashPolicyIR(ir)}${options?.includeDomains ? '' : ' · domínios de valores omitidos'}</p>`);
+
+  h(2, 'Sumário Executivo');
+  const { simResult, incrementalResult } = kpis || {};
+  if (simResult) {
+    S.push(`<ul>
+      <li><strong>Taxa de Aprovação (simulada):</strong> ${fmtPct100(simResult.approvalRate)}</li>
+      <li><strong>Inad. Real:</strong> ${fmtPct(simResult.inadReal)}</li>
+      <li><strong>Inad. Inferida:</strong> ${fmtPct(simResult.inadInferida)}</li>
+      <li><strong>Volume total:</strong> ${fmtQty(simResult.totalQty)} (✅ ${fmtQty(simResult.approvedQty)} · ❌ ${fmtQty(simResult.rejectedQty)}${simResult.asIsQty ? ` · ⟳ ${fmtQty(simResult.asIsQty)}` : ''})</li>
+    </ul>`);
+  }
+  if (incrementalResult) {
+    para('**Comparativo vs. AS IS**');
+    S.push(htmlTable(['', 'AS IS', 'Simulado', 'Delta'], [
+      ['Taxa de Aprovação', fmtPct100(incrementalResult.baseline.approvalRate), fmtPct100(incrementalResult.simulated.approvalRate), fmtDelta100(incrementalResult.impacted.approvalDelta)],
+      ['Inad. Real', fmtPct(incrementalResult.baseline.inadReal), fmtPct(incrementalResult.simulated.inadReal), ''],
+      ['Inad. Inferida', fmtPct(incrementalResult.baseline.inadInferida), fmtPct(incrementalResult.simulated.inadInferida), ''],
+    ]));
+    para(`População impactada: ${fmtQty(incrementalResult.impacted.qty)} (${fmtPct100(incrementalResult.impacted.pct)}) — ${fmtQty(incrementalResult.impacted.rToA)} promovida(s) (Reprovado→Aprovado), ${fmtQty(incrementalResult.impacted.aToR)} rejeitada(s) a mais (Aprovado→Reprovado).`);
+  } else {
+    para('_Baseline AS IS não configurada — sem comparativo disponível._');
+  }
+
+  h(2, 'Fluxo da Política');
+  if (!flowNodes || flowNodes.length === 0) para('_Canvas vazio — nenhum nó de fluxo._');
+  else S.push(`<ul>${flowNodes.map(fn => `<li><strong>${escHtml(fn.label)}</strong> <em>(${escHtml(fn.kind)})</em> — ${mdBoldToHtml(describeFlowNode(fn))}</li>`).join('')}</ul>`);
+
+  h(2, 'Regras Achatadas (raiz → terminal)');
+  if (!paths || paths.list.length === 0) para('_Sem caminhos — nenhuma raiz de fluxo configurada._');
+  else {
+    S.push(`<ol style="font-family:system-ui,sans-serif;color:#334155;line-height:1.7;">${paths.list.map(path => `<li>${escHtml(describePath(path))}</li>`).join('')}</ol>`);
+    if (paths.truncated) para('_(lista truncada — política com combinações demais para listar por completo)_');
+  }
+
+  h(2, 'Funil por Nó e Valor');
+  if (!funnel || funnel.rows.length === 0) para('_Sem dados de funil — nenhuma raiz de fluxo configurada._');
+  else {
+    S.push(htmlTable(
+      ['Nó', 'Valor', 'Volume', 'Aprovado', 'Reprovado', 'Taxa Aprov.', 'Inad. Real', 'Inad. Inferida'],
+      funnel.rows.map(r => [r.nodeName, r.value ?? '(agregado por nó)', fmtQty(r.qty), fmtQty(r.approvedQty), fmtQty(r.rejectedQty), fmtPct(r.approvalRate), fmtPct(r.inadReal), fmtPct(r.inadInferida)]),
+    ));
+    if (funnel.totals) para(`<strong>Total:</strong> ${fmtQty(funnel.totals.qty)} propostas · ${fmtPct100((funnel.totals.approvalRate ?? 0) * 100)} aprovação · Inad. Real ${fmtPct(funnel.totals.inadReal)} · Inad. Inferida ${fmtPct(funnel.totals.inadInferida)}`);
+  }
+
+  h(2, 'Confiabilidade da Amostra');
+  if (!reliability || !reliability.hasLowSample) para(`_Nenhum segmento com amostra abaixo de ${reliability?.minSample ?? 30} altas — números estatisticamente estáveis._`);
+  else {
+    para(`⚠ Os segmentos abaixo têm menos de ${reliability.minSample} altas (real ou inferida) — leia as taxas com cautela (alta variância amostral):`);
+    S.push(htmlTable(['Nó', 'Valor', 'Altas Reais', 'Altas Inferidas'], reliability.lowSampleRows.map(r => [r.nodeName, r.value ?? '(agregado por nó)', fmtQty(r.qtdAltasSum), fmtQty(r.qtdAltasInferSum)])));
+  }
+
+  h(2, 'Comparação de Cenários');
+  if (!scenarios) para('_Baseline AS IS não configurada — comparação de cenários indisponível._');
+  else S.push(htmlTable(['Cenário', 'Taxa de Aprovação', 'Inad. Real', 'Inad. Inferida'], scenarios.rows.map(r => [r.nome, fmtPct100(r.approvalRate), fmtPct(r.inadReal), fmtPct(r.inadInferida)])));
+
+  if (changelog) {
+    h(2, 'Changelog Estrutural');
+    para(`Comparado com: <strong>${escHtml(changelog.compareName || 'versão anterior')}</strong>`);
+    const { added, removed, changed, entryChanged } = changelog.irDiff;
+    if (added.length === 0 && removed.length === 0 && changed.length === 0 && !entryChanged) {
+      para('_Nenhuma diferença estrutural._');
+    } else {
+      if (added.length) S.push(`<p><strong>Adicionados:</strong></p><ul>${added.map(n => `<li>${escHtml(n.label)} (${escHtml(n.kind)})</li>`).join('')}</ul>`);
+      if (removed.length) S.push(`<p><strong>Removidos:</strong></p><ul>${removed.map(n => `<li>${escHtml(n.label)} (${escHtml(n.kind)})</li>`).join('')}</ul>`);
+      if (changed.length) S.push(`<p><strong>Alterados:</strong></p><ul>${changed.flatMap(n => n.fields.map(f => `<li>${escHtml(n.label)} (${escHtml(n.kind)}) — campo <code>${escHtml(f.key)}</code> mudou</li>`)).join('')}</ul>`);
+      if (entryChanged) para('- Raízes do fluxo (entry) mudaram.');
+    }
+    S.push(htmlTable(['', 'Antes', 'Depois'], [
+      ['Taxa de Aprovação', fmtPct100(changelog.before.kpis.approvalRate), fmtPct100(changelog.after.kpis.approvalRate)],
+      ['Inad. Real', fmtPct(changelog.before.kpis.inadReal), fmtPct(changelog.after.kpis.inadReal)],
+      ['Inad. Inferida', fmtPct(changelog.before.kpis.inadInferida), fmtPct(changelog.after.kpis.inadInferida)],
+    ]));
+  }
+
+  h(2, 'Glossário de Variáveis');
+  if (!glossary || glossary.length === 0) para('_Nenhuma variável referenciada._');
+  else S.push(htmlTable(
+    ['Coluna', 'Base', 'Papel', 'Tipo', 'Tipo de Variável', 'Domínio'],
+    glossary.map(g => [
+      g.col, g.csvName || '—', g.role === 'decision' ? 'Decisão' : 'Regra (Lens)',
+      COL_TYPES.find(t => t.value === g.colType)?.label || g.colType || '—',
+      g.varType || '—',
+      g.values ? g.values.join(', ') : (g.domainSize != null ? `${g.domainSize} valor(es)` : '—'),
+    ]),
+  ));
+
+  S.push('</body></html>');
+  return S.join('\n');
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [shapes, setShapes] = useState(() => {
@@ -3386,6 +3795,10 @@ export default function App() {
   const [goalSeekModal, setGoalSeekModal] = useState(null); // null | {step:'form'|'loading'|'result', goal, constraints, ...GOAL_SEEK_RESULT}
   // Simplificação com prova de equivalência — Copiloto Sessão 5 (DEC-IA-005/006)
   const [simplifyModal, setSimplifyModal] = useState(null); // null | {step:'loading'|'result', proposal, equivalence}
+  // Documentação Automática — Copiloto Sessão 6 (DEC-IA-006): composição efêmera (mesmo
+  // padrão não-persistido de goalSeekModal/simplifyModal — ver ⚠️ regra do CLAUDE.md).
+  // null | {step:'form'|'loading'|'result', includeDomains, scenarioIds:Set, compareCanvasId, docModel?}
+  const [docModal, setDocModal] = useState(null);
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
@@ -3446,6 +3859,7 @@ export default function App() {
   const johnnyModalR  = useRef(johnnyModal);useEffect(()=>{johnnyModalR.current=johnnyModal},[johnnyModal]);
   const goalSeekModalR = useRef(goalSeekModal); useEffect(()=>{goalSeekModalR.current=goalSeekModal},[goalSeekModal]);
   const simplifyModalR = useRef(simplifyModal); useEffect(()=>{simplifyModalR.current=simplifyModal},[simplifyModal]);
+  const docModalR = useRef(docModal); useEffect(()=>{docModalR.current=docModal},[docModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
@@ -3558,6 +3972,25 @@ export default function App() {
         if (pendingRankingPortIdRef.current !== nodeId) return; // seleção mudou antes da resposta chegar
         pendingRankingPortIdRef.current = null;
         setVariableRankingModal({ portId: nodeId, ...e.data });
+      } else if (msgType === 'POLICY_DOC_RESULT') {
+        // Changelog fica de fora do worker (DEC-IA-006): o diff estrutural (diffPolicyIR) é
+        // uma função pura sobre dois IR — a main já tem os dois prontos (o próprio docModel.ir
+        // e o `compareIr` guardado no modal ao disparar a comparação) — só os KPIs da política
+        // de comparação (compareKpis) precisam varrer a base, e esses já voltam no mesmo passe.
+        const { docModel } = e.data;
+        setDocModal(m => {
+          if (!m) return m;
+          let changelog = null;
+          if (m.compareIr && docModel.compareKpis) {
+            changelog = {
+              compareName: m.compareName || 'versão anterior',
+              irDiff: diffPolicyIR(docModel.ir, m.compareIr),
+              before: { kpis: docModel.compareKpis.simResult, incrementalResult: docModel.compareKpis.incrementalResult },
+              after:  { kpis: docModel.kpis.simResult, incrementalResult: docModel.kpis.incrementalResult },
+            };
+          }
+          return { ...m, step: 'result', docModel: { ...docModel, changelog } };
+        });
       }
     };
     return () => worker.terminate();
@@ -7362,6 +7795,75 @@ export default function App() {
     setSimplifyModal(null);
   };
 
+  // ── Documentação Automática — Copiloto Sessão 6 (DEC-IA-006) ─────────────────
+  // "📄 Documentar política" abre o formulário de composição (toggle de domínios, cenários
+  // a comparar, comparação estrutural); ao confirmar, `ir` é construído aqui (buildPolicyIR
+  // só existe nesta thread) e viaja PRONTO no payload de COMPUTE_POLICY_DOC — o worker só
+  // computa os números que exigem varrer a base (KPIs, funil, confiabilidade, cenários).
+  const openDocModal = () => {
+    setDocModal({ step: 'form', includeDomains: false, compareCanvasId: null });
+  };
+
+  const runPolicyDoc = () => {
+    const cur = docModalR.current;
+    if (!cur) return;
+    const activeId = activeCanvasIdR.current;
+    const ir = buildPolicyIR(shapesR.current, connsR.current, csvStoreR.current, { name: canvasesR.current[activeId]?.name ?? null });
+    const options = {
+      includeDomains: !!cur.includeDomains,
+      activeCanvasId: activeId,
+      activeCanvasName: canvasesR.current[activeId]?.name ?? null,
+    };
+    let compareIr = null, compareName = null;
+    if (cur.compareCanvasId && canvasesR.current[cur.compareCanvasId]) {
+      const cmp = canvasesR.current[cur.compareCanvasId];
+      const cmpShapes = cur.compareCanvasId === activeId ? shapesR.current : (cmp.shapes || []);
+      const cmpConns  = cur.compareCanvasId === activeId ? connsR.current  : (cmp.conns  || []);
+      compareIr = buildPolicyIR(cmpShapes, cmpConns, csvStoreR.current, { name: cmp.name ?? null });
+      compareName = cmp.name || null;
+      options.compare = { shapes: cmpShapes, conns: cmpConns };
+    }
+    setDocModal(m => (m ? { ...m, step: 'loading', compareIr, compareName } : m));
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_POLICY_DOC',
+      shapes: shapesR.current,
+      conns: connsR.current,
+      ir,
+      canvases: buildAnalyticsCanvasInputs(),
+      options,
+    });
+  };
+
+  // Download `.md` — mesmo padrão de doExportPolicyIR (Blob + <a download>, revoke atrasado).
+  const downloadDocMarkdown = () => {
+    const docModel = docModalR.current?.docModel;
+    if (!docModel) return;
+    const md = renderDocMarkdown(docModel);
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `politica_${new Date().toISOString().slice(0,10)}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  };
+
+  // HTML self-contained numa nova janela, pronto para window.print() (→ PDF via navegador).
+  const printDocHTML = () => {
+    const docModel = docModalR.current?.docModel;
+    if (!docModel) return;
+    const html = renderDocHTML(docModel);
+    const w = window.open('', '_blank');
+    if (!w) return;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => { try { w.print(); } catch {} }, 300);
+  };
+
   // ── Sugestão de próximo nó (Copiloto Sessão 3) ─────────────────────────────
   // Dispara o ranking on-demand para a porta selecionada (não entra no tick de
   // edição/cache). `pendingRankingPortIdRef` descarta respostas obsoletas caso a
@@ -8283,6 +8785,13 @@ export default function App() {
               onMouseEnter={e=>{e.currentTarget.style.background="#dcfce7";e.currentTarget.style.borderColor="#86efac";}}
               onMouseLeave={e=>{e.currentTarget.style.background="#f0fdf4";e.currentTarget.style.borderColor="#bbf7d0";}}>
               <span style={{fontSize:16}}>🧹</span> Simplificar
+            </button>
+            <button onClick={openDocModal}
+              title="Gerar documento executivo/técnico da política atual — KPIs, fluxo, regras achatadas, funil, cenários e glossário, com os números da simulação"
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #bfdbfe",background:"#eff6ff",color:"#1d4ed8",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#dbeafe";e.currentTarget.style.borderColor="#93c5fd";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#eff6ff";e.currentTarget.style.borderColor="#bfdbfe";}}>
+              <span style={{fontSize:16}}>📄</span> Documentar Política
             </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
@@ -12092,6 +12601,106 @@ export default function App() {
                         </div>
                       </>
                     )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ DOCUMENTAÇÃO AUTOMÁTICA — Copiloto Sessão 6 (DEC-IA-006) ═══════════════ */}
+      {docModal&&(()=>{
+        const { step, includeDomains, compareCanvasId, docModel } = docModal;
+        const canvasOptions = Object.values(canvases).filter(c => c.id !== activeCanvasId);
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth: step==='result' ? 920 : 480,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#bfdbfe",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>📄</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Documentação Automática</h2>
+                    <p style={{fontSize:11,color:"#1d4ed8"}}>Copiloto Sessão 6 — gerado da política viva, com os números da simulação</p>
+                  </div>
+                </div>
+                <button onClick={()=>setDocModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
+                {step==='form' && (
+                  <div style={{display:"flex",flexDirection:"column",gap:16}}>
+                    <label style={{display:"flex",alignItems:"flex-start",gap:8,fontSize:12.5,color:"#334155",lineHeight:1.5,cursor:"pointer"}}>
+                      <input type="checkbox" checked={!!includeDomains}
+                        onChange={e=>setDocModal(m=>({...m,includeDomains:e.target.checked}))}
+                        style={{marginTop:2}}/>
+                      <span>
+                        <b>Incluir domínios de valores</b> (ex.: R01–R20, Digital/Loja) no documento.
+                        Desligado por padrão — o documento pode circular fora do sistema (Contrato de
+                        Privacidade, N2 opt-in). Nomes de variáveis e números agregados aparecem sempre.
+                      </span>
+                    </label>
+                    <div>
+                      <label style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:6}}>
+                        Changelog — comparar com outro canvas (opcional)
+                      </label>
+                      <select value={compareCanvasId||''} onChange={e=>setDocModal(m=>({...m,compareCanvasId:e.target.value||null}))}
+                        style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",color:"#334155"}}>
+                        <option value="">(nenhum — sem changelog)</option>
+                        {canvasOptions.map(c=> <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"flex-end",gap:8,borderTop:"1px solid #f1f5f9",paddingTop:14}}>
+                      <button onClick={()=>setDocModal(null)}
+                        style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                          color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                        Cancelar
+                      </button>
+                      <button onClick={runPolicyDoc}
+                        style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#2563eb",
+                          color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                        📄 Gerar Documento
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {step==='loading' && (
+                  <div style={{padding:"40px 0",textAlign:"center",color:"#1d4ed8",fontSize:13}}>
+                    Montando sumário, fluxo, regras achatadas, funil e cenários…
+                  </div>
+                )}
+
+                {step==='result' && docModel && (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <iframe title="Prévia do documento" srcDoc={renderDocHTML(docModel)}
+                      style={{width:"100%",height:520,border:"1px solid #e2e8f0",borderRadius:10,background:"#fff"}}/>
+                    <div style={{display:"flex",gap:8,justifyContent:"flex-end",borderTop:"1px solid #f1f5f9",paddingTop:12}}>
+                      <button onClick={()=>setDocModal(m=>({...m,step:'form'}))}
+                        style={{padding:"9px 14px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                          color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                        ← Opções
+                      </button>
+                      <button onClick={downloadDocMarkdown}
+                        style={{padding:"9px 14px",borderRadius:9,border:"1px solid #bfdbfe",background:"#eff6ff",
+                          color:"#1d4ed8",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                        ⬇ Markdown
+                      </button>
+                      <button onClick={printDocHTML}
+                        style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#2563eb",
+                          color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                        🖨 Imprimir / PDF
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
