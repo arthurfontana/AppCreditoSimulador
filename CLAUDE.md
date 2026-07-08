@@ -30,6 +30,7 @@ AppCreditoSimulador/
 │   ├── inferenceCascade.test.js  # GATE: cascata da Tabela de Inferência sobre amostra real
 │   ├── inferenceRef.test.js      # indexInferenceRef + round-trip serialize/deserialize
 │   ├── policyIR.test.js          # GATE Copiloto Sessão 0: roteamento via PolicyIR ≡ motor compilado (M8), round-trip IR→canvas→IR, IR sem posições/dados
+│   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 ├── docs/
@@ -80,6 +81,7 @@ AppCreditoSimulador/
 - `domainModal`: modal "Configurar nó" (domínio exibido) — `null | {shapeId, draft:{val?|row?|col?: null|string[]}}`
 - `lensCounts`: contagens de população impactada por lens, computadas no worker (M10) e recebidas no `OVERLAY_RESULT` — `{[lensId]: {count, total}}` (ponderadas pelo volume; alimentam o rótulo do nó `decision_lens`). As populações por-linha (`Uint8Array`) vivem só no worker, não na main
 - `cinemaLibrary`: biblioteca de configurações de Cineminha salvas localmente — `array`
+- `policyLibrary`: biblioteca de templates de PolicyIR (Copiloto Sessão 2) — `array` de `{id, name, description, tags, ir, requiredVars, savedAt}` (ver "Biblioteca de Políticas")
 - `businessWidget`: widget de impacto de negócio flutuante — `{visible, x, y, w, h}`
 - `activeTab`: aba ativa — `"analysis" | "canvas"` (padrão `"canvas"` — aba exibida no label como "Dashboard")
 - `analyticsDataset`: dataset analítico largo cacheado do worker (`COMPUTE_ANALYTICS_DATASET`) — `null | AnalyticsDataset` (formato **colunar** desde a Otimização de Memória Fase 4 — ver Analytics Workspace / accessors `awColStr`/`awColNum`)
@@ -251,6 +253,7 @@ AppCreditoSimulador/
 - `buildFlowGraph(shapes, conns)`: constrói lista de adjacências do grafo de fluxo para o motor de simulação e `autoLayout`
 - `buildPolicyIR(shapes, conns, csvStore, opts?)`: deriva o **PolicyIR** (JSON canônico da política — Copiloto Sessão 0, DEC-IA-002) do canvas — ver seção "PolicyIR"
 - `applyPolicyPatch(patch, base?)`: materializa um patch de PolicyIR de volta em `{shapes, conns, idMap}` (IDs via contador `_id`/`uid()` existente) — ver seção "PolicyIR"
+- `extractPolicyRequiredVars(ir)` / `applyPolicyVarMapping(ir, mapping)`: variáveis exigidas por um PolicyIR (uma por nome distinto) e remapeamento delas antes de `applyPolicyPatch` — Copiloto Sessão 2, ver "Biblioteca de Políticas"
 - `normalizeColName(s)`: normaliza nome de coluna para comparação fuzzy
 - `exportDiagnosticCSV(shapes, conns, csvStore)`: gera CSV de auditoria com métricas de funil por nó+valor (aprovação, volume, inadimplência) para diagnóstico da política
 - `pivotWidget(ds, config)`: pivot client-side genérico → `{state, data, series, metricDef, xCol, truncated}`; usado pelos gráficos do Analytics Workspace
@@ -695,6 +698,20 @@ até clicar em **⚡ Aplicar**.
 - **Aplicar**: modal da biblioteca → selecionar entrada → modal de mapeamento de variáveis (`cinemaImportModal`) → aplica `cells` com remapeamento de domínio
 - **Export/Import**: JSON e CSV de lote via `cinemaLibraryModal`
 
+## Biblioteca de Políticas (`policyLibrary`, Copiloto Sessão 2)
+
+Generalização do padrão do `cinemaLibrary` para políticas inteiras: salva o **PolicyIR**
+(Copiloto Sessão 0 — nós/rotas/regras, sem posições nem dados linha a linha) + metadados,
+em vez do canvas com posições. Ver `docs/wiki/Copiloto-ConstrucaoAssistida.md` (Sessão 2).
+
+- **Estado**: `policyLibrary: array` de `{id, name, description, tags, ir: PolicyIR, requiredVars, savedAt}`, persistido no `.credito.json` (`buildProjectPayload`/`loadProject`, schema **`"2.4"`**). `policyLibraryModal` (`null | {mode:'browse'|'save', search, saveMeta, overwriteId}`) e `policyApplyModal` (`null | {itemId, name, ir, requiredVars, mapping}`) são efêmeros (UI), não persistem.
+- **`extractPolicyRequiredVars(ir)`** (helper global exportado): lista, uma vez por **nome distinto** de coluna referenciada no IR, `{col, csvId, csvName, kind}` — `kind:'decision'` para variável de losango/eixo de Cineminha (precisa ser coluna tipada como Filtro no dataset-alvo), `kind:'any'` para coluna de regra de Decision Lens (casa por nome contra qualquer coluna carregada, de qualquer tipo — mesma semântica de `rowMatchesLensRules`, sem `csvId` próprio). Mesmo nome nos dois papéis → prevalece `'decision'`.
+- **`applyPolicyVarMapping(ir, mapping)`** (helper global exportado, puro): materializa `mapping: {[origCol]: {col,csvId}|null}` de volta no IR, reescrevendo `variable`/`rowVar`/`colVar`/`rules[].col` — **antes** de chamar o único aplicador da DEC-IA-002 (`applyPolicyPatch`), nunca um segundo caminho de materialização. Variável sem mapeamento (ausente ou `null`) vira `null`: o nó nasce **sem** variável — pendência visível, não erro nem aplicação parcial silenciosa de outra coluna. Como o nó fica sem tráfego (0 chegadas em todos os ports), o lint do Copiloto Sessão 1 (`zero_arrival`) já sinaliza isso automaticamente no painel — reaproveitado, não reinventado.
+- **Salvar**: seção Fluxo → botão **📚 Políticas** → **💾 Salvar atual** (`savePolicyToLibrary`) — roda `buildPolicyIR` sobre o canvas ativo + `extractPolicyRequiredVars`.
+- **Aplicar**: item da biblioteca → **▶ Aplicar** (`openPolicyApplyModal`) abre o modal de mapeamento (padrão `cinemaImportModal`): auto-match por `normalizeColName` contra as colunas do dataset atual (filtradas por `kind`), pendência (⚠) visível por variável não casada. **Aplicar** (`applyPolicyTemplate`) roda `applyPolicyVarMapping` → `applyPolicyPatch` (com `pushHistory()`), anexando ao canvas ativo; mostra aviso (`importWarn`) listando variáveis pendentes, se houver. O posicionamento em camadas do `applyPolicyPatch` já deixa o canvas legível — não dispara `autoLayout()` automaticamente (o usuário pode usar ⊹ Reorganizar).
+- **Export/Import**: JSON da biblioteca inteira (`{schemaVersion, kind:'policy-library', items}`) via `exportPolicyLibrary`/`onPolicyLibFileChange` — itens importados recebem IDs novos (sem colisão).
+- **Teste**: `tests/policyTemplates.test.js` — salvar → aplicar em base com colunas **renomeadas** via mapeamento → roteamento equivalente (agregados + decisão por linha); variável sem mapeamento → pendência (nó sem variável), nunca erro.
+
 ## Domínio Exibido ("Configurar nó")
 
 ### Problema
@@ -768,10 +785,10 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"2.3", kind:"credito-project", generatedAt,
+  Monta o snapshot `{schemaVersion:"2.4", kind:"credito-project", generatedAt,
   activeTab, viewport, panelCollapsed, canvases, activeCanvasId, csvStore,
   inferenceRef, analyticsLayout, analyticsGroupings, analyticsPageFilters,
-  cinemaLibrary, businessWidget, preferences}`.
+  cinemaLibrary, policyLibrary, businessWidget, preferences}`.
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
   (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
@@ -843,7 +860,7 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"2.3"`** (bumped na M3 de otimização de memória — `csvStore` em base64).
+   Versão atual: **`"2.4"`** (bumped no Copiloto Sessão 2 — `policyLibrary`).
 4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
    adicionar serialize/deserialize dedicados (padrão de `serializeInferenceRef` e
    `serializeCsvStore`/`deserializeCsvStore`) e cobrir o round-trip em teste.
@@ -856,8 +873,8 @@ terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados comp
 (`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `inferenceConfig`) ·
 Tabela de Inferência (`inferenceRef`) · Dashboard (`analyticsLayout`,
 `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de Cineminhas
-(`cinemaLibrary`) · widget de negócio · preferências de aresta/espessura ·
-viewport · aba ativa · painel colapsado.
+(`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de negócio ·
+preferências de aresta/espessura · viewport · aba ativa · painel colapsado.
 
 ## Auto-persistência de sessão (`sessionStorage`)
 
