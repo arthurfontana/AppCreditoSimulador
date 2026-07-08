@@ -3,7 +3,58 @@
 > Parte do épico [[Epicos-CopilotoIA|Copiloto de Política de Crédito]] (ler primeiro:
 > arquitetura em camadas, PolicyIR, DEC-IA-001..006, contrato anti-alucinação).
 >
-> **Status:** Sessão 4 (Goal Seek) ✅ ENTREGUE — Sessão 5 (Simplificação) em planejamento.
+> **Status:** Sessão 4 (Goal Seek) ✅ ENTREGUE — Sessão 5 (Simplificação) ✅ ENTREGUE.
+
+## Sessão 5 — como foi entregue
+
+`COMPUTE_SIMPLIFY` (worker, `src/simulation.worker.js`) generaliza o padrão de detecção
+estrutural da Sessão 1 (`computePolicyInsights`) para **propor** uma política reduzida —
+não só apontar o achado, mas religar o roteamento e **provar** que a redução não muda
+nenhuma decisão. Catálogo de candidatos (`detectSimplifyCandidates`), cada um com um
+`apply` mínimo materializável por `applySimplifyCandidates` (**`src/policySimplify.js`**,
+módulo compartilhado worker/main no mesmo padrão de `src/goalSeek.js`):
+
+- **`collapsible_node`**: losango cujos valores TODOS roteiam pro mesmo destino final
+  (via `resolveThroughPortsSimplify`, mesma semântica de `resolveThroughPorts` do
+  PolicyIR); Cineminha cujos ports Elegível/Não Elegível vão pro mesmo destino; ou
+  Decision Lens cuja regra deixa passar 100% do volume que chega (`lens_no_effect` usa o
+  MESMO `apply` — colapsa pro próprio destino). Aplicação religa as arestas de ENTRADA
+  direto pro destino e remove o nó + portas próprias.
+- **`zero_arrival_node`**: losango/Cineminha/Decision Lens que nunca recebe volume na
+  base atual (losango/Cineminha via `nodeArrivals` do tick; lens via `computeLensStats`,
+  um walk dedicado — `nodeArrivals` não cobre lens). Poda o nó + descendentes
+  EXCLUSIVOS (sem outra entrada externa sobrevivente, ponto fixo iterativo).
+- **`redundant_variable`**: losango D2 que retesta a MESMA coluna+csv já decidida por um
+  losango D1 a montante, alcançado por uma cadeia DIRETA de ports a partir de um valor
+  fixo — quem chega aqui já tem coluna==valor, então D2 só pode discriminar o próprio
+  ramo desse valor. Religa só a aresta específica (`reroute_edge`) pro destino que D2
+  daria pra esse valor, sem remover D2 (outros caminhos podem alcançá-lo).
+
+**Prova de equivalência** (`computeSimplifyEquivalence`): compara o **desfecho por linha**
+de duas políticas via `computeRowOutcomes` (mesma classificação de `runSimulation`, incl.
+fallback de AS IS) — `identical` só é `true` com `diffCount === 0` (agregados podem
+empatar com decisões trocadas por baixo; só o diff linha a linha prova de verdade). Cada
+candidato é validado **incrementalmente** (greedy, contra o estado já aceito); por
+transitividade de igualdade linha a linha, a proposta final inteira é `diff = 0` contra a
+política original **por construção**, mesmo que um detector individual não seja perfeito
+(um candidato que quebra equivalência com o que já foi aceito é descartado, nunca
+contamina a proposta). Quando não é possível zerar o diff, o delta reportado vem de
+`runSimulation` antes/depois de verdade — nunca estimado (DEC-IA-005, mesmo contrato do
+Goal Seek).
+
+UI: `simplifyModal` (padrão do épico, mas sem etapa de formulário — não há objetivo a
+declarar) — botão **🧹 Simplificar** na seção Fluxo do painel direito dispara
+`COMPUTE_SIMPLIFY` direto; resultado lista as simplificações propostas (ícone + rótulo por
+tipo) e a prova (✅ idêntica / ⚠ delta declarado); **✓ Aplicar como novo cenário**
+materializa via `cloneCanvasWithNewIds` + `applySimplifyCandidates` (mesmo padrão
+não-destrutivo do Goal Seek — a política de origem fica intocada).
+
+GATE `tests/policySimplify.test.js`: nó colapsável (losango e Cineminha) ⇒ proposta reduz
+e `computeSimplifyEquivalence` prova diff = 0; nó com chegada zero ⇒ removível sem alterar
+nenhuma decisão; regra de lens sem efeito e variável re-testada ⇒ detectados e colapsados
+sem perda; prova de equivalência **lossy** (par de canvases deliberadamente diferente,
+testando a primitiva direto) ⇒ diffCount e delta batem com o cálculo manual via
+`runSimulation` antes/depois; determinismo (mesma entrada ⇒ mesma proposta).
 
 ## Sessão 4 — como foi entregue
 

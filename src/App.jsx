@@ -6,6 +6,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
 import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn } from "./columnar.js";
 import { applyGoalSeekMoves } from "./goalSeek.js";
+import { applySimplifyCandidates } from "./policySimplify.js";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -1190,6 +1191,15 @@ const COPILOT_SEV_META = {
   error:   { emoji: "🔴", color: "#b91c1c", bg: "#fef2f2", border: "#fecaca" },
   warning: { emoji: "🟡", color: "#92400e", bg: "#fffbeb", border: "#fde68a" },
   info:    { emoji: "🔵", color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
+};
+
+// Simplificação com prova de equivalência (Copiloto Sessão 5, DEC-IA-005/006) — metadados
+// de UI por tipo de candidato do catálogo (findings vêm de COMPUTE_SIMPLIFY/SIMPLIFY_RESULT).
+const SIMPLIFY_CODE_META = {
+  collapsible_node:   { icon: "🔗", label: "Nó colapsável" },
+  zero_arrival_node:  { icon: "🕳", label: "Chegada zero" },
+  lens_no_effect:     { icon: "🎚", label: "Regra sem efeito" },
+  redundant_variable: { icon: "🔁", label: "Variável re-testada" },
 };
 
 // Agrega uma métrica sobre um conjunto de linhas (dataset largo COLUNAR) para uma coluna
@@ -3374,6 +3384,8 @@ export default function App() {
   const [johnnyModal, setJohnnyModal] = useState(null);   // null | johnny obj
   // Goal Seek — Copiloto Sessão 4 (DEC-IA-005/006): busca de política inteira por objetivo
   const [goalSeekModal, setGoalSeekModal] = useState(null); // null | {step:'form'|'loading'|'result', goal, constraints, ...GOAL_SEEK_RESULT}
+  // Simplificação com prova de equivalência — Copiloto Sessão 5 (DEC-IA-005/006)
+  const [simplifyModal, setSimplifyModal] = useState(null); // null | {step:'loading'|'result', proposal, equivalence}
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
@@ -3433,6 +3445,7 @@ export default function App() {
   const lensModalR    = useRef(lensModal);  useEffect(()=>{lensModalR.current=lensModal},  [lensModal]);
   const johnnyModalR  = useRef(johnnyModal);useEffect(()=>{johnnyModalR.current=johnnyModal},[johnnyModal]);
   const goalSeekModalR = useRef(goalSeekModal); useEffect(()=>{goalSeekModalR.current=goalSeekModal},[goalSeekModal]);
+  const simplifyModalR = useRef(simplifyModal); useEffect(()=>{simplifyModalR.current=simplifyModal},[simplifyModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
@@ -3537,6 +3550,9 @@ export default function App() {
       } else if (msgType === 'GOAL_SEEK_RESULT') {
         const { goal, baseline, frontier, moves, goalReached, bindingConstraint, result } = e.data;
         setGoalSeekModal(m => (m ? { ...m, step: 'result', goal, baseline, frontier, moves, goalReached, bindingConstraint, result } : m));
+      } else if (msgType === 'SIMPLIFY_RESULT') {
+        const { proposal, equivalence } = e.data;
+        setSimplifyModal(m => (m ? { ...m, step: 'result', proposal, equivalence } : m));
       } else if (msgType === 'VARIABLE_RANKING_RESULT') {
         const { nodeId } = e.data;
         if (pendingRankingPortIdRef.current !== nodeId) return; // seleção mudou antes da resposta chegar
@@ -7306,6 +7322,46 @@ export default function App() {
     setGoalSeekModal(null);
   };
 
+  // ── Simplificação com prova de equivalência — Copiloto Sessão 5 (DEC-IA-005/006) ─────
+  // Dispara o detector de candidatos (nó colapsável, chegada zero, regra de lens sem
+  // efeito, variável re-testada) direto — sem formulário, ao contrário do Goal Seek —
+  // já que não há objetivo a declarar, só a política atual a reduzir.
+  const openSimplifyModal = () => {
+    setSimplifyModal({ step: 'loading' });
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_SIMPLIFY',
+      shapes: shapesR.current,
+      conns: connsR.current,
+    });
+  };
+
+  // Materializa os candidatos aceitos numa aba de canvas NOVA (mesmo padrão não-destrutivo
+  // de applyGoalSeekResult) — aplica no CLONE via applySimplifyCandidates (mesmo helper
+  // usado internamente pelo worker para a validação incremental por equivalência).
+  const applySimplifyResult = () => {
+    const cur = simplifyModalR.current;
+    const candidates = cur?.proposal?.candidates || [];
+    if (candidates.length === 0) return;
+    const curCanvasId = activeCanvasIdR.current;
+    const source = canvasesR.current[curCanvasId];
+    const srcShapes = shapesR.current, srcConns = connsR.current;
+    const { newShapes, newConns, idMap } = cloneCanvasWithNewIds(srcShapes, srcConns);
+    const { shapes: patchedShapes, conns: patchedConns } =
+      applySimplifyCandidates(newShapes, newConns, candidates, idMap);
+    const id = uid();
+    setCanvases(prev => ({
+      ...prev,
+      [curCanvasId]: { ...prev[curCanvasId], shapes: srcShapes, conns: srcConns },
+      [id]: { id, name: `${source?.name || 'Canvas'} · Simplificada`, shapes: patchedShapes, conns: patchedConns, includeInDashboard: true },
+    }));
+    setShapes(patchedShapes); setConns(patchedConns);
+    setUndoStack([]); setRedoStack([]);
+    setSel(null); setMultiSel(new Set());
+    setActiveCanvasId(id);
+    setActiveTab('canvas');
+    setSimplifyModal(null);
+  };
+
   // ── Sugestão de próximo nó (Copiloto Sessão 3) ─────────────────────────────
   // Dispara o ranking on-demand para a porta selecionada (não entra no tick de
   // edição/cache). `pendingRankingPortIdRef` descarta respostas obsoletas caso a
@@ -8220,6 +8276,13 @@ export default function App() {
               onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
               onMouseLeave={e=>{e.currentTarget.style.background="#fffbeb";e.currentTarget.style.borderColor="#fde68a";}}>
               <span style={{fontSize:16}}>🎯</span> Atingir Objetivo
+            </button>
+            <button onClick={openSimplifyModal}
+              title="Detectar nós colapsáveis, chegada zero, regras de lens sem efeito e variáveis re-testadas — propõe a política reduzida com prova de equivalência"
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #bbf7d0",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#dcfce7";e.currentTarget.style.borderColor="#86efac";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#f0fdf4";e.currentTarget.style.borderColor="#bbf7d0";}}>
+              <span style={{fontSize:16}}>🧹</span> Simplificar
             </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
@@ -11906,6 +11969,131 @@ export default function App() {
                     </div>
                   );
                 })()}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ SIMPLIFY MODAL — simplificação com prova (Copiloto Sessão 5) ═══════════════ */}
+      {simplifyModal&&(()=>{
+        const { step, proposal, equivalence } = simplifyModal;
+        const candidates = proposal?.candidates || [];
+        const fmtPctSigned = (v) => v==null ? 'N/A' : `${(v*100).toFixed(2)}%`;
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:680,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#f0fdf4 0%,#dcfce7 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#bbf7d0",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>🧹</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Simplificação com Prova</h2>
+                    <p style={{fontSize:11,color:"#15803d"}}>Copiloto Sessão 5 — detector de equivalência</p>
+                  </div>
+                </div>
+                <button onClick={()=>setSimplifyModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
+                {step==='loading' && (
+                  <div style={{padding:"40px 0",textAlign:"center",color:"#15803d",fontSize:13}}>
+                    Detectando nós colapsáveis, chegada zero, regras sem efeito e variáveis re-testadas…
+                  </div>
+                )}
+
+                {step==='result' && (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    {candidates.length===0 ? (
+                      <div style={{padding:"24px 14px",fontSize:12.5,color:"#64748b",textAlign:"center",
+                        border:"1px dashed #e2e8f0",borderRadius:10,lineHeight:1.6}}>
+                        Nenhuma simplificação segura encontrada — o detector não achou nó colapsável, chegada
+                        zero, regra de lens sem efeito ou variável re-testada nesta política.
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{display:"flex",gap:10,alignItems:"center",padding:"10px 14px",borderRadius:10,
+                          background: equivalence?.identical ? "#f0fdf4" : "#fffbeb",
+                          border: `1px solid ${equivalence?.identical ? "#bbf7d0" : "#fde68a"}`}}>
+                          <span style={{fontSize:18}}>{equivalence?.identical ? "✅" : "⚠"}</span>
+                          <div style={{fontSize:12,color: equivalence?.identical ? "#15803d" : "#92400e",lineHeight:1.5}}>
+                            {equivalence?.identical
+                              ? <><b>Prova de equivalência: idêntica.</b> {proposal.removedNodeCount} nó(s) removível(is) de {proposal.totalNodeCount} — 0 de {equivalence.totalRows} linhas mudam de decisão.</>
+                              : <><b>Simplificação parcial (lossy).</b> {equivalence?.diffCount} de {equivalence?.totalRows} linhas mudam de decisão — delta declarado abaixo.</>}
+                          </div>
+                        </div>
+
+                        <div>
+                          <p style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>
+                            Simplificações propostas ({candidates.length})
+                          </p>
+                          <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:280,overflowY:"auto"}}>
+                            {candidates.map((c)=>{
+                              const meta = SIMPLIFY_CODE_META[c.code] || { icon:'•', label: c.code };
+                              return (
+                                <div key={c.id} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",
+                                  borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",fontSize:11.5}}>
+                                  <span style={{width:22,height:22,borderRadius:6,background:"#dcfce7",flexShrink:0,
+                                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{meta.icon}</span>
+                                  <div style={{flex:1}}>
+                                    <div style={{fontSize:10,color:"#16a34a",fontWeight:700,textTransform:"uppercase",letterSpacing:.4,marginBottom:2}}>{meta.label}</div>
+                                    <div style={{color:"#334155",lineHeight:1.5}}>{c.label}</div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {equivalence?.delta && (
+                          <div>
+                            <p style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Delta declarado</p>
+                            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                              {[
+                                {k:'approvalRate', label:'Taxa de Aprovação', fmt:v=>v==null?'N/A':`${v.toFixed(2)}%`},
+                                {k:'inadReal', label:'Inad. Real', fmt:fmtPctSigned},
+                                {k:'inadInferida', label:'Inad. Inferida', fmt:fmtPctSigned},
+                              ].map(({k,label,fmt})=>{
+                                const d = equivalence.delta[k];
+                                return (
+                                  <div key={k} style={{padding:"10px 12px",borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc"}}>
+                                    <div style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",marginBottom:4}}>{label}</div>
+                                    <div style={{fontSize:15,fontWeight:700,color:"#1e293b"}}>{fmt(d?.after)}</div>
+                                    <div style={{fontSize:10.5,color:"#94a3b8"}}>era {fmt(d?.before)}</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        <div style={{display:"flex",gap:8,justifyContent:"flex-end",borderTop:"1px solid #f1f5f9",paddingTop:12}}>
+                          <button onClick={()=>setSimplifyModal(null)}
+                            style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                              color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                            Fechar
+                          </button>
+                          <button onClick={applySimplifyResult} disabled={candidates.length===0}
+                            style={{padding:"9px 18px",borderRadius:9,border:"none",
+                              background: candidates.length===0 ? "#e2e8f0" : "#16a34a",
+                              color:"#fff",cursor: candidates.length===0 ? "default" : "pointer",
+                              fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                            ✓ Aplicar como novo cenário
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>

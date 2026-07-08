@@ -21,6 +21,7 @@ AppCreditoSimulador/
 │   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny, Goal Seek (~2430 linhas)
 │   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
 │   ├── goalSeek.js                # applyGoalSeekMoves — materialização de movimentos do Goal Seek (compartilhado worker/main)
+│   ├── policySimplify.js          # applySimplifyCandidates — materialização de candidatos de Simplificação (compartilhado worker/main)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
 │   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget
@@ -30,6 +31,7 @@ AppCreditoSimulador/
 │   ├── goalSeek.test.js          # GATE Copiloto Sessão 4: delta O(1) por movimento ≡ resimulação, precedência ordinal, restrições/travas, determinismo
 │   ├── importPipeline.test.js    # GATE M1: import vetorizado equivale ao caminho legado (parse→normalize→append→buildColumnar)
 │   ├── policyIR.test.js          # GATE Copiloto Sessão 0: roteamento via PolicyIR ≡ motor compilado (M8), round-trip IR→canvas→IR, IR sem posições/dados
+│   ├── policySimplify.test.js    # GATE Copiloto Sessão 5: nó colapsável/chegada zero/regra sem efeito/variável re-testada ⇒ proposta prova diff=0; caso lossy ⇒ delta declarado bate com runSimulation
 │   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
@@ -336,6 +338,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns}]` — abas marcadas (cenários, 5B). Populações de lens derivadas no worker (M10). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
 | `COMPUTE_GOAL_SEEK` | `{shapes, conns, goal, constraints, locks}` | Copiloto Sessão 4 — roda `computeGoalSeek` (catálogo de movimentos + busca gulosa com precedência/shrinkage/restrições + validação por re-simulação); responde com `GOAL_SEEK_RESULT` |
+| `COMPUTE_SIMPLIFY` | `{shapes, conns}` | Copiloto Sessão 5 — roda `computeSimplify` (detecção de candidatos + aceitação incremental validada por `computeSimplifyEquivalence` + prova de equivalência linha a linha); responde com `SIMPLIFY_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -347,6 +350,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
 | `GOAL_SEEK_RESULT` | `{goal, baseline, frontier, moves, goalReached, bindingConstraint, result}` — ver seção "Motor de Goal Seek" |
+| `SIMPLIFY_RESULT` | `{proposal, equivalence}` — ver seção "Simplificação com Prova de Equivalência" |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -366,6 +370,10 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, lockedIds)`: catálogo de candidatos a movimento (`cinema_cell`, `decision_terminal`, `lens_threshold`) com precedência entre eles
 - `computeGoalSeekArrivals(shapes, conns, csvStore, lensPopulations, lensColByShape)`: walk compilado (M8) que agrega métricas por segmento `(nó de decisão, valor)` e, para lens elegíveis a `lens_threshold`, por valor bruto da coluna da regra
 - `computeGoalSeekBaseline(shapes, conns, csvStore)`: agregador paralelo a `runSimulation` que também expõe os somatórios brutos (`qtdAltasSum`, `inadRealSum`, etc.) — necessários para os deltas O(1) da busca
+- `computeSimplify(shapes, conns, csvStore, nodeArrivals)`: ponto de entrada da Simplificação (Copiloto Sessão 5) — detecta candidatos, aceita-os incrementalmente (só os que preservam `diff=0`) e devolve `{proposal, equivalence}` — ver seção "Simplificação com Prova de Equivalência"
+- `detectSimplifyCandidates(shapes, conns, nodeArrivals, lensStats)`: catálogo de candidatos (`collapsible_node`, `zero_arrival_node`, `redundant_variable`; `lens_no_effect` reusa o `apply` de `collapsible_node`) — cada um com um patch `apply` materializável por `applySimplifyCandidates` (`src/policySimplify.js`)
+- `computeLensStats(shapes, conns, csvStore)`: walk dedicado (padrão `computeNodeArrivals`, generalizado a Decision Lens) — `{[lensId]: {arrived, passed}}`, base dos candidatos `zero_arrival_node`/`lens_no_effect` sobre lens (`nodeArrivals` não cobre lens)
+- `computeSimplifyEquivalence(origShapes, origConns, propShapes, propConns, csvStore)`: prova de equivalência — compara o desfecho **por linha** (`computeRowOutcomes`, mesma classificação de `runSimulation`) de duas políticas; `identical` só é `true` com `diffCount===0`; quando não, o `delta` vem de `runSimulation` antes/depois de verdade (nunca estimado)
 
 ### M6 — Tick de edição: passe único em vez de ~4 varreduras da base (entregue)
 Ver `docs/wiki/PERFORMANCE-ANALISE.md` (item M6, Fase C do backlog). Cada gesto de edição
@@ -791,6 +799,106 @@ imediatamente no Dashboard/KPI A vs B.
 re-simulação completa via `runSimulation`; monotonicidade ordinal preservada mesmo quando
 o segmento mais barato não é o primeiro do domínio; nenhum ponto da fronteira viola
 teto/trava; objetivo inatingível reporta o melhor parcial + a restrição-gargalo;
+determinismo (mesma entrada ⇒ mesma proposta).
+
+## Simplificação com Prova de Equivalência (`simplifyModal`, Copiloto Sessão 5)
+
+Generaliza o padrão de detecção estrutural da Sessão 1 (`computePolicyInsights`) para
+**propor** uma política reduzida — não só apontar o achado, mas religar o roteamento e
+**provar** que a redução não muda nenhuma decisão. Ver `docs/wiki/Copiloto-SugestoesMelhoria.md`
+(Sessão 5) e `docs/wiki/Epicos-CopilotoIA.md` (DEC-IA-005/006).
+
+### Catálogo de candidatos (`detectSimplifyCandidates`, worker)
+Cada candidato carrega um `apply` mínimo (nunca referencia x/y/layout), materializável por
+`applySimplifyCandidates` (**`src/policySimplify.js`** — módulo compartilhado worker/main,
+mesmo motivo de `src/goalSeek.js`: os dois precisam da MESMA lógica de aplicação sem se
+importar um ao outro):
+- **`collapsible_node`**: losango cujos valores TODOS roteiam pro mesmo destino final (via
+  `resolveThroughPortsSimplify`, mesma semântica de `resolveThroughPorts` do PolicyIR);
+  Cineminha cujos ports Elegível/Não Elegível vão pro mesmo destino; ou Decision Lens cuja
+  regra deixa passar 100% do volume que chega (**`lens_no_effect`** — mesmo código de
+  achado distinto, mas reusa o `apply` de `collapsible_node`, já que a operação é idêntica:
+  colapsar o nó pro próprio destino). `apply: {type:'collapse_node', nodeId, destId}` —
+  religa as arestas de ENTRADA do nó direto pro destino e remove o nó + portas próprias
+  (as únicas apontadas exclusivamente por ele).
+- **`zero_arrival_node`**: losango/Cineminha (via `nodeArrivals` do tick — `totalArrivalOf`
+  soma os valores/eixo) ou Decision Lens (via `computeLensStats`, um walk DEDICADO — o
+  `nodeArrivals` do tick não cobre lens) que nunca recebe volume na base atual. `apply:
+  {type:'prune_node', nodeId}` — remove o nó + descendentes EXCLUSIVOS (sem outra entrada
+  externa sobrevivente, cascata por ponto fixo).
+- **`redundant_variable`**: losango D2 que retesta a MESMA coluna+csv já decidida por um
+  losango D1 a montante, alcançado por uma cadeia DIRETA de ports a partir de um valor
+  FIXO v — quem chega aqui já tem coluna==v (garantido por D1), então D2 só pode
+  discriminar o próprio ramo de v; os demais nunca chegam. `apply: {type:'reroute_edge',
+  connId, newTo}` — religa só a aresta específica (a que liga o último port da cadeia a
+  D2) pro destino que D2 daria pra esse v; D2 em si não é removido (pode ser alcançado por
+  outros caminhos).
+
+**Limitação importante**: um nó que é ele mesmo a ÚNICA raiz do fluxo (sem nó a montante)
+não pode virar candidato `collapsible_node`/`lens_no_effect` de forma útil — o motor exige
+pelo menos um nó decision/cineminha/lens como raiz pra sequer começar a andar pela base
+(`runSimulation`: `rootNodes.length===0` ⇒ nenhuma linha é processada); colapsar a raiz
+única pra um terminal quebraria a política inteira. Os detectores não têm essa
+restrição explícita — quem barra esse caso é a validação incremental abaixo (o candidato
+é descartado por falhar a prova, nunca aplicado incorretamente).
+
+### Prova de equivalência (`computeSimplifyEquivalence`, worker)
+Compara o **desfecho por linha** de duas políticas via `computeRowOutcomes` (mesma
+classificação de `runSimulation`, incl. fallback de AS IS via `__DECISAO_ORIGINAL`) — não
+só os agregados, já que dois canvases podem empatar na taxa de aprovação com decisões
+trocadas por baixo (troca quem é aprovado, sem mudar a soma). `identical` só é `true` com
+`diffCount===0` (TODAS as linhas de TODOS os csvs decidem igual). Quando não é idêntico,
+o `delta` reportado vem de `runSimulation` antes/depois de VERDADE — nunca estimado
+(DEC-IA-005, mesmo contrato de validação do Goal Seek).
+
+### Aceitação incremental (`computeSimplify`, worker)
+Cada candidato do catálogo é validado um de cada vez, GREEDY, contra o estado JÁ ACEITO
+(não contra o canvas original): só entra na proposta final se preservar `diff=0` sobre
+esse estado intermediário. Por transitividade de igualdade linha a linha, a proposta final
+inteira é `diff=0` contra a política ORIGINAL — a prova real do épico — **sem depender de
+os detectores serem perfeitos**: um candidato que não é seguro (por interação com outro já
+aceito, ou por ser a raiz única do fluxo — ver limitação acima) é descartado
+silenciosamente, nunca contamina a proposta. Retorna:
+```js
+{
+  proposal: {
+    candidates,          // SimplifyCandidate[] aceitos — {id, code, nodeId, label, apply}
+    consideredCount,     // total de candidatos detectados (incl. os rejeitados)
+    totalNodeCount,       // shapes.length original
+    removedNodeCount,     // quantos shapes a proposta remove
+  },
+  equivalence: { identical, diffCount, totalRows, delta },
+}
+```
+
+### Estado `simplifyModal`
+```js
+null | {
+  step: 'loading' | 'result',
+  proposal,      // devolvido por SIMPLIFY_RESULT
+  equivalence,   // devolvido por SIMPLIFY_RESULT
+}
+```
+Sem etapa de formulário (ao contrário do `goalSeekModal`) — não há objetivo a declarar, só
+a política atual a reduzir; **🧹 Simplificar** dispara `COMPUTE_SIMPLIFY` direto.
+
+### Ativação e aplicação
+Botão **🧹 Simplificar** na seção Fluxo do painel direito (`openSimplifyModal`) dispara
+`COMPUTE_SIMPLIFY` direto (sem formulário); o resultado lista as simplificações propostas
+(ícone + rótulo por tipo, `SIMPLIFY_CODE_META`) e a prova (✅ idêntica / ⚠ delta
+declarado); **✓ Aplicar como novo cenário** (`applySimplifyResult`) materializa os
+candidatos aceitos numa aba de canvas **nova** (`cloneCanvasWithNewIds` +
+`applySimplifyCandidates`, mesmo padrão não-destrutivo do Goal Seek/Sub-sessão 5A) — a
+política de origem fica intocada, comparável imediatamente no Dashboard/KPI A vs B.
+
+### Teste
+`tests/policySimplify.test.js` — GATE: nó colapsável (losango e Cineminha) ⇒ proposta
+reduz e `computeSimplifyEquivalence` prova `diff=0`; nó com chegada zero (losango/Cineminha
+via `nodeArrivals`, Decision Lens via `computeLensStats`) ⇒ removível sem alterar nenhuma
+decisão; regra de lens sem efeito e variável re-testada ⇒ detectados e colapsados/religados
+sem perda; prova de equivalência **lossy** (par de canvases deliberadamente diferente,
+testando a primitiva `computeSimplifyEquivalence` direto, sem passar pelo detector) ⇒
+`diffCount` e `delta` batem com o cálculo manual via `runSimulation` antes/depois;
 determinismo (mesma entrada ⇒ mesma proposta).
 
 ## Biblioteca de Cineminha (`cinemaLibrary`)
@@ -1275,7 +1383,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/claude-md-docs-09v1ql`
+`claude/copiloto-session-5-simplify-4ejq8e`
 
 ## Roadmap futuro (não implementado)
 
