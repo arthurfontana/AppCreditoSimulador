@@ -7,6 +7,7 @@
 // colunar (produção) quanto sobre o legado string[][] (testes / GATE).
 import { cellStr, cellNum, rowCount, isColumnar } from './columnar.js';
 import { applyGoalSeekMoves } from './goalSeek.js';
+import { applySimplifyCandidates } from './policySimplify.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -3345,6 +3346,443 @@ function computePolicyInsights(shapes, conns, nodeArrivals = {}, lensCounts = {}
   return findings;
 }
 
+// ── COMPUTE_SIMPLIFY — Copiloto Sessão 5 (simplificação com prova de equivalência) ──
+// Generaliza o padrão de detecção estrutural da Sessão 1 (computePolicyInsights) para
+// PROPOR uma política reduzida — não só apontar o achado, mas religar o roteamento e
+// PROVAR que a redução não muda nenhuma decisão (diff = 0 linha a linha), ou declarar o
+// delta exato quando não for possível (DEC-IA-005: números sempre do motor, nunca estimados).
+//
+// Catálogo de candidatos (mesmo padrão do catálogo de movimentos do Goal Seek —
+// buildGoalSeekCandidates — cada um com um `apply` mínimo materializável por
+// applySimplifyCandidates, src/policySimplify.js, compartilhado com a main):
+//   - collapsible_node:   losango cujos valores TODOS roteiam pro mesmo destino, Cineminha
+//                         cujo Elegível/Não Elegível vão pro mesmo destino, OU Decision Lens
+//                         cuja regra deixa passar 100% do volume que chega (filtro redundante
+//                         — mesmo apply que os outros dois, "colapsa pro próprio destino");
+//   - zero_arrival_node:  nó (losango/Cineminha/Decision Lens) que nunca recebe volume na
+//                         base atual (nodeArrivals/lensStats) — remoção não tem NENHUM
+//                         efeito porque nenhuma linha jamais o visita;
+//   - redundant_variable: losango que retesta a MESMA variável (mesma coluna+csv) já
+//                         decidida por um losango a montante, alcançado por uma cadeia
+//                         DIRETA de ports a partir de um valor fixo — o retest nunca
+//                         discrimina nada (o valor da coluna já é conhecido para quem chega).
+//
+// `shape.locked` (🔒, mesmo campo/toolbar do Goal Seek) exclui o nó do catálogo ANTES da
+// busca — os três primeiros detectores pulam nó travado; redundant_variable pula quando o
+// losango retestado (D2) está travado.
+//
+// Cada candidato é validado INCREMENTALMENTE (greedy, um de cada vez, contra o estado já
+// aceito) via computeSimplifyEquivalence — só entra na proposta final se preservar diff = 0
+// sobre o estado anterior; por transitividade de igualdade linha a linha, a proposta final
+// inteira é diff = 0 contra a política ORIGINAL (a prova real do épico), sem depender de os
+// detectores serem perfeitos — se um candidato pontual não for seguro (interação com outro
+// já aceito, base de dados atípica, ou por ser a raiz única do fluxo — colapsar a raiz pra
+// um terminal quebraria a política inteira), ele é descartado silenciosamente em vez de contaminar
+// a proposta.
+function resolveThroughPortsSimplify(shapesMap, out, id) {
+  let cur = id;
+  const seen = new Set();
+  while (cur != null) {
+    const node = shapesMap[cur];
+    if (!node) return null;
+    if (node.type !== 'port') return cur;
+    if (seen.has(cur)) return null;
+    seen.add(cur);
+    cur = out[cur]?.[0] ? out[cur][0].to : null;
+  }
+  return null;
+}
+
+// Estatísticas por Decision Lens (mesmo padrão de walk de computeNodeArrivals, generalizado
+// pra lens): `arrived` = qty total que chega ao lens (respeitando o roteamento a montante);
+// `passed` = qty, dentre essa, que a regra do PRÓPRIO lens deixa passar. `passed === arrived
+// > 0` ⇒ a regra não filtra nada (candidato lens_no_effect); `arrived === 0` ⇒ nó morto
+// (candidato zero_arrival_node).
+function computeLensStats(shapes, conns, csvStore) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const EMIT = new Set(['port', 'decision_lens', 'decision', 'cineminha']);
+  const nonRoot = new Set(conns.filter(c => EMIT.has(shapesMap[c.from]?.type)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !nonRoot.has(s.id)
+  );
+
+  const stats = {};
+  for (const s of shapes) if (s.type === 'decision_lens') stats[s.id] = { arrived: 0, passed: 0 };
+  if (Object.keys(stats).length === 0) return stats;
+
+  function walk(csv, r, startId, qty) {
+    const headers = csv.headers;
+    let cur = startId;
+    const visited = new Set();
+    while (cur) {
+      if (visited.has(cur)) break;
+      visited.add(cur);
+      const node = shapesMap[cur];
+      if (!node) break;
+      if (TERM.has(node.type)) break;
+      if (node.type === 'decision') {
+        const colIdx = headers.indexOf(node.variableCol);
+        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const rIdx = node.rowVar ? headers.indexOf(node.rowVar.col) : -1;
+        const cIdx = node.colVar ? headers.indexOf(node.colVar.col) : -1;
+        const rv = node.rowVar && rIdx >= 0 ? (cellStr(csv, r, rIdx) ?? '').trim() : '';
+        const cv = node.colVar && cIdx >= 0 ? (cellStr(csv, r, cIdx) ?? '').trim() : '';
+        if (!node.rowVar && !node.colVar) break;
+        const rKey = node.rowVar ? rv : '*';
+        const cKey = node.colVar ? cv : '*';
+        const isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
+        const typeCfg = getCinemaType(node.cinemaType);
+        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
+        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        if (stats[cur]) stats[cur].arrived += qty;
+        const passes = rowMatchesLensRules(csv, r, node.rules || []);
+        if (!passes) break;
+        if (stats[cur]) stats[cur].passed += qty;
+        const edges = out[cur] || [];
+        if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || [];
+        if (edges.length === 0) break;
+        cur = edges[0].to;
+      } else break;
+    }
+  }
+
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const types = csv.columnTypes || {};
+    const qtyCol = Object.entries(types).find(([, t]) => t === 'qty')?.[0];
+    const qtyIdx = qtyCol ? csv.headers.indexOf(qtyCol) : -1;
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    if (csvRoots.length === 0) continue;
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      const qty = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+      for (const root of csvRoots) walk(csv, r, root.id, qty);
+    }
+  }
+  return stats;
+}
+
+// Total de volume que chega a um losango/Cineminha, a partir do `nodeArrivals` já computado
+// pelo tick (val/row/col) — 0 ⇒ candidato zero_arrival_node. Losango: soma de todos os
+// valores. Cineminha: soma do eixo configurado (linha e/ou coluna — usa o maior quando os
+// dois eixos estão configurados, já que descrevem a MESMA população vista por ângulos
+// diferentes; podem divergir só por valor vazio num dos dois lados).
+function totalArrivalOf(node, arr) {
+  if (!arr) return 0;
+  if (node.type === 'decision') return Object.values(arr.val || {}).reduce((a, b) => a + b, 0);
+  if (node.type === 'cineminha') {
+    const rowSum = Object.values(arr.row || {}).reduce((a, b) => a + b, 0);
+    const colSum = Object.values(arr.col || {}).reduce((a, b) => a + b, 0);
+    if (node.rowVar && node.colVar) return Math.max(rowSum, colSum);
+    if (node.rowVar) return rowSum;
+    if (node.colVar) return colSum;
+    return 0;
+  }
+  return 0;
+}
+
+function detectSimplifyCandidates(shapes, conns, nodeArrivals, lensStats) {
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const out = {};
+  for (const s of shapes) out[s.id] = [];
+  for (const c of conns) if (out[c.from]) out[c.from].push(c);
+
+  const candidates = [];
+  const handled = new Set(); // nodeId já com candidato de remoção/colapso — evita conflito
+  let seq = 0;
+  const nextId = (prefix) => `${prefix}${seq++}`;
+
+  // (a) losango colapsável — todos os valores roteiam pro MESMO destino final.
+  for (const s of shapes) {
+    if (s.type !== 'decision' || handled.has(s.id) || s.locked) continue;
+    const seen = new Set();
+    const dests = new Set();
+    let anyValue = false;
+    for (const e of (out[s.id] || [])) {
+      const value = (e.label ?? '').trim();
+      if (seen.has(value)) continue;
+      seen.add(value);
+      anyValue = true;
+      dests.add(resolveThroughPortsSimplify(shapesMap, out, e.to));
+    }
+    if (anyValue && dests.size === 1) {
+      const destId = [...dests][0];
+      if (destId != null && destId !== s.id) {
+        candidates.push({
+          id: nextId('collapse_d_'), code: 'collapsible_node', nodeId: s.id,
+          label: `"${s.label || s.variableCol || 'Decisão'}" — todos os valores roteiam para "${shapesMap[destId]?.label || shapesMap[destId]?.type || destId}".`,
+          apply: { type: 'collapse_node', nodeId: s.id, destId },
+        });
+        handled.add(s.id);
+      }
+    }
+  }
+
+  // (a) Cineminha colapsável — Elegível e Não Elegível pro MESMO destino.
+  for (const s of shapes) {
+    if (s.type !== 'cineminha' || handled.has(s.id) || s.locked) continue;
+    const cfg = getCinemaType(s.cinemaType);
+    const eEdge = (out[s.id] || []).find(e => e.label === cfg.ports[0].label);
+    const nEdge = (out[s.id] || []).find(e => e.label === cfg.ports[1].label);
+    const eTo = eEdge ? resolveThroughPortsSimplify(shapesMap, out, eEdge.to) : null;
+    const nTo = nEdge ? resolveThroughPortsSimplify(shapesMap, out, nEdge.to) : null;
+    if (eTo != null && eTo === nTo) {
+      candidates.push({
+        id: nextId('collapse_c_'), code: 'collapsible_node', nodeId: s.id,
+        label: `"${s.label || 'Cineminha'}" — Elegível e Não Elegível roteiam para "${shapesMap[eTo]?.label || shapesMap[eTo]?.type || eTo}".`,
+        apply: { type: 'collapse_node', nodeId: s.id, destId: eTo },
+      });
+      handled.add(s.id);
+    }
+  }
+
+  // (b) chegada zero — nó decision/cineminha/lens que nunca recebe volume na base atual.
+  for (const s of shapes) {
+    if (handled.has(s.id) || s.locked) continue;
+    if (s.type === 'decision' || s.type === 'cineminha') {
+      const total = totalArrivalOf(s, nodeArrivals[s.id]);
+      if (total === 0) {
+        candidates.push({
+          id: nextId('prune_'), code: 'zero_arrival_node', nodeId: s.id,
+          label: `"${s.label || s.variableCol || (s.type === 'cineminha' ? 'Cineminha' : s.type)}" nunca recebe volume (0 propostas) — removível sem efeito.`,
+          apply: { type: 'prune_node', nodeId: s.id },
+        });
+        handled.add(s.id);
+      }
+    } else if (s.type === 'decision_lens') {
+      const st = lensStats[s.id] || { arrived: 0, passed: 0 };
+      if (st.arrived === 0) {
+        candidates.push({
+          id: nextId('prune_'), code: 'zero_arrival_node', nodeId: s.id,
+          label: `"${s.label || 'Decision Lens'}" nunca recebe volume (0 propostas) — removível sem efeito.`,
+          apply: { type: 'prune_node', nodeId: s.id },
+        });
+        handled.add(s.id);
+      }
+    }
+  }
+
+  // (c) regra de lens sem efeito — passa 100% do volume que chega (filtro redundante).
+  for (const s of shapes) {
+    if (s.type !== 'decision_lens' || handled.has(s.id) || s.locked) continue;
+    const st = lensStats[s.id];
+    if (!st || st.arrived === 0 || st.passed !== st.arrived) continue;
+    const edge = (out[s.id] || [])[0];
+    const destId = edge ? resolveThroughPortsSimplify(shapesMap, out, edge.to) : null;
+    if (destId != null && destId !== s.id) {
+      candidates.push({
+        id: nextId('bypass_'), code: 'lens_no_effect', nodeId: s.id,
+        label: `"${s.label || 'Decision Lens'}" — a regra não filtra ninguém (100% do volume que chega passa) — removível sem efeito.`,
+        apply: { type: 'collapse_node', nodeId: s.id, destId },
+      });
+      handled.add(s.id);
+    }
+  }
+
+  // (d) variável re-testada sem ganho — losango D2 (mesma coluna+csv de D1) alcançado por
+  // uma cadeia DIRETA de ports a partir de um valor fixo v de D1: qualquer linha que chega
+  // aqui já tem coluna==v (garantido por D1), então D2 só pode discriminar o ramo próprio de
+  // v — os demais nunca chegam. Colapsa a aresta pro destino que D2 daria pra esse v.
+  for (const d of shapes) {
+    if (d.type !== 'decision' || !d.variableCol || handled.has(d.id)) continue;
+    for (const e of (out[d.id] || [])) {
+      const value = (e.label ?? '').trim();
+      let cur = e.to;
+      let lastPortId = null;
+      const seenPorts = new Set();
+      while (shapesMap[cur]?.type === 'port') {
+        if (seenPorts.has(cur)) { cur = null; break; }
+        seenPorts.add(cur);
+        lastPortId = cur;
+        const nxt = (out[cur] || [])[0];
+        cur = nxt ? nxt.to : null;
+      }
+      if (cur == null || lastPortId == null) continue;
+      const d2 = shapesMap[cur];
+      if (!d2 || d2.type !== 'decision' || d2.id === d.id || handled.has(d2.id) || d2.locked) continue;
+      if (d2.variableCol !== d.variableCol || d2.csvId !== d.csvId) continue;
+      const connToD2 = conns.find(c => c.from === lastPortId && c.to === d2.id);
+      if (!connToD2) continue;
+      const d2Edge = (out[d2.id] || []).find(e2 => (e2.label ?? '').trim() === value);
+      const destId = d2Edge ? resolveThroughPortsSimplify(shapesMap, out, d2Edge.to) : null;
+      if (destId == null) continue;
+      candidates.push({
+        id: nextId('reroute_'), code: 'redundant_variable', nodeId: d2.id,
+        label: `"${d2.variableCol}" é retestado em "${d2.label || d2.variableCol}" (valor "${value}" já decidido em "${d.label || d.variableCol}") — o retest não discrimina nada.`,
+        apply: { type: 'reroute_edge', connId: connToD2.id, newTo: destId },
+      });
+    }
+  }
+
+  return candidates;
+}
+
+// Desfecho terminal por linha — MESMA classificação de runSimulation (incl. fallback de AS
+// IS via __DECISAO_ORIGINAL), mas devolvendo o CÓDIGO por linha em vez de só os agregados.
+// Base da prova de equivalência: duas políticas só são "iguais" se decidirem TODAS as linhas
+// exatamente igual — dois canvases podem empatar no agregado (approvalRate) e ainda assim
+// decidir linhas diferentes (trocam quem é aprovado, sem mudar a soma).
+const ROW_NONE = 0, ROW_APROVADO = 1, ROW_REPROVADO = 2;
+function computeRowOutcomes(shapes, conns, csvStore) {
+  const { out } = buildFlowGraph(shapes, conns);
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  function traverseRow(csv, r, startId) {
+    let cur = startId;
+    const visited = new Set();
+    while (cur) {
+      if (visited.has(cur)) return null;
+      visited.add(cur);
+      const node = shapesMap[cur];
+      if (!node) return null;
+      if (TERM.has(node.type)) return node.type;
+      if (node.type === 'decision') {
+        const colIdx = csv.headers.indexOf(node.variableCol);
+        const val = (colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '') : '').trim();
+        const match = (out[cur] || []).find(e => (e.label ?? '').trim() === val);
+        if (!match) return null;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        const rowIdx = node.rowVar ? csv.headers.indexOf(node.rowVar.col) : -1;
+        const colIdx = node.colVar ? csv.headers.indexOf(node.colVar.col) : -1;
+        const rowVal = node.rowVar && rowIdx >= 0 ? (cellStr(csv, r, rowIdx) ?? '').trim() : '';
+        const colVal = node.colVar && colIdx >= 0 ? (cellStr(csv, r, colIdx) ?? '').trim() : '';
+        if (!node.rowVar && !node.colVar) return null;
+        const rKey = node.rowVar ? rowVal : '*';
+        const cKey = node.colVar ? colVal : '*';
+        const isEligible = isCellEligible(node.cells, `${rKey}|${cKey}`);
+        const typeCfg = getCinemaType(node.cinemaType);
+        const targetLabel = isEligible ? typeCfg.ports[0].label : typeCfg.ports[1].label;
+        const match = (out[cur] || []).find(e => e.label === targetLabel);
+        if (!match) return null;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        if (!rowMatchesLensRules(csv, r, node.rules || [])) return null;
+        const edges = out[cur] || [];
+        if (edges.length === 0) return null;
+        cur = edges[0].to;
+      } else if (node.type === 'port') {
+        const edges = out[cur] || [];
+        if (edges.length === 0) return null;
+        cur = edges[0].to;
+      } else return null;
+    }
+    return null;
+  }
+
+  const result = {};
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision')      return d.csvId === csvId;
+      if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    const n = rowCount(csv);
+    const codes = new Int8Array(n);
+    if (csvRoots.length > 0) {
+      const rootId = csvRoots[0].id;
+      for (let r = 0; r < n; r++) {
+        const res = traverseRow(csv, r, rootId);
+        if (res === 'approved') codes[r] = ROW_APROVADO;
+        else if (res === 'rejected') codes[r] = ROW_REPROVADO;
+        else if (res === 'as_is') {
+          const orig = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').trim().toUpperCase() : '';
+          codes[r] = orig === 'APROVADO' ? ROW_APROVADO : orig === 'REPROVADO' ? ROW_REPROVADO : ROW_NONE;
+        } else codes[r] = ROW_NONE;
+      }
+    }
+    result[csvId] = codes;
+  }
+  return result;
+}
+
+// Prova de equivalência (Copiloto Sessão 5, DEC-IA-005): compara o DESFECHO POR LINHA de
+// duas políticas — `identical` só é true com diffCount === 0 (TODAS as linhas de TODOS os
+// csvs decidem igual). Quando não é idêntico, o delta reportado vem de runSimulation
+// ANTES/DEPOIS de verdade — nunca estimado (mesmo contrato de validação do Goal Seek).
+function computeSimplifyEquivalence(origShapes, origConns, propShapes, propConns, csvStore) {
+  const codesA = computeRowOutcomes(origShapes, origConns, csvStore);
+  const codesB = computeRowOutcomes(propShapes, propConns, csvStore);
+  let diffCount = 0, totalRows = 0;
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const a = codesA[csvId], b = codesB[csvId];
+    const n = rowCount(csv);
+    totalRows += n;
+    if (!a || !b) { diffCount += n; continue; }
+    for (let r = 0; r < n; r++) if (a[r] !== b[r]) diffCount++;
+  }
+  const identical = diffCount === 0;
+  let delta = null;
+  if (!identical) {
+    const before = runSimulation(origShapes, origConns, csvStore);
+    const after  = runSimulation(propShapes, propConns, csvStore);
+    const d = (a, b) => (a != null && b != null) ? b - a : null;
+    delta = {
+      approvalRate: { before: before.approvalRate, after: after.approvalRate, delta: d(before.approvalRate, after.approvalRate) },
+      inadReal:     { before: before.inadReal,     after: after.inadReal,     delta: d(before.inadReal, after.inadReal) },
+      inadInferida: { before: before.inadInferida, after: after.inadInferida, delta: d(before.inadInferida, after.inadInferida) },
+      approvedQty:  { before: before.approvedQty,  after: after.approvedQty,  delta: after.approvedQty - before.approvedQty },
+      rejectedQty:  { before: before.rejectedQty,  after: after.rejectedQty,  delta: after.rejectedQty - before.rejectedQty },
+    };
+  }
+  return { identical, diffCount, totalRows, delta };
+}
+
+// Ponto de entrada do COMPUTE_SIMPLIFY: detecta candidatos, aceita-os INCREMENTALMENTE (só
+// os que preservam diff = 0 sobre o estado já aceito — ver comentário do catálogo acima) e
+// devolve a proposta final + a prova de equivalência contra a política ORIGINAL.
+function computeSimplify(shapes, conns, csvStore, nodeArrivals) {
+  const lensStats = computeLensStats(shapes, conns, csvStore);
+  const candidates = detectSimplifyCandidates(shapes, conns, nodeArrivals || {}, lensStats);
+
+  let curShapes = shapes, curConns = conns;
+  const accepted = [];
+  for (const cand of candidates) {
+    const { shapes: tryShapes, conns: tryConns } = applySimplifyCandidates(curShapes, curConns, [cand]);
+    const eq = computeSimplifyEquivalence(curShapes, curConns, tryShapes, tryConns, csvStore);
+    if (eq.identical) {
+      curShapes = tryShapes; curConns = tryConns;
+      accepted.push(cand);
+    }
+  }
+
+  const equivalence = computeSimplifyEquivalence(shapes, conns, curShapes, curConns, csvStore);
+
+  return {
+    proposal: {
+      candidates: accepted,
+      consideredCount: candidates.length,
+      totalNodeCount: shapes.length,
+      removedNodeCount: shapes.length - curShapes.length,
+    },
+    equivalence,
+  };
+}
+
 // Lista de ArrayBuffers das colunas do dataset largo — transferíveis (zero-cópia) no
 // postMessage de ANALYTICS_RESULT. Cada coluna tem seu próprio buffer (nunca compartilhado),
 // então a lista é livre de duplicatas. Após a transferência os typed arrays do worker ficam
@@ -3446,6 +3884,17 @@ function handleMessage(e) {
     return;
   }
 
+  // Simplificação com prova de equivalência (Copiloto Sessão 5) — busca on-demand, como o
+  // Goal Seek; reusa o `nodeArrivals` do tick (normalmente uma leitura de cache) para os
+  // candidatos de chegada zero de losango/Cineminha.
+  if (type === 'COMPUTE_SIMPLIFY') {
+    const { shapes, conns = [] } = e.data;
+    const { nodeArrivals } = getTickResult(shapes, conns);
+    const result = computeSimplify(shapes, conns, workerCsvStore, nodeArrivals);
+    self.postMessage({ type: 'SIMPLIFY_RESULT', ...result });
+    return;
+  }
+
   if (type === 'COMPUTE_JOHNNY') {
     const { shapes, cinemaIds, conns = [], lensPopulations = {}, riskLevels, hierarchyMode, inadMetric } = e.data;
     const result = computeJohnnyData(shapes, cinemaIds, conns, workerCsvStore, lensPopulations, riskLevels, hierarchyMode, inadMetric);
@@ -3504,5 +3953,9 @@ export {
   computeGoalSeekBaseline,
   computeNewLensThreshold,
   resolveDirectTerminalConn,
+  computeSimplify,
+  detectSimplifyCandidates,
+  computeSimplifyEquivalence,
+  computeLensStats,
   __setWorkerCsvStoreForTest,
 };
