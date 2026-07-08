@@ -56,6 +56,22 @@ Princípio: tudo funciona 100% local; IA é camada opcional de enriquecimento
 política** (PolicyIR, Sessão 0) e **cálculo de delta marginal** (deltas O(1) por
 segmento no Goal Seek, Sessão 4).
 
+### Frente 5 — Policy Strategy Assistant (visão de longo prazo, não é sessão)
+
+Um nível acima da Descoberta de Segmentos (Frente 4): em vez de descobrir segmentos,
+descobrir **estratégias** — "qual combinação de recomendações atinge a meta com o
+melhor trade-off?", "vale flexibilizar o segmento A e endurecer o B?", "qual a
+sequência ótima de mudanças?". Premissa de design inegociável: **deltas de mudanças
+NÃO são aditivos** (aplicar A muda a população que chega ao ponto de B) — qualquer
+ranking de combinações exige re-simulação real por combinação (busca greedy/beam
+sobre achados, mesmo padrão Johnny/Goal Seek — nunca enumeração cega nem soma de
+deltas). Pré-condições para virar épico: (a) MVP da Frente 4 validado com usuário
+real; (b) colunas financeiras (margem/custo) no modelo de dados, sem as quais "ROI"
+seria só um proxy que o Goal Seek já otimiza. A semente já está especificada: a
+aplicação combinada de N achados com delta re-simulado (Sessão 12) responde "esses
+três segmentos juntos atingem a meta?" sem motor de estratégia. Degrau **Planejar**
+da pirâmide de maturidade ([[Epicos-CopilotoIA]]).
+
 ---
 
 ## Exportação

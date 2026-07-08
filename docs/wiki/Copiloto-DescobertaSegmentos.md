@@ -170,6 +170,10 @@ SegmentFinding = {
   },
   explanation: {     // decomposição local, determinística
     contributions: [{col, value, sharePct}],   // decomposição WoE aditiva do desvio
+    dispersion: {                              // "por que nunca vi isso antes": onde a
+      nodesCount,                              // política ATUAL decide o segmento hoje —
+      terminals: [{terminal, sharePct}],       // volume do segmento por terminal/desfecho
+    },                                         // (mesmo walk do escopo — sem passe extra)
     stability: null | {split:'temporal', holds: boolean},
     pValue, qValue,                            // teste + FDR
   },
@@ -190,7 +194,9 @@ SegmentFinding = {
 ┌──────────────────────────────▼─────────────────────────────────────┐
 │ 2. EXPLICAÇÃO (worker, mesmo passe)                                 │
 │    decomposição WoE por condição · lift vs. complemento ·           │
-│    teste binomial + FDR (BH) · estabilidade temporal (split-half)   │
+│    teste binomial + FDR (BH) · estabilidade temporal (split-half) · │
+│    dispersão na política atual (em quantos nós/terminais o          │
+│    segmento é decidido hoje — "por que nunca vi isso antes")        │
 └──────────────────────────────┬─────────────────────────────────────┘
 ┌──────────────────────────────▼─────────────────────────────────────┐
 │ 3. PRIORIZAÇÃO (worker)                                             │
@@ -227,12 +233,22 @@ Os estágios são funções separadas no worker (testáveis isoladamente), compo
    · 🔀 divergência vs. AS IS · ⚠️ anomalia).
 3. Cada card mostra: condições do segmento em linguagem de regra ("Score em R07–R08 **e**
    Canal = Digital"), volume e share, inad vs. referência (com lift), decomposição do
-   porquê, selo de confiança (significância + estabilidade) e **impacto simulado** da
-   recomendação.
+   porquê, **dispersão na política atual** ("hoje este segmento é decidido em 4 nós
+   diferentes — 61% reprovado no nó X, 22% aprovado no Y…" — a resposta determinística a
+   "por que eu nunca descobri isso antes": segmento diluído não aparece inteiro em nenhum
+   corte da política), selo de confiança (significância + estabilidade) e **impacto
+   simulado** da recomendação. Quando o escopo é um nó, o card declara o contexto
+   condicional ("dentro da população que chega a este nó" — ex.: a variável só é
+   discriminante após `Score ≥ R08`).
 4. Ações por card: **👁 Ver no Dashboard** (cria filtro de página com as condições —
    reusa `FilterCard`), **🎯 Enviar ao Goal Seek** (pré-carrega o objetivo/trava
    correspondente) e **✓ Aplicar como novo cenário** (materializa o patch numa aba nova —
-   nunca toca a política de origem).
+   nunca toca a política de origem). O modal também permite **selecionar múltiplos
+   achados e aplicá-los juntos** num único cenário, com delta combinado re-simulado (ver
+   "Aplicação combinada" abaixo) — e **filtrar os achados por variável** (facet sobre
+   `conditions[].col`): navegação centrada na variável ("existem oportunidades envolvendo
+   Tempo de Cliente?"), útil em revisões temáticas — os achados já carregam as colunas,
+   o filtro é client-side sobre o `SegmentModel` pronto.
 
 ### Nível 1 — análise de um nó específico
 
@@ -323,6 +339,9 @@ Regras de tradução fixas (templates determinísticos, pt-BR — mesmo princíp
 - **Todo achado com verbo de ação**: o card não termina em estatística, termina em
   proposta ("Criar exceção de aprovação para este segmento — impacto simulado: +0,6pp
   aprovação, +0,03pp inad inferida").
+- **Todo achado com o "porquê nunca vi isso"** (quando `dispersion.nodesCount > 1`):
+  template determinístico sobre a dispersão — "hoje este segmento está diluído em N nós
+  da política (X% decidido em A, Y% em B…) — nenhum corte atual o enxerga inteiro".
 - **Toda proposta com número simulado de verdade** (DEC-IA-005): o delta do card vem de
   `runSimulation` sobre o canvas clonado com o patch aplicado — nunca do agregado interno
   da busca.
@@ -341,6 +360,20 @@ Cada tipo de achado mapeia para um gerador de patch, TODOS materializados pelo a
 | `heterogeneous_block` | "Quebra que falta": losango ou Cineminha (se interação, mesmo critério `IV(A×B) >> IV(A)+IV(B)` da Sessão 3) no nó heterogêneo | fluxo de criação da Sessão 3 (um clique, já conectado) — **entrega o movimento "adicionar quebra" pendente da Sessão 4** |
 | `asis_divergence` | Nenhum patch — encaminha para inspeção (filtro no Dashboard + destaque no canvas) | `FilterCard` + navegação |
 | `anomaly` | Nenhum patch — sinalização de qualidade de dado | card informativo |
+
+### Aplicação combinada de achados (fase intermediária)
+
+O modal permite selecionar **N achados com recomendação** e aplicá-los juntos num único
+cenário novo. Premissa de design inegociável: **os deltas dos achados NÃO são aditivos**
+— aplicar o achado A muda a população que trafega pelo ponto do achado B (o segmento de
+B pode encolher ou desaparecer). Por isso o delta combinado exibido **nunca** é a soma
+dos deltas individuais: os patches são aplicados em sequência sobre o MESMO clone e o
+conjunto é validado por **uma re-simulação real** (`runSimulation`) — mesmo contrato
+DEC-IA-005 dos deltas individuais. Se o delta combinado divergir relevantemente da soma
+dos individuais, o modal declara a interação ("os achados se sobrepõem em X propostas")
+em vez de esconder. Isso responde perguntas como "esses três segmentos juntos atingem a
+meta de aprovação?" sem exigir um motor de estratégia — e é a semente declarada da
+visão de longo prazo "Policy Strategy Assistant" (ver [[Roadmap]]).
 
 ---
 
@@ -479,6 +512,12 @@ aba Dashboard — exceção DEC-AW-001 já aberta):
   - **Dedup**: filho aninhado sem ganho incremental não aparece quando o pai é reportado.
   - **Recomendação ≡ simulação**: o delta exibido de cada recomendação ≡ `runSimulation`
     antes/depois do patch aplicado (mesma técnica do GATE do Goal Seek).
+  - **Dispersão exata**: `dispersion` de um achado ≡ contagem manual, por terminal, das
+    linhas que casam as condições (fixture com o segmento deliberadamente espalhado por
+    2+ nós).
+  - **Combinação ≡ re-simulação, nunca soma**: fixture com dois achados que interagem
+    (o patch de A muda a população de B) ⇒ o delta combinado exibido ≡ `runSimulation`
+    do clone com os DOIS patches, e difere da soma dos deltas individuais.
   - **Determinismo**: mesma entrada ⇒ mesmo `SegmentModel`.
   - **Travas**: nó 🔒 ⇒ recomendação correspondente marcada não-acionável.
 - Sessão 13 (IA): GATE de contrato — payload enviado nunca contém N3; rótulo/narrativa
@@ -492,7 +531,10 @@ aba Dashboard — exceção DEC-AW-001 já aberta):
   (testáveis): `discoverSegments` (beam sobre dicionários — O(distintos^profundidade)
   PODADO, nunca produto cartesiano cego), `explainSegment`, `prioritizeFindings`,
   `buildSegmentRecommendations`. População de escopo via walk compilado M8 (mesmo padrão
-  `computeVariableRanking`); bins/IV reusam `computeIV` existente.
+  `computeVariableRanking`); bins/IV reusam `computeIV` existente. A métrica-alvo entra
+  no pipeline já resolvida como `{col, denominator, direction}` (DEC-SD-006) — nenhuma
+  função interna assume inad. A `dispersion` (nós/terminais onde o segmento é decidido
+  hoje) sai do MESMO walk que já roteia as linhas para o escopo — não é um passe extra.
 - **Validação dos deltas**: gerar o patch, aplicar num clone em memória
   (`applyPolicyPatch`/`applyGoalSeekMoves` conforme o tipo) e `runSimulation` — só para os
   top-N achados (não para todo candidato; o card exibe delta só quando validado).
@@ -532,6 +574,20 @@ estatístico, nunca como achados diretos.
 Score = impacto × confiança × acionabilidade, decomposto no card. Colunas financeiras
 (margem/custo), quando existirem na base, entram no eixo de impacto sem mudança
 estrutural — o score é uma soma de termos, não um modelo fechado.
+
+### DEC-SD-006: Função de qualidade parametrizada por métrica-alvo declarada
+A busca (estágio 1) recebe a métrica-alvo como **parâmetro estruturado**
+`{col, denominator, direction}` — nunca um nome de coluna hardcoded no motor: `col` é a
+coluna métrica, `denominator` declara a base da razão (`'approved'` como inad — soma só
+sobre aprovados — ou `'all'` como conversão sobre propostas) e `direction` declara o
+sentido bom (`'lower'`/`'higher'`, mesma semântica de `GOOD_WHEN_LOWER` do Dashboard).
+**O MVP fecha o parâmetro em `inadReal`/`inadInferida`** (as únicas métricas que a base
+tem hoje); a generalização para margem, churn, CAC ou LTV é uma extensão do **wizard/
+modelo de dados** (novo tipo de coluna métrica genérica em `METRIC_COL_TYPES` +
+classificação no passo 2), não do motor — que já nasce genérico por esta decisão. A
+Sessão 10 NÃO deve assumir inad em assinaturas internas (`discoverSegments`,
+`explainSegment`, função de qualidade): o `riskMetric` do formulário resolve para este
+objeto antes de entrar no pipeline.
 
 ---
 
@@ -576,9 +632,9 @@ estrutural — o score é uma soma de termos, não um modelo fechado.
 
 | Fase | Entrega | Sessões |
 |---|---|---|
-| **MVP** | Motor de descoberta 1D/2D global + por nó (achados `approvable_low_risk`, `approved_high_risk`, `heterogeneous_block`), rigor estatístico completo (volume/shrinkage/FDR/dedup), modal com cards + GATE | 10, 11 |
-| **Intermediária** | Recomendações materializáveis (patches + re-simulação + novo cenário), integração Goal Seek ("adicionar quebra" + envio de objetivo), achados `asis_divergence` e `anomaly`, quadrante + estabilidade temporal, filtro de Dashboard a partir do achado | 12 |
-| **Longo prazo** | Enriquecimento de IA (rótulos/narrativa/hipóteses via Sessão 7), seção no DocGen, achados salvos/dispensados persistidos, colunas de margem no impacto, monitoramento de drift de segmentos entre safras, grounding no chat (Sessão 9) | 13+ |
+| **MVP** | Motor de descoberta 1D/2D global + por nó (achados `approvable_low_risk`, `approved_high_risk`, `heterogeneous_block`), explicação com `dispersion` ("por que nunca vi isso antes"), rigor estatístico completo (volume/shrinkage/FDR/dedup), modal com cards + filtro por variável + GATE | 10, 11 |
+| **Intermediária** | Recomendações materializáveis (patches + re-simulação + novo cenário), **aplicação combinada de N achados** (delta combinado re-simulado, nunca soma), integração Goal Seek ("adicionar quebra" + envio de objetivo), achados `asis_divergence` e `anomaly`, quadrante + estabilidade temporal, filtro de Dashboard a partir do achado | 12 |
+| **Longo prazo** | Enriquecimento de IA (rótulos/narrativa/hipóteses via Sessão 7), seção no DocGen, achados salvos/dispensados persistidos, métrica-alvo genérica no wizard (margem/churn/CAC/LTV — DEC-SD-006), entrada contextual "🔍 Oportunidades com esta variável" no chip do painel, monitoramento de drift de segmentos entre safras, grounding no chat (Sessão 9), visão "Policy Strategy Assistant" (ver [[Roadmap]]) | 13+ |
 
 ---
 
