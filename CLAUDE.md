@@ -35,6 +35,7 @@ AppCreditoSimulador/
 │   ├── policySimplify.test.js    # GATE Copiloto Sessão 5: nó colapsável/chegada zero/regra sem efeito/variável re-testada ⇒ proposta prova diff=0; caso lossy ⇒ delta declarado bate com runSimulation
 │   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
+│   ├── segmentDiscovery.test.js  # GATE Copiloto Sessão 10: subgrupo plantado achado com condições exatas; homogênea ⇒ zero; agregados ≡ matchLensRule; dispersion ≡ contagem por terminal; p-value binomial ≡ controle; FDR (BH); shrinkage rebaixa nicho; escopo por nó ≡ sub-base; dedup; determinismo
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
@@ -343,6 +344,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_GOAL_SEEK` | `{shapes, conns, goal, constraints, locks}` | Copiloto Sessão 4 — roda `computeGoalSeek` (catálogo de movimentos + busca gulosa com precedência/shrinkage/restrições + validação por re-simulação); responde com `GOAL_SEEK_RESULT` |
 | `COMPUTE_SIMPLIFY` | `{shapes, conns}` | Copiloto Sessão 5 — roda `computeSimplify` (detecção de candidatos + aceitação incremental validada por `computeSimplifyEquivalence` + prova de equivalência linha a linha); responde com `SIMPLIFY_RESULT` |
 | `COMPUTE_POLICY_DOC` | `{shapes, conns, ir, canvases, options}` | Copiloto Sessão 6 — `ir` chega PRONTO (`buildPolicyIR` só existe em `App.jsx`); `canvases: [{id, nome, shapes, conns}]` para a comparação de cenários (mesmo formato de `COMPUTE_ANALYTICS_DATASET`); `options: {includeDomains, activeCanvasId?, activeCanvasName?, compare?:{shapes,conns}}`. Roda `computePolicyDoc`; responde com `POLICY_DOC_RESULT` |
+| `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?}`. Roda `computeSegmentDiscovery`; responde com `SEGMENT_DISCOVERY_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -356,6 +358,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `GOAL_SEEK_RESULT` | `{goal, baseline, frontier, moves, goalReached, bindingConstraint, result}` — ver seção "Motor de Goal Seek" |
 | `SIMPLIFY_RESULT` | `{proposal, equivalence}` — ver seção "Simplificação com Prova de Equivalência" |
 | `POLICY_DOC_RESULT` | `{docModel}` — ver seção "Documentação Automática" |
+| `SEGMENT_DISCOVERY_RESULT` | `{segmentModel}` — ver seção "Descoberta de Segmentos" |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -380,6 +383,10 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `computeLensStats(shapes, conns, csvStore)`: walk dedicado (padrão `computeNodeArrivals`, generalizado a Decision Lens) — `{[lensId]: {arrived, passed}}`, base dos candidatos `zero_arrival_node`/`lens_no_effect` sobre lens (`nodeArrivals` não cobre lens)
 - `computeSimplifyEquivalence(origShapes, origConns, propShapes, propConns, csvStore)`: prova de equivalência — compara o desfecho **por linha** (`computeRowOutcomes`, mesma classificação de `runSimulation`) de duas políticas; `identical` só é `true` com `diffCount===0`; quando não, o `delta` vem de `runSimulation` antes/depois de verdade (nunca estimado)
 - `computePolicyDoc(shapes, conns, csvStore, ir, canvasInputs, options)`: ponto de entrada da Documentação Automática (Copiloto Sessão 6) — monta o `docModel` inteiro numa única passada; ver seção "Documentação Automática"
+- `computeSegmentDiscovery(shapes, conns, csvStore, scope, params)`: ponto de entrada da Descoberta de Segmentos (Copiloto Sessão 10) — orquestra `discoverSegments` → `explainSegment` → `prioritizeFindings` e devolve o `SegmentModel`; ver seção "Descoberta de Segmentos"
+- `discoverSegments(shapes, conns, csvStore, scope, metricSpec, params)`: estágio 1 (beam search 1D→2D sobre os dicionários das colunas Filtro, escopo global ou por nó via walk compilado M8) — devolve os candidatos crus + o `ctx` compartilhado (agregados do escopo, dispersão por linha, bins, coders). `metricSpec` resolvido por `resolveRiskMetric` (DEC-SD-006 — nenhuma função interna assume inad)
+- `explainSegment(candidate, ctx)`: estágio 2 — decomposição WoE por condição (reusa `computeIV`/bins da Sessão 3), lift vs. complemento, teste binomial (`segBinomTwoSided`) e `dispersion` (nós/terminais onde a política decide o segmento hoje), tudo do mesmo walk do escopo
+- `prioritizeFindings(explained, ctx, params)`: estágio 3 — FDR Benjamini–Hochberg (`segBenjaminiHochberg`) sobre todos os candidatos testados, gate de significância/oportunidade, score impacto × confiança × acionabilidade (shrinkage `SHRINK_K`), dedup de segmentos aninhados sem ganho incremental e `diagnostics` com contadores de descarte
 - `computeFunnelByNode(shapes, conns, csvStore)`: funil por nó+valor — mesma travessia/acumulação de `exportDiagnosticCSV` (`App.jsx`), reimplementada aqui (worker não importa `App.jsx`) e estendida para atravessar `decision_lens` (a versão original de `exportDiagnosticCSV` para no primeiro lens do caminho — ver seção "Documentação Automática")
 - `redactFunnel(funnel, includeDomains)`: Contrato de Privacidade aplicado ao funil — sem `includeDomains`, agrega as linhas por NÓ (perde a granularidade por valor, que é N2)
 - `buildPolicyPaths(ir, maxPaths=500)`: regras achatadas raiz→terminal — DFS determinístico sobre o IR compondo as condições de cada nó no caminho (decisão enumera todas as rotas; Cineminha enumera os dois ramos); ciclo/destino ausente terminam o ramo com `terminal:null` + motivo, nunca inventam
@@ -1051,6 +1058,78 @@ fixture A/A' com 1 célula de Cineminha mudada ⇒ exatamente essa mudança, del
 batendo com `computeSimulationTick` antes/depois, e o mesmo delta reproduzido via
 `computePolicyDoc({..., options:{compare}})`).
 
+## Descoberta de Segmentos (Copiloto Sessão 10, motor — DEC-SD-001..006)
+
+Motor de **subgroup discovery** que varre a base (ou a população de um nó) procurando
+segmentos acionáveis onde a política atual está desalinhada com o comportamento observado.
+Ver `docs/wiki/Copiloto-DescobertaSegmentos.md`. **Sessão 10 = só o motor + GATE** (sem UI;
+as recomendações materializáveis + re-simulação e os achados `asis_divergence`/`anomaly`
+ficam para a Sessão 12).
+
+### SegmentModel (padrão `docModel` — dados crus, nunca prosa)
+`COMPUTE_SEGMENT_DISCOVERY` (worker) devolve:
+```js
+{
+  version, generatedAt, scope,            // null (global) | {nodeId, label}
+  metric: {id, label, direction},         // métrica-alvo resolvida (DEC-SD-006)
+  population: {qty, decidedQty},
+  findings: [SegmentFinding],             // ordenados por prioridade
+  diagnostics: {candidatesTested, discarded:{lowVolume, notSignificant, unstable, duplicate, noOpportunity}},
+}
+// SegmentFinding = { id, code, segment:{conditions:LensRule[], scope}, metrics, explanation, priority, recommendation:null }
+//   code: 'approvable_low_risk' | 'approved_high_risk' | 'heterogeneous_block'
+//   metrics: {qty, share, qtdAltas, qtdAltasInfer, inadReal, inadInferida, refInadReal, refInadInferida, lift, currentDecision}
+//   explanation: {contributions:[{col,value,sharePct}], dispersion:{nodesCount, terminals:[{terminal,qty,sharePct}], currentDecision}, stability:null, pValue, qValue}
+//   priority: {score, impact:{deltaApproval:null, deltaInadInf, movedQty}, confidence, actionability}
+```
+Segmento = **conjunção de `LensRule`** sobre colunas Filtro (DEC-SD-001) — imediatamente
+interpretável e materializável (vira Decision Lens/losango/Cineminha na Sessão 12).
+
+### Pipeline (três estágios desacoplados, testáveis)
+- **`discoverSegments`** — beam search 1D→`maxDepth` (default 2) sobre os **dicionários** das
+  colunas Filtro (`candidateCoder`/agregação O(distintos), PODADO — nunca produto cartesiano
+  cego). Escopo global (`scope==null`) ou por nó (`scope.nodeId`): as linhas do escopo saem
+  de um **walk compilado M8** (raiz do motor, como `runSimulation`) que também registra, por
+  linha, o **terminal** e o **nó decisor** — base da `dispersion` (sem passe extra). Winner =
+  csv de maior população no escopo (mesmo critério de `computeVariableRanking`; multi-csv é
+  extensão). Devolve os candidatos crus + `ctx` compartilhado.
+- **`explainSegment`** — decomposição **WoE aditiva** por condição (reusa a matemática
+  good/bad de `computeIV`), **lift** vs. complemento, **teste binomial** de proporção
+  (`segBinomTwoSided`: exato até `n≤1000`, aproximação normal acima) e **`dispersion`** ("por
+  que nunca vi isso antes": em quantos nós/terminais a política decide o segmento hoje).
+- **`prioritizeFindings`** — **FDR Benjamini–Hochberg** (`segBenjaminiHochberg`) sobre TODOS
+  os candidatos de desvio testados; gate de significância (`qValue ≤ alpha`) + de oportunidade
+  (código atribuído); **score = impacto × confiança × acionabilidade** (shrinkage `SHRINK_K`
+  proporcional ao volume do escopo, penalidade por profundidade e por nó 🔒 travado); **dedup**
+  de filho aninhado sem ganho incremental de |desvio| sobre o pai (parcimônia); `diagnostics`
+  com contadores de descarte.
+
+### Métrica-alvo estruturada (DEC-SD-006)
+`resolveRiskMetric(riskMetric)` → `{numColType, denColType, direction, ...}`. O formulário só
+oferece `inadReal`/`inadInferida` por ora, mas **nenhuma função interna assume inad** — todas
+leem `numColType`/`denColType` genericamente (margem/churn/CAC são extensão do wizard, não do
+motor).
+
+### Achados desta sessão
+- **`approvable_low_risk`**: segmento hoje **reprovado** com risco significativamente MENOR que
+  a referência (aprovação deixada na mesa).
+- **`approved_high_risk`**: simétrico — hoje **aprovado** com risco maior (vazamento de risco).
+- **`heterogeneous_block`**: bloco de **tratamento único** (não `mixed`) internamente
+  heterogêneo (IV ≥ `SEG_HET_MIN_IV` numa coluna candidata) — a "quebra que falta". Emitido no
+  nível do escopo (depth-0); `contributions` = colunas discriminantes por share de IV.
+
+### Comportamento
+Determinístico (mesma entrada ⇒ mesmo `SegmentModel`, ordem inclusive); agregados sempre da
+agregação exata; `recommendation` sempre `null` nesta sessão; sem coluna temporal ⇒
+`stability: null` (nunca inventado). Efêmero — o motor não persiste nada.
+
+### Teste
+`tests/segmentDiscovery.test.js` — GATE: subgrupo plantado achado com condições exatas;
+homogênea ⇒ zero achados; agregados ≡ `matchLensRule`; `dispersion` ≡ contagem manual por
+terminal (segmento espalhado por 2+ nós); p-value ≡ controle binomial manual; BH monótono com
+ruído descartado; shrinkage rebaixa nicho minúsculo; escopo por nó ≡ sub-base filtrada à mão;
+dedup; determinismo.
+
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
 - Estado local (array) persistido em `localStorage` implicitamente (futuro)
@@ -1533,7 +1612,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/copiloto-session-6-docs-jye71z`
+`claude/copiloto-segment-discovery-h25uuu`
 
 ## Roadmap futuro (não implementado)
 

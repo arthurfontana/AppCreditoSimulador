@@ -3167,6 +3167,645 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
   };
 }
 
+// ── COMPUTE_SEGMENT_DISCOVERY — Copiloto Sessão 10 (Descoberta de Segmentos) ─────
+// docs/wiki/Copiloto-DescobertaSegmentos.md (DEC-SD-001..006). Assistente de subgroup
+// discovery: varre a base (ou a população de um nó) procurando conjunções de condições
+// (SegmentDef = LensRule[] sobre colunas de decisão — DEC-SD-001) onde a métrica-alvo
+// (risco) desvia da referência e a política ATUAL está desalinhada. Motor 100% local,
+// determinístico; NENHUM número exibido sem agregação exata (a re-simulação das
+// recomendações fica para a Sessão 12 — aqui recommendation === null).
+//
+// Quatro estágios desacoplados (funções separadas, testáveis):
+//   discoverSegments   → beam search de conjunções 1D→2D sobre os dicionários das colunas
+//                        Filtro (O(distintos) por passo, PODADO — nunca produto cartesiano
+//                        cego); escopo global ou população de um nó via walk compilado M8
+//                        (mesmo padrão de computeVariableRanking). Devolve os candidatos
+//                        crus + um `ctx` compartilhado (agregados do escopo, dispersão por
+//                        linha, bins, coders) que os estágios seguintes reusam SEM reler a
+//                        base.
+//   explainSegment     → decomposição WoE por condição (reusa computeIV/bins da Sessão 3),
+//                        lift vs. complemento, teste binomial (proporção) e `dispersion`
+//                        (em quantos nós/terminais a política decide o segmento HOJE — a
+//                        resposta a "por que nunca vi isso antes"), tudo do MESMO walk que
+//                        resolveu o escopo (sem passe extra).
+//   prioritizeFindings → correção FDR (Benjamini–Hochberg) sobre TODOS os candidatos
+//                        testados, gate de significância, score impacto × confiança ×
+//                        acionabilidade (shrinkage SHRINK_K), dedup de segmentos aninhados
+//                        sem ganho incremental e `diagnostics` com contadores de descarte.
+//
+// DEC-SD-006: a métrica-alvo entra RESOLVIDA como `{numColType, denColType, direction}` —
+// nenhuma função interna assume inad. O formulário só oferece inadReal/inadInferida por
+// ora (as únicas métricas da base), resolvidas por `resolveRiskMetric` ANTES do pipeline.
+//
+// Achados desta sessão (DEC-SD-002): approvable_low_risk (baixo risco hoje reprovado),
+// approved_high_risk (alto risco hoje aprovado), heterogeneous_block (bloco de tratamento
+// único, internamente heterogêneo — a "quebra que falta"). asis_divergence/anomaly ficam
+// para a Sessão 12.
+//
+// Limitação MVP documentada: a descoberta roda sobre o csv de MAIOR população no escopo
+// (mesmo critério de "winner" de computeVariableRanking); multi-csv é extensão. Beam 1D/2D
+// (maxDepth 2 por default). Sem coluna temporal → `stability: null` com aviso (nunca
+// inventado).
+const SEG_BEAM_WIDTH = 8;
+const SEG_MAX_DEPTH_DEFAULT = 2;
+const SEG_DEFAULT_ALPHA = 0.05;
+const SEG_DEFAULT_MAX_FINDINGS = 20;
+const SEG_CURRENT_DOMINANT = 0.8;      // share ≥ isto ⇒ tratamento único (não 'mixed')
+const SEG_HET_MIN_IV = 0.1;            // IV mínimo p/ declarar bloco heterogêneo
+const SEG_MIN_INCREMENTAL_DEV = 0.1;   // ganho relativo mínimo de |desvio| do filho sobre o
+                                       // pai p/ escapar do dedup (parcimônia do beam)
+const SEG_ACTION_DEPTH_PENALTY = 0.5;  // acionabilidade cai a cada condição extra
+const SEG_LOCKED_PENALTY = 0.2;        // segmento decidido em nó 🔒 travado
+const SEG_BINOM_EXACT_MAX = 1000;      // n ≤ isto ⇒ binomial exato; acima ⇒ aprox. normal
+
+// Resolve o `riskMetric` do formulário no objeto estruturado da DEC-SD-006. As duas
+// únicas métricas que a base tem hoje; a generalização (margem/churn/CAC) é extensão do
+// wizard, não do motor — que já lê `numColType`/`denColType` genericamente.
+function resolveRiskMetric(riskMetric) {
+  if (riskMetric === 'inadInferida') {
+    return { id: 'inadInferida', numColType: 'inadInferida', denColType: 'qtdAltasInfer', direction: 'lower', label: 'Inad. Inferida' };
+  }
+  return { id: 'inadReal', numColType: 'inadReal', denColType: 'qtdAltas', direction: 'lower', label: 'Inad. Real' };
+}
+
+// Agregado por segmento — soma bruta de cada tipo de coluna métrica (genérico: a métrica
+// alvo lê `numColType`/`denColType` deste bundle, nunca um nome hardcoded).
+const segEmptyAgg = () => ({ qty: 0, qtdAltas: 0, qtdAltasInfer: 0, inadReal: 0, inadInferida: 0 });
+function segAddAgg(a, s) {
+  a.qty += s.qty; a.qtdAltas += s.qtdAltas; a.qtdAltasInfer += s.qtdAltasInfer;
+  a.inadReal += s.inadReal; a.inadInferida += s.inadInferida;
+}
+function segSubAgg(a, b) {
+  return {
+    qty: a.qty - b.qty, qtdAltas: a.qtdAltas - b.qtdAltas, qtdAltasInfer: a.qtdAltasInfer - b.qtdAltasInfer,
+    inadReal: a.inadReal - b.inadReal, inadInferida: a.inadInferida - b.inadInferida,
+  };
+}
+const segMetricNum = (agg, spec) => agg[spec.numColType] || 0;
+const segMetricDen = (agg, spec) => agg[spec.denColType] || 0;
+function segMetricRate(agg, spec) { const d = segMetricDen(agg, spec); return d > 0 ? segMetricNum(agg, spec) / d : null; }
+// Taxas "de exibição" (independem da métrica-alvo — sempre reportadas no card):
+function segInadReal(agg) { return agg.qtdAltas > 0 ? agg.inadReal / agg.qtdAltas : null; }
+function segInadInferida(agg) { return agg.qtdAltasInfer > 0 ? agg.inadInferida / agg.qtdAltasInfer : null; }
+
+function segColIdxs(csv) {
+  const types = csv.columnTypes || {};
+  const find = (t) => { const c = Object.entries(types).find(([, tt]) => tt === t)?.[0]; return c ? csv.headers.indexOf(c) : -1; };
+  return { qty: find('qty'), qtdAltas: find('qtdAltas'), qtdAltasInfer: find('qtdAltasInfer'), inadReal: find('inadReal'), inadInferida: find('inadInferida') };
+}
+function segReadSums(csv, r, idxs) {
+  return {
+    qty: idxs.qty >= 0 ? (cellNum(csv, r, idxs.qty) || 0) : 1,
+    qtdAltas: idxs.qtdAltas >= 0 ? (cellNum(csv, r, idxs.qtdAltas) || 0) : 0,
+    qtdAltasInfer: idxs.qtdAltasInfer >= 0 ? (cellNum(csv, r, idxs.qtdAltasInfer) || 0) : 0,
+    inadReal: idxs.inadReal >= 0 ? (cellNum(csv, r, idxs.inadReal) || 0) : 0,
+    inadInferida: idxs.inadInferida >= 0 ? (cellNum(csv, r, idxs.inadInferida) || 0) : 0,
+  };
+}
+
+// erf/erfc só pra aproximação normal do binomial (n grande, fora do caminho do GATE).
+function segErf(x) {
+  const sign = x < 0 ? -1 : 1; x = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * x);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return sign * y;
+}
+// Teste binomial de proporção, bicaudal. Exato (soma iterativa de pmf, sem overflow) até
+// SEG_BINOM_EXACT_MAX; acima, aproximação normal. Bicaudal pelo método do "dobro da menor
+// cauda" (min(1, 2·min(P(X≤k), P(X≥k)))) — determinístico e replicável à mão no GATE.
+function segBinomTwoSided(kRaw, nRaw, p0Raw) {
+  const n = Math.round(nRaw);
+  if (n <= 0) return 1;
+  const k = Math.round(Math.max(0, Math.min(n, kRaw)));
+  const p0 = Math.min(1 - 1e-12, Math.max(1e-12, p0Raw));
+  if (n <= SEG_BINOM_EXACT_MAX) {
+    let pmf = Math.pow(1 - p0, n);
+    const ratio = p0 / (1 - p0);
+    let cumLE = 0;   // P(X ≤ k)
+    let cumLT = 0;   // P(X < k)
+    for (let j = 0; j <= n; j++) {
+      if (j <= k) cumLE += pmf;
+      if (j < k) cumLT += pmf;
+      if (j < n) pmf = pmf * ((n - j) / (j + 1)) * ratio;
+    }
+    const lower = cumLE;        // P(X ≤ k)
+    const upper = 1 - cumLT;    // P(X ≥ k)
+    return Math.min(1, 2 * Math.min(lower, upper));
+  }
+  const mean = n * p0, sd = Math.sqrt(n * p0 * (1 - p0));
+  if (sd <= 0) return 1;
+  const z = Math.abs((k - mean) / sd);
+  return Math.min(1, 1 - segErf(z / Math.SQRT2));
+}
+
+// Benjamini–Hochberg: q-values monótonos alinhados à ordem de entrada. m = nº de hipóteses
+// testadas (candidatosTested). Controla o FDR da varredura (DEC-SD-002).
+function segBenjaminiHochberg(pvals) {
+  const m = pvals.length;
+  const q = new Array(m).fill(1);
+  if (m === 0) return q;
+  const order = pvals.map((p, i) => ({ p, i })).sort((a, b) => (a.p - b.p) || (a.i - b.i));
+  let prev = 1;
+  for (let rank = m - 1; rank >= 0; rank--) {
+    const { p, i } = order[rank];
+    const qi = (p * m) / (rank + 1);
+    prev = Math.min(prev, qi);
+    q[i] = Math.min(1, prev);
+  }
+  return q;
+}
+
+// Coder de coluna candidata (mesmo helper da Sessão 3): 'code' (dict-encoded, produção) ou
+// 'row' (base legada / coluna não dict-encoded). Aqui o KEY do bin é sempre a STRING do
+// valor (para virar `LensRule.value` diretamente e casar com matchLensRule no GATE).
+function segCandValue(coder, csv, r) {
+  return coder.mode === 'code' ? coder.dict[coder.codes[r]] : (cellStr(csv, r, coder.colIdx) ?? '').toString().trim();
+}
+
+// WoE marginal de um valor sobre o escopo (reusa a decomposição good/bad de computeIV):
+// good = den−num (clamp ≥0), bad = num. Épsilon de Laplace só quando good OU bad zera.
+function segWoe(numV, denV, totalNum, totalDen) {
+  const totalGood = totalDen - totalNum, totalBad = totalNum;
+  if (totalGood <= 0 || totalBad <= 0) return null;
+  let good = Math.max(0, denV - numV), bad = numV;
+  if (good === 0 || bad === 0) { good += IV_EPS; bad += IV_EPS; }
+  const distGood = good / totalGood, distBad = bad / totalBad;
+  if (distGood <= 0 || distBad <= 0) return null;
+  return Math.log(distGood / distBad);
+}
+
+// ESTÁGIO 1 — descoberta. Devolve os candidatos crus (kind 'deviation' | 'het') + o `ctx`
+// compartilhado (agregados do escopo, dispersão por linha, bins de nível 1, coders) que os
+// estágios 2/3 reusam sem reler a base. Escopo global (`scope == null`) ⇒ todas as linhas;
+// escopo por nó (`scope.nodeId`) ⇒ só as linhas cujo roteamento REAL (raiz do motor, como
+// runSimulation) passa pelo nó — mesma semântica de computeCinemaArrivals/prévia AS IS.
+function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {}) {
+  const spec = metricSpec || resolveRiskMetric('inadReal');
+  const maxDepth = params.maxDepth != null ? params.maxDepth : SEG_MAX_DEPTH_DEFAULT;
+  const beamWidth = params.beamWidth != null ? params.beamWidth : SEG_BEAM_WIDTH;
+  const scopeNodeId = scope && scope.nodeId ? scope.nodeId : null;
+
+  const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
+  const { out } = buildFlowGraph(shapes, conns);
+  const routes = compileRoutes(shapes, conns, out);
+  const { decisionRoutes, cinemaRoutes, singleEdge } = routes;
+  const nodeIdx = new Map(shapes.map((s, i) => [s.id, i]));
+  const TERM = new Set(['approved', 'rejected', 'as_is']);
+
+  // Raiz por csv = MESMA eleição de runSimulation (1ª raiz sem aresta de entrada vinda de
+  // porta) — a decisão REAL da política, necessária para dispersion/currentDecision baterem
+  // com o motor. Walk compilado M8 (código do dicionário), com fallback por-linha no legado.
+  const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
+  const decWithPortInc = new Set(conns.filter(c => portIds.has(c.from)).map(c => c.to));
+  const rootNodes = shapes.filter(s =>
+    (s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens') && !decWithPortInc.has(s.id)
+  );
+
+  // Roteia UMA linha até o terminal, registrando terminal + nó decisor (último losango/
+  // Cineminha/lens antes do terminal) + se passou pelo nó de escopo. Espelha traverseRow /
+  // reachesAnchor.
+  function routeRow(csv, r, startId, compiled, lastVisit, epoch) {
+    let cur = startId, lastFlow = null, hitScope = false;
+    while (cur) {
+      const idx = nodeIdx.get(cur);
+      if (idx === undefined || lastVisit[idx] === epoch) break; // ciclo
+      lastVisit[idx] = epoch;
+      if (scopeNodeId && cur === scopeNodeId) hitScope = true;
+      const node = shapesMap[cur];
+      if (!node) break;
+      if (TERM.has(node.type)) return { terminalType: node.type, decidingNodeId: lastFlow, hitScope };
+      if (node.type === 'decision') {
+        lastFlow = cur;
+        const cd = compiled.decision[cur];
+        let match;
+        if (cd.codes) match = cd.routeByCode[cd.codes[r]];
+        else { const val = (cd.colIdx >= 0 ? (cellStr(csv, r, cd.colIdx) ?? '') : '').trim(); match = decisionRoutes[cur]?.get(val); }
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'cineminha') {
+        lastFlow = cur;
+        const cc = compiled.cinema[cur];
+        let isEligible;
+        if (cc.mode === 'code') {
+          if (cc.none) break;
+          const ri = cc.rowCodes ? cc.rowCodes[r] : 0;
+          const ci = cc.colCodes ? cc.colCodes[r] : 0;
+          isEligible = cc.eligByPair[ri * cc.nC + ci] === 1;
+        } else {
+          const rv = node.rowVar && cc.rowIdx >= 0 ? (cellStr(csv, r, cc.rowIdx) ?? '').trim() : '';
+          const cv = node.colVar && cc.colIdx >= 0 ? (cellStr(csv, r, cc.colIdx) ?? '').trim() : '';
+          if (!node.rowVar && !node.colVar) break;
+          isEligible = isCellEligible(node.cells, `${node.rowVar ? rv : '*'}|${node.colVar ? cv : '*'}`);
+        }
+        const rt = cinemaRoutes[cur];
+        const match = isEligible ? rt?.eligible : rt?.notEligible;
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'decision_lens') {
+        lastFlow = cur;
+        const m = compiled.lens[cur];
+        if (m && !m(r)) break;
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else if (node.type === 'port') {
+        const match = singleEdge[cur];
+        if (!match) break;
+        cur = match.to;
+      } else break;
+    }
+    return { terminalType: null, decidingNodeId: lastFlow, hitScope };
+  }
+
+  // Constrói o escopo (agregado + dispersão por linha) de UM csv.
+  function buildCsvScope(csvId, csv) {
+    const idxs = segColIdxs(csv);
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const csvRoots = rootNodes.filter(d => {
+      if (d.type === 'decision') return d.csvId === csvId;
+      if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
+      if (d.type === 'decision_lens') return true;
+      return false;
+    });
+    const rootId = csvRoots.length ? csvRoots[0].id : null;
+    const compiled = rootId ? compileNodesForCsv(shapes, csv, routes) : null;
+    const lastVisit = new Int32Array(shapes.length);
+    let epoch = 0;
+
+    const scopeAgg = segEmptyAgg();
+    const scopeRows = [];
+    const rowInfo = new Map(); // r -> {t: terminalType|null, res, dn: decidingNodeId, q}
+    const nRows = rowCount(csv);
+    for (let r = 0; r < nRows; r++) {
+      let terminalType = null, decidingNodeId = null, hitScope = false;
+      if (rootId) { epoch++; ({ terminalType, decidingNodeId, hitScope } = routeRow(csv, r, rootId, compiled, lastVisit, epoch)); }
+      const inScope = scopeNodeId ? hitScope : true;
+      if (!inScope) continue;
+      const s = segReadSums(csv, r, idxs);
+      segAddAgg(scopeAgg, s);
+      let res = 'undecided';
+      if (terminalType === 'approved') res = 'approved';
+      else if (terminalType === 'rejected') res = 'rejected';
+      else if (terminalType === 'as_is') {
+        const orig = dOrigIdx >= 0 ? String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase() : '';
+        res = orig === 'APROVADO' ? 'approved' : orig === 'REPROVADO' ? 'rejected' : 'ignored';
+      }
+      scopeRows.push(r);
+      rowInfo.set(r, { t: terminalType, res, dn: decidingNodeId, q: s.qty });
+    }
+    return { csvId, csv, idxs, dOrigIdx, scopeAgg, scopeRows, rowInfo };
+  }
+
+  // Winner = csv de maior população no escopo (mesmo critério de computeVariableRanking).
+  let winner = null;
+  for (const [csvId, csv] of Object.entries(csvStore)) {
+    const sc = buildCsvScope(csvId, csv);
+    if (!winner || sc.scopeAgg.qty > winner.scopeAgg.qty) winner = sc;
+  }
+  if (!winner || winner.scopeRows.length === 0) {
+    return { scope: scopeNodeId ? { nodeId: scopeNodeId, label: shapesMap[scopeNodeId]?.label ?? scopeNodeId } : null,
+             empty: true, population: { qty: 0, decidedQty: 0 } };
+  }
+
+  const { csv, csvId, idxs, scopeAgg, scopeRows, rowInfo } = winner;
+
+  // Colunas candidatas = colunas Filtro do winner csv. Coders O(distintos).
+  const types = csv.columnTypes || {};
+  const candCols = Object.entries(types).filter(([, t]) => t === 'decision').map(([c]) => c);
+  const candCoders = candCols.map(col => candidateCoder(csv, csv.headers.indexOf(col)));
+
+  // Bins de nível 1: uma passada sobre as linhas do escopo, agregando por (col, valor) e
+  // guardando as linhas de cada bin (para a extensão 2D e a dispersão). O(escopo × candCols).
+  const binsByCand = candCols.map(() => new Map());
+  for (const r of scopeRows) {
+    const s = segReadSums(csv, r, idxs);
+    for (let ci = 0; ci < candCoders.length; ci++) {
+      const value = segCandValue(candCoders[ci], csv, r);
+      let bin = binsByCand[ci].get(value);
+      if (!bin) { bin = { value, agg: segEmptyAgg(), rows: [] }; binsByCand[ci].set(value, bin); }
+      segAddAgg(bin.agg, s);
+      bin.rows.push(r);
+    }
+  }
+
+  const scopeDen = segMetricDen(scopeAgg, spec);
+  const globalRate = segMetricRate(scopeAgg, spec);
+  // Shrinkage (DEC-SD-002 / SHRINK_K do Johnny): prior = taxa global do escopo, força
+  // proporcional ao volume de tentativas do escopo — puxa segmentos pequenos para a média,
+  // matando o "nicho de 40 propostas com inad 0%".
+  const SHRINK_K = Math.max(1, scopeDen * 0.02);
+
+  const minQty = params.minQty != null ? params.minQty : Math.max(200, Math.round(scopeAgg.qty * 0.001));
+  const diagnostics = { candidatesTested: 0, discarded: { lowVolume: 0, notSignificant: 0, unstable: 0, duplicate: 0, noOpportunity: 0 } };
+
+  // Beam search 1D→maxDepth. Um "nó" do beam: {conds:[{col,ci,value}], usedCi:Set, agg, rows}.
+  const candidates = [];
+  const seenSig = new Set(); // dedup de assinatura de conjunto (col=val ordenados)
+  const sigOf = (conds) => conds.map(c => `${c.col}=${c.value}`).sort().join(' & ');
+
+  const quality = (agg) => {
+    const den = segMetricDen(agg, spec);
+    if (den <= 0 || globalRate == null) return 0;
+    const shrunk = (segMetricNum(agg, spec) + globalRate * SHRINK_K) / (den + SHRINK_K);
+    const share = scopeDen > 0 ? den / scopeDen : 0;
+    return share * Math.abs(shrunk - globalRate);
+  };
+
+  // Nível 1 a partir dos bins já computados.
+  let beam = [];
+  for (let ci = 0; ci < candCols.length; ci++) {
+    for (const bin of binsByCand[ci].values()) {
+      if (bin.agg.qty < minQty) { diagnostics.discarded.lowVolume++; continue; }
+      const conds = [{ col: candCols[ci], ci, value: bin.value }];
+      const seg = { conds, usedCi: new Set([ci]), agg: bin.agg, rows: bin.rows };
+      const sig = sigOf(conds);
+      if (!seenSig.has(sig)) { seenSig.add(sig); candidates.push({ kind: 'deviation', ...seg }); }
+      beam.push({ ...seg, q: quality(bin.agg) });
+    }
+  }
+  beam.sort((a, b) => (b.q - a.q) || sigOf(a.conds).localeCompare(sigOf(b.conds)));
+  beam = beam.slice(0, beamWidth);
+
+  // Níveis 2..maxDepth: estende só os nós do beam, agregando as linhas do PAI por uma nova
+  // coluna (O(linhas do pai × candCols) — nunca produto cartesiano cego).
+  for (let depth = 2; depth <= maxDepth; depth++) {
+    const next = [];
+    for (const parent of beam) {
+      for (let ci = 0; ci < candCols.length; ci++) {
+        if (parent.usedCi.has(ci)) continue;
+        const sub = new Map();
+        for (const r of parent.rows) {
+          const value = segCandValue(candCoders[ci], csv, r);
+          let b = sub.get(value);
+          if (!b) { b = { value, agg: segEmptyAgg(), rows: [] }; sub.set(value, b); }
+          segAddAgg(b.agg, segReadSums(csv, r, idxs));
+          b.rows.push(r);
+        }
+        for (const b of sub.values()) {
+          if (b.agg.qty < minQty) { diagnostics.discarded.lowVolume++; continue; }
+          const conds = [...parent.conds, { col: candCols[ci], ci, value: b.value }];
+          const sig = sigOf(conds);
+          const seg = { conds, usedCi: new Set([...parent.usedCi, ci]), agg: b.agg, rows: b.rows };
+          if (!seenSig.has(sig)) { seenSig.add(sig); candidates.push({ kind: 'deviation', ...seg }); }
+          next.push({ ...seg, q: quality(b.agg) });
+        }
+      }
+    }
+    next.sort((a, b) => (b.q - a.q) || sigOf(a.conds).localeCompare(sigOf(b.conds)));
+    beam = next.slice(0, beamWidth);
+  }
+
+  // currentDecision do ESCOPO inteiro (base do heterogeneous_block depth-0).
+  const scopeDisp = segDispersion(scopeRows, rowInfo);
+
+  // Candidato heterogeneous_block (depth-0): escopo com tratamento único + discriminante
+  // interno forte (IV ≥ SEG_HET_MIN_IV) numa coluna candidata. Reusa os bins de nível 1.
+  if (scopeDisp.currentDecision !== 'mixed' && scopeDisp.currentDecision !== 'undecided') {
+    const hetCols = candCols.map((col, ci) => {
+      const bins = [...binsByCand[ci].values()]
+        .map(b => ({ altas: segMetricDen(b.agg, spec), maus: segMetricNum(b.agg, spec) }))
+        .filter(b => b.altas > 0);
+      return { col, iv: bins.length >= 2 ? computeIV(bins) : null };
+    }).filter(h => h.iv != null && isFinite(h.iv)).sort((a, b) => b.iv - a.iv || a.col.localeCompare(b.col));
+    if (hetCols.length && hetCols[0].iv >= SEG_HET_MIN_IV) {
+      candidates.push({ kind: 'het', conds: [], agg: scopeAgg, rows: scopeRows, hetCols });
+    }
+  }
+
+  const scopeLabel = scopeNodeId ? { nodeId: scopeNodeId, label: shapesMap[scopeNodeId]?.label ?? scopeNodeId } : null;
+  return {
+    scope: scopeLabel, empty: false,
+    population: { qty: scopeAgg.qty, decidedQty: scopeDisp.decidedQty },
+    candidates,
+    ctx: {
+      spec, csv, csvId, idxs, scopeAgg, scopeRows, rowInfo, candCols, candCoders, binsByCand,
+      globalRate, scopeDen, SHRINK_K, minQty, shapesMap, scopeDisp, diagnostics,
+    },
+  };
+}
+
+// Dispersão de um conjunto de linhas: share por terminal (qty) + nº de nós decisores
+// distintos + currentDecision (aprovado/reprovado/mixed pela resolução real, incl. AS IS).
+function segDispersion(rows, rowInfo) {
+  const byTerminal = {};
+  const nodes = new Set();
+  let apr = 0, rej = 0, reached = 0;
+  for (const r of rows) {
+    const info = rowInfo.get(r); if (!info) continue;
+    if (info.t) {
+      byTerminal[info.t] = (byTerminal[info.t] || 0) + info.q;
+      reached += info.q;
+      if (info.dn != null) nodes.add(info.dn);
+    }
+    if (info.res === 'approved') apr += info.q;
+    else if (info.res === 'rejected') rej += info.q;
+  }
+  const decidedQty = apr + rej;
+  let currentDecision = 'undecided';
+  if (decidedQty > 0) {
+    const aprShare = apr / decidedQty;
+    currentDecision = aprShare >= SEG_CURRENT_DOMINANT ? 'approved' : (1 - aprShare) >= SEG_CURRENT_DOMINANT ? 'rejected' : 'mixed';
+  }
+  const terminals = Object.entries(byTerminal)
+    .map(([terminal, qty]) => ({ terminal, qty, sharePct: reached > 0 ? (qty / reached) * 100 : 0 }))
+    .sort((a, b) => b.qty - a.qty || a.terminal.localeCompare(b.terminal));
+  return { nodesCount: nodes.size, terminals, currentDecision, decidedQty, approvedQty: apr, rejectedQty: rej };
+}
+
+// ESTÁGIO 2 — explicação de UM candidato. Só agregação/decomposição exata + teste (o
+// q-value é preenchido depois, no FDR de prioritizeFindings). Não relê a base: usa o `ctx`.
+function explainSegment(cand, ctx) {
+  const { spec, scopeAgg, rowInfo, candCols, binsByCand } = ctx;
+  const segAgg = cand.agg;
+  const complAgg = segSubAgg(scopeAgg, segAgg);
+  const segRate = segMetricRate(segAgg, spec);
+  const refRate = segMetricRate(complAgg, spec);
+  const lift = (segRate != null && refRate != null && refRate > 0) ? segRate / refRate : null;
+  const dispersion = segDispersion(cand.rows, rowInfo);
+
+  const metrics = {
+    qty: segAgg.qty,
+    share: scopeAgg.qty > 0 ? segAgg.qty / scopeAgg.qty : 0,
+    qtdAltas: segAgg.qtdAltas, qtdAltasInfer: segAgg.qtdAltasInfer,
+    inadReal: segInadReal(segAgg), inadInferida: segInadInferida(segAgg),
+    refInadReal: segInadReal(complAgg), refInadInferida: segInadInferida(complAgg),
+    lift, currentDecision: dispersion.currentDecision,
+  };
+
+  const conditions = cand.conds.map(c => ({ col: c.col, operator: 'equal', value: c.value, logic: 'AND', csvId: ctx.csvId }));
+  const id = `${cand.kind === 'het' ? 'het' : 'seg'}:${conditions.map(c => `${c.col}=${c.value}`).join('&') || '(escopo)'}`;
+
+  if (cand.kind === 'het') {
+    // Bloco heterogêneo: contribuições = colunas discriminantes por share de IV.
+    const totalIv = cand.hetCols.reduce((a, h) => a + Math.abs(h.iv), 0) || 1;
+    const contributions = cand.hetCols.slice(0, 4).map(h => ({ col: h.col, value: null, sharePct: (Math.abs(h.iv) / totalIv) * 100 }));
+    return {
+      id, code: 'heterogeneous_block', kind: 'het',
+      segment: { conditions, scope: ctx.scope ?? null },
+      metrics,
+      explanation: { contributions, dispersion, stability: null, pValue: null, qValue: null },
+      _raw: { deviation: cand.hetCols[0].iv, segDen: segMetricDen(segAgg, spec), splitCol: cand.hetCols[0].col },
+    };
+  }
+
+  // Desvio da métrica-alvo vs. complemento (referência); teste binomial vs. p0 = refRate.
+  const p0 = (refRate != null && refRate > 0 && refRate < 1) ? refRate : ctx.globalRate;
+  const segNum = segMetricNum(segAgg, spec), segDen = segMetricDen(segAgg, spec);
+  const pValue = (segDen > 0 && p0 != null) ? segBinomTwoSided(segNum, segDen, p0) : 1;
+
+  // Decomposição WoE aditiva do desvio (reusa a matemática good/bad de computeIV).
+  const totalNum = segMetricNum(scopeAgg, spec), totalDen = segMetricDen(scopeAgg, spec);
+  const woes = cand.conds.map(c => {
+    const bin = binsByCand[c.ci].get(c.value);
+    const w = bin ? segWoe(segMetricNum(bin.agg, spec), segMetricDen(bin.agg, spec), totalNum, totalDen) : null;
+    return { col: c.col, value: c.value, woe: w == null || !isFinite(w) ? 0 : w };
+  });
+  const sumAbs = woes.reduce((a, w) => a + Math.abs(w.woe), 0);
+  const contributions = woes.map(w => ({ col: w.col, value: w.value, sharePct: sumAbs > 0 ? (Math.abs(w.woe) / sumAbs) * 100 : 100 / woes.length }));
+
+  // Código provisório (o gate de significância é aplicado no estágio 3): aprovável de baixo
+  // risco = hoje reprovado + risco significativamente MELHOR que a referência; simétrico
+  // para alto risco aprovado. "Melhor/pior" respeita `spec.direction` (DEC-SD-006).
+  const ratioGood = spec.direction === 'lower' ? SEGMENT_LOW_RATIO : SEGMENT_HIGH_RATIO;
+  const ratioBad = spec.direction === 'lower' ? SEGMENT_HIGH_RATIO : SEGMENT_LOW_RATIO;
+  const strongGood = lift != null && (spec.direction === 'lower' ? lift <= ratioGood : lift >= ratioGood);
+  const strongBad = lift != null && (spec.direction === 'lower' ? lift >= ratioBad : lift <= ratioBad);
+  let code = null;
+  if (dispersion.currentDecision === 'rejected' && strongGood) code = 'approvable_low_risk';
+  else if (dispersion.currentDecision === 'approved' && strongBad) code = 'approved_high_risk';
+
+  return {
+    id, code, kind: 'deviation',
+    segment: { conditions, scope: ctx.scope ?? null },
+    metrics,
+    explanation: { contributions, dispersion, stability: null, pValue, qValue: null },
+    _raw: { deviation: (segRate != null && refRate != null) ? segRate - refRate : 0, segRate, refRate, segDen, segNum, share: metrics.share },
+  };
+}
+
+// ESTÁGIO 3 — FDR + gate + score + dedup + diagnostics. Recebe TODOS os candidatos já
+// explicados (com pValue cru) e o ctx.
+function prioritizeFindings(explained, ctx, params = {}) {
+  const alpha = params.alpha != null ? params.alpha : SEG_DEFAULT_ALPHA;
+  const maxFindings = params.maxFindings != null ? params.maxFindings : SEG_DEFAULT_MAX_FINDINGS;
+  const { diagnostics, SHRINK_K, shapesMap, rowInfo } = ctx;
+
+  const deviation = explained.filter(f => f.kind === 'deviation');
+  const het = explained.filter(f => f.kind === 'het');
+  diagnostics.candidatesTested = deviation.length;
+
+  // FDR sobre TODOS os candidatos de desvio testados.
+  const qvals = segBenjaminiHochberg(deviation.map(f => f.explanation.pValue));
+  deviation.forEach((f, i) => { f.explanation.qValue = qvals[i]; });
+
+  // Gate de significância + de oportunidade (código atribuído).
+  const kept = [];
+  for (const f of deviation) {
+    if (f.explanation.qValue > alpha) { diagnostics.discarded.notSignificant++; continue; }
+    if (!f.code) { diagnostics.discarded.noOpportunity++; continue; }
+    kept.push(f);
+  }
+  for (const f of het) kept.push(f); // het já passou o gate de IV/tratamento-único na descoberta
+
+  // Se algum nó decisor do segmento está travado (🔒), a recomendação não é acionável.
+  const lockedNodes = new Set(ctx.lockedIds || []);
+  const isLocked = (f) => {
+    for (const r of segRowsOf(f, ctx)) { const info = rowInfo.get(r); if (info?.dn != null && lockedNodes.has(info.dn)) return true; }
+    return false;
+  };
+
+  // Score = impacto × confiança × acionabilidade (decomposto, DEC-SD-005). Sem re-simulação
+  // nesta sessão (Sessão 12): impacto é o proxy de agregação (movedQty × |desvio|).
+  for (const f of kept) {
+    const segDen = f._raw.segDen || 0;
+    const movedQty = f.metrics.qty;
+    const dev = Math.abs(f._raw.deviation || 0);
+    const impactScalar = movedQty * dev;
+    const shrinkFactor = segDen / (segDen + SHRINK_K);
+    const confidence = f.kind === 'het'
+      ? shrinkFactor * Math.min(1, (f._raw.deviation || 0))
+      : (1 - (f.explanation.qValue ?? 1)) * shrinkFactor;
+    const nConds = f.segment.conditions.length;
+    const depthPenalty = 1 / (1 + Math.max(0, nConds - 1) * SEG_ACTION_DEPTH_PENALTY);
+    const locked = isLocked(f);
+    const actionability = depthPenalty * (locked ? SEG_LOCKED_PENALTY : 1);
+    f.locked = locked;
+    f.priority = {
+      score: impactScalar * confidence * actionability,
+      impact: { deltaApproval: null, deltaInadInf: f._raw.deviation ?? null, movedQty },
+      confidence, actionability,
+    };
+    f.recommendation = null; // Sessão 12
+  }
+
+  kept.sort((a, b) => (b.priority.score - a.priority.score) || a.id.localeCompare(b.id));
+
+  // Dedup estrutural: filho aninhado (superconjunto de condições) sem ganho incremental de
+  // |desvio| sobre um pai JÁ mantido não aparece (parcimônia — regra 5 do épico).
+  const final = [];
+  const condSet = (f) => new Set(f.segment.conditions.map(c => `${c.col}=${c.value}`));
+  for (const f of kept) {
+    const fSet = condSet(f);
+    let dup = false;
+    // Só desvio-contra-desvio: o heterogeneous_block (conds=[]) não é "pai" de ninguém —
+    // caso contrário seu conjunto vazio (subconjunto de qualquer segmento) engoliria todos.
+    if (f.kind === 'deviation') for (const p of final) {
+      if (p.kind !== 'deviation') continue;
+      const pSet = condSet(p);
+      if (pSet.size === 0 || pSet.size >= fSet.size) continue;
+      let subset = true;
+      for (const c of pSet) if (!fSet.has(c)) { subset = false; break; }
+      if (subset && Math.abs(f._raw.deviation || 0) <= Math.abs(p._raw.deviation || 0) * (1 + SEG_MIN_INCREMENTAL_DEV)) { dup = true; break; }
+    }
+    if (dup) { diagnostics.discarded.duplicate++; continue; }
+    final.push(f);
+  }
+
+  const findings = final.slice(0, maxFindings).map(f => {
+    const { _raw, kind, ...pub } = f; // não expõe internos
+    return pub;
+  });
+  return { findings, diagnostics };
+}
+
+// Linhas de um finding (via bins de nível 1 / escopo) — para checar travas sem reler a base.
+function segRowsOf(f, ctx) {
+  if (f.kind === 'het' || f.segment.conditions.length === 0) return ctx.scopeRows;
+  // reconstrói a interseção via os bins (O(menor bin)); barato para checagem de trava.
+  const conds = f.segment.conditions;
+  let rows = null;
+  for (const c of conds) {
+    const ci = ctx.candCols.indexOf(c.col);
+    const bin = ci >= 0 ? ctx.binsByCand[ci].get(c.value) : null;
+    const set = bin ? bin.rows : [];
+    rows = rows == null ? set : rows.filter(r => set.includes(r));
+  }
+  return rows || [];
+}
+
+// Ponto de entrada — orquestra os três estágios (padrão computeSimplify/computePolicyDoc).
+function computeSegmentDiscovery(shapes, conns, csvStore, scope, params = {}) {
+  const spec = resolveRiskMetric(params.riskMetric || 'inadReal');
+  const disc = discoverSegments(shapes, conns, csvStore, scope, spec, params);
+  if (disc.empty) {
+    return {
+      version: '1.0', generatedAt: new Date().toISOString(),
+      scope: disc.scope, population: disc.population, findings: [],
+      diagnostics: { candidatesTested: 0, discarded: { lowVolume: 0, notSignificant: 0, unstable: 0, duplicate: 0, noOpportunity: 0 } },
+    };
+  }
+  disc.ctx.scope = disc.scope;
+  disc.ctx.lockedIds = shapes.filter(s => s.locked).map(s => s.id);
+  const explained = disc.candidates.map(c => explainSegment(c, disc.ctx));
+  const { findings, diagnostics } = prioritizeFindings(explained, disc.ctx, params);
+  return {
+    version: '1.0', generatedAt: new Date().toISOString(),
+    scope: disc.scope, population: disc.population,
+    metric: { id: spec.id, label: spec.label, direction: spec.direction },
+    findings, diagnostics,
+  };
+}
+
 // ── COMPUTE_POLICY_INSIGHTS — Copiloto Sessão 1 (lint estrutural, DEC-IA-006) ────
 // Achados são FATOS estruturais sobre o grafo do canvas ativo — nunca bloqueiam a
 // simulação (só informam). Reaproveita o `nodeArrivals`/`lensCounts` que o tick já
@@ -4384,6 +5023,15 @@ function handleMessage(e) {
     self.postMessage({ type: 'POLICY_DOC_RESULT', docModel });
     return;
   }
+
+  // Descoberta de Segmentos (Copiloto Sessão 10) — varredura on-demand ao abrir o modal;
+  // não entra no cache do tick. `scope` = null (global) ou {nodeId} (população de um nó).
+  if (type === 'COMPUTE_SEGMENT_DISCOVERY') {
+    const { shapes, conns = [], scope = null, params = {} } = e.data;
+    const segmentModel = computeSegmentDiscovery(shapes, conns, workerCsvStore, scope, params);
+    self.postMessage({ type: 'SEGMENT_DISCOVERY_RESULT', segmentModel });
+    return;
+  }
 }
 
 // Só registra o handler em contexto de worker real; permite importar as funções
@@ -4428,5 +5076,13 @@ export {
   computeScenarioComparison,
   buildGlossary,
   computePolicyDoc,
+  computeSegmentDiscovery,
+  discoverSegments,
+  explainSegment,
+  prioritizeFindings,
+  resolveRiskMetric,
+  segBinomTwoSided,
+  segBenjaminiHochberg,
+  matchLensRule,
   __setWorkerCsvStoreForTest,
 };
