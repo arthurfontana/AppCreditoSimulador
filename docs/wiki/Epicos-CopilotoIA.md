@@ -253,6 +253,30 @@ quando fizer sentido, na auto-persistência de `sessionStorage`.
 
 ---
 
+## Pirâmide de maturidade do analista (mapa de posicionamento)
+
+As frentes não são um conjunto de copilotos avulsos: lidas em ordem, elas cobrem o
+**ciclo de vida completo de uma política de crédito** — do canvas em branco à
+governança. Este mapa é posicionamento de produto (não muda escopo nem ordem das
+sessões); frentes futuras devem se ancorar num degrau antes de virar documento
+(nascem como parágrafo no [[Roadmap]] e só ganham épico quando promovidas a sessões).
+
+| Degrau | Pergunta do analista | O que cobre hoje |
+|---|---|---|
+| 1. **Construir** | "Como monto a política?" | Frente 1 (templates, biblioteca, sugestão de próximo nó) + canvas/Cineminha |
+| 2. **Validar** | "Ela está correta e faz sentido?" | Lint (S1), prévia AS IS, prova de equivalência (S5), GATEs |
+| 3. **Otimizar** | "Como a melhoro dentro do que existe?" | Johnny, Goal Seek (S4), Simplificação (S5) |
+| 4. **Descobrir** | "O que meus dados sabem que a política não expressa?" | Frente 4 (S10–13) |
+| 5. **Explicar** | "Como defendo isso para o comitê?" | DocGen (S6), narrativas de IA (S8/13), chat grounded (S9) |
+| 6. **Planejar** | "Qual combinação/sequência de mudanças atinge a meta?" | Semente: aplicação combinada de achados (S12); visão: Policy Strategy Assistant ([[Roadmap]]) |
+| 7. **Governar** | "Quem mudou o quê, e continua valendo?" | Semente: changelog estrutural (`diffPolicyIR`, S6), auditoria de payloads (S7), drift de segmentos (F4 longo prazo); visão: [[SECURITY-AND-ENTERPRISE-READINESS]] |
+
+Degraus 1–5 têm dono claro nas sessões planejadas; 6–7 são direção declarada com
+sementes já entregues ou especificadas — não abrir frente nova para eles antes de o
+degrau 4 estar validado com usuário real.
+
+---
+
 ## Plano de sessões
 
 Cada sessão é independente, implementável por um modelo mais simples, com prompt

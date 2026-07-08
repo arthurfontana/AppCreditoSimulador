@@ -296,7 +296,8 @@ Releia o épico e o código antes de propor.
 
 **O que vai entregar**:
 - `COMPUTE_SEGMENT_DISCOVERY` no worker → `SEGMENT_DISCOVERY_RESULT {segmentModel}`
-- Pipeline em funções exportadas: `discoverSegments` (beam 1D/2D sobre dicionários, escopo global ou por nó via walk compilado), `explainSegment` (decomposição WoE, lift, teste binomial + Benjamini–Hochberg), `prioritizeFindings` (score impacto × confiança × acionabilidade + dedup de aninhados)
+- Pipeline em funções exportadas: `discoverSegments` (beam 1D/2D sobre dicionários, escopo global ou por nó via walk compilado), `explainSegment` (decomposição WoE, lift, teste binomial + Benjamini–Hochberg, **`dispersion`** — em quais nós/terminais a política atual decide o segmento hoje, computada no mesmo walk do escopo), `prioritizeFindings` (score impacto × confiança × acionabilidade + dedup de aninhados)
+- Métrica-alvo como parâmetro estruturado `{col, denominator, direction}` (DEC-SD-006) — o MVP fecha em `inadReal`/`inadInferida`, mas nenhuma função interna do pipeline assume inad
 - Achados do MVP: `approvable_low_risk`, `approved_high_risk`, `heterogeneous_block`
 - Rigor estatístico: volume mínimo, shrinkage (`SHRINK_K`), FDR, teto de profundidade, `diagnostics` com contadores de descarte
 - GATE: `tests/segmentDiscovery.test.js`
@@ -311,17 +312,23 @@ search de conjunções LensRule 1D/2D sobre as colunas de decisão (agregação
 O(distintos) sobre os dicionários, NUNCA produto cartesiano cego; escopo global ou
 população de um nó via walk compilado M8, mesmo padrão de computeVariableRanking),
 explainSegment (decomposição WoE por condição reusando computeIV/bins da Sessão 3,
-lift vs. complemento, teste binomial + correção Benjamini–Hochberg) e
+lift vs. complemento, teste binomial + correção Benjamini–Hochberg, e dispersion —
+em quais nós/terminais a política ATUAL decide o segmento hoje, com share por
+terminal, computada no MESMO walk que resolve o escopo, sem passe extra) e
 prioritizeFindings (score impacto × confiança × acionabilidade, shrinkage SHRINK_K,
 dedup de segmentos aninhados sem ganho incremental, diagnostics com contadores de
-descarte). Achados desta sessão: approvable_low_risk, approved_high_risk,
+descarte). A métrica-alvo entra no pipeline como parâmetro estruturado
+{col, denominator, direction} (DEC-SD-006) — o formulário só oferece
+inadReal/inadInferida por ora, mas NENHUMA função interna deve hardcodar inad.
+Achados desta sessão: approvable_low_risk, approved_high_risk,
 heterogeneous_block. Sem UI nesta sessão (só o motor + GATE). GATE
 tests/segmentDiscovery.test.js: subgrupo plantado em fixture sintética é encontrado
 com as condições exatas e fixture homogênea devolve zero achados; agregados de cada
-achado ≡ agregação manual via matchLensRule; p-value bate com valor de controle
-manual; FDR descarta o ruído da fixture de múltiplas comparações; shrinkage rebaixa
-nicho minúsculo; escopo por nó ≡ sub-base filtrada manualmente; dedup; determinismo.
-Releia o épico, a frente e o código antes de propor.
+achado ≡ agregação manual via matchLensRule; dispersion ≡ contagem manual por
+terminal em fixture com segmento espalhado por 2+ nós; p-value bate com valor de
+controle manual; FDR descarta o ruído da fixture de múltiplas comparações; shrinkage
+rebaixa nicho minúsculo; escopo por nó ≡ sub-base filtrada manualmente; dedup;
+determinismo. Releia o épico, a frente e o código antes de propor.
 ```
 
 ---
@@ -336,7 +343,8 @@ Releia o épico, a frente e o código antes de propor.
 
 **O que vai entregar**:
 - Botão **🔍 Descobrir Segmentos** na seção Fluxo (escopo global) e **🔍 Descobrir aqui** na toolbar contextual de nó (escopo = população do nó)
-- `segmentDiscoveryModal` (efêmero, padrão `goalSeekModal`): formulário mínimo com defaults → loading → cards de oportunidade ranqueados (regra + métricas com referência + barra de contribuições + selos de confiança + diagnostics)
+- `segmentDiscoveryModal` (efêmero, padrão `goalSeekModal`): formulário mínimo com defaults → loading → cards de oportunidade ranqueados (regra + métricas com referência + barra de contribuições + frase de dispersão "hoje decidido em N nós" quando `dispersion.nodesCount > 1` + selos de confiança + diagnostics)
+- **Filtro por variável** no modal (facet sobre `conditions[].col` — navegação centrada na variável, client-side sobre o `SegmentModel` pronto)
 - Quadrante volume × risco (Recharts, dentro do modal — exceção DEC-AW-001)
 - **👁 Ver no Dashboard** (converte `SegmentDef.conditions` em `FilterCard[]` de página) e **ver no fluxo** (highlight reusando o "ir até o nó" do lint)
 - Achado informativo 🔵 no painel Copiloto apontando para a Descoberta (link, não segunda lista)
@@ -350,8 +358,12 @@ COMPUTE_SEGMENT_DISCOVERY e o SegmentModel. Implemente o segmentDiscoveryModal
 os dois pontos de entrada (🔍 Descobrir Segmentos na seção Fluxo, escopo global;
 🔍 Descobrir aqui na toolbar contextual de losango/Cineminha/lens/terminal, escopo =
 população do nó), os cards de oportunidade (condições em linguagem de regra, métricas
-sempre com referência e lift, barra de decomposição das contribuições, selos de
-confiança, contadores de diagnostics visíveis), o quadrante volume × risco em
+sempre com referência e lift, barra de decomposição das contribuições, frase de
+dispersão via template determinístico quando dispersion.nodesCount > 1 — "hoje este
+segmento está diluído em N nós da política: X% decidido em A, Y% em B" — e, quando o
+escopo é um nó, o contexto condicional declarado, selos de confiança, contadores de
+diagnostics visíveis), o filtro de achados por variável (facet client-side sobre
+conditions[].col — navegação centrada na variável), o quadrante volume × risco em
 Recharts dentro do modal (clique no ponto foca o card), a ação "👁 Ver no Dashboard"
 (SegmentDef.conditions → FilterCard[] de filtro de página — mesmo formato LensRule) e
 o "ver no fluxo" reusando o highlight do lint. Adicione o achado informativo 🔵 no
@@ -373,6 +385,7 @@ persistência nova (modal efêmero). Sem IA. Releia a frente e o código antes d
 - `buildSegmentRecommendations` no worker: cada achado → patch (lens de exceção via `applyPolicyPatch`; movimento do catálogo do Goal Seek via `applyGoalSeekMoves` quando o segmento coincide com célula/valor/limiar existente; quebra via fluxo da Sessão 3 para `heterogeneous_block`)
 - Delta de cada recomendação validado por **re-simulação real** (top-N apenas), exibido no card
 - **✓ Aplicar como novo cenário** (`cloneCanvasWithNewIds`, política de origem intocada) e **🎯 Enviar ao Goal Seek** (objetivo pré-carregado)
+- **Aplicação combinada**: seleção de N achados → um único cenário com todos os patches em sequência sobre o mesmo clone, delta combinado por **uma re-simulação real** (deltas de achados NÃO são aditivos — aplicar A muda a população de B); interação relevante entre achados é declarada, nunca escondida
 - Movimento **"adicionar quebra"** no catálogo do Goal Seek (pendência da Sessão 4, gerada pelo achado `heterogeneous_block`)
 - Achados `asis_divergence` (decomposição rToA/aToR por segmento sobre o overlay existente) e `anomaly` (desvio robusto por valor/safra) — sem patch, só navegação
 - Selo de estabilidade temporal (split-half quando há coluna `temporal`) + sparkline no card
@@ -391,7 +404,12 @@ applyGoalSeekMoves; heterogeneous_block vira criação de losango/Cineminha no p
 da Sessão 3. Valide o delta dos top-N achados por re-simulação real (runSimulation
 sobre clone com o patch — mesmo contrato DEC-IA-005 do Goal Seek) e exiba só deltas
 validados. UI: "✓ Aplicar como novo cenário" via cloneCanvasWithNewIds e "🎯 Enviar
-ao Goal Seek" com objetivo pré-carregado. Adicione ao catálogo do Goal Seek o
+ao Goal Seek" com objetivo pré-carregado. Implemente também a APLICAÇÃO COMBINADA:
+seleção de N achados no modal → um único cenário novo com os patches aplicados em
+sequência sobre o MESMO clone, com delta combinado validado por UMA re-simulação real
+— NUNCA a soma dos deltas individuais (aplicar o achado A muda a população que chega
+ao ponto do achado B); quando o combinado diverge relevantemente da soma, declare a
+interação no modal em vez de esconder. Adicione ao catálogo do Goal Seek o
 movimento "adicionar quebra" (pendência declarada da Sessão 4), gerado pelo achado
 heterogeneous_block. Acrescente os achados asis_divergence (decomposição do
 rToA/aToR por segmento, reusando computeSimulatedDecisions/incrementalResult) e
@@ -399,10 +417,11 @@ anomaly (desvio robusto mediana/MAD por valor e por safra quando há coluna temp
 — ambos sem patch, com navegação (filtro de Dashboard/highlight). Selo de
 estabilidade split-half temporal + sparkline no card; travas 🔒 desabilitam a ação
 com motivo declarado. Estenda tests/segmentDiscovery.test.js: delta exibido ≡
-runSimulation antes/depois para cada tipo de recomendação; movimento "adicionar
-quebra" ≡ criação manual equivalente; asis_divergence bate com o incrementalResult
-agregado; nó travado ⇒ não-acionável; determinismo. Releia a frente, o épico e o
-código antes de propor.
+runSimulation antes/depois para cada tipo de recomendação; delta COMBINADO ≡
+runSimulation do clone com os N patches, e difere da soma dos individuais em fixture
+com achados que interagem; movimento "adicionar quebra" ≡ criação manual equivalente;
+asis_divergence bate com o incrementalResult agregado; nó travado ⇒ não-acionável;
+determinismo. Releia a frente, o épico e o código antes de propor.
 ```
 
 ---
