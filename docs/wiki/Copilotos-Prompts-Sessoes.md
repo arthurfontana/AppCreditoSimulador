@@ -531,4 +531,4 @@ Cada sessão segue o mesmo template:
 
 ---
 
-**Última atualização**: 2026-07-08 (Sessões 10–13 — Frente 4: Descoberta de Segmentos, com tags de modelo)
+**Última atualização**: 2026-07-09 (Sessões 0–6 executadas ✅ | Sessões 7–13 aguardando desenvolvimento)
