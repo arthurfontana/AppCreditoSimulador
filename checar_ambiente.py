@@ -16,6 +16,11 @@ Ele:
   3. Tenta `pip install` (a partir do índice configurado) de cada pacote,
      um de cada vez, com timeout — e captura o erro quando falha.
   4. Tenta importar cada pacote instalado com sucesso e reporta a versão.
+     O import é tentado DUAS vezes: a primeira importação de pacotes grandes
+     (ex.: scikit-learn) pode demorar minutos em máquinas corporativas
+     (antivírus escaneando as DLLs na primeira carga); a segunda tentativa,
+     com cache quente, distingue "lento na primeira vez" (inócuo) de
+     "realmente quebrado".
   5. Mede o tempo de cada etapa.
   6. Grava dois relatórios na mesma pasta deste script:
        - relatorio_ambiente.txt  (leitura humana)
@@ -77,7 +82,15 @@ PACOTES = [
 ]
 
 TIMEOUT_INSTALL_SEG = 240  # scipy/sklearn podem demorar para baixar/compilar
-TIMEOUT_IMPORT_SEG = 30
+# 1ª importação: antivírus corporativo pode escanear centenas de DLLs na
+# primeira carga de um pacote grande (sklearn) — precisa de folga real.
+TIMEOUT_IMPORT_COLD_SEG = 300
+# 2ª importação (cache quente): se ainda demorar mais que isso, o problema
+# não é cold start.
+TIMEOUT_IMPORT_WARM_SEG = 120
+# Acima deste tempo na 1ª importação, sinalizamos "cold start lento" mesmo
+# quando o import funciona.
+LIMIAR_IMPORT_LENTO_SEG = 10
 
 # Variáveis de ambiente relevantes para diagnóstico de proxy/índice do pip.
 # Reportamos só SE estão definidas (booleano), nunca o valor — podem conter
@@ -192,6 +205,39 @@ def criar_venv_descartavel():
 # Etapa 3 — pip install + import, pacote a pacote
 # ---------------------------------------------------------------------------
 
+def tentar_import(python_venv, nome_import, timeout_seg):
+    """Uma tentativa de import em subprocesso; retorna dict com o resultado."""
+    tentativa = {
+        "sucesso": False,
+        "tempo_seg": None,
+        "timeout_seg": timeout_seg,
+        "versao": None,
+        "erro_resumo": None,
+    }
+    codigo = (
+        f"import {nome_import} as _m; "
+        f"print(getattr(_m, '__version__', 'desconhecida'))"
+    )
+    t0 = time.monotonic()
+    try:
+        r = subprocess.run(
+            [python_venv, "-c", codigo],
+            capture_output=True, text=True, timeout=timeout_seg,
+        )
+        tentativa["sucesso"] = r.returncode == 0
+        if r.returncode == 0:
+            tentativa["versao"] = r.stdout.strip()
+        else:
+            linhas = (r.stderr or r.stdout or "").strip().splitlines()
+            tentativa["erro_resumo"] = "\n".join(linhas[-15:])
+    except subprocess.TimeoutExpired:
+        tentativa["erro_resumo"] = f"Timeout após {timeout_seg}s"
+    except Exception as e:
+        tentativa["erro_resumo"] = f"{type(e).__name__}: {e}"
+    tentativa["tempo_seg"] = round(time.monotonic() - t0, 2)
+    return tentativa
+
+
 def testar_pacote(python_venv, nome_pip, nome_import):
     log(f"→ Testando pacote: {nome_pip} ...")
     resultado = {
@@ -205,9 +251,12 @@ def testar_pacote(python_venv, nome_pip, nome_import):
         },
         "importacao": {
             "sucesso": False,
-            "tempo_seg": None,
+            "tempo_seg": None,          # tempo da 1ª tentativa (fria)
+            "tempo_warm_seg": None,     # tempo da 2ª tentativa (cache quente)
             "versao": None,
             "erro_resumo": None,
+            "cold_start_lento": False,  # funciona, mas a 1ª carga foi lenta
+            "tentativas": [],           # detalhe de cada tentativa
         },
     }
 
@@ -242,35 +291,35 @@ def testar_pacote(python_venv, nome_pip, nome_import):
 
     log(f"   ✓ Instalação de {nome_pip} OK ({resultado['instalacao']['tempo_seg']}s).")
 
-    # --- importação ---
-    t0 = time.monotonic()
-    codigo = (
-        f"import {nome_import} as _m; "
-        f"print(getattr(_m, '__version__', 'desconhecida'))"
-    )
-    try:
-        r = subprocess.run(
-            [python_venv, "-c", codigo],
-            capture_output=True, text=True, timeout=TIMEOUT_IMPORT_SEG,
-        )
-        resultado["importacao"]["sucesso"] = r.returncode == 0
-        if r.returncode == 0:
-            resultado["importacao"]["versao"] = r.stdout.strip()
-        else:
-            linhas = (r.stderr or r.stdout or "").strip().splitlines()
-            resultado["importacao"]["erro_resumo"] = "\n".join(linhas[-15:])
-    except subprocess.TimeoutExpired:
-        resultado["importacao"]["erro_resumo"] = (
-            f"Timeout após {TIMEOUT_IMPORT_SEG}s"
-        )
-    except Exception as e:
-        resultado["importacao"]["erro_resumo"] = f"{type(e).__name__}: {e}"
-    resultado["importacao"]["tempo_seg"] = round(time.monotonic() - t0, 2)
+    # --- importação (2 tentativas: fria + cache quente) ---
+    log(f"   → Import de {nome_import} (1ª vez pode demorar alguns minutos "
+        f"— antivírus escaneando as DLLs; timeout {TIMEOUT_IMPORT_COLD_SEG}s)...")
+    fria = tentar_import(python_venv, nome_import, TIMEOUT_IMPORT_COLD_SEG)
+    log(f"   → Import de {nome_import} (2ª vez, cache quente)...")
+    quente = tentar_import(python_venv, nome_import, TIMEOUT_IMPORT_WARM_SEG)
 
-    if resultado["importacao"]["sucesso"]:
-        log(f"   ✓ Import de {nome_import} OK (versão {resultado['importacao']['versao']}).")
+    imp = resultado["importacao"]
+    imp["tentativas"] = [fria, quente]
+    imp["sucesso"] = fria["sucesso"] or quente["sucesso"]
+    imp["tempo_seg"] = fria["tempo_seg"]
+    imp["tempo_warm_seg"] = quente["tempo_seg"]
+    imp["versao"] = fria["versao"] or quente["versao"]
+    if not imp["sucesso"]:
+        imp["erro_resumo"] = quente["erro_resumo"] or fria["erro_resumo"]
+    imp["cold_start_lento"] = imp["sucesso"] and (
+        not fria["sucesso"] or fria["tempo_seg"] > LIMIAR_IMPORT_LENTO_SEG
+    )
+
+    if imp["sucesso"]:
+        detalhe = f"versão {imp['versao']}, fria {fria['tempo_seg']}s"
+        if quente["sucesso"]:
+            detalhe += f", quente {quente['tempo_seg']}s"
+        if imp["cold_start_lento"]:
+            log(f"   ⚠ Import de {nome_import} OK, mas 1ª carga lenta ({detalhe}).")
+        else:
+            log(f"   ✓ Import de {nome_import} OK ({detalhe}).")
     else:
-        log(f"   ✗ Import de {nome_import} falhou.")
+        log(f"   ✗ Import de {nome_import} falhou nas duas tentativas.")
 
     return resultado
 
@@ -280,13 +329,24 @@ def testar_pacote(python_venv, nome_pip, nome_import):
 # ---------------------------------------------------------------------------
 
 def montar_conclusao(resultados_pacotes):
-    ok = [r["pacote"] for r in resultados_pacotes
-          if r["instalacao"]["sucesso"] and r["importacao"]["sucesso"]]
-    falhou = [r["pacote"] for r in resultados_pacotes
-              if not (r["instalacao"]["sucesso"] and r["importacao"]["sucesso"])]
+    # Wheel offline só resolve falha de INSTALAÇÃO (índice/proxy/download).
+    # Falha de IMPORT com instalação OK é outro problema (antivírus, política
+    # de execução, incompatibilidade) — wheel não ajuda.
+    ok, falha_instalacao, instala_mas_nao_importa, import_lento = [], [], [], []
+    for r in resultados_pacotes:
+        if not r["instalacao"]["sucesso"]:
+            falha_instalacao.append(r["pacote"])
+        elif not r["importacao"]["sucesso"]:
+            instala_mas_nao_importa.append(r["pacote"])
+        else:
+            ok.append(r["pacote"])
+            if r["importacao"].get("cold_start_lento"):
+                import_lento.append(r["pacote"])
     return {
         "pacotes_ok_via_indice": ok,
-        "pacotes_precisam_wheel_offline": falhou,
+        "pacotes_precisam_wheel_offline": falha_instalacao,
+        "pacotes_instalam_mas_nao_importam": instala_mas_nao_importa,
+        "pacotes_import_lento_primeira_vez": import_lento,
     }
 
 
@@ -345,9 +405,19 @@ def gravar_relatorio_txt(dados):
         imp = r["importacao"]
         if inst["sucesso"]:
             if imp["sucesso"]:
-                linhas.append(f"    Import:     OK (versão {imp['versao']}, {imp['tempo_seg']}s)")
+                quente = imp.get("tempo_warm_seg")
+                detalhe = f"versão {imp['versao']}, 1ª vez {imp['tempo_seg']}s"
+                if quente is not None:
+                    detalhe += f", 2ª vez {quente}s"
+                if imp.get("cold_start_lento"):
+                    linhas.append(f"    Import:     OK, mas 1ª carga LENTA ({detalhe})")
+                    linhas.append("      | Provável escaneamento de antivírus na primeira")
+                    linhas.append("      | importação — inócuo se a 2ª vez foi rápida.")
+                else:
+                    linhas.append(f"    Import:     OK ({detalhe})")
             else:
-                linhas.append(f"    Import:     FALHOU ({imp['tempo_seg']}s)")
+                linhas.append(f"    Import:     FALHOU nas 2 tentativas "
+                              f"(1ª {imp['tempo_seg']}s, 2ª {imp.get('tempo_warm_seg')}s)")
                 if imp["erro_resumo"]:
                     for l in imp["erro_resumo"].splitlines():
                         linhas.append(f"      | {l}")
@@ -356,9 +426,13 @@ def gravar_relatorio_txt(dados):
     conclusao = dados.get("conclusao", {})
     linhas.append("-- Conclusão --")
     ok = conclusao.get("pacotes_ok_via_indice", [])
-    falhou = conclusao.get("pacotes_precisam_wheel_offline", [])
-    linhas.append(f"Instalam via índice normalmente : {', '.join(ok) if ok else '(nenhum)'}")
-    linhas.append(f"Precisam de wheel offline        : {', '.join(falhou) if falhou else '(nenhum)'}")
+    falhou_inst = conclusao.get("pacotes_precisam_wheel_offline", [])
+    nao_importa = conclusao.get("pacotes_instalam_mas_nao_importam", [])
+    lentos = conclusao.get("pacotes_import_lento_primeira_vez", [])
+    linhas.append(f"Instalam e importam via índice          : {', '.join(ok) if ok else '(nenhum)'}")
+    linhas.append(f"Falha de INSTALAÇÃO (wheel offline)     : {', '.join(falhou_inst) if falhou_inst else '(nenhum)'}")
+    linhas.append(f"Instalam mas NÃO importam (investigar)  : {', '.join(nao_importa) if nao_importa else '(nenhum)'}")
+    linhas.append(f"Import lento na 1ª vez (antivírus?)     : {', '.join(lentos) if lentos else '(nenhum)'}")
     linhas.append("")
     linhas.append("Nenhum dado de negócio foi coletado — só metadados de ambiente.")
     linhas.append("=" * 70)
