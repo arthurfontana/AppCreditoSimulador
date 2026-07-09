@@ -1,0 +1,44 @@
+======================================================================
+RELATÓRIO — Sonda do Ambiente Python Corporativo
+======================================================================
+Gerado em: 2026-07-09T18:17:07.878792-03:00
+
+-- Ambiente --
+Sistema operacional : Windows 11 (AMD64, 64bit)
+Python              : 3.13.3 (CPython)
+Executável Python   : C:\Program Files\Python313\python.exe
+pip (sistema)       : pip 25.0.1 from C:\Program Files\Python313\Lib\site-packages\pip (python 3.13)
+
+Variáveis de proxy/índice definidas (só presença, sem valores):
+  (nenhuma definida)
+
+-- Criação do venv descartável --
+Status: OK (11.98s)
+
+-- Pacotes testados --
+* numpy (import: numpy)
+    Instalação: OK (13.3s)
+    Import:     OK (versão 2.5.1, 1ª vez 1.58s, 2ª vez 0.51s)
+
+* scipy (import: scipy)
+    Instalação: OK (18.93s)
+    Import:     OK (versão 1.18.0, 1ª vez 0.7s, 2ª vez 0.6s)
+
+* scikit-learn (import: sklearn)
+    Instalação: OK (12.23s)
+    Import:     OK, mas 1ª carga LENTA (versão 1.9.0, 1ª vez 38.41s, 2ª vez 3.6s)
+      | Provável escaneamento de antivírus na primeira
+      | importação — inócuo se a 2ª vez foi rápida.
+
+* duckdb (import: duckdb)
+    Instalação: OK (4.78s)
+    Import:     OK (versão 1.5.4, 1ª vez 1.94s, 2ª vez 0.5s)
+
+-- Conclusão --
+Instalam e importam via índice          : numpy, scipy, scikit-learn, duckdb
+Falha de INSTALAÇÃO (wheel offline)     : (nenhum)
+Instalam mas NÃO importam (investigar)  : (nenhum)
+Import lento na 1ª vez (antivírus?)     : scikit-learn
+
+Nenhum dado de negócio foi coletado — só metadados de ambiente.
+======================================================================
