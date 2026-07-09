@@ -74,6 +74,21 @@ da pirâmide de maturidade ([[Epicos-CopilotoIA]]).
 
 ---
 
+## Execução Híbrida — Motor Python local opcional (planejado)
+
+Épico planejado e documentado em [[Arquitetura-Execucao-Hibrida]] (ADR-008), com
+plano de sessões em [[Hibrido-Prompts-Sessoes]]. Motivação: a evolução para
+plataforma analítica (clusterização, seleção de indicadores, bases menos
+sumarizadas, Frente 5) traz carga multiplicativa e teto de memória que o navegador
+sozinho não sustenta acima de ~5MM de linhas. Princípio (espelho do ADR-007): o
+browser continua o caminho padrão e completo; um sidecar Python local (extensão do
+`serve.py` do release), **opt-in**, amplia limites e destrava análises novas —
+paridade numérica provada por GATEs cross-runtime. A Fase 0 do plano (telemetria,
+fluidez M12–M14, dieta de memória, pool de workers) é browser-pura e tem valor
+independente do híbrido.
+
+---
+
 ## Exportação
 
 - Exportar política de crédito como JSON estruturado
