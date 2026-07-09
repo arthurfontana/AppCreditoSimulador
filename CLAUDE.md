@@ -344,7 +344,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_GOAL_SEEK` | `{shapes, conns, goal, constraints, locks}` | Copiloto Sessão 4 — roda `computeGoalSeek` (catálogo de movimentos + busca gulosa com precedência/shrinkage/restrições + validação por re-simulação); responde com `GOAL_SEEK_RESULT` |
 | `COMPUTE_SIMPLIFY` | `{shapes, conns}` | Copiloto Sessão 5 — roda `computeSimplify` (detecção de candidatos + aceitação incremental validada por `computeSimplifyEquivalence` + prova de equivalência linha a linha); responde com `SIMPLIFY_RESULT` |
 | `COMPUTE_POLICY_DOC` | `{shapes, conns, ir, canvases, options}` | Copiloto Sessão 6 — `ir` chega PRONTO (`buildPolicyIR` só existe em `App.jsx`); `canvases: [{id, nome, shapes, conns}]` para a comparação de cenários (mesmo formato de `COMPUTE_ANALYTICS_DATASET`); `options: {includeDomains, activeCanvasId?, activeCanvasName?, compare?:{shapes,conns}}`. Roda `computePolicyDoc`; responde com `POLICY_DOC_RESULT` |
-| `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?}`. Roda `computeSegmentDiscovery`; responde com `SEGMENT_DISCOVERY_RESULT` |
+| `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10/12 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?}`. Roda `computeSegmentDiscovery` (achados + recomendações validadas + asis_divergence/anomaly + estabilidade); responde com `SEGMENT_DISCOVERY_RESULT` |
+| `COMPUTE_SEGMENT_COMBINED` | `{shapes, conns, applies}` | Copiloto Sessão 12 — aplicação combinada de N recomendações. `applies: [{moves}]`. Aplica os patches EM SEQUÊNCIA sobre UM clone e valida por UMA re-simulação real (`computeSegmentCombined`) — nunca a soma dos deltas; responde com `SEGMENT_COMBINED_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -359,6 +360,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `SIMPLIFY_RESULT` | `{proposal, equivalence}` — ver seção "Simplificação com Prova de Equivalência" |
 | `POLICY_DOC_RESULT` | `{docModel}` — ver seção "Documentação Automática" |
 | `SEGMENT_DISCOVERY_RESULT` | `{segmentModel}` — ver seção "Descoberta de Segmentos" |
+| `SEGMENT_COMBINED_RESULT` | `{combined}` — `{baseline, combined, combinedApprovalDelta, combinedMovedQty, sumApprovalDelta, sumMovedQty, individual, interaction:{interacts, overlapQty, note}}` (Sessão 12) |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -731,8 +733,14 @@ acumuladores globais por adição/subtração, sem re-simular a base a cada cand
   único port de saída resolve direto a **Aprovado** — relaxa (admite o próximo valor que
   hoje falha) ou aperta (remove o valor mais próximo da fronteira que hoje passa) por
   **um passo** por execução. Lens com saída para Reprovado/AS IS ou com mais de uma regra
-  ficam fora do catálogo (extensível por design — mesmo precedente do movimento "adicionar
-  quebra" do épico, que também aguarda uma sessão futura).
+  ficam fora do catálogo (extensível por design).
+- **`add_break`** (Sessão 12): a "quebra que falta" — INSERE um losango (1 condição) ou
+  Cineminha (2 condições) ANTES de um nó âncora, roteando o sub-segmento acionável a um
+  terminal e o resto de volta ao âncora. NÃO é gerado pela busca do Goal Seek (não tem
+  agregado O(1) por candidato); é gerado pelo achado `heterogeneous_block`/exceção da
+  **Descoberta de Segmentos** (`segBuildBreakMove`) e materializado pelo MESMO applier
+  (`applyGoalSeekMoves`, `src/goalSeek.js`) — entregando a pendência declarada da Sessão 4.
+  O "🎯 Enviar ao Goal Seek" da Descoberta pré-carrega o objetivo para o refino fino aqui.
 
 ### Busca
 Greedy com precedência + shrinkage bayesiano (`SHRINK_K`, mesmo padrão do
@@ -1058,13 +1066,14 @@ fixture A/A' com 1 célula de Cineminha mudada ⇒ exatamente essa mudança, del
 batendo com `computeSimulationTick` antes/depois, e o mesmo delta reproduzido via
 `computePolicyDoc({..., options:{compare}})`).
 
-## Descoberta de Segmentos (Copiloto Sessão 10, motor — DEC-SD-001..006)
+## Descoberta de Segmentos (Copiloto Sessão 10/11/12, motor + UI — DEC-SD-001..006)
 
 Motor de **subgroup discovery** que varre a base (ou a população de um nó) procurando
 segmentos acionáveis onde a política atual está desalinhada com o comportamento observado.
-Ver `docs/wiki/Copiloto-DescobertaSegmentos.md`. **Sessão 10 = só o motor + GATE** (sem UI;
-as recomendações materializáveis + re-simulação e os achados `asis_divergence`/`anomaly`
-ficam para a Sessão 12).
+Ver `docs/wiki/Copiloto-DescobertaSegmentos.md`. **Sessão 10 = motor de descoberta/explicação/
+priorização + GATE; Sessão 11 = UI (modal, cards, quadrante); Sessão 12 = recomendações
+materializáveis (patch + re-simulação real), aplicação combinada, achados `asis_divergence`/
+`anomaly`, selo de estabilidade temporal e o movimento "adicionar quebra" do Goal Seek.**
 
 ### SegmentModel (padrão `docModel` — dados crus, nunca prosa)
 `COMPUTE_SEGMENT_DISCOVERY` (worker) devolve:
@@ -1076,14 +1085,19 @@ ficam para a Sessão 12).
   findings: [SegmentFinding],             // ordenados por prioridade
   diagnostics: {candidatesTested, discarded:{lowVolume, notSignificant, unstable, duplicate, noOpportunity}},
 }
-// SegmentFinding = { id, code, segment:{conditions:LensRule[], scope}, metrics, explanation, priority, recommendation:null }
-//   code: 'approvable_low_risk' | 'approved_high_risk' | 'heterogeneous_block'
+  asIsTotals: {rToA, aToR},               // totais de promoções/rebaixamentos (Sessão 12)
+}
+// SegmentFinding = { id, code, segment:{conditions:LensRule[], scope}, metrics, explanation, priority, recommendation }
+//   code: 'approvable_low_risk' | 'approved_high_risk' | 'heterogeneous_block' | 'asis_divergence' | 'anomaly'
 //   metrics: {qty, share, qtdAltas, qtdAltasInfer, inadReal, inadInferida, refInadReal, refInadInferida, lift, currentDecision}
-//   explanation: {contributions:[{col,value,sharePct}], dispersion:{nodesCount, terminals:[{terminal,qty,sharePct}], currentDecision}, stability:null, pValue, qValue}
-//   priority: {score, impact:{deltaApproval:null, deltaInadInf, movedQty}, confidence, actionability}
+//     asis_divergence: {qty, share, rToA, aToR, rToAShare, aToRShare} · anomaly: {qty, share, rate, median, mad, z, temporal}
+//   explanation: {contributions:[{col,value,sharePct}], dispersion:{...}, stability:null|{split:'temporal',holds}, stabilitySeries?:[{bucket,rate}], pValue, qValue}
+//   priority: {score, impact:{deltaApproval, deltaInadInf, movedQty}, confidence, actionability}
+//   recommendation: null | { kind:'goal_seek_move'|'add_break', targetTerminal, actionable, reason,
+//                            apply:{moves:[...]}, goalSeek:{target,direction,magnitude,minimize}, delta }  (ver Sessão 12)
 ```
 Segmento = **conjunção de `LensRule`** sobre colunas Filtro (DEC-SD-001) — imediatamente
-interpretável e materializável (vira Decision Lens/losango/Cineminha na Sessão 12).
+interpretável e materializável (vira losango/Cineminha/movimento de Goal Seek na Sessão 12).
 
 ### Pipeline (três estágios desacoplados, testáveis)
 - **`discoverSegments`** — beam search 1D→`maxDepth` (default 2) sobre os **dicionários** das
@@ -1118,17 +1132,60 @@ motor).
   heterogêneo (IV ≥ `SEG_HET_MIN_IV` numa coluna candidata) — a "quebra que falta". Emitido no
   nível do escopo (depth-0); `contributions` = colunas discriminantes por share de IV.
 
+### Recomendações materializáveis (Sessão 12 — estágio 4, DEC-SD-003)
+`buildSegmentRecommendations(shapes, conns, csvStore, findings, ctx)` anexa a cada achado
+acionável (deviation com código, `heterogeneous_block`) uma `recommendation` com **patch +
+delta VALIDADO por re-simulação real** (`runSimulation` antes/depois — só top-N `SEG_MAX_VALIDATE`;
+o card só exibe delta validado). **Nenhum aplicador novo** (DEC-IA-002): os patches são
+movimentos do catálogo do Goal Seek (`applyGoalSeekMoves`):
+- **`segCoincidenceMove`** — quando o segmento 1D coincide com um valor decidido DIRETO por um
+  losango (port → terminal, via `resolveDirectTerminalConn`), a recomendação é um movimento
+  `decision_terminal` (troca só aquele terminal).
+- **`segBuildBreakMove`** — senão, o movimento NOVO **`add_break`** (a "quebra que falta"
+  pendente da Sessão 4): insere um losango (1 condição / het) ou Cineminha (2 condições)
+  ANTES do nó âncora (root do escopo ou nó de escopo), roteando o sub-segmento acionável ao
+  terminal alvo e o resto de volta ao âncora. Materializado por `applyGoalSeekMoves` (em
+  `src/goalSeek.js`, `genId` opcional) — mesma função/validador usado pela main no "Aplicar
+  como novo cenário" (`applySegmentRecommendation` → `cloneCanvasWithNewIds` + `applyGoalSeekMoves`).
+- `recommendation.goalSeek` pré-carrega o objetivo estruturado para **🎯 Enviar ao Goal Seek**
+  (`sendSegmentToGoalSeek` abre o `goalSeekModal`); nó 🔒 travado ⇒ `actionable:false` + `reason`
+  declarado, sem delta.
+
+### Aplicação combinada (`computeSegmentCombined`, `COMPUTE_SEGMENT_COMBINED`)
+Aplica N recomendações selecionadas **em sequência sobre UM clone** e valida por **UMA
+re-simulação real** — **nunca a soma dos deltas individuais** (aplicar A muda a população que
+chega ao ponto de B). Devolve `combinedApprovalDelta`/`combinedMovedQty` (união, re-simulada) +
+`sumApprovalDelta`/`sumMovedQty` (soma dos isolados) + `interaction:{interacts, overlapQty, note}`
+— o modal DECLARA a sobreposição em vez de escondê-la. Main: `runSegmentCombined` (seleção via
+checkbox "combinar" no card) e `applySegmentCombinedAsScenario`.
+
+### asis_divergence e anomaly (Sessão 12 — sem patch, só navegação)
+- **`asis_divergence`** (`detectAsIsDivergence`): decompõe o rToA/aToR (promoções/rebaixamentos
+  vs. AS IS) por valor de segmento, reusando o desfecho por linha do escopo + `__DECISAO_ORIGINAL`.
+  A soma ≡ `incrementalResult.impacted` (GATE). `metrics: {rToA, aToR, rToAShare, aToRShare}`.
+- **`anomaly`** (`detectAnomalies`): desvio robusto **mediana/MAD** (modified z-score ≥
+  `SEG_ANOMALY_Z`) por valor e por **safra** (quando há coluna temporal). Sinalização de
+  qualidade de dado. `metrics: {rate, median, mad, z, temporal}`.
+- Ambos: `recommendation: null`; ação = **👁 Ver no Dashboard** (`FilterCard`) / **🎯 Ver no fluxo** (highlight).
+
+### Estabilidade temporal (`attachStability`)
+Selo split-half por período (`stability:{split:'temporal', holds}`) + `stabilitySeries` (sparkline
+no card, `SegmentSparkline`) quando há coluna temporal; sem ela ⇒ `stability:null` (nunca inventado).
+
 ### Comportamento
-Determinístico (mesma entrada ⇒ mesmo `SegmentModel`, ordem inclusive); agregados sempre da
-agregação exata; `recommendation` sempre `null` nesta sessão; sem coluna temporal ⇒
-`stability: null` (nunca inventado). Efêmero — o motor não persiste nada.
+Determinístico (mesma entrada ⇒ mesmo `SegmentModel`, incl. recomendações/deltas); agregados e
+deltas sempre da agregação/re-simulação exata (nunca estimados); `segmentDiscoveryModal` efêmero
+(não persiste — sem criação do usuário; ⚠️ regra do CLAUDE.md não se aplica).
 
 ### Teste
 `tests/segmentDiscovery.test.js` — GATE: subgrupo plantado achado com condições exatas;
 homogênea ⇒ zero achados; agregados ≡ `matchLensRule`; `dispersion` ≡ contagem manual por
-terminal (segmento espalhado por 2+ nós); p-value ≡ controle binomial manual; BH monótono com
-ruído descartado; shrinkage rebaixa nicho minúsculo; escopo por nó ≡ sub-base filtrada à mão;
-dedup; determinismo.
+terminal; p-value ≡ controle binomial manual; BH monótono; shrinkage rebaixa nicho; escopo por
+nó ≡ sub-base; dedup; **delta exibido ≡ `runSimulation` antes/depois por tipo de recomendação
+(add_break 1D/2D, movimento)**; **movimento `add_break` ≡ criação manual equivalente**; **delta
+COMBINADO ≡ re-simulação dos N patches, e difere da soma dos individuais em fixture que interage**;
+**`asis_divergence` ≡ `incrementalResult.impacted` agregado**; **anomaly (mediana/MAD)**; **selo de
+estabilidade temporal**; **nó travado ⇒ recomendação não acionável**; determinismo.
 
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
@@ -1612,7 +1669,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/copiloto-segment-discovery-h25uuu`
+`claude/copiloto-session-12-recommendations-cpotc2`
 
 ## Roadmap futuro (não implementado)
 
