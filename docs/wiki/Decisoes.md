@@ -160,7 +160,7 @@ das frentes.
 
 ---
 
-## ADR-008 (DEC-HX-001..008): Execução híbrida opt-in — ComputeProvider (Browser + sidecar Python local)
+## ADR-008 (DEC-HX-001..009): Execução híbrida opt-in — ComputeProvider (Browser + sidecar Python local)
 
 **Decisão:** o navegador permanece o caminho de execução **padrão e completo** de todo
 o produto; um **sidecar Python local** (extensão do `serve.py` que o release já
@@ -168,18 +168,25 @@ embarca, `127.0.0.1` apenas) passa a existir como camada **opcional** de acelera
 ampliação de limites, atrás de uma interface `ComputeProvider` roteada por um
 `ComputeRouter` — a UI posta as mesmas tarefas e recebe os mesmos payloads,
 independentemente de quem computou. Tarefas são classificadas: **Classe A** (paridade
-total — todo o core atual, sempre no worker), **Classe B** (ampliada — browser executa
-com tetos declarados; sidecar remove os tetos) e **Classe C** (exclusiva — análises
-novas tipo clusterização; sem sidecar, botão desabilitado com motivo). O tick de
+total — todo o core atual, sempre no worker) e **Classe B** (ampliada — browser
+executa com tetos declarados; sidecar remove os tetos). Pela decisão de **paridade
+total** (premissa P4, validada com o usuário em 09/07/2026), **não existem features
+exclusivas do modo Python**: toda análise nova (clusterização, estatísticas
+avançadas, feature engineering) nasce com baseline browser de limites declarados —
+a antiga "Classe C exclusiva" foi eliminada. Complemento (DEC-HX-009): ao carregar
+uma base, o app estima a capacidade do browser e **recomenda proativamente** ligar o
+motor Python quando entender que o browser não dará conta (nunca bloqueia). O tick de
 edição **jamais** roteia para o sidecar.
 
 **Contexto:** o produto está evoluindo de simulador para plataforma analítica
 (descoberta, clusterização, indicadores, feature engineering, bases menos
 sumarizadas) — carga multiplicativa O(linhas × candidatos) e teto de memória da aba
-(~2–4GB) que nenhuma otimização JS remove. O argumento pró-Python não é velocidade de
+(~2–4GB) que nenhuma otimização JS remove; o **alvo de projeto validado é ~7MM de
+linhas** em 1–2 anos (premissa P2), acima da zona de conforto do browser (~5MM com a
+dieta de memória). O argumento pró-Python não é velocidade de
 linguagem, e sim **biblioteca madura (numpy/scipy/sklearn/duckdb) + multicore +
 memória fora da aba**. Análise completa, alternativas avaliadas (DuckDB-WASM, Arrow,
-pool de workers) e protocolo em [[Arquitetura-Execucao-Hibrida]].
+pool de workers), premissas validadas e protocolo em [[Arquitetura-Execucao-Hibrida]].
 
 **Justificativa:**
 - Preserva o diferencial local-first (mesmo princípio do ADR-007 para IA): desligar o
@@ -190,7 +197,10 @@ pool de workers) e protocolo em [[Arquitetura-Execucao-Hibrida]].
   fixtures douradas cross-runtime (Vitest gera, pytest valida) — sem GATE verde, a
   tarefa não roteia.
 
-**Tradeoff aceito:** dois runtimes onde houver Classe B/C portada (custo de manutenção
-limitado pelas classes e pelo protocolo versionado); tier `stdlib` (sem numpy) tem
-ganho marginal — o valor real exige tier `full` via wheels offline embarcadas no
-release. Plano de sessões executáveis em [[Hibrido-Prompts-Sessoes]].
+**Tradeoff aceito:** dois runtimes onde houver Classe B portada — custo **ampliado
+conscientemente** pela paridade total (GATEs duplos sobre as mesmas fixtures
+douradas), em troca de ninguém ficar travado sem Python; tier `stdlib` (sem numpy)
+tem ganho marginal — o valor real exige tier `full`, instalado em camadas conforme a
+premissa P1 (`pip` do índice primeiro, wheels offline do release como fallback, com
+uma **sonda de ambiente** — Sessão HP — validando o que instala de fato antes da
+Fase 1). Plano de sessões executáveis em [[Hibrido-Prompts-Sessoes]].
