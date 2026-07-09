@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from "recharts";
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList, ScatterChart, Scatter, ZAxis, Cell } from "recharts";
 // Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
@@ -1202,6 +1202,38 @@ const SIMPLIFY_CODE_META = {
   redundant_variable: { icon: "🔁", label: "Variável re-testada" },
 };
 
+// Descoberta de Segmentos (Copiloto Sessão 10/11, DEC-SD-001..006) — metadados de UI por
+// código de achado (findings vêm de COMPUTE_SEGMENT_DISCOVERY/SEGMENT_DISCOVERY_RESULT).
+// Cores validadas para separação CVD (scripts/validate_palette.js da skill dataviz).
+const SEGMENT_CODE_META = {
+  approvable_low_risk: { icon: "💰", label: "Aprovável de baixo risco", color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
+  approved_high_risk:  { icon: "🔥", label: "Aprovado de alto risco",   color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
+  heterogeneous_block: { icon: "🪓", label: "Bloco heterogêneo",       color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
+};
+const SEGMENT_TERMINAL_LABEL = { approved: "Aprovado", rejected: "Reprovado", as_is: "AS IS" };
+
+// Condições do segmento em linguagem de regra ("Score = R08 e Canal = Digital").
+function segmentRuleText(conditions) {
+  if (!conditions || conditions.length === 0) return null;
+  return conditions.map(c => `${c.col} = ${c.value}`).join(" e ");
+}
+
+// "2,4× menor"/"2,4× maior" — sempre relativo (nunca "lift 0.42", sempre a leitura direta.
+function fmtLift(lift) {
+  if (lift == null || !isFinite(lift) || lift <= 0) return null;
+  const factor = lift >= 1 ? lift : 1 / lift;
+  const word = lift < 1 ? "menor" : lift > 1 ? "maior" : "igual";
+  return `${factor.toFixed(1)}× ${word}`;
+}
+
+// Template determinístico da dispersão ("por que nunca vi isso antes") — só quando o
+// segmento é decidido em mais de um nó da política hoje (dispersion.nodesCount > 1).
+function segmentDispersionText(dispersion) {
+  if (!dispersion || dispersion.nodesCount <= 1) return null;
+  const parts = (dispersion.terminals || []).map(t => `${t.sharePct.toFixed(0)}% em ${SEGMENT_TERMINAL_LABEL[t.terminal] || t.terminal}`);
+  return `Hoje este segmento está diluído em ${dispersion.nodesCount} nós da política: ${parts.join(", ")} — nenhum corte atual o enxerga inteiro.`;
+}
+
 // Agrega uma métrica sobre um conjunto de linhas (dataset largo COLUNAR) para uma coluna
 // de decisão. Replica a semântica do motor: numeradores/denominadores só sobre aprovados.
 // `indices`: Int32Array|number[]|null — subconjunto de linhas; null = todas as linhas
@@ -2030,6 +2062,193 @@ function FilterCardsEditor({ cards, dataset, onChange }) {
         background: "#f8fafc", color: "#475569", cursor: "pointer", fontSize: 11.5, fontWeight: 600, fontFamily: "inherit" }}>
         + Adicionar filtro
       </button>
+    </div>
+  );
+}
+
+// ── SegmentFindingCard — card de oportunidade da Descoberta de Segmentos ──────────
+// (Copiloto Sessão 11, UI sobre o SegmentModel da Sessão 10). Puro: regra + métricas com
+// referência/lift + barra de decomposição das contribuições + dispersão (template
+// determinístico) + selos de confiança + ações (ver no Dashboard / ver no fluxo).
+function SegmentFindingCard({ finding, segmentModel, focused, onFocus, onViewDashboard, onViewFlow }) {
+  const meta = SEGMENT_CODE_META[finding.code] || SEGMENT_CODE_META.heterogeneous_block;
+  const { metrics, explanation, priority } = finding;
+  const isHet = finding.code === 'heterogeneous_block';
+  const ruleText = segmentRuleText(finding.segment.conditions);
+  const metricId = segmentModel?.metric?.id || 'inadReal';
+  const primaryVal = metricId === 'inadInferida' ? metrics.inadInferida : metrics.inadReal;
+  const refVal = metricId === 'inadInferida' ? metrics.refInadInferida : metrics.refInadReal;
+  const metricLabel = segmentModel?.metric?.label || 'Inad. Real';
+  const liftText = fmtLift(metrics.lift);
+  const dispersionText = segmentDispersionText(explanation.dispersion);
+  const contributions = isHet
+    ? (explanation.contributions || [])
+    : (explanation.contributions || []);
+  const RAMP = ["#0369a1", "#0ea5e9", "#7dd3fc", "#bae6fd"];
+
+  const confidenceBadge = isHet
+    ? { icon: "🪓", text: "achado estrutural (IV)", color: "#7c3aed" }
+    : (explanation.qValue != null && explanation.qValue <= 0.01)
+      ? { icon: "✅", text: "muito significativo", color: "#16a34a" }
+      : { icon: "✅", text: "significativo (FDR)", color: "#16a34a" };
+
+  return (
+    <div id={`segfind-${finding.id}`} onClick={() => onFocus(finding.id)}
+      style={{ padding: "12px 14px", borderRadius: 12, background: meta.bg,
+        border: `1.5px solid ${focused ? meta.color : meta.border}`,
+        boxShadow: focused ? `0 0 0 3px ${meta.color}22` : "none",
+        cursor: "pointer", transition: "box-shadow .15s, border-color .15s" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <span style={{ fontSize: 18, flexShrink: 0 }}>{meta.icon}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: meta.color, textTransform: "uppercase", letterSpacing: .4 }}>
+            {meta.label}
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", marginTop: 2, lineHeight: 1.4 }}>
+            {ruleText || (segmentModel?.scope ? `Escopo: ${segmentModel.scope.label}` : "Base inteira")}
+          </div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b" }}>{fmtQty(metrics.qty)}</div>
+          <div style={{ fontSize: 10, color: "#94a3b8" }}>{(metrics.share * 100).toFixed(1)}% do escopo</div>
+        </div>
+      </div>
+
+      {segmentModel?.scope && (
+        <div style={{ fontSize: 10.5, color: "#64748b", marginTop: 6, fontStyle: "italic" }}>
+          Dentro da população que chega a "{segmentModel.scope.label}".
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase" }}>{metricLabel}</div>
+          <div style={{ fontSize: 12.5, color: "#1e293b" }}>
+            <b>{fmtPct(primaryVal)}</b>
+            {refVal != null && <> vs. <b>{fmtPct(refVal)}</b> do restante{liftText ? ` (${liftText})` : ""}</>}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase" }}>Decisão atual</div>
+          <div style={{ fontSize: 12.5, color: "#1e293b" }}>{SEGMENT_TERMINAL_LABEL[metrics.currentDecision] || (metrics.currentDecision === 'mixed' ? 'Misto' : 'Não decidido')}</div>
+        </div>
+      </div>
+
+      {contributions.length > 0 && (
+        <div style={{ marginTop: 9 }}>
+          <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", marginBottom: 3 }}>
+            {isHet ? "Variáveis discriminantes" : "Decomposição do desvio"}
+          </div>
+          <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden", gap: 1 }}>
+            {contributions.map((c, i) => (
+              <div key={i} title={`${c.col}${c.value != null ? ` = ${c.value}` : ""} — ${c.sharePct.toFixed(0)}%`}
+                style={{ width: `${c.sharePct}%`, minWidth: 3, background: RAMP[i % RAMP.length] }} />
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+            {contributions.map((c, i) => (
+              <span key={i} style={{ fontSize: 10, color: "#64748b", display: "flex", alignItems: "center", gap: 3 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 2, background: RAMP[i % RAMP.length], display: "inline-block" }} />
+                {c.col}{c.value != null ? ` = ${c.value}` : ""} ({c.sharePct.toFixed(0)}%)
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {dispersionText && (
+        <div style={{ marginTop: 8, padding: "6px 8px", borderRadius: 7, background: "rgba(255,255,255,.6)", fontSize: 10.5, color: "#475569", lineHeight: 1.5 }}>
+          🔀 {dispersionText}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 6, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: confidenceBadge.color, display: "flex", alignItems: "center", gap: 3 }}>
+          {confidenceBadge.icon} {confidenceBadge.text}
+        </span>
+        <span style={{ fontSize: 10, color: "#94a3b8" }}>⏱ estabilidade não avaliável</span>
+        {finding.locked && (
+          <span style={{ fontSize: 10, fontWeight: 700, color: "#b91c1c" }}>🔒 não acionável (nó travado)</span>
+        )}
+        <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>score {priority.score.toFixed(1)}</span>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginTop: 8 }} onClick={e => e.stopPropagation()}>
+        {!isHet && (
+          <button onClick={() => onViewDashboard(finding)}
+            style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid #bfdbfe", background: "#eff6ff",
+              color: "#1d4ed8", cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit" }}>
+            👁 Ver no Dashboard
+          </button>
+        )}
+        <button onClick={() => onViewFlow(finding)}
+          style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff",
+            color: "#475569", cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit" }}>
+          🎯 Ver no fluxo
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Contadores de descarte da varredura (diagnostics) — sempre visíveis: o assistente nunca
+// "some" com candidatos silenciosamente (DEC-SD-002).
+function DiagnosticsStrip({ diag }) {
+  const d = diag.discarded || {};
+  const parts = [
+    d.lowVolume ? `${d.lowVolume} baixo volume` : null,
+    d.notSignificant ? `${d.notSignificant} não significativo` : null,
+    d.unstable ? `${d.unstable} instável` : null,
+    d.duplicate ? `${d.duplicate} duplicado` : null,
+    d.noOpportunity ? `${d.noOpportunity} sem oportunidade` : null,
+  ].filter(Boolean);
+  return (
+    <div style={{ fontSize: 10.5, color: "#94a3b8", padding: "8px 10px", borderRadius: 8, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
+      🔬 {diag.candidatesTested} candidato{diag.candidatesTested !== 1 ? "s" : ""} testado{diag.candidatesTested !== 1 ? "s" : ""}
+      {parts.length > 0 ? ` · descartados: ${parts.join(", ")}` : " · nenhum descarte"}
+    </div>
+  );
+}
+
+// Quadrante Volume × Risco (Recharts, DEC-AW-001) — cada achado é um ponto (x=volume,
+// y=lift de risco, cor=tipo de achado, tamanho=score de prioridade). Clique foca o card
+// (scroll + borda), mesmo padrão de "ir até o nó". Blocos heterogêneos (sem lift definido —
+// o complemento do escopo inteiro é vazio) ficam em y=1 (neutro) por convenção.
+function SegmentQuadrant({ findings, focusedId, onPick }) {
+  const data = findings.map(f => ({
+    id: f.id, code: f.code,
+    qty: f.metrics.qty,
+    lift: (f.metrics.lift != null && isFinite(f.metrics.lift)) ? f.metrics.lift : 1,
+    score: f.priority.score,
+  }));
+  return (
+    <div>
+      <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>
+        Quadrante Volume × Risco — clique num ponto para focar o card
+      </p>
+      <ResponsiveContainer width="100%" height={200}>
+        <ScatterChart margin={{top:8,right:16,bottom:8,left:8}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+          <XAxis type="number" dataKey="qty" name="Volume" tickFormatter={fmtQty} tick={{fontSize:10,fill:'#94a3b8'}}/>
+          <YAxis type="number" dataKey="lift" name="Lift de risco" tick={{fontSize:10,fill:'#94a3b8'}}/>
+          <ZAxis type="number" dataKey="score" range={[60,360]} name="Prioridade"/>
+          <Tooltip cursor={{strokeDasharray:'3 3'}}/>
+          <Scatter data={data} onClick={(p)=>onPick(p?.payload?.id ?? p?.id)} cursor="pointer">
+            {data.map((d,i)=>(
+              <Cell key={i} fill={(SEGMENT_CODE_META[d.code]||SEGMENT_CODE_META.heterogeneous_block).color}
+                stroke={d.id===focusedId?'#1e293b':'none'} strokeWidth={d.id===focusedId?2:0}/>
+            ))}
+          </Scatter>
+        </ScatterChart>
+      </ResponsiveContainer>
+      <div style={{display:"flex",gap:12,marginTop:2,flexWrap:"wrap"}}>
+        {Object.entries(SEGMENT_CODE_META).map(([code,m])=>(
+          <span key={code} style={{fontSize:10,color:"#64748b",display:"flex",alignItems:"center",gap:4}}>
+            <span style={{width:8,height:8,borderRadius:"50%",background:m.color,display:"inline-block"}}/>
+            {m.icon} {m.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -3799,6 +4018,11 @@ export default function App() {
   // padrão não-persistido de goalSeekModal/simplifyModal — ver ⚠️ regra do CLAUDE.md).
   // null | {step:'form'|'loading'|'result', includeDomains, scenarioIds:Set, compareCanvasId, docModel?}
   const [docModal, setDocModal] = useState(null);
+  // Descoberta de Segmentos — Copiloto Sessão 10/11 (DEC-SD-001..006): composição efêmera
+  // (mesmo padrão não-persistido de goalSeekModal/simplifyModal/docModal — sem recomendação/
+  // patch nesta sessão, só descoberta + explicação + priorização + navegação).
+  // null | {step:'form'|'loading'|'result', scope:null|{nodeId}, params, segmentModel?, varFilter?, focusedId?}
+  const [segmentDiscoveryModal, setSegmentDiscoveryModal] = useState(null);
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
@@ -3860,6 +4084,7 @@ export default function App() {
   const goalSeekModalR = useRef(goalSeekModal); useEffect(()=>{goalSeekModalR.current=goalSeekModal},[goalSeekModal]);
   const simplifyModalR = useRef(simplifyModal); useEffect(()=>{simplifyModalR.current=simplifyModal},[simplifyModal]);
   const docModalR = useRef(docModal); useEffect(()=>{docModalR.current=docModal},[docModal]);
+  const segmentDiscoveryModalR = useRef(segmentDiscoveryModal); useEffect(()=>{segmentDiscoveryModalR.current=segmentDiscoveryModal},[segmentDiscoveryModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
@@ -3991,6 +4216,9 @@ export default function App() {
           }
           return { ...m, step: 'result', docModel: { ...docModel, changelog } };
         });
+      } else if (msgType === 'SEGMENT_DISCOVERY_RESULT') {
+        const { segmentModel } = e.data;
+        setSegmentDiscoveryModal(m => (m ? { ...m, step: 'result', segmentModel, varFilter: null, focusedId: segmentModel.findings?.[0]?.id ?? null } : m));
       }
     };
     return () => worker.terminate();
@@ -7795,6 +8023,96 @@ export default function App() {
     setSimplifyModal(null);
   };
 
+  // ── Descoberta de Segmentos — Copiloto Sessão 10/11 (DEC-SD-001..006) ────────────
+  // Dois pontos de entrada: 🔍 Descobrir Segmentos (Fluxo, escopo global — scope=null) e
+  // 🔍 Descobrir aqui (toolbar contextual de losango/Cineminha/Decision Lens/terminal —
+  // scope={nodeId}, população que efetivamente chega ao nó, mesmo critério de
+  // computeCinemaArrivals/prévia AS IS). Form mínimo com defaults → loading → resultado
+  // (padrão goalSeekModal). Nesta sessão `recommendation` é sempre null no worker — só
+  // descoberta/explicação/priorização + navegação (Dashboard/fluxo), sem patch/aplicação.
+  const openSegmentDiscoveryModal = (scope) => {
+    setSegmentDiscoveryModal({
+      step: 'form',
+      scope: scope || null,
+      params: { riskMetric: 'inadReal', minQty: null, maxDepth: 2 },
+      varFilter: null,
+      focusedId: null,
+    });
+  };
+
+  const runSegmentDiscovery = () => {
+    const cur = segmentDiscoveryModalR.current;
+    if (!cur) return;
+    setSegmentDiscoveryModal(m => ({ ...m, step: 'loading' }));
+    const { riskMetric, minQty, maxDepth } = cur.params;
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_SEGMENT_DISCOVERY',
+      shapes: shapesR.current,
+      conns: connsR.current,
+      scope: cur.scope ? { nodeId: cur.scope.nodeId } : null,
+      params: { riskMetric, maxDepth, ...(minQty != null ? { minQty } : {}) },
+    });
+  };
+
+  // Foca um card (quadrante → clique no ponto) e rola a lista até ele.
+  const focusSegmentFinding = (findingId) => {
+    setSegmentDiscoveryModal(m => (m ? { ...m, focusedId: findingId } : m));
+    requestAnimationFrame(() => {
+      document.getElementById(`segfind-${findingId}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  };
+
+  // 👁 Ver no Dashboard — converte SegmentDef.conditions (LensRule[], mesmo formato do
+  // Decision Lens) em FilterCard[] de filtro de PÁGINA (foca o Dashboard inteiro no
+  // segmento) e troca para a aba Dashboard. Sem condições (heterogeneous_block, escopo
+  // inteiro) a ação não aparece no card — não há o que filtrar.
+  const viewSegmentInDashboard = (finding) => {
+    const conditions = finding?.segment?.conditions || [];
+    if (conditions.length === 0) return;
+    const cards = conditions.map(c => ({
+      id: uid(), dim: c.col, mode: 'advanced', selected: null,
+      rules: [{ id: uid(), operator: c.operator || 'equal', value: c.value, logic: null }],
+    }));
+    setAnalyticsPageFilters(cards);
+    setActiveTab('analysis');
+    setSegmentDiscoveryModal(null);
+  };
+
+  // 🎯 Ver no fluxo — reusa a mecânica de "ir até o nó" do lint (seleção + centralização
+  // do viewport), generalizada para múltiplos nós: o nó de escopo (quando a varredura foi
+  // restrita a um nó) + qualquer losango/Cineminha/Decision Lens cuja variável aparece nas
+  // condições do segmento (ou nas colunas discriminantes, para heterogeneous_block) — mostra
+  // onde na política atual essas variáveis já são usadas.
+  const viewSegmentInFlow = (finding) => {
+    const scopeNodeId = segmentDiscoveryModalR.current?.segmentModel?.scope?.nodeId;
+    const cols = new Set((finding.segment.conditions || []).map(c => c.col));
+    if (finding.code === 'heterogeneous_block') {
+      for (const h of (finding.explanation.contributions || [])) cols.add(h.col);
+    }
+    const ids = new Set();
+    if (scopeNodeId) ids.add(scopeNodeId);
+    for (const s of shapesR.current) {
+      if (s.type === 'decision' && s.variableCol && cols.has(s.variableCol)) ids.add(s.id);
+      else if (s.type === 'cineminha' && ((s.rowVar && cols.has(s.rowVar.col)) || (s.colVar && cols.has(s.colVar.col)))) ids.add(s.id);
+      else if (s.type === 'decision_lens' && (s.rules || []).some(r => cols.has(r.col))) ids.add(s.id);
+    }
+    if (ids.size === 0) return;
+    setSel(null);
+    setMultiSel(ids);
+    setActiveTab('canvas');
+    setSegmentDiscoveryModal(null);
+    requestAnimationFrame(() => {
+      const svgEl = svgRef.current;
+      if (!svgEl) return;
+      const targets = shapesR.current.filter(s => ids.has(s.id));
+      if (targets.length === 0) return;
+      const minX = Math.min(...targets.map(s => s.x)), maxX = Math.max(...targets.map(s => s.x + (s.w || 0)));
+      const minY = Math.min(...targets.map(s => s.y)), maxY = Math.max(...targets.map(s => s.y + (s.h || 0)));
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      setVp(v => ({ s: v.s, x: svgEl.clientWidth / 2 - cx * v.s, y: svgEl.clientHeight / 2 - cy * v.s }));
+    });
+  };
+
   // ── Documentação Automática — Copiloto Sessão 6 (DEC-IA-006) ─────────────────
   // "📄 Documentar política" abre o formulário de composição (toggle de domínios, cenários
   // a comparar, comparação estrutural); ao confirmar, `ir` é construído aqui (buildPolicyIR
@@ -8220,6 +8538,13 @@ export default function App() {
                 💾 Salvar
               </button>
               <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 2px"}}/>
+              <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
+                title="Descobrir segmentos na população que efetivamente chega a este Cineminha"
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
+                  color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                🔍 Descobrir aqui
+              </button>
               <button onClick={()=>toggleShapeLock(sel)}
                 title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
                 style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
@@ -8261,6 +8586,13 @@ export default function App() {
                 whiteSpace:"nowrap",fontWeight:600}}>
               ⚙ Domínio
             </button>
+            <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
+              title="Descobrir segmentos na população que efetivamente chega a este losango"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
+                color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              🔍 Descobrir aqui
+            </button>
             <button onClick={()=>toggleShapeLock(sel)}
               title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
               style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
@@ -8282,12 +8614,36 @@ export default function App() {
                 whiteSpace:"nowrap",fontWeight:600}}>
               🔎 Configurar
             </button>
+            <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
+              title="Descobrir segmentos na população que passa por este Decision Lens"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
+                color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              🔍 Descobrir aqui
+            </button>
             <button onClick={()=>toggleShapeLock(sel)}
               title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
               style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
                 background:selShape.locked?"#fef2f2":"#fff",color:selShape.locked?"#b91c1c":"#64748b",
                 cursor:"pointer",fontSize:13,fontFamily:"inherit",whiteSpace:"nowrap"}}>
               {selShape.locked ? "🔒" : "🔓"}
+            </button>
+          </div>
+        )}
+
+        {/* Terminal toolbar (Aprovado/Reprovado/AS IS) — Descoberta de Segmentos escopada
+            à população que efetivamente TERMINA neste nó (útil pra "por que este terminal
+            tem inad alta?"). Terminais não têm trava (shape.locked é só de fluxo/decisão). */}
+        {['approved','rejected','as_is'].includes(selShape?.type)&&multiSel.size<=1&&(
+          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
+            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
+            border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
+            <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
+              title="Descobrir segmentos na população que termina neste nó"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
+                color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              🔍 Descobrir aqui
             </button>
           </div>
         )}
@@ -8793,6 +9149,13 @@ export default function App() {
               onMouseLeave={e=>{e.currentTarget.style.background="#eff6ff";e.currentTarget.style.borderColor="#bfdbfe";}}>
               <span style={{fontSize:16}}>📄</span> Documentar Política
             </button>
+            <button onClick={()=>openSegmentDiscoveryModal(null)}
+              title="Varrer a base (subgroup discovery) procurando segmentos onde a política atual está desalinhada — aprovação deixada na mesa, risco vazando ou blocos heterogêneos"
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#a5b4fc";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#c7d2fe";}}>
+              <span style={{fontSize:16}}>🔍</span> Descobrir Segmentos
+            </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
             <input ref={libFileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onLibFileChange}/>
@@ -8971,6 +9334,22 @@ export default function App() {
                 })}
               </div>
             )}
+            {/* Achado informativo 🔵 apontando pra Descoberta de Segmentos (Sessão 10/11) —
+                não duplica a lista (estatística, não estrutural): o painel só aponta, o
+                modal detalha. Sempre visível quando há fluxo — a varredura é on-demand. */}
+            <div style={{marginTop:6,padding:"8px 10px",borderRadius:8,background:COPILOT_SEV_META.info.bg,border:`1px solid ${COPILOT_SEV_META.info.border}`,fontSize:11.5,color:COPILOT_SEV_META.info.color,lineHeight:1.45}}>
+              <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
+                <span style={{flexShrink:0}}>{COPILOT_SEV_META.info.emoji}</span>
+                <span style={{flex:1}}>Descoberta de Segmentos disponível — varra a base procurando aprovação deixada na mesa, risco vazando ou blocos heterogêneos que a política atual não trata.</span>
+              </div>
+              <div style={{marginTop:6}}>
+                <button onClick={()=>openSegmentDiscoveryModal(null)}
+                  title="Abrir a Descoberta de Segmentos"
+                  style={{padding:"3px 9px",borderRadius:6,border:`1px solid ${COPILOT_SEV_META.info.border}`,background:"#fff",color:COPILOT_SEV_META.info.color,cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                  🔍 Abrir Descoberta
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -12703,6 +13082,167 @@ export default function App() {
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ SEGMENT DISCOVERY MODAL — Descoberta de Segmentos (Copiloto Sessão 10/11) ═══════════════ */}
+      {segmentDiscoveryModal&&(()=>{
+        const { step, scope, params, segmentModel, varFilter, focusedId } = segmentDiscoveryModal;
+        const updParams = (patch) => setSegmentDiscoveryModal(m => ({ ...m, params: { ...m.params, ...patch } }));
+        const findings = segmentModel?.findings || [];
+        const allVars = [...new Set(findings.flatMap(f => [
+          ...(f.segment.conditions||[]).map(c=>c.col),
+          ...(f.code==='heterogeneous_block' ? (f.explanation.contributions||[]).map(c=>c.col) : []),
+        ]))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+        const filtered = varFilter ? findings.filter(f =>
+          (f.segment.conditions||[]).some(c=>c.col===varFilter) ||
+          (f.code==='heterogeneous_block' && (f.explanation.contributions||[]).some(c=>c.col===varFilter))
+        ) : findings;
+        const diag = segmentModel?.diagnostics;
+        const scopeLabel = segmentModel?.scope?.label ?? (scope ? (shapesById.get(scope.nodeId)?.label || scope.nodeId) : null);
+
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth: step==='result' ? 940 : 480,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#eef2ff 0%,#e0e7ff 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#c7d2fe",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>🔍</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Descoberta de Segmentos</h2>
+                    <p style={{fontSize:11,color:"#4f46e5"}}>
+                      {scope ? `Escopo: população que chega a "${scopeLabel}"` : "Escopo: base inteira"}
+                    </p>
+                  </div>
+                </div>
+                <button onClick={()=>setSegmentDiscoveryModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
+                {step==='form' && (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <p style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
+                      Varredura (subgroup discovery) sobre as colunas Filtro procurando conjunções onde a
+                      métrica de risco desvia significativamente da referência — nenhum achado aparece sem
+                      passar volume mínimo → shrinkage → teste + FDR → dedup.
+                    </p>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Métrica de risco
+                        <select value={params.riskMetric} onChange={e=>updParams({riskMetric:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value="inadReal">Inad. Real</option>
+                          <option value="inadInferida">Inad. Inferida</option>
+                        </select>
+                      </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Profundidade máx. da conjunção
+                        <select value={params.maxDepth} onChange={e=>updParams({maxDepth:Number(e.target.value)})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value={1}>1 variável</option>
+                          <option value={2}>2 variáveis</option>
+                        </select>
+                      </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600,gridColumn:"1 / -1"}}>
+                        Volume mínimo por segmento
+                        <input type="number" min="1" value={params.minQty ?? ''}
+                          placeholder="automático (máx. entre 200 e 0,1% da população)"
+                          onChange={e=>updParams({minQty: e.target.value===''?null:Number(e.target.value)})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </label>
+                    </div>
+                    <button onClick={runSegmentDiscovery}
+                      style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
+                        background:"#4f46e5",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                      🔎 Buscar
+                    </button>
+                  </div>
+                )}
+
+                {step==='loading' && (
+                  <div style={{padding:"40px 0",textAlign:"center",color:"#4f46e5",fontSize:13}}>
+                    Varrendo a base por segmentos…
+                  </div>
+                )}
+
+                {step==='result' && segmentModel && (()=>{
+                  if (findings.length === 0) {
+                    return (
+                      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                        <div style={{padding:"14px 16px",borderRadius:10,background:"#f8fafc",border:"1px dashed #e2e8f0",
+                          fontSize:12.5,color:"#64748b",textAlign:"center",lineHeight:1.6}}>
+                          Nenhum segmento passou os filtros de relevância (volume mínimo, significância/FDR, acionabilidade).
+                        </div>
+                        {diag && <DiagnosticsStrip diag={diag}/>}
+                        <button onClick={()=>setSegmentDiscoveryModal(m=>({...m,step:'form'}))}
+                          style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                            color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",alignSelf:"flex-start"}}>
+                          ← Ajustar parâmetros
+                        </button>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                        <div style={{fontSize:12,color:"#64748b"}}>
+                          <b>{findings.length}</b> achado{findings.length!==1?'s':''} · população do escopo: <b>{fmtQty(segmentModel.population.qty)}</b>
+                        </div>
+                        <button onClick={()=>setSegmentDiscoveryModal(m=>({...m,step:'form'}))}
+                          style={{padding:"6px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                            color:"#475569",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                          ← Ajustar parâmetros
+                        </button>
+                      </div>
+
+                      {allVars.length>0 && (
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                          <span style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase"}}>Filtrar por variável:</span>
+                          {allVars.map(v=>(
+                            <button key={v} onClick={()=>setSegmentDiscoveryModal(m=>({...m,varFilter: m.varFilter===v?null:v}))}
+                              style={{padding:"3px 10px",borderRadius:20,border:`1px solid ${varFilter===v?'#4f46e5':'#e2e8f0'}`,
+                                background:varFilter===v?'#eef2ff':'#fff',color:varFilter===v?'#4338ca':'#64748b',
+                                cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                              {v}
+                            </button>
+                          ))}
+                          {varFilter && (
+                            <button onClick={()=>setSegmentDiscoveryModal(m=>({...m,varFilter:null}))}
+                              style={{border:"none",background:"none",color:"#94a3b8",cursor:"pointer",fontSize:10.5,fontFamily:"inherit"}}>
+                              ✕ limpar
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {filtered.length>1 && (
+                        <SegmentQuadrant findings={filtered} focusedId={focusedId} onPick={focusSegmentFinding}/>
+                      )}
+
+                      <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:360,overflowY:"auto",paddingRight:2}}>
+                        {filtered.map(f=>(
+                          <SegmentFindingCard key={f.id} finding={f} segmentModel={segmentModel}
+                            focused={focusedId===f.id} onFocus={focusSegmentFinding}
+                            onViewDashboard={viewSegmentInDashboard} onViewFlow={viewSegmentInFlow}/>
+                        ))}
+                      </div>
+
+                      {diag && <DiagnosticsStrip diag={diag}/>}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </div>
