@@ -1,13 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeSegmentDiscovery,
+  computeSegmentCombined,
   discoverSegments,
   explainSegment,
   resolveRiskMetric,
   segBinomTwoSided,
   segBenjaminiHochberg,
   matchLensRule,
+  runSimulation,
+  computeSimulatedDecisions,
+  computeIncrementalResult,
 } from '../src/simulation.worker.js';
+import { applyGoalSeekMoves } from '../src/goalSeek.js';
 
 // ── GATE Copiloto Sessão 10 (Descoberta de Segmentos — DEC-SD-001..006) ──────────
 // docs/wiki/Copiloto-DescobertaSegmentos.md. `computeSegmentDiscovery` é o motor de
@@ -320,6 +325,237 @@ describe('segmentDiscovery · heterogeneous_block e determinismo', () => {
       ['R05', 'Digital', '1000', '1000', '380'],
       ['R05', 'Fisico', '1000', '1000', '20'],
     ]);
+    const a = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, { seg: csv }, null, { minQty: 1 });
+    const b = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, { seg: csv }, null, { minQty: 1 });
+    const strip = (m) => ({ ...m, generatedAt: null });
+    expect(strip(a)).toEqual(strip(b));
+  });
+});
+
+// ── GATE Copiloto Sessão 12 (Recomendações acionáveis — DEC-SD-003) ──────────────
+// Cada recomendação carrega um patch (movimento do catálogo do Goal Seek — decision_terminal/
+// cinema_cell/add_break) e um delta VALIDADO por re-simulação real (runSimulation antes/depois);
+// a aplicação combinada é validada por UMA re-simulação (nunca a soma); asis_divergence bate
+// com o incrementalResult; nó travado ⇒ não acionável.
+
+describe('segmentDiscovery · recomendação: delta exibido ≡ runSimulation antes/depois (add_break 2D)', () => {
+  const csv = csvOf([
+    ['R08', 'Digital', '1000', '1000', '20'],
+    ['R08', 'Fisico', '1000', '1000', '380'],
+    ['R05', 'Digital', '1000', '1000', '380'],
+    ['R05', 'Fisico', '1000', '1000', '20'],
+  ]);
+  const store = { seg: csv };
+  it('a recomendação do achado 2D é add_break (Cineminha) e seu delta ≡ re-simulação', () => {
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, store, null, { minQty: 1 });
+    const planted = m.findings.find(f => f.code === 'approvable_low_risk' && f.segment.conditions.length === 2 &&
+      f.segment.conditions.some(c => c.value === 'R08') && f.segment.conditions.some(c => c.value === 'Digital'));
+    expect(planted).toBeTruthy();
+    expect(planted.recommendation).toBeTruthy();
+    expect(planted.recommendation.kind).toBe('add_break');
+    expect(planted.recommendation.apply.moves[0].type).toBe('add_break');
+    expect(planted.recommendation.apply.moves[0].breakKind).toBe('cinema');
+
+    const before = runSimulation(rejectAll.shapes, rejectAll.conns, store);
+    const { shapes: ps, conns: pc } = applyGoalSeekMoves(rejectAll.shapes, rejectAll.conns, planted.recommendation.apply.moves);
+    const after = runSimulation(ps, pc, store);
+    expect(planted.recommendation.delta.before.approvalRate).toBeCloseTo(before.approvalRate, 9);
+    expect(planted.recommendation.delta.after.approvalRate).toBeCloseTo(after.approvalRate, 9);
+    // Só R08×Digital (1000 de 4000) é aprovado; o resto continua reprovado.
+    expect(after.approvalRate).toBeCloseTo(25, 9);
+    expect(planted.recommendation.delta.movedQty).toBe(1000);
+  });
+});
+
+describe('segmentDiscovery · movimento "adicionar quebra" ≡ criação manual equivalente', () => {
+  // Base toda reprovada; SCORE separa (R08=2%, R05=40%). O add_break vira um losango que
+  // aprova o lado bom (R08) e mantém o resto reprovado.
+  const csv = csvOf([
+    ['R08', 'Digital', '1000', '1000', '20'],
+    ['R08', 'Fisico', '1000', '1000', '20'],
+    ['R05', 'Digital', '1000', '1000', '400'],
+    ['R05', 'Fisico', '1000', '1000', '400'],
+  ]);
+  const store = { seg: csv };
+  it('o delta do add_break do heterogeneous_block ≡ losango construído à mão', () => {
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, store, null, { minQty: 1 });
+    const het = m.findings.find(f => f.code === 'heterogeneous_block');
+    expect(het).toBeTruthy();
+    expect(het.recommendation.apply.moves[0].breakKind).toBe('decision');
+    expect(het.recommendation.apply.moves[0].splitValues).toEqual(['R08']);
+
+    const auto = applyGoalSeekMoves(rejectAll.shapes, rejectAll.conns, het.recommendation.apply.moves);
+    const autoSim = runSimulation(auto.shapes, auto.conns, store);
+
+    // Losango manual equivalente: SCORE R08 → Aprovado; R05 → volta pro root (L → Reprovado).
+    const manualShapes = [
+      { id: 'D', type: 'decision', label: 'SCORE', variableCol: 'SCORE', csvId: 'seg' },
+      { id: 'pG', type: 'port', label: 'R08' },
+      { id: 'pB', type: 'port', label: 'R05' },
+      { id: 'AP', type: 'approved', label: 'Aprovado' },
+      ...rejectAll.shapes,
+    ];
+    const manualConns = [
+      { id: 'm1', from: 'D', to: 'pG', label: 'R08' },
+      { id: 'm2', from: 'pG', to: 'AP' },
+      { id: 'm3', from: 'D', to: 'pB', label: 'R05' },
+      { id: 'm4', from: 'pB', to: 'L' },
+      ...rejectAll.conns,
+    ];
+    const manualSim = runSimulation(manualShapes, manualConns, store);
+    expect(autoSim.approvalRate).toBeCloseTo(manualSim.approvalRate, 9);
+    expect(autoSim.inadReal).toBeCloseTo(manualSim.inadReal, 12);
+    expect(autoSim.approvedQty).toBe(manualSim.approvedQty);
+    // R08 (2000 de 4000) aprovado.
+    expect(autoSim.approvalRate).toBeCloseTo(50, 9);
+  });
+});
+
+describe('segmentDiscovery · combinação ≡ re-simulação, nunca soma (achados que interagem)', () => {
+  // SCORE=R08 e CANAL=Digital são ambos aprováveis (baixo risco, hoje reprovados) e se
+  // SOBREPÕEM em R08×Digital — aprovar os dois junto NÃO é a soma (dupla contagem do overlap).
+  const csv = csvOf([
+    ['R08', 'Digital', '1000', '1000', '20'],
+    ['R08', 'Fisico', '1000', '1000', '20'],
+    ['R05', 'Digital', '1000', '1000', '20'],
+    ['R05', 'Fisico', '1000', '1000', '400'],
+  ]);
+  const store = { seg: csv };
+  it('combinedMovedQty (união) < soma dos individuais e a interação é declarada', () => {
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, store, null, { minQty: 1 });
+    const a = m.findings.find(f => f.code === 'approvable_low_risk' && f.segment.conditions.length === 1 && f.segment.conditions[0].value === 'R08');
+    const b = m.findings.find(f => f.code === 'approvable_low_risk' && f.segment.conditions.length === 1 && f.segment.conditions[0].value === 'Digital');
+    expect(a).toBeTruthy();
+    expect(b).toBeTruthy();
+
+    const combined = computeSegmentCombined(rejectAll.shapes, rejectAll.conns, store, [a.recommendation.apply, b.recommendation.apply]);
+    // Individual: R08 (2000) e Digital (2000) → soma 4000. União: R08 ∪ Digital = 3000.
+    expect(combined.sumMovedQty).toBe(4000);
+    expect(combined.combinedMovedQty).toBe(3000);
+    expect(combined.combinedMovedQty).not.toBe(combined.sumMovedQty);
+    expect(combined.interaction.interacts).toBe(true);
+    expect(combined.interaction.overlapQty).toBeCloseTo(1000, 6);
+
+    // E o combinado bate com a re-simulação real dos DOIS patches em sequência.
+    const { shapes: ps, conns: pc } = applyGoalSeekMoves(rejectAll.shapes, rejectAll.conns, [...a.recommendation.apply.moves, ...b.recommendation.apply.moves]);
+    const reSim = runSimulation(ps, pc, store);
+    expect(combined.combined.approvalRate).toBeCloseTo(reSim.approvalRate, 9);
+    expect(reSim.approvalRate).toBeCloseTo(75, 9); // 3000/4000
+  });
+});
+
+describe('segmentDiscovery · asis_divergence bate com o incrementalResult agregado', () => {
+  // Política: SCORE R08 → Aprovado, R05 → Reprovado. AS IS: todos REPROVADO. Logo R08 é
+  // rToA (promovido) e R05 fica reprovado.
+  const shapes = [
+    { id: 'D', type: 'decision', label: 'SCORE', variableCol: 'SCORE', csvId: 'b' },
+    { id: 'pA', type: 'port', label: 'R08' },
+    { id: 'pR', type: 'port', label: 'R05' },
+    { id: 'AP', type: 'approved', label: 'Aprovado' },
+    { id: 'REJ', type: 'rejected', label: 'Reprovado' },
+  ];
+  const conns = [
+    { id: 'c1', from: 'D', to: 'pA', label: 'R08' },
+    { id: 'c2', from: 'pA', to: 'AP' },
+    { id: 'c3', from: 'D', to: 'pR', label: 'R05' },
+    { id: 'c4', from: 'pR', to: 'REJ' },
+  ];
+  const csv = {
+    headers: ['SCORE', 'qty', 'qtdAltas', 'inadReal', '__DECISAO_ORIGINAL'],
+    columnTypes: { SCORE: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', inadReal: 'inadReal' },
+    rows: [
+      ['R08', '1000', '1000', '20', 'REPROVADO'],
+      ['R05', '1000', '1000', '200', 'REPROVADO'],
+    ],
+  };
+  const store = { b: csv };
+  it('rToA do achado asis_divergence ≡ incrementalResult.impacted.rToA (agregado)', () => {
+    const m = computeSegmentDiscovery(shapes, conns, store, null, { minQty: 1 });
+    const div = m.findings.find(f => f.code === 'asis_divergence' && f.segment.conditions[0].value === 'R08');
+    expect(div).toBeTruthy();
+    expect(div.metrics.rToA).toBe(1000);
+
+    const overlay = computeSimulatedDecisions(shapes, conns, store, {});
+    const inc = computeIncrementalResult(overlay, store);
+    expect(inc.impacted.rToA).toBe(1000);
+    expect(div.metrics.rToA).toBe(inc.impacted.rToA);
+    expect(m.asIsTotals.rToA).toBe(inc.impacted.rToA);
+  });
+});
+
+describe('segmentDiscovery · nó travado ⇒ recomendação não acionável', () => {
+  const csv = csvOf([
+    ['R08', 'Digital', '1000', '1000', '20'],
+    ['R08', 'Fisico', '1000', '1000', '380'],
+    ['R05', 'Digital', '1000', '1000', '380'],
+    ['R05', 'Fisico', '1000', '1000', '20'],
+  ]);
+  it('com o único nó decisor travado, o achado é marcado não acionável (motivo declarado, sem delta)', () => {
+    const locked = {
+      shapes: [{ ...rejectAll.shapes[0], locked: true }, rejectAll.shapes[1]],
+      conns: rejectAll.conns,
+    };
+    const m = computeSegmentDiscovery(locked.shapes, locked.conns, { seg: csv }, null, { minQty: 1 });
+    const planted = m.findings.find(f => f.code === 'approvable_low_risk');
+    expect(planted).toBeTruthy();
+    expect(planted.locked).toBe(true);
+    expect(planted.recommendation.actionable).toBe(false);
+    expect(planted.recommendation.reason).toBeTruthy();
+    expect(planted.recommendation.delta).toBe(null);
+  });
+});
+
+describe('segmentDiscovery · anomaly (mediana/MAD) e estabilidade temporal', () => {
+  it('valor com métrica discrepante vira achado anomaly (z robusto)', () => {
+    // 5 valores de REGIAO: quatro ~10%, um "??" com inad 90% (erro de carga).
+    const csv = {
+      headers: ['REGIAO', 'qty', 'qtdAltas', 'inadReal'],
+      columnTypes: { REGIAO: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', inadReal: 'inadReal' },
+      rows: [
+        ['N', '1000', '1000', '100'],
+        ['S', '1000', '1000', '105'],
+        ['L', '1000', '1000', '95'],
+        ['O', '1000', '1000', '110'],
+        ['??', '1000', '1000', '900'],
+      ],
+    };
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, { seg: csv }, null, { minQty: 1 });
+    const anom = m.findings.find(f => f.code === 'anomaly' && f.segment.conditions[0].value === '??');
+    expect(anom).toBeTruthy();
+    expect(anom.recommendation).toBe(null);
+    expect(Math.abs(anom.metrics.z)).toBeGreaterThanOrEqual(3.5);
+    expect(anom.metrics.rate).toBeCloseTo(0.9, 9);
+  });
+
+  it('selo de estabilidade split-half temporal preenchido quando há coluna temporal', () => {
+    // Segmento SEG=X é baixo risco nas DUAS metades temporais (estável).
+    const csv = {
+      headers: ['SEG', 'MES', 'qty', 'qtdAltas', 'inadReal'],
+      columnTypes: { SEG: 'decision', MES: 'temporal', qty: 'qty', qtdAltas: 'qtdAltas', inadReal: 'inadReal' },
+      rows: [
+        ['X', '1', '1000', '1000', '20'],
+        ['Y', '1', '1000', '1000', '300'],
+        ['X', '2', '1000', '1000', '20'],
+        ['Y', '2', '1000', '1000', '300'],
+      ],
+    };
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, { seg: csv }, null, { minQty: 1 });
+    const seg = m.findings.find(f => f.code === 'approvable_low_risk' && f.segment.conditions.some(c => c.col === 'SEG' && c.value === 'X'));
+    expect(seg).toBeTruthy();
+    expect(seg.explanation.stability).toEqual({ split: 'temporal', holds: true });
+    expect(Array.isArray(seg.explanation.stabilitySeries)).toBe(true);
+    expect(seg.explanation.stabilitySeries.length).toBe(2);
+  });
+});
+
+describe('segmentDiscovery · determinismo com recomendações validadas', () => {
+  const csv = csvOf([
+    ['R08', 'Digital', '1000', '1000', '20'],
+    ['R08', 'Fisico', '1000', '1000', '380'],
+    ['R05', 'Digital', '1000', '1000', '380'],
+    ['R05', 'Fisico', '1000', '1000', '20'],
+  ]);
+  it('mesma entrada ⇒ mesmo SegmentModel (incl. recomendações/deltas)', () => {
     const a = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, { seg: csv }, null, { minQty: 1 });
     const b = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, { seg: csv }, null, { minQty: 1 });
     const strip = (m) => ({ ...m, generatedAt: null });

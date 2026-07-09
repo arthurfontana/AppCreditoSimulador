@@ -1209,6 +1209,8 @@ const SEGMENT_CODE_META = {
   approvable_low_risk: { icon: "💰", label: "Aprovável de baixo risco", color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
   approved_high_risk:  { icon: "🔥", label: "Aprovado de alto risco",   color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
   heterogeneous_block: { icon: "🪓", label: "Bloco heterogêneo",       color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
+  asis_divergence:     { icon: "🔀", label: "Divergência vs. AS IS",   color: "#ea580c", bg: "#fff7ed", border: "#fed7aa" },
+  anomaly:             { icon: "⚠️", label: "Anomalia de dado",         color: "#b45309", bg: "#fffbeb", border: "#fde68a" },
 };
 const SEGMENT_TERMINAL_LABEL = { approved: "Aprovado", rejected: "Reprovado", as_is: "AS IS" };
 
@@ -2066,11 +2068,108 @@ function FilterCardsEditor({ cards, dataset, onChange }) {
   );
 }
 
+// Sparkline temporal do desvio do segmento (Sessão 12) — série {bucket, rate}. Instabilidade
+// fica visível sem estatística. Sem série (sem coluna temporal) não renderiza nada.
+function SegmentSparkline({ series }) {
+  const pts = (series || []).filter(p => p && p.rate != null);
+  if (pts.length < 2) return null;
+  const W = 96, H = 22, PAD = 2;
+  const rates = pts.map(p => p.rate);
+  const min = Math.min(...rates), max = Math.max(...rates);
+  const span = max - min || 1;
+  const step = pts.length > 1 ? (W - 2 * PAD) / (pts.length - 1) : 0;
+  const coords = pts.map((p, i) => {
+    const x = PAD + i * step;
+    const y = H - PAD - ((p.rate - min) / span) * (H - 2 * PAD);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return (
+    <svg width={W} height={H} style={{ display: "block" }}>
+      <polyline points={coords} fill="none" stroke="#6366f1" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// pp = pontos percentuais assinados (delta de taxa). `ratio` converte 0–1 → 0–100.
+function fmtPP(v, ratio) {
+  if (v == null || !isFinite(v)) return "—";
+  const x = ratio ? v * 100 : v;
+  return `${x >= 0 ? "+" : ""}${x.toFixed(2)} pp`;
+}
+
 // ── SegmentFindingCard — card de oportunidade da Descoberta de Segmentos ──────────
-// (Copiloto Sessão 11, UI sobre o SegmentModel da Sessão 10). Puro: regra + métricas com
-// referência/lift + barra de decomposição das contribuições + dispersão (template
-// determinístico) + selos de confiança + ações (ver no Dashboard / ver no fluxo).
-function SegmentFindingCard({ finding, segmentModel, focused, onFocus, onViewDashboard, onViewFlow }) {
+// (Copiloto Sessão 11/12, UI sobre o SegmentModel). Puro: regra + métricas com referência/
+// lift + decomposição + dispersão + selos + estabilidade (sparkline) + RECOMENDAÇÃO
+// (delta validado + ✓ Aplicar como novo cenário / 🎯 Enviar ao Goal Seek / seleção p/
+// combinação). asis_divergence/anomaly têm layout próprio (sem patch — só navegação).
+function SegmentFindingCard({ finding, segmentModel, focused, onFocus, onViewDashboard, onViewFlow,
+  onApply, onSendGoalSeek, selectable, selected, onToggleSelect }) {
+  const rec = finding.recommendation;
+  if (finding.code === 'asis_divergence' || finding.code === 'anomaly') {
+    return <SegmentInfoCard finding={finding} focused={focused} onFocus={onFocus}
+      onViewDashboard={onViewDashboard} onViewFlow={onViewFlow} />;
+  }
+  return <SegmentOpportunityCard finding={finding} segmentModel={segmentModel} focused={focused}
+    onFocus={onFocus} onViewDashboard={onViewDashboard} onViewFlow={onViewFlow}
+    rec={rec} onApply={onApply} onSendGoalSeek={onSendGoalSeek}
+    selectable={selectable} selected={selected} onToggleSelect={onToggleSelect} />;
+}
+
+// asis_divergence / anomaly — achados informativos (sem recomendação de patch, DEC-SD-003).
+function SegmentInfoCard({ finding, focused, onFocus, onViewDashboard, onViewFlow }) {
+  const meta = SEGMENT_CODE_META[finding.code];
+  const { metrics } = finding;
+  const ruleText = segmentRuleText(finding.segment.conditions);
+  const isAnomaly = finding.code === 'anomaly';
+  return (
+    <div id={`segfind-${finding.id}`} onClick={() => onFocus(finding.id)}
+      style={{ padding: "12px 14px", borderRadius: 12, background: meta.bg,
+        border: `1.5px solid ${focused ? meta.color : meta.border}`,
+        boxShadow: focused ? `0 0 0 3px ${meta.color}22` : "none", cursor: "pointer" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <span style={{ fontSize: 18, flexShrink: 0 }}>{meta.icon}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: meta.color, textTransform: "uppercase", letterSpacing: .4 }}>{meta.label}</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", marginTop: 2 }}>{ruleText || "—"}</div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b" }}>{fmtQty(metrics.qty)}</div>
+          <div style={{ fontSize: 10, color: "#94a3b8" }}>{(metrics.share * 100).toFixed(1)}% do escopo</div>
+        </div>
+      </div>
+      {isAnomaly ? (
+        <div style={{ fontSize: 12, color: "#475569", marginTop: 8, lineHeight: 1.5 }}>
+          Métrica <b>{fmtPct(metrics.rate)}</b> — mediana do domínio <b>{fmtPct(metrics.median)}</b> (z robusto {metrics.z.toFixed(1)}{metrics.temporal ? ", por safra" : ""}).
+          Inspecione a carga antes de otimizar sobre este valor.
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase" }}>Reprovado → Aprovado</div>
+            <div style={{ fontSize: 12.5, color: "#1e293b" }}><b>{fmtQty(metrics.rToA)}</b> ({(metrics.rToAShare * 100).toFixed(0)}% do rToA global)</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase" }}>Aprovado → Reprovado</div>
+            <div style={{ fontSize: 12.5, color: "#1e293b" }}><b>{fmtQty(metrics.aToR)}</b> ({(metrics.aToRShare * 100).toFixed(0)}% do aToR global)</div>
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, marginTop: 9 }} onClick={e => e.stopPropagation()}>
+        <button onClick={() => onViewDashboard(finding)}
+          style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid #bfdbfe", background: "#eff6ff", color: "#1d4ed8", cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit" }}>
+          👁 Ver no Dashboard
+        </button>
+        <button onClick={() => onViewFlow(finding)}
+          style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff", color: "#475569", cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit" }}>
+          🎯 Ver no fluxo
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SegmentOpportunityCard({ finding, segmentModel, focused, onFocus, onViewDashboard, onViewFlow,
+  rec, onApply, onSendGoalSeek, selectable, selected, onToggleSelect }) {
   const meta = SEGMENT_CODE_META[finding.code] || SEGMENT_CODE_META.heterogeneous_block;
   const { metrics, explanation, priority } = finding;
   const isHet = finding.code === 'heterogeneous_block';
@@ -2166,9 +2265,16 @@ function SegmentFindingCard({ finding, segmentModel, focused, onFocus, onViewDas
         <span style={{ fontSize: 10, fontWeight: 700, color: confidenceBadge.color, display: "flex", alignItems: "center", gap: 3 }}>
           {confidenceBadge.icon} {confidenceBadge.text}
         </span>
-        <span style={{ fontSize: 10, color: "#94a3b8" }}>⏱ estabilidade não avaliável</span>
+        {explanation.stability
+          ? <span style={{ fontSize: 10, fontWeight: 700, color: explanation.stability.holds ? "#16a34a" : "#b45309" }}>
+              {explanation.stability.holds ? "✅ estável no tempo" : "⚠ instável no tempo"}
+            </span>
+          : <span style={{ fontSize: 10, color: "#94a3b8" }}>⏱ estabilidade não avaliável</span>}
         {finding.locked && (
           <span style={{ fontSize: 10, fontWeight: 700, color: "#b91c1c" }}>🔒 não acionável (nó travado)</span>
+        )}
+        {explanation.stabilitySeries && (
+          <span title="Desvio do segmento por safra" style={{ marginLeft: 4 }}><SegmentSparkline series={explanation.stabilitySeries} /></span>
         )}
         <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>score {priority.score.toFixed(1)}</span>
       </div>
@@ -2187,6 +2293,43 @@ function SegmentFindingCard({ finding, segmentModel, focused, onFocus, onViewDas
           🎯 Ver no fluxo
         </button>
       </div>
+
+      {/* Recomendação (patch + delta validado por re-simulação — DEC-SD-003) */}
+      {rec && (
+        <div style={{ marginTop: 10, paddingTop: 9, borderTop: "1px dashed rgba(0,0,0,.1)" }} onClick={e => e.stopPropagation()}>
+          {!rec.actionable ? (
+            <div style={{ fontSize: 11, color: "#b91c1c", fontWeight: 600 }}>🔒 {rec.reason || "Recomendação não acionável."}</div>
+          ) : (
+            <>
+              {rec.delta && (
+                <div style={{ fontSize: 11.5, color: "#0f172a", marginBottom: 7, lineHeight: 1.5 }}>
+                  <b>Impacto simulado</b> ({rec.kind === 'add_break' ? 'nova quebra' : 'movimento'}):
+                  {" "}aprovação <b>{fmtPP(rec.delta.approvalDelta)}</b>,
+                  {" "}{segmentModel?.metric?.id === 'inadInferida' ? 'inad. inf.' : 'inad. real'}
+                  {" "}<b>{fmtPP(segmentModel?.metric?.id === 'inadInferida' ? rec.delta.inadInfDelta : rec.delta.inadRealDelta, true)}</b>
+                  {" "}· <b>{fmtQty(rec.delta.movedQty)}</b> propostas
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <button onClick={() => onApply(finding)}
+                  style={{ padding: "6px 12px", borderRadius: 7, border: "none", background: "#4f46e5", color: "#fff", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit" }}>
+                  ✓ Aplicar como novo cenário
+                </button>
+                <button onClick={() => onSendGoalSeek(finding)}
+                  style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid #c7d2fe", background: "#eef2ff", color: "#4338ca", cursor: "pointer", fontSize: 11.5, fontWeight: 600, fontFamily: "inherit" }}>
+                  🎯 Enviar ao Goal Seek
+                </button>
+                {selectable && (
+                  <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#475569", cursor: "pointer", fontWeight: 600 }}>
+                    <input type="checkbox" checked={!!selected} onChange={() => onToggleSelect(finding.id)} />
+                    combinar
+                  </label>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -4218,7 +4361,11 @@ export default function App() {
         });
       } else if (msgType === 'SEGMENT_DISCOVERY_RESULT') {
         const { segmentModel } = e.data;
-        setSegmentDiscoveryModal(m => (m ? { ...m, step: 'result', segmentModel, varFilter: null, focusedId: segmentModel.findings?.[0]?.id ?? null } : m));
+        setSegmentDiscoveryModal(m => (m ? { ...m, step: 'result', segmentModel, varFilter: null,
+          focusedId: segmentModel.findings?.[0]?.id ?? null, selectedIds: [], combined: null } : m));
+      } else if (msgType === 'SEGMENT_COMBINED_RESULT') {
+        const { combined } = e.data;
+        setSegmentDiscoveryModal(m => (m ? { ...m, combined: { loading: false, result: combined } } : m));
       }
     };
     return () => worker.terminate();
@@ -8037,6 +8184,8 @@ export default function App() {
       params: { riskMetric: 'inadReal', minQty: null, maxDepth: 2 },
       varFilter: null,
       focusedId: null,
+      selectedIds: [],
+      combined: null,
     });
   };
 
@@ -8111,6 +8260,87 @@ export default function App() {
       const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
       setVp(v => ({ s: v.s, x: svgEl.clientWidth / 2 - cx * v.s, y: svgEl.clientHeight / 2 - cy * v.s }));
     });
+  };
+
+  // ── Recomendações da Descoberta — Copiloto Sessão 12 (DEC-SD-003) ────────────────
+  // "✓ Aplicar como novo cenário": materializa o(s) patch(es) da recomendação numa aba de
+  // canvas NOVA (não-destrutivo, padrão applyGoalSeekResult/applySimplifyResult). Aplica no
+  // CLONE via applyGoalSeekMoves (mesmo helper/validador do worker, DEC-IA-005) — nenhum
+  // aplicador novo: as recomendações são movimentos do catálogo do Goal Seek (incl. add_break).
+  const applySegmentMovesAsScenario = (moves, labelSuffix) => {
+    if (!moves || moves.length === 0) return;
+    const curCanvasId = activeCanvasIdR.current;
+    const source = canvasesR.current[curCanvasId];
+    const srcShapes = shapesR.current, srcConns = connsR.current;
+    const { newShapes, newConns, idMap } = cloneCanvasWithNewIds(srcShapes, srcConns);
+    // genId = uid: ids dos nós criados pela quebra ficam globalmente únicos no canvas.
+    const { shapes: patchedShapes, conns: patchedConns } =
+      applyGoalSeekMoves(newShapes, newConns, moves, idMap, uid);
+    const id = uid();
+    setCanvases(prev => ({
+      ...prev,
+      [curCanvasId]: { ...prev[curCanvasId], shapes: srcShapes, conns: srcConns },
+      [id]: { id, name: `${source?.name || 'Canvas'} · ${labelSuffix}`, shapes: patchedShapes, conns: patchedConns, includeInDashboard: true },
+    }));
+    setShapes(patchedShapes); setConns(patchedConns);
+    setUndoStack([]); setRedoStack([]);
+    setSel(null); setMultiSel(new Set());
+    setActiveCanvasId(id);
+    setActiveTab('canvas');
+    setSegmentDiscoveryModal(null);
+  };
+
+  const applySegmentRecommendation = (finding) => {
+    const rec = finding?.recommendation;
+    if (!rec || !rec.actionable || !rec.apply?.moves) return;
+    applySegmentMovesAsScenario(rec.apply.moves, 'Exceção de segmento');
+  };
+
+  // "🎯 Enviar ao Goal Seek": abre o goalSeekModal com o objetivo pré-carregado da
+  // recomendação (mesma direção do achado) — o usuário refina os terminais/limiares lá.
+  const sendSegmentToGoalSeek = (finding) => {
+    const gs = finding?.recommendation?.goalSeek;
+    if (!gs) return;
+    setSegmentDiscoveryModal(null);
+    setGoalSeekModal({ step: 'form', goal: { ...gs }, constraints: { maxInadReal: null, maxInadInf: null } });
+  };
+
+  const toggleSegmentSelect = (id) => {
+    setSegmentDiscoveryModal(m => {
+      if (!m) return m;
+      const set = new Set(m.selectedIds || []);
+      set.has(id) ? set.delete(id) : set.add(id);
+      return { ...m, selectedIds: [...set], combined: null };
+    });
+  };
+
+  // Aplicação COMBINADA: dispara COMPUTE_SEGMENT_COMBINED com os patches selecionados; o
+  // worker aplica em SEQUÊNCIA no mesmo clone e valida por UMA re-simulação (nunca a soma).
+  const runSegmentCombined = () => {
+    const cur = segmentDiscoveryModalR.current;
+    if (!cur) return;
+    const byId = new Map((cur.segmentModel?.findings || []).map(f => [f.id, f]));
+    const applies = (cur.selectedIds || [])
+      .map(id => byId.get(id)?.recommendation)
+      .filter(r => r && r.actionable && r.apply?.moves)
+      .map(r => r.apply);
+    if (applies.length < 2) return;
+    setSegmentDiscoveryModal(m => (m ? { ...m, combined: { loading: true } } : m));
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_SEGMENT_COMBINED',
+      shapes: shapesR.current, conns: connsR.current, applies,
+    });
+  };
+
+  const applySegmentCombinedAsScenario = () => {
+    const cur = segmentDiscoveryModalR.current;
+    if (!cur) return;
+    const byId = new Map((cur.segmentModel?.findings || []).map(f => [f.id, f]));
+    const moves = (cur.selectedIds || [])
+      .map(id => byId.get(id)?.recommendation)
+      .filter(r => r && r.actionable && r.apply?.moves)
+      .flatMap(r => r.apply.moves);
+    applySegmentMovesAsScenario(moves, `${(cur.selectedIds || []).length} exceções combinadas`);
   };
 
   // ── Documentação Automática — Copiloto Sessão 6 (DEC-IA-006) ─────────────────
@@ -13090,9 +13320,10 @@ export default function App() {
 
       {/* ═══════════════ SEGMENT DISCOVERY MODAL — Descoberta de Segmentos (Copiloto Sessão 10/11) ═══════════════ */}
       {segmentDiscoveryModal&&(()=>{
-        const { step, scope, params, segmentModel, varFilter, focusedId } = segmentDiscoveryModal;
+        const { step, scope, params, segmentModel, varFilter, focusedId, selectedIds = [], combined } = segmentDiscoveryModal;
         const updParams = (patch) => setSegmentDiscoveryModal(m => ({ ...m, params: { ...m.params, ...patch } }));
         const findings = segmentModel?.findings || [];
+        const selectedSet = new Set(selectedIds);
         const allVars = [...new Set(findings.flatMap(f => [
           ...(f.segment.conditions||[]).map(c=>c.col),
           ...(f.code==='heterogeneous_block' ? (f.explanation.contributions||[]).map(c=>c.col) : []),
@@ -13235,9 +13466,45 @@ export default function App() {
                         {filtered.map(f=>(
                           <SegmentFindingCard key={f.id} finding={f} segmentModel={segmentModel}
                             focused={focusedId===f.id} onFocus={focusSegmentFinding}
-                            onViewDashboard={viewSegmentInDashboard} onViewFlow={viewSegmentInFlow}/>
+                            onViewDashboard={viewSegmentInDashboard} onViewFlow={viewSegmentInFlow}
+                            onApply={applySegmentRecommendation} onSendGoalSeek={sendSegmentToGoalSeek}
+                            selectable={!!(f.recommendation && f.recommendation.actionable)}
+                            selected={selectedSet.has(f.id)} onToggleSelect={toggleSegmentSelect}/>
                         ))}
                       </div>
+
+                      {/* Aplicação combinada de N recomendações (delta re-simulado, nunca soma) */}
+                      {selectedIds.length>=2 && (
+                        <div style={{padding:"11px 14px",borderRadius:12,background:"#eef2ff",border:"1.5px solid #c7d2fe",display:"flex",flexDirection:"column",gap:8}}>
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+                            <div style={{fontSize:12,color:"#3730a3",fontWeight:600}}>
+                              🧩 {selectedIds.length} recomendações selecionadas para aplicar juntas
+                            </div>
+                            <div style={{display:"flex",gap:6}}>
+                              <button onClick={runSegmentCombined} disabled={combined?.loading}
+                                style={{padding:"6px 12px",borderRadius:8,border:"1px solid #c7d2fe",background:"#fff",color:"#4338ca",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                                {combined?.loading ? "Simulando…" : "🔎 Simular combinação"}
+                              </button>
+                              <button onClick={applySegmentCombinedAsScenario}
+                                style={{padding:"6px 12px",borderRadius:8,border:"none",background:"#4f46e5",color:"#fff",cursor:"pointer",fontSize:11.5,fontWeight:700,fontFamily:"inherit"}}>
+                                ✓ Aplicar juntas como cenário
+                              </button>
+                            </div>
+                          </div>
+                          {combined?.result && (()=>{
+                            const r = combined.result;
+                            return (
+                              <div style={{fontSize:11.5,color:"#1e293b",lineHeight:1.6,paddingTop:6,borderTop:"1px dashed #c7d2fe"}}>
+                                <div><b>Combinado (re-simulado):</b> aprovação {fmtPP(r.combinedApprovalDelta)} · {fmtQty(r.combinedMovedQty)} propostas movidas.</div>
+                                <div style={{color:"#64748b"}}>Soma dos individuais: {fmtPP(r.sumApprovalDelta)} · {fmtQty(r.sumMovedQty)} — o efeito NÃO é aditivo.</div>
+                                {r.interaction?.interacts && r.interaction.note && (
+                                  <div style={{marginTop:4,color:"#b45309",fontWeight:600}}>⚠ {r.interaction.note}</div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
 
                       {diag && <DiagnosticsStrip diag={diag}/>}
                     </div>

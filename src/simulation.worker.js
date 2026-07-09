@@ -3453,7 +3453,7 @@ function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {
       scopeRows.push(r);
       rowInfo.set(r, { t: terminalType, res, dn: decidingNodeId, q: s.qty });
     }
-    return { csvId, csv, idxs, dOrigIdx, scopeAgg, scopeRows, rowInfo };
+    return { csvId, csv, idxs, dOrigIdx, scopeAgg, scopeRows, rowInfo, rootId };
   }
 
   // Winner = csv de maior população no escopo (mesmo critério de computeVariableRanking).
@@ -3580,6 +3580,7 @@ function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {
     ctx: {
       spec, csv, csvId, idxs, scopeAgg, scopeRows, rowInfo, candCols, candCoders, binsByCand,
       globalRate, scopeDen, SHRINK_K, minQty, shapesMap, scopeDisp, diagnostics,
+      rootId: winner.rootId, scopeNodeId, dOrigIdx: winner.dOrigIdx,
     },
   };
 }
@@ -3783,7 +3784,390 @@ function segRowsOf(f, ctx) {
   return rows || [];
 }
 
-// Ponto de entrada — orquestra os três estágios (padrão computeSimplify/computePolicyDoc).
+// ── ESTÁGIO 4 — RECOMENDAÇÃO (Copiloto Sessão 12, DEC-SD-003) ─────────────────────
+// Cada achado acionável (deviation com código, heterogeneous_block) vira um PATCH
+// materializável e um delta VALIDADO por re-simulação real (runSimulation sobre o canvas
+// com o patch — mesmo contrato DEC-IA-005 do Goal Seek). NENHUM aplicador novo: os patches
+// são movimentos do catálogo do Goal Seek (applyGoalSeekMoves) — decision_terminal/
+// cinema_cell quando o segmento coincide com estrutura existente, e o movimento NOVO
+// `add_break` (a "quebra que falta" pendente da Sessão 4) quando exige estrutura nova.
+// asis_divergence e anomaly NÃO geram patch — só navegação (recommendation: null).
+const SEG_MAX_VALIDATE = 12;          // top-N achados validados por re-simulação
+const SEG_ASIS_MIN_SHARE = 0.15;      // share mínimo do rToA/aToR global p/ virar achado
+const SEG_ANOMALY_Z = 3.5;            // |z| robusto (mediana/MAD) p/ sinalizar anomalia
+const SEG_ANOMALY_MIN_VALUES = 4;     // nº mínimo de valores p/ MAD ter sentido
+const SEG_COMBINE_INTERACT = 0.02;    // |combinado − soma| relativo p/ declarar interação
+
+function segSimSnapshot(sim) {
+  if (!sim) return null;
+  const decided = sim.approvedQty + sim.rejectedQty + sim.asIsQty;
+  return {
+    approvalRate: sim.approvalRate,
+    approvalRateDecided: decided > 0 ? (sim.approvedQty / decided) * 100 : 0,
+    inadReal: sim.inadReal, inadInferida: sim.inadInferida,
+    approvedQty: sim.approvedQty, rejectedQty: sim.rejectedQty, asIsQty: sim.asIsQty,
+    totalQty: sim.totalQty,
+  };
+}
+
+// Terminal que o achado quer alcançar (melhora a política): baixo risco reprovado →
+// Aprovado; alto risco aprovado → Reprovado; bloco heterogêneo → o oposto do tratamento
+// único atual (rejeitado ⇒ aprovar os bons; aprovado ⇒ reprovar os ruins).
+function segFindingTarget(finding) {
+  if (finding.code === 'approvable_low_risk') return 'approved';
+  if (finding.code === 'approved_high_risk') return 'rejected';
+  if (finding.code === 'heterogeneous_block') {
+    const cd = finding.metrics.currentDecision;
+    if (cd === 'rejected') return 'approved';
+    if (cd === 'approved') return 'rejected';
+  }
+  return null;
+}
+
+// Coincidência com estrutura existente → movimento do catálogo do Goal Seek. Cobre o caso
+// idiomático mais robusto: segmento 1D {col=val} decidido DIRETO por um losango cujo port
+// desse valor resolve a um terminal (resolveDirectTerminalConn) — troca só esse terminal
+// (decision_terminal). Cineminha/casela e demais formas caem no add_break (sempre correto).
+function segCoincidenceMove(shapes, conns, finding, target, ctx) {
+  const conds = finding.segment.conditions || [];
+  if (conds.length !== 1) return null;
+  const { col, value } = conds[0];
+  const connFromMap = {};
+  for (const c of conns) { (connFromMap[c.from] || (connFromMap[c.from] = [])).push({ to: c.to, id: c.id, label: c.label ?? '' }); }
+  const termShape = shapes.find(s => s.type === target);
+  if (!termShape) return null;
+  for (const s of shapes) {
+    if (s.type !== 'decision' || s.variableCol !== col || s.csvId !== ctx.csvId) continue;
+    const edge = (connFromMap[s.id] || []).find(e => (e.label ?? '').trim() === String(value).trim());
+    if (!edge) continue;
+    const info = resolveDirectTerminalConn(ctx.shapesMap, connFromMap, edge.to, edge.id);
+    if (!info || info.terminal === 'as_is' || info.terminal === target) continue;
+    return { type: 'decision_terminal', connId: info.connId, newTo: termShape.id };
+  }
+  return null;
+}
+
+// add_break — "adicionar quebra". Segmento 1D → losango; 2D → Cineminha; het → losango
+// sobre a coluna discriminante, roteando os valores do lado ACIONÁVEL da métrica ao terminal
+// alvo e o resto de volta ao nó âncora (root do escopo, ou o nó de escopo). Descritor puro
+// (sem ids gerados) — a materialização (com ids/portas/layout) é do applyGoalSeekMoves.
+function segBuildBreakMove(finding, target, ctx) {
+  const conds = finding.segment.conditions || [];
+  const attachNodeId = ctx.scopeNodeId || ctx.rootId;
+  if (attachNodeId == null) return null;
+  const base = { type: 'add_break', attachNodeId, targetTerminal: target, label: 'Exceção de segmento' };
+
+  if (finding.code === 'heterogeneous_block') {
+    const col = finding.explanation.contributions?.[0]?.col;
+    const ci = ctx.candCols.indexOf(col);
+    if (ci < 0) return null;
+    const bins = ctx.binsByCand[ci];
+    const isGood = (rate) => rate == null ? false : (ctx.spec.direction === 'lower' ? rate < ctx.globalRate : rate > ctx.globalRate);
+    const split = [], rest = [];
+    // "acionável" = lado que melhora ao tratar (rejeitado ⇒ separar os bons p/ aprovar;
+    // aprovado ⇒ separar os ruins p/ reprovar).
+    const actionableIsGood = finding.metrics.currentDecision === 'rejected';
+    for (const [val, bin] of bins.entries()) {
+      const rate = segMetricRate(bin.agg, ctx.spec);
+      const good = isGood(rate);
+      ((good === actionableIsGood) ? split : rest).push(val);
+    }
+    if (split.length === 0 || rest.length === 0) return null;
+    return { ...base, breakKind: 'decision', variableCol: col, csvId: ctx.csvId,
+      splitValues: split.sort(), restValues: rest.sort() };
+  }
+
+  if (conds.length === 1) {
+    const { col, value } = conds[0];
+    const ci = ctx.candCols.indexOf(col);
+    if (ci < 0) return null;
+    const rest = [...ctx.binsByCand[ci].keys()].filter(v => v !== value).sort();
+    return { ...base, breakKind: 'decision', variableCol: col, csvId: ctx.csvId,
+      splitValues: [value], restValues: rest, label: `Exceção: ${col} = ${value}` };
+  }
+
+  if (conds.length === 2) {
+    const c0 = conds[0], c1 = conds[1];
+    const ci0 = ctx.candCols.indexOf(c0.col), ci1 = ctx.candCols.indexOf(c1.col);
+    if (ci0 < 0 || ci1 < 0) return null;
+    const rowDomain = [...ctx.binsByCand[ci0].keys()].sort();
+    const colDomain = [...ctx.binsByCand[ci1].keys()].sort();
+    return { ...base, breakKind: 'cinema',
+      rowVar: { col: c0.col, csvId: ctx.csvId }, colVar: { col: c1.col, csvId: ctx.csvId },
+      rowDomain, colDomain, eligibleCells: [`${c0.value}|${c1.value}`],
+      label: `Exceção: ${c0.col} = ${c0.value} × ${c1.col} = ${c1.value}` };
+  }
+  return null; // conjunção 3+ (fora do maxDepth padrão) — sem quebra automática
+}
+
+// Objetivo pré-carregado ao "🎯 Enviar ao Goal Seek": a direção que a recomendação segue.
+function segGoalSeekObjective(finding, target, ctx) {
+  const minimize = ctx.spec.id === 'inadInferida' ? 'inadInferida' : 'inadReal';
+  if (target === 'approved') return { target: 'approvalRate', direction: 'increase', magnitude: null, minimize };
+  return { target: ctx.spec.id === 'inadInferida' ? 'inadInferida' : 'inadReal', direction: 'decrease', magnitude: null, minimize };
+}
+
+// Anexa `recommendation` (patch + delta validado por re-simulação) aos achados acionáveis.
+// Valida só os top-N (SEG_MAX_VALIDATE) — o card só exibe delta quando validado (DEC-SD-003).
+function buildSegmentRecommendations(shapes, conns, csvStore, findings, ctx) {
+  const baselineSim = runSimulation(shapes, conns, csvStore);
+  const baseSnap = segSimSnapshot(baselineSim);
+  let validated = 0;
+  for (const f of findings) {
+    if (f.code === 'asis_divergence' || f.code === 'anomaly') { f.recommendation = null; continue; }
+    const target = segFindingTarget(f);
+    if (!target) { f.recommendation = null; continue; }
+
+    const coincidence = segCoincidenceMove(shapes, conns, f, target, ctx);
+    const move = coincidence || segBuildBreakMove(f, target, ctx);
+    if (!move) { f.recommendation = null; continue; }
+
+    const rec = {
+      kind: coincidence ? 'goal_seek_move' : 'add_break',
+      targetTerminal: target,
+      actionable: !f.locked,
+      reason: f.locked ? 'Segmento decidido em nó travado (🔒) — desabilite a trava para aplicar.' : null,
+      apply: { moves: [move] },
+      goalSeek: segGoalSeekObjective(f, target, ctx),
+      delta: null,
+    };
+    // Só re-simula os acionáveis top-N (o card só mostra delta validado).
+    if (rec.actionable && validated < SEG_MAX_VALIDATE) {
+      try {
+        const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, [move]);
+        const afterSim = runSimulation(ps, pc, csvStore);
+        const after = segSimSnapshot(afterSim);
+        rec.delta = {
+          before: baseSnap, after,
+          approvalDelta: after.approvalRate - baseSnap.approvalRate,
+          inadRealDelta: (after.inadReal ?? 0) - (baseSnap.inadReal ?? 0),
+          inadInfDelta: (after.inadInferida ?? 0) - (baseSnap.inadInferida ?? 0),
+          movedQty: Math.abs(after.approvedQty - baseSnap.approvedQty),
+        };
+        validated++;
+      } catch { rec.delta = null; }
+    }
+    f.recommendation = rec;
+  }
+  return baseSnap;
+}
+
+// ── Achado asis_divergence (DEC-SD-003) — decomposição do rToA/aToR por segmento ─────
+// Reusa o desfecho por linha já resolvido pelo escopo (rowInfo.res) + a decisão AS IS
+// (__DECISAO_ORIGINAL): onde a política simulada promove (rToA) / rebaixa (aToR) sistematica-
+// mente um segmento. Sem patch (navegação). A soma sobre um partição (valores de uma coluna)
+// ≡ incrementalResult.impacted (GATE). Emite achado por valor 1D com share ≥ SEG_ASIS_MIN_SHARE.
+function detectAsIsDivergence(ctx) {
+  const { csv, dOrigIdx, rowInfo, candCols, candCoders, scopeRows, minQty } = ctx;
+  if (dOrigIdx < 0) return { findings: [], totals: { rToA: 0, aToR: 0 } };
+  let totRToA = 0, totAToR = 0;
+  const byCand = candCols.map(() => new Map());
+  for (const r of scopeRows) {
+    const info = rowInfo.get(r); if (!info) continue;
+    const orig = String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase();
+    const q = info.q;
+    const isR2A = orig === 'REPROVADO' && info.res === 'approved';
+    const isA2R = orig === 'APROVADO' && info.res === 'rejected';
+    if (!isR2A && !isA2R) continue;
+    if (isR2A) totRToA += q; else totAToR += q;
+    for (let ci = 0; ci < candCoders.length; ci++) {
+      const value = segCandValue(candCoders[ci], csv, r);
+      let b = byCand[ci].get(value);
+      if (!b) { b = { value, rToA: 0, aToR: 0, qty: 0 }; byCand[ci].set(value, b); }
+      if (isR2A) b.rToA += q; else b.aToR += q;
+      b.qty += q;
+    }
+  }
+  const totalImpacted = totRToA + totAToR;
+  const findings = [];
+  if (totalImpacted > 0) {
+    for (let ci = 0; ci < candCols.length; ci++) {
+      for (const b of byCand[ci].values()) {
+        const share = (b.rToA + b.aToR) / totalImpacted;
+        if (share < SEG_ASIS_MIN_SHARE || b.qty < minQty) continue;
+        const conditions = [{ col: candCols[ci], operator: 'equal', value: b.value, logic: 'AND', csvId: ctx.csvId }];
+        findings.push({
+          id: `asis:${candCols[ci]}=${b.value}`, code: 'asis_divergence',
+          segment: { conditions, scope: ctx.scope ?? null },
+          metrics: {
+            qty: b.qty, share: ctx.scopeAgg.qty > 0 ? b.qty / ctx.scopeAgg.qty : 0,
+            rToA: b.rToA, aToR: b.aToR,
+            rToAShare: totRToA > 0 ? b.rToA / totRToA : 0,
+            aToRShare: totAToR > 0 ? b.aToR / totAToR : 0,
+            currentDecision: null, lift: null, inadReal: null, inadInferida: null,
+          },
+          explanation: { contributions: [], dispersion: null, stability: null, pValue: null, qValue: null },
+          priority: { score: (b.rToA + b.aToR), impact: { movedQty: b.rToA + b.aToR }, confidence: 1, actionability: 1 },
+          recommendation: null,
+          _sortKey: b.rToA + b.aToR,
+        });
+      }
+    }
+    findings.sort((a, b) => b._sortKey - a._sortKey || a.id.localeCompare(b.id));
+    findings.forEach(f => { delete f._sortKey; });
+  }
+  return { findings, totals: { rToA: totRToA, aToR: totAToR } };
+}
+
+// ── Achado anomaly (DEC-SD-003) — desvio robusto mediana/MAD por valor (e por safra) ──
+// Sinaliza valores de domínio cuja métrica é estatisticamente discrepante (erro de carga,
+// mudança de mercado) — modified z-score = 0.6745·(x−mediana)/MAD. Por safra quando há
+// coluna temporal. Sem patch (qualidade de dado).
+function segMedian(arr) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+function detectAnomalies(ctx) {
+  const { csv, candCols, binsByCand, spec, minQty } = ctx;
+  const findings = [];
+  const scanBins = (col, entries, temporal) => {
+    const rated = entries.map(([value, agg]) => ({ value, rate: segMetricRate(agg, spec), qty: agg.qty }))
+      .filter(o => o.rate != null && o.qty >= minQty);
+    if (rated.length < SEG_ANOMALY_MIN_VALUES) return;
+    const rates = rated.map(o => o.rate);
+    const med = segMedian(rates);
+    const mad = segMedian(rated.map(o => Math.abs(o.rate - med)));
+    if (mad == null || mad <= 0) return;
+    for (const o of rated) {
+      const z = 0.6745 * (o.rate - med) / mad;
+      if (Math.abs(z) < SEG_ANOMALY_Z) continue;
+      const conditions = [{ col, operator: 'equal', value: o.value, logic: 'AND', csvId: ctx.csvId }];
+      findings.push({
+        id: `anomaly:${temporal ? 'safra:' : ''}${col}=${o.value}`, code: 'anomaly',
+        segment: { conditions, scope: ctx.scope ?? null },
+        metrics: {
+          qty: o.qty, share: ctx.scopeAgg.qty > 0 ? o.qty / ctx.scopeAgg.qty : 0,
+          rate: o.rate, median: med, mad, z, temporal: !!temporal,
+          currentDecision: null, lift: null, inadReal: null, inadInferida: null,
+        },
+        explanation: { contributions: [], dispersion: null, stability: null, pValue: null, qValue: null },
+        priority: { score: Math.abs(z) * o.qty, impact: { movedQty: o.qty }, confidence: 1, actionability: 0 },
+        recommendation: null,
+        _sortKey: Math.abs(z) * o.qty,
+      });
+    }
+  };
+  // Por valor das colunas candidatas (nível 1 já agregado).
+  for (let ci = 0; ci < candCols.length; ci++) {
+    scanBins(candCols[ci], [...binsByCand[ci].entries()].map(([v, b]) => [v, b.agg]), false);
+  }
+  // Por safra (coluna temporal), quando existe.
+  const temporalCol = Object.entries(csv.columnTypes || {}).find(([, t]) => t === 'temporal')?.[0];
+  if (temporalCol) {
+    const tIdx = csv.headers.indexOf(temporalCol);
+    const coder = candidateCoder(csv, tIdx);
+    const byCohort = new Map();
+    for (const r of ctx.scopeRows) {
+      const value = coder.mode === 'code' ? coder.dict[coder.codes[r]] : (cellStr(csv, r, tIdx) ?? '').toString().trim();
+      let agg = byCohort.get(value);
+      if (!agg) { agg = segEmptyAgg(); byCohort.set(value, agg); }
+      segAddAgg(agg, segReadSums(csv, r, ctx.idxs));
+    }
+    scanBins(temporalCol, [...byCohort.entries()], true);
+  }
+  findings.sort((a, b) => b._sortKey - a._sortKey || a.id.localeCompare(b.id));
+  findings.forEach(f => { delete f._sortKey; });
+  return findings;
+}
+
+// Selo de estabilidade split-half temporal + sparkline. Divide as linhas do escopo em duas
+// metades cronológicas; o achado é estável se o SINAL do desvio (segRate − refRate) se mantém.
+// stabilitySeries = desvio por safra (sparkline). Sem coluna temporal ⇒ stability fica null.
+function attachStability(findings, ctx) {
+  const { csv, spec, scopeAgg } = ctx;
+  const temporalCol = Object.entries(csv.columnTypes || {}).find(([, t]) => t === 'temporal')?.[0];
+  if (!temporalCol) return;
+  const tIdx = csv.headers.indexOf(temporalCol);
+  const coder = candidateCoder(csv, tIdx);
+  const tKey = (r) => coder.mode === 'code' ? coder.dict[coder.codes[r]] : (cellStr(csv, r, tIdx) ?? '').toString().trim();
+  const buckets = [...new Set(ctx.scopeRows.map(tKey))].sort((a, b) => {
+    const na = parseFloat(a), nb = parseFloat(b);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return String(a).localeCompare(String(b));
+  });
+  if (buckets.length < 2) return;
+  const half = Math.ceil(buckets.length / 2);
+  const firstHalf = new Set(buckets.slice(0, half));
+  for (const f of findings) {
+    // het (conds=[]) é o escopo inteiro — sem complemento, o selo split-half não faz sentido.
+    if (f.code === 'anomaly' || f.code === 'asis_divergence' || f.code === 'heterogeneous_block') continue;
+    if (!(f.segment.conditions || []).length) continue;
+    const rows = segRowsOf(f, ctx);
+    if (!rows.length) continue;
+    // Agregados por metade + série por safra.
+    const aggA = segEmptyAgg(), aggB = segEmptyAgg();
+    const complA = segEmptyAgg(), complB = segEmptyAgg();
+    const series = new Map();
+    const rowSet = new Set(rows);
+    for (const r of ctx.scopeRows) {
+      const inSeg = rowSet.has(r);
+      const s = segReadSums(csv, r, ctx.idxs);
+      const first = firstHalf.has(tKey(r));
+      if (inSeg) {
+        segAddAgg(first ? aggA : aggB, s);
+        const bk = tKey(r);
+        let sr = series.get(bk); if (!sr) { sr = segEmptyAgg(); series.set(bk, sr); }
+        segAddAgg(sr, s);
+      } else segAddAgg(first ? complA : complB, s);
+    }
+    const devOf = (seg, compl) => {
+      const sr = segMetricRate(seg, spec), rr = segMetricRate(compl, spec);
+      return (sr != null && rr != null) ? sr - rr : null;
+    };
+    const dA = devOf(aggA, complA), dB = devOf(aggB, complB);
+    const holds = dA != null && dB != null && Math.sign(dA) === Math.sign(dB) && dA !== 0;
+    f.explanation.stability = { split: 'temporal', holds };
+    f.explanation.stabilitySeries = buckets.map(bk => ({
+      bucket: bk, rate: series.has(bk) ? segMetricRate(series.get(bk), spec) : null,
+    }));
+  }
+}
+
+// Aplicação COMBINADA (DEC-SD-003) — aplica N patches EM SEQUÊNCIA sobre o MESMO clone e
+// valida por UMA re-simulação real (nunca a soma dos deltas individuais: aplicar A muda a
+// população que chega ao ponto de B). Declara a interação quando o combinado diverge da
+// soma. `applies` = [{moves}] das recomendações selecionadas.
+function computeSegmentCombined(shapes, conns, csvStore, applies) {
+  const baseSnap = segSimSnapshot(runSimulation(shapes, conns, csvStore));
+  const list = (applies || []).filter(a => a && Array.isArray(a.moves));
+  // Delta individual de cada patch (isolado) — para comparar com o combinado.
+  let sumApprovalDelta = 0, sumMovedQty = 0;
+  const individual = list.map(a => {
+    const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, a.moves);
+    const snap = segSimSnapshot(runSimulation(ps, pc, csvStore));
+    const approvalDelta = snap.approvalRate - baseSnap.approvalRate;
+    const movedQty = Math.abs(snap.approvedQty - baseSnap.approvedQty);
+    sumApprovalDelta += approvalDelta; sumMovedQty += movedQty;
+    return { approvalDelta, movedQty };
+  });
+  // Combinado: TODOS os moves em sequência sobre o MESMO canvas → uma re-simulação.
+  const allMoves = list.flatMap(a => a.moves);
+  const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, allMoves);
+  const combinedSnap = segSimSnapshot(runSimulation(ps, pc, csvStore));
+  const combinedApprovalDelta = combinedSnap.approvalRate - baseSnap.approvalRate;
+  const combinedMovedQty = Math.abs(combinedSnap.approvedQty - baseSnap.approvedQty);
+  const denom = Math.max(1, Math.abs(sumMovedQty));
+  const overlaps = sumMovedQty - combinedMovedQty; // >0 ⇒ os achados se sobrepõem
+  const interacts = Math.abs(sumApprovalDelta - combinedApprovalDelta) > SEG_COMBINE_INTERACT ||
+    Math.abs(overlaps) / denom > SEG_COMBINE_INTERACT;
+  return {
+    baseline: baseSnap, combined: combinedSnap,
+    combinedApprovalDelta, combinedMovedQty,
+    sumApprovalDelta, sumMovedQty,
+    individual,
+    interaction: {
+      interacts,
+      overlapQty: overlaps,
+      note: interacts
+        ? `Os achados se sobrepõem em ~${Math.round(Math.abs(overlaps))} propostas — o efeito combinado NÃO é a soma dos individuais.`
+        : null,
+    },
+  };
+}
+
+// Ponto de entrada — orquestra os quatro estágios (padrão computeSimplify/computePolicyDoc).
 function computeSegmentDiscovery(shapes, conns, csvStore, scope, params = {}) {
   const spec = resolveRiskMetric(params.riskMetric || 'inadReal');
   const disc = discoverSegments(shapes, conns, csvStore, scope, spec, params);
@@ -3798,11 +4182,20 @@ function computeSegmentDiscovery(shapes, conns, csvStore, scope, params = {}) {
   disc.ctx.lockedIds = shapes.filter(s => s.locked).map(s => s.id);
   const explained = disc.candidates.map(c => explainSegment(c, disc.ctx));
   const { findings, diagnostics } = prioritizeFindings(explained, disc.ctx, params);
+
+  // Estágio 4: asis_divergence + anomaly (sem patch) + recomendações validadas + estabilidade.
+  const asis = detectAsIsDivergence(disc.ctx);
+  const anomalies = detectAnomalies(disc.ctx);
+  const allFindings = [...findings, ...asis.findings, ...anomalies];
+  attachStability(allFindings, disc.ctx);
+  buildSegmentRecommendations(shapes, conns, csvStore, allFindings, disc.ctx);
+
   return {
     version: '1.0', generatedAt: new Date().toISOString(),
     scope: disc.scope, population: disc.population,
     metric: { id: spec.id, label: spec.label, direction: spec.direction },
-    findings, diagnostics,
+    findings: allFindings, diagnostics,
+    asIsTotals: asis.totals,
   };
 }
 
@@ -5032,6 +5425,15 @@ function handleMessage(e) {
     self.postMessage({ type: 'SEGMENT_DISCOVERY_RESULT', segmentModel });
     return;
   }
+
+  // Aplicação combinada de N recomendações (Copiloto Sessão 12) — delta combinado validado
+  // por UMA re-simulação real (nunca a soma dos individuais). `applies` = [{moves}].
+  if (type === 'COMPUTE_SEGMENT_COMBINED') {
+    const { shapes, conns = [], applies = [] } = e.data;
+    const combined = computeSegmentCombined(shapes, conns, workerCsvStore, applies);
+    self.postMessage({ type: 'SEGMENT_COMBINED_RESULT', combined });
+    return;
+  }
 }
 
 // Só registra o handler em contexto de worker real; permite importar as funções
@@ -5077,6 +5479,10 @@ export {
   buildGlossary,
   computePolicyDoc,
   computeSegmentDiscovery,
+  computeSegmentCombined,
+  buildSegmentRecommendations,
+  detectAsIsDivergence,
+  detectAnomalies,
   discoverSegments,
   explainSegment,
   prioritizeFindings,
