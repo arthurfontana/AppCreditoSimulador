@@ -473,9 +473,9 @@ Releia a frente, o épico e o código antes de propor.
 - [x] **Sessão 4** — Goal Seek ✅
 - [x] **Sessão 5** — Simplificação ✅
 - [x] **Sessão 6** — DocGen ✅
-- [ ] **Sessão 10** — Motor de Descoberta de Segmentos 🏷️ `Opus 4.8`
-- [ ] **Sessão 11** — Painel de Oportunidades (UI) 🏷️ `Sonnet 5`
-- [ ] **Sessão 12** — Recomendações Acionáveis + Goal Seek 🏷️ `Opus 4.8`
+- [x] **Sessão 10** — Motor de Descoberta de Segmentos 🏷️ `Opus 4.8` ✅
+- [x] **Sessão 11** — Painel de Oportunidades (UI) 🏷️ `Sonnet 5` ✅
+- [x] **Sessão 12** — Recomendações Acionáveis + Goal Seek 🏷️ `Opus 4.8` ✅
 - [ ] **Sessão 7** — Camada de IA 🏷️ `Opus 4.8`
 - [ ] **Sessão 8** — Enriquecimentos IA 🏷️ `Sonnet 5`
 - [ ] **Sessão 13** — IA da Descoberta 🏷️ `Sonnet 5`
