@@ -21,6 +21,7 @@
 
 **Engenharia**
 - [[Arquitetura]]
+- [[Ribbon-Prompts-Sessoes|Ribbon UI — Prompts das Sessões]]
 - [[Decisoes|Decisões (ADRs)]]
 - [[Otimizacao-Memoria|Otimização de Memória (datasets grandes)]]
 - [[PERFORMANCE-ANALISE|Análise de Performance e Memória (backlog técnico)]]
