@@ -15,6 +15,15 @@
 > baseline browser com tetos declarados, nada é exclusivo do Python (P4); recomendação
 > proativa do motor no carregamento da base (DEC-HX-009).
 >
+> **✅ Sonda HP executada (09/07/2026, 2 rodadas na máquina corporativa alvo)** —
+> resultado: **os 4 pacotes (numpy/scipy/scikit-learn/duckdb) instalam E importam do
+> índice**; nenhuma wheel offline imprescindível; único desvio é a 1ª importação do
+> sklearn lenta sob antivírus (38s frios / 3,6s quentes). Consequências já refletidas
+> na H5: detecção de tier com **warm-up assíncrono** + capabilities por pacote, tier
+> `full` definido por numpy(+scipy) sem depender de sklearn, e wheels do CI rebaixadas
+> a contingência opcional. Detalhes em [[Arquitetura-Execucao-Hibrida]] (§5 P1,
+> DEC-HX-004).
+>
 > **🏷️ Tag de modelo**: `[OPUS]` para núcleos algorítmicos, refatoração estrutural,
 > protocolo/paridade cross-runtime e matemática sutil; `[SONNET]` para UI sobre padrões
 > consolidados, instrumentação e trabalho bem especificado.
@@ -179,9 +188,19 @@ CLAUDE.md e o worker antes de propor.
 
 ---
 
-## Sessão HP — Sonda do Ambiente Python Corporativo 🏷️ [SONNET]
+## Sessão HP — Sonda do Ambiente Python Corporativo 🏷️ [SONNET] — ✅ CONCLUÍDA
 
 **Documentação**: [[Arquitetura-Execucao-Hibrida]] (§5 P1, §12 riscos)
+
+**Status (09/07/2026)**: script criado (`checar_ambiente.py`, na **raiz** do repo — não
+em `release/python/`; mover para lá é passo da H5) e **rodado 2× na máquina corporativa
+alvo** (Windows 11, Python 3.13.3, pip 25.0.1, sem proxy). Resultado: 4/4 pacotes
+instalam e importam do índice (numpy 2.5.1, scipy 1.18.0, scikit-learn 1.9.0, duckdb
+1.5.4); **nenhuma wheel offline imprescindível**; sklearn com 1ª carga lenta por
+antivírus (38s frios / 3,6s quentes — a 1ª rodada, com timeout de 30s, classificou isso
+erroneamente como falha; o script foi corrigido para 2 tentativas de import, fria +
+cache quente, e conclusão em 4 categorias). Consequências aplicadas na H5 (abaixo) e
+na DEC-HX-004.
 
 **Pré-requisitos**: Nenhum. **Pode (e deve) rodar antes de qualquer outra sessão do
 híbrido** — é a validação empírica da premissa P1 (`pip` liberado, mas pacotes podem
@@ -283,16 +302,25 @@ wheels offline).
 - Decodificação do formato M3 (base64 → `array`/`memoryview` no tier stdlib;
   `numpy.frombuffer` quando numpy presente); datasets **só em RAM**, por hash,
   idempotente
-- Detecção de tier: tenta importar numpy/scipy/sklearn/duckdb → `full`; senão
-  `stdlib`; `capabilities` declara pacotes/versões/cores/protocolVersion
+- Detecção de tier **calibrada pela sonda HP** (DEC-HX-004): imports em **warm-up
+  assíncrono no boot** (thread de fundo — a 1ª importação do sklearn levou 38s sob
+  antivírus na máquina alvo; nunca importar inline no request); `capabilities`
+  responde imediato com status **por pacote** (`{numpy:'2.5.1', sklearn:'loading'|
+  null, ...}`) + cores/protocolVersion; tier `full` = numpy(+scipy) presentes —
+  **sklearn nunca é gate do tier** (é extra da H8, carregado lazy no primeiro job
+  que o usar)
 - Job runner: fila, execução em processo filho (`multiprocessing`) com progresso e
   cancelamento; task inicial `echo_stats` (conta linhas, soma uma métrica — prova o
   round-trip ponta a ponta e serve de benchmark)
 - `release/python/` com `requirements.txt` + `instalar_motor.bat` em camadas (P1):
-  cria venv e tenta `pip install` **do índice** primeiro (pip é liberado no ambiente
-  alvo); para o que falhar, cai para `pip install --no-index --find-links wheels/` —
-  as wheels são baixadas no CI e embarcadas no zip; documentar no workflow, sem
-  quebrar o build atual
+  cria venv e tenta `pip install` **do índice** primeiro (validado pela HP: os 4
+  pacotes instalam do índice na máquina alvo); para o que falhar, cai para
+  `pip install --no-index --find-links wheels/` — **camada de contingência**: o
+  relatório da HP não apontou nenhuma wheel imprescindível, então embarcar wheels
+  no CI é **opcional/adiável** (documentar o passo no workflow sem ativá-lo; ativar
+  se alguma outra máquina reportar falha de instalação de verdade)
+- Mover `checar_ambiente.py` da raiz para `release/python/` (junto do instalador,
+  para o analista rodar a sonda na própria máquina antes de instalar o motor)
 - `tests_python/` com pytest mínimo (health/token/capabilities/dataset round-trip/
   job lifecycle), rodável local; integração ao CI como job separado e opcional
 
@@ -305,8 +333,12 @@ Vamos à Sessão H5 da Execução Híbrida (sidecar Python v1), conforme
 docs/wiki/Arquitetura-Execucao-Hibrida.md (DEC-HX-003/004/006/008, §8–§9). Crie
 release/sidecar.py (arquivo único, stdlib apenas — http.server/ThreadingHTTPServer,
 sem Flask) importado por release/serve.py: endpoints /api/compute/health, /token
-(só mesma origem), /capabilities (tier stdlib|full por tentativa de import de
-numpy/scipy/sklearn/duckdb, cores, protocolVersion=1), /datasets (POST idempotente
+(só mesma origem), /capabilities (status POR PACOTE via warm-up ASSÍNCRONO no boot
+— thread de fundo importa numpy/scipy/sklearn/duckdb; a sonda HP mediu 38s na 1ª
+importação do sklearn sob antivírus, então NUNCA importe inline no request; a
+resposta é imediata com {numpy:'2.5.1', sklearn:'loading'|null, ...}, cores,
+protocolVersion=1; tier full = numpy+scipy presentes, sklearn NUNCA é gate do
+tier), /datasets (POST idempotente
 por hash com corpo nos chunks base64 do serializeCsvStore/M3, decodificado para
 array/memoryview ou numpy.frombuffer; HEAD para checar existência; dados SÓ em
 RAM), /jobs (POST cria, GET status/progress/result, DELETE cancela; execução em
@@ -315,11 +347,13 @@ X-Compute-Token, nenhum header CORS exceto allowlist do origin do Vite sob flag
 --dev. Task inicial echo_stats (rowCount + soma de uma coluna métrica) para provar
 o round-trip contra o worker. Crie release/python/requirements.txt +
 instalar_motor.bat em camadas (P1): venv + pip install do índice primeiro e, para
-cada pacote que falhar, fallback pip install --no-index --find-links wheels/;
-ajuste o build-release.yml para embarcar as wheels sem quebrar o fluxo atual —
-use o relatório da Sessão HP (se existir) para decidir o conjunto de wheels
-imprescindíveis. Testes pytest
-em tests_python/ (health, token, capabilities, dataset round-trip, ciclo de job,
+cada pacote que falhar, fallback pip install --no-index --find-links wheels/ —
+camada de CONTINGÊNCIA: o relatório da HP (09/07/2026) mostrou que os 4 pacotes
+instalam do índice na máquina alvo, então documente o passo de wheels no
+build-release.yml sem ativá-lo (ativar só se outra máquina reportar falha real de
+instalação). Mova checar_ambiente.py da raiz para release/python/. Testes pytest
+em tests_python/ (health, token, capabilities durante e após o warm-up, dataset
+round-trip, ciclo de job,
 cancelamento), como job separado e opcional no CI. Releia o documento, o serve.py
 e o computeRouter (H4) antes de propor.
 ```
@@ -435,7 +469,10 @@ documento, a frente e o código antes de propor.
 - Task `cluster_segments` no sidecar (tier full): o **MESMO algoritmo determinístico**
   vetorizado em numpy (mesma init, mesma seed ⇒ mesmo resultado — é o que torna o
   GATE cross-runtime possível); sklearn entra como extra (silhueta para k automático,
-  hierárquico como alternativa), sem tetos e mais rápido
+  hierárquico como alternativa), sem tetos e mais rápido — **carregado lazy** no
+  primeiro job que o usar (a HP confirmou sklearn 1.9.0 disponível na máquina alvo,
+  mas com 1ª carga lenta sob antivírus; a UI tolera `sklearn: null|'loading'` nas
+  capabilities sem esconder a feature — o baseline determinístico cobre tudo)
 - `ClusterModel` no padrão da casa (dados crus, nunca prosa — irmão do
   `SegmentModel`/`docModel`), **idêntico nos dois executores**
 - Modal efêmero no padrão `segmentDiscoveryModal` (form mínimo → loading → cards de
@@ -525,7 +562,7 @@ os GATEs antes de propor.
 
 ## Checklist de Execução
 
-- [ ] **Sessão HP** — Sonda do ambiente Python corporativo 🏷️ `[SONNET]` *(pode rodar já — antes de tudo)*
+- [x] **Sessão HP** — Sonda do ambiente Python corporativo 🏷️ `[SONNET]` ✅ *(concluída 09/07/2026 — 4/4 pacotes OK via índice; sklearn com cold start de antivírus; wheels offline dispensáveis)*
 - [ ] **Sessão H0** — Telemetria local de custo 🏷️ `[SONNET]`
 - [ ] **Sessão H1** — Fluidez (M12+M13+M14) 🏷️ `[OPUS]`
 - [ ] **Sessão H2** — Dieta de memória (2–5MM linhas; alvo P2 = 7MM) 🏷️ `[OPUS]`
@@ -542,9 +579,10 @@ os GATEs antes de propor.
 ## Resumo das Dependências
 
 ```
-Sonda (ortogonal — pode rodar a qualquer momento, idealmente JÁ)
-  HP (sonda de ambiente)   ← isolada; valida P1 na máquina corporativa real;
-                             informa as wheels da H5
+Sonda (✅ concluída 09/07/2026)
+  HP (sonda de ambiente)   ← RODADA: P1 validada (4/4 pacotes via índice);
+                             wheels da H5 rebaixadas a contingência;
+                             warm-up assíncrono na detecção de tier
 
 Fase 0 (browser puro — valor independente do híbrido)
   H0 (telemetria)          ← isolada; base factual das decisões de roteamento
@@ -571,8 +609,8 @@ Fase 3 (opcional)
 um script avulso). H0, H1, H2 e H3 — sempre (não dependem do híbrido nem entre si).
 H4 — isolada (sidecar mockado). H5+ — em cadeia.
 
-**Ordem ideal para minimizar retrabalho:** HP o quanto antes (tira o risco de
-ambiente do caminho); depois a numeração (H0→H9). A Fase 0 melhora o produto para
+**Ordem ideal para minimizar retrabalho:** ~~HP o quanto antes~~ ✅ HP concluída
+(risco de ambiente fora do caminho); agora a numeração (H0→H9). A Fase 0 melhora o produto para
 todos os usuários mesmo que o híbrido nunca seja ligado. Com o alvo de projeto de
 ~7MM de linhas (P2), as Fases 1–2 têm gatilho de produto próprio — o próprio alvo
 as justifica, sem esperar um épico analítico; a Fase 3 continua puxada por demanda
@@ -595,7 +633,10 @@ real (Frente 5, bases na íntegra acima do conforto do browser).
 
 ---
 
-**Última atualização**: 2026-07-09 (planejamento — nenhuma sessão executada;
-revisado no mesmo dia com as premissas validadas pelo usuário: sonda HP nova,
-paridade total na H8, recomendação DEC-HX-009 na H6, install em camadas na H5,
-alvo de projeto 7MM)
+**Última atualização**: 2026-07-09 (planejamento; revisado no mesmo dia com as
+premissas validadas pelo usuário: sonda HP nova, paridade total na H8, recomendação
+DEC-HX-009 na H6, install em camadas na H5, alvo de projeto 7MM. **Sessão HP
+executada e concluída no mesmo dia** — 2 rodadas na máquina corporativa: 4/4 pacotes
+instalam/importam do índice, sklearn com cold start de antivírus (38s→3,6s), nenhuma
+wheel offline imprescindível; H5 ajustada: warm-up assíncrono na detecção de tier,
+tier full sem depender de sklearn, wheels do CI como contingência opcional)
