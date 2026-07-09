@@ -157,3 +157,40 @@ linguagem natural) e a prosa da documentação é mecânica; a busca do Goal See
 gulosa (ótimos locais, mitigados por beam search e pela fronteira exposta). Detalhes,
 níveis de maturidade e plano de sessões em [[Epicos-CopilotoIA]] e nos documentos
 das frentes.
+
+---
+
+## ADR-008 (DEC-HX-001..008): Execução híbrida opt-in — ComputeProvider (Browser + sidecar Python local)
+
+**Decisão:** o navegador permanece o caminho de execução **padrão e completo** de todo
+o produto; um **sidecar Python local** (extensão do `serve.py` que o release já
+embarca, `127.0.0.1` apenas) passa a existir como camada **opcional** de aceleração e
+ampliação de limites, atrás de uma interface `ComputeProvider` roteada por um
+`ComputeRouter` — a UI posta as mesmas tarefas e recebe os mesmos payloads,
+independentemente de quem computou. Tarefas são classificadas: **Classe A** (paridade
+total — todo o core atual, sempre no worker), **Classe B** (ampliada — browser executa
+com tetos declarados; sidecar remove os tetos) e **Classe C** (exclusiva — análises
+novas tipo clusterização; sem sidecar, botão desabilitado com motivo). O tick de
+edição **jamais** roteia para o sidecar.
+
+**Contexto:** o produto está evoluindo de simulador para plataforma analítica
+(descoberta, clusterização, indicadores, feature engineering, bases menos
+sumarizadas) — carga multiplicativa O(linhas × candidatos) e teto de memória da aba
+(~2–4GB) que nenhuma otimização JS remove. O argumento pró-Python não é velocidade de
+linguagem, e sim **biblioteca madura (numpy/scipy/sklearn/duckdb) + multicore +
+memória fora da aba**. Análise completa, alternativas avaliadas (DuckDB-WASM, Arrow,
+pool de workers) e protocolo em [[Arquitetura-Execucao-Hibrida]].
+
+**Justificativa:**
+- Preserva o diferencial local-first (mesmo princípio do ADR-007 para IA): desligar o
+  sidecar não remove funcionalidade — critério de aceite permanente.
+- O release já exige Python (`serve.py`): o sidecar não adiciona dependência nova de
+  implantação corporativa.
+- Paridade **provada**, nunca presumida: toda dupla implementação exige GATE de
+  fixtures douradas cross-runtime (Vitest gera, pytest valida) — sem GATE verde, a
+  tarefa não roteia.
+
+**Tradeoff aceito:** dois runtimes onde houver Classe B/C portada (custo de manutenção
+limitado pelas classes e pelo protocolo versionado); tier `stdlib` (sem numpy) tem
+ganho marginal — o valor real exige tier `full` via wheels offline embarcadas no
+release. Plano de sessões executáveis em [[Hibrido-Prompts-Sessoes]].

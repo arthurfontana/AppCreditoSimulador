@@ -21,6 +21,8 @@
 
 **Engenharia**
 - [[Arquitetura]]
+- [[Arquitetura-Execucao-Hibrida|Execução Híbrida (Browser + Python opcional)]]
+  - [[Hibrido-Prompts-Sessoes|Prompts das Sessões]]
 - [[Ribbon-Prompts-Sessoes|Ribbon UI — Prompts das Sessões]]
 - [[Decisoes|Decisões (ADRs)]]
 - [[Otimizacao-Memoria|Otimização de Memória (datasets grandes)]]
