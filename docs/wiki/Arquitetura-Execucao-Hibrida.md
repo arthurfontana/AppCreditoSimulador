@@ -183,6 +183,20 @@ que já existe no fluxo de implantação corporativa. O risco de distribuição 
   (`pip install --no-index --find-links`) só para o que falhar. O desenho de
   capacidades declaradas (DEC-HX-004) permanece intacto: o app se adapta ao que
   encontrar — tier `stdlib` (só Python puro) e tier `full` (pacotes científicos).
+
+  **✅ P1 VALIDADA EMPIRICAMENTE (sonda HP rodada 2× em 09/07/2026 na máquina
+  corporativa alvo — Windows 11, Python 3.13.3, pip 25.0.1, sem proxy configurado):**
+  os 4 pacotes **instalam E importam do índice** (numpy 2.5.1, scipy 1.18.0,
+  scikit-learn 1.9.0, duckdb 1.5.4). Único desvio: a **1ª importação do sklearn é
+  lenta** (38s frios vs. 3,6s com cache quente — antivírus escaneando as DLLs na
+  primeira carga; a 1ª rodada da sonda, com timeout de 30s, chegou a classificá-la
+  erroneamente como falha). Consequências no plano: **(a)** as wheels offline ficam
+  rebaixadas a **contingência** — nenhuma é imprescindível nesta máquina; o passo de
+  embarcar wheels no CI (H5) torna-se opcional/adiável, mantendo o `instalar_motor`
+  em camadas como está (o fallback é barato); **(b)** a detecção de tier do sidecar
+  (H5) **não pode importar pacotes inline** no request de `capabilities` — warm-up
+  assíncrono no boot (ver DEC-HX-004); **(c)** o tier `full` é definido por
+  numpy(+scipy) — sklearn é extra por pacote, nunca gate do tier.
 - **P2 — Alvo de projeto: ~7MM de linhas no horizonte de 1–2 anos.** Isso fica ACIMA
   da zona de conforto do browser (ver tabela do §2.2): browser-only cobre com folga
   até ~3MM e, com a dieta de memória (H2), até ~5MM; em 7MM o modo browser é
@@ -232,6 +246,16 @@ stats). **Honestidade técnica registrada:**
 Python puro é 10–100× mais lento que o worker JS em loop por linha — o tier `stdlib`
 é um degrau de instalação, não um destino; o valor real do híbrido está no tier
 `full`.
+
+**Detecção de tier (calibrada pela sonda HP, 09/07/2026):** a 1ª importação de um
+pacote grande pode levar dezenas de segundos sob antivírus corporativo (sklearn:
+38s frios vs. 3,6s quentes na máquina alvo). Por isso os imports de detecção rodam
+em **warm-up assíncrono no boot do sidecar** (thread de fundo), nunca inline no
+request — `capabilities` responde imediato com status **por pacote**
+(`packages: {numpy:'2.5.1', sklearn:'loading'|null, ...}`) e o cliente pode
+re-consultar. O tier `full` é definido pela presença de **numpy(+scipy)**; sklearn
+e duckdb são declarados por pacote e habilitam extras (silhueta/hierárquico da H8,
+SQL ad-hoc futuro), sem nunca serem gate do tier.
 
 ### DEC-HX-005 — Paridade provada por GATEs cross-runtime
 Toda função com dupla implementação (JS + Python) tem um GATE de **fixtures douradas**:
@@ -432,7 +456,8 @@ mais lento que o worker JS — ver DEC-HX-004).
 | Risco | Mitigação |
 |---|---|
 | **Drift numérico entre motores** (o pior risco) | DEC-HX-005: fixtures douradas cross-runtime como GATE bloqueante; sem GATE, não roteia. Dupla implementação restrita ao mínimo (Classe A só no worker até H9) |
-| `pip` liberado mas pacote específico falha (P1) | **Sonda de ambiente (Sessão HP) antes da Fase 1** mede o que instala de fato na máquina corporativa; `instalar_motor` tenta o índice primeiro e cai para as wheels offline do zip (`release/python/wheels/`); falha total ⇒ tier stdlib ⇒ modo browser. Nunca um estado quebrado |
+| `pip` liberado mas pacote específico falha (P1) | **✅ Medido pela sonda HP (09/07/2026): os 4 pacotes instalam e importam do índice — risco não se materializou nesta máquina.** `instalar_motor` mantém as camadas (índice primeiro, wheels offline `release/python/wheels/` como contingência; embarcar wheels no CI é opcional/adiável); falha total ⇒ tier stdlib ⇒ modo browser. Nunca um estado quebrado |
+| Antivírus atrasa a 1ª importação de pacote grande (medido: sklearn 38s frios / 3,6s quentes) | Warm-up assíncrono dos imports no boot do sidecar (DEC-HX-004); `capabilities` responde imediato com status por pacote; tier `full` não depende de sklearn |
 | Custo de manter GATEs duplos (paridade total, P4) | Aceito conscientemente na validação das premissas; mitigado pelas MESMAS fixtures douradas alimentando Vitest e pytest (uma fonte, dois consumidores) e por baselines browser que compartilham primitivas já testadas do worker |
 | Antivírus/política corporativa bloqueia o processo Python | Já é risco do `serve.py` atual (mesmo processo); documentar no manual; modo browser é o fallback universal |
 | Porta ocupada / múltiplas instâncias | Porta configurável; token por instância; health-check identifica a versão |
@@ -503,7 +528,7 @@ mais lento que o worker JS — ver DEC-HX-004).
 
 | Fase | Sessões ([[Hibrido-Prompts-Sessoes]]) | Entrega |
 |---|---|---|
-| **Sonda (a qualquer momento)** | HP (sonda do ambiente Python — pode rodar hoje, antes de qualquer código) | Relatório do que instala/importa na máquina corporativa real (P1); decide se as wheels offline são necessárias |
+| **Sonda (✅ concluída 09/07/2026)** | HP (sonda do ambiente Python — `checar_ambiente.py`, rodada 2× na máquina corporativa) | Relatório entregue: os 4 pacotes instalam/importam do índice; **nenhuma wheel offline imprescindível**; sklearn com 1ª carga lenta (antivírus) ⇒ warm-up assíncrono na detecção de tier da H5 |
 | **Fase 0 — Browser primeiro** | H0 (telemetria), H1 (fluidez M12–M14), H2 (dieta de memória), H3 (pool de workers) | Headroom até ~5MM linhas; validações paralelas; números reais de custo por tarefa |
 | **Fase 1 — Fundação híbrida** | H4 (ComputeRouter), H5 (sidecar v1), H6 (UX do motor + recomendação DEC-HX-009) | Sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark |
 | **Fase 2 — Cargas reais** | H7 (Descoberta profunda), H8 (clusterização/stats — baseline browser + sidecar, paridade total) | Primeiro valor de usuário do híbrido |
@@ -518,5 +543,8 @@ A sonda HP é ortogonal e barata: rodá-la cedo tira o risco de ambiente do cami
 
 *Documento gerado a partir de leitura integral da wiki e do código em jul/2026;
 premissas P1–P4 validadas com o usuário em 09/07/2026 (pip com sonda, alvo 7MM,
-browser-first confirmado, paridade total + recomendação proativa). Plano de execução
+browser-first confirmado, paridade total + recomendação proativa). **P1 validada
+empiricamente no mesmo dia pela sonda HP** (2 rodadas na máquina corporativa alvo:
+4/4 pacotes OK via índice; sklearn com cold start de antivírus ⇒ warm-up assíncrono
+na DEC-HX-004; wheels offline rebaixadas a contingência). Plano de execução
 por sessões (com prompts e tags de modelo) em [[Hibrido-Prompts-Sessoes]].*
