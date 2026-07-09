@@ -12,6 +12,12 @@
 > **Status:** planejamento. Nada aqui foi implementado. O plano de sessões executável
 > por modelos mais baratos está em [[Hibrido-Prompts-Sessoes]].
 >
+> **Premissas validadas (09/07/2026):** as quatro premissas do §5 foram respondidas
+> pelo usuário. P3 confirmada como estava; **P1, P2 e P4 mudaram** (pip liberado com
+> sonda de ambiente; alvo de projeto ~7MM de linhas; paridade total — sem features
+> exclusivas do Python — + recomendação proativa do motor no carregamento da base,
+> DEC-HX-009). Este documento já reflete as respostas.
+>
 > **Análise-base:** leitura integral de [[PERFORMANCE-ANALISE]], [[Otimizacao-Memoria]],
 > [[Roadmap]], [[Epicos-CopilotoIA]], [[SECURITY-AND-ENTERPRISE-READINESS]] e do código
 > (`src/App.jsx` ~13.8k linhas, `src/simulation.worker.js` ~5.5k, `src/columnar.js`),
@@ -69,6 +75,7 @@ navegador é ~2–4GB, e nenhuma otimização de código muda isso.
 | 1MM × 15 col | ~100MB | ✅ Hoje, com folga |
 | 3MM × 20 col | ~350–500MB | ✅ Com a dieta de memória (Fase 0) |
 | 5MM × 30 col | ~0,9–1,4GB | ⚠️ Limite — exige códigos `Int16/Uint8` e disciplina nos picos |
+| **7MM × 30 col** (alvo de projeto — P2) | ~1,3–2GB | ⚠️/❌ No fio do teto da aba — abre só com dieta agressiva; conforto real é o sidecar (browser fica com amostragem declarada) |
 | 10MM × 30 col | ~2–3GB | ❌ Acima do teto da aba — só com sidecar (ou amostragem declarada) |
 
 Códigos `Int16`/`Uint8` para colunas de baixa cardinalidade (~metade das células de
@@ -108,10 +115,11 @@ biblioteca + multicore + memória fora da aba** — não "velocidade de linguage
 | Apache Arrow como formato de troca | Interop eficiente browser⇄Python | Nada sozinho | Adiar — o formato base64 do M3 já existe e é suficiente no v1; Arrow é otimização futura do transporte |
 | WebGPU/WASM SIMD para o motor | CPU do tick | Memória, bibliotecas; alto custo de manutenção | Descartar por ora — o tick não é o gargalo |
 
-**Leitura honesta:** as medidas browser-first compram 1–2 anos para linhas e
-agregação, mas **não resolvem biblioteca estatística nem o teto de memória** para
-10MM+. Se o roadmap analítico é para valer, o híbrido não é "se", é "quando e com
-qual contrato". Este documento define o contrato.
+**Leitura honesta:** as medidas browser-first compram headroom até ~5MM de linhas,
+mas **não resolvem biblioteca estatística nem o teto de memória** — e o alvo de
+projeto declarado (P2) é **~7MM**, acima dessa zona de conforto. Com esse alvo, o
+híbrido não é "se" nem "quando um épico puxar": é parte do caminho para o próprio
+alvo. Este documento define o contrato.
 
 ### 2.4 O detalhe que muda o custo da decisão
 
@@ -159,33 +167,48 @@ que já existe no fluxo de implantação corporativa. O risco de distribuição 
 - Escolher framework web Python pesado: o sidecar v1 é stdlib (`http.server`, como o
   `serve.py` atual), sem Flask/FastAPI.
 
-## 5. Premissas assumidas (decisões tomadas nesta revisão — reversíveis)
+## 5. Premissas validadas (respostas do usuário em 09/07/2026)
 
-> Estas quatro premissas foram assumidas na análise; se alguma estiver errada para o
-> seu contexto, ela muda parâmetros do plano, não a arquitetura.
+> Estas quatro premissas foram assumidas na primeira versão da análise e depois
+> **validadas com o usuário**. P3 foi confirmada; P1, P2 e P4 mudaram de conteúdo —
+> os parâmetros do plano abaixo já refletem as respostas.
 
-- **P1 — Python corporativo é heterogêneo.** Não assumimos `pip` liberado. O sidecar
-  **declara capacidades em camadas** (DEC-HX-004): tier `stdlib` (só Python puro) e
-  tier `full` (numpy/scipy/sklearn/duckdb via **wheels offline embarcadas no zip do
-  release** — `pip install --no-index --find-links`). O app se adapta ao que
-  encontrar.
-- **P2 — Alvo de projeto: ~5MM de linhas no browser.** Até aí, a Fase 0 (dieta de
-  memória) sustenta o modo browser-only. 10MM+ é território exclusivo do sidecar
-  (com amostragem **declarada** como degradação no modo browser).
-- **P3 — Escopo em fases: browser primeiro.** A Fase 0 (otimizações browser) precede
-  o híbrido — é mais barata, beneficia todos os usuários e reduz a pressão sobre o
-  sidecar.
-- **P4 — Classificação por feature (ver §7.3).** O core existente é sempre Classe A
-  (paridade total). Features novas declaram sua classe (A/B/C) pelo critério: custo
-  de reimplementar em JS × valor de funcionar offline-browser.
+- **P1 — `pip` é liberado, mas pacotes individuais podem falhar** (proxy, política de
+  pacotes, ausência de compilador). Estratégia em camadas, na ordem: (1) **sonda de
+  ambiente ANTES de investir** (Sessão HP de [[Hibrido-Prompts-Sessoes]] — script
+  stdlib `checar_ambiente.py` que testa install+import de numpy/scipy/sklearn/duckdb
+  na máquina corporativa real e gera relatório; pode rodar hoje, antes de qualquer
+  código do híbrido); (2) `instalar_motor` tenta `pip install` **do índice** primeiro;
+  (3) **wheels offline embarcadas no zip do release** como fallback
+  (`pip install --no-index --find-links`) só para o que falhar. O desenho de
+  capacidades declaradas (DEC-HX-004) permanece intacto: o app se adapta ao que
+  encontrar — tier `stdlib` (só Python puro) e tier `full` (pacotes científicos).
+- **P2 — Alvo de projeto: ~7MM de linhas no horizonte de 1–2 anos.** Isso fica ACIMA
+  da zona de conforto do browser (ver tabela do §2.2): browser-only cobre com folga
+  até ~3MM e, com a dieta de memória (H2), até ~5MM; em 7MM o modo browser é
+  **degradação declarada** (amostragem) e a íntegra é território do sidecar.
+  Consequências: a Fase 0/H2 deixa de ser opcional (é pré-requisito do alvo) e as
+  Fases 1–2 do híbrido têm gatilho de produto próprio — não esperam um épico
+  analítico ser priorizado.
+- **P3 — Escopo em fases: browser primeiro, híbrido em seguida** (**confirmada**).
+  A Fase 0 (otimizações browser) precede o híbrido — é mais barata, beneficia todos
+  os usuários e reduz a pressão sobre o sidecar.
+- **P4 — Paridade total (substitui a classificação com classe exclusiva).** TODA
+  feature analítica nova (clusterização, estatísticas avançadas, feature engineering)
+  funciona no browser com **limites declarados** (amostragem, teto de candidatos,
+  profundidade, dimensões) e o Python **remove os limites e acelera** — não existem
+  features exclusivas do modo Python. Custo aceito conscientemente: GATEs duplos
+  onde houver dupla implementação (DEC-HX-005). Complemento decidido junto: ao
+  **carregar um dataset**, o app estima a capacidade e **recomenda proativamente**
+  ligar o motor Python quando entender que o browser não dará conta (DEC-HX-009).
 
 ## 6. Decisões arquiteturais (DEC-HX)
 
 ### DEC-HX-001 — Local-first inegociável; Python é aceleração, nunca requisito
 Espelho do ADR-007: assim como a IA é camada opcional sobre um produto 100% local, o
 sidecar é camada opcional sobre um produto 100% browser. Critério de aceite
-permanente: **desligar/remover o sidecar não remove funcionalidade Classe A/B** (B
-volta aos tetos declarados) e degrada Classe C de forma limpa e explicada.
+permanente: **desligar/remover o sidecar não remove funcionalidade nenhuma** — com a
+paridade total (P4), toda tarefa volta ao baseline browser com seus tetos declarados.
 
 ### DEC-HX-002 — Fronteira única: `ComputeProvider` atrás do protocolo existente
 O protocolo `COMPUTE_* → *_RESULT` do worker é a fronteira. Um **ComputeRouter** (na
@@ -204,7 +227,8 @@ o sidecar roda à parte com allowlist de CORS para `localhost:5173` + token. Bin
 `GET /api/compute/capabilities` → `{tier, packages, cores, protocolVersion}`. O
 ComputeRouter habilita tarefas pelo que o sidecar declara. Tier `stdlib` habilita só
 paralelismo (multiprocessing) para cargas embaraçosamente paralelas; tier `full`
-habilita vetorização e as análises Classe C. **Honestidade técnica registrada:**
+habilita vetorização e a remoção de tetos das análises Classe B (clusterização,
+stats). **Honestidade técnica registrada:**
 Python puro é 10–100× mais lento que o worker JS em loop por linha — o tier `stdlib`
 é um degrau de instalação, não um destino; o valor real do híbrido está no tier
 `full`.
@@ -226,17 +250,23 @@ reuso integral, base64 de typed arrays). A chave é um hash do conteúdo (papel 
 os dados **somente em RAM** (nunca em disco sem opt-in explícito). Trocar a base
 invalida e re-registra.
 
-### DEC-HX-007 — Classes de tarefa (contrato de degradação)
-- **Classe A — paridade total:** tudo que existe hoje (tick, overlay, otimizadores,
-  Goal Seek, Descoberta depth≤2, DocGen...). Roda **sempre** no worker; o sidecar só
-  entra, no futuro, como acelerador de lote (H9) com GATE de paridade.
-- **Classe B — ampliada com degradação declarada:** versões estendidas de motores
-  existentes (Descoberta profunda depth 3–4, lote maior de validações, base >5MM).
-  Browser executa com **tetos declarados na UI** ("profundidade limitada a 2 sem o
-  Motor Python"); sidecar remove os tetos.
-- **Classe C — exclusiva do sidecar:** análises novas cuja reimplementação JS não se
-  paga (clusterização, estatística sklearn). Sem sidecar, o botão aparece
-  **desabilitado com motivo** (mesmo padrão dos botões ✨ do Copiloto sem provedor).
+### DEC-HX-007 — Classes de tarefa (contrato de degradação) — paridade total (P4)
+- **Classe A — paridade total do core:** tudo que existe hoje (tick, overlay,
+  otimizadores, Goal Seek, Descoberta depth≤2, DocGen...). Roda **sempre** no worker;
+  o sidecar só entra, no futuro, como acelerador de lote (H9) com GATE de paridade.
+- **Classe B — ampliada com degradação declarada:** com a decisão de paridade total
+  (P4), esta classe passa a cobrir **todas as features analíticas novas**, além das
+  versões estendidas de motores existentes. Toda feature nasce com implementação
+  browser de **tetos declarados na UI** ("profundidade limitada a 2 sem o Motor
+  Python", "clusterização sobre até N dimensões/valores", amostragem em base grande);
+  o sidecar remove os tetos e acelera. Exemplos: Descoberta profunda depth 3–4, lote
+  maior de validações, base >5MM, **clusterização, estatísticas avançadas, feature
+  engineering**.
+- **~~Classe C — exclusiva do sidecar~~ — eliminada** pela decisão de paridade total
+  (09/07/2026): **nenhuma feature é exclusiva do modo Python** — ninguém fica travado
+  sem ele. O padrão "botão desabilitado com motivo" (que era o contrato da Classe C)
+  fica reservado apenas ao estado **transitório** de desenvolvimento em que o baseline
+  browser de uma feature nova ainda não foi entregue — nunca como estado final.
 
 **Regra de ouro:** o tick de edição e qualquer resposta síncrona a gesto **jamais**
 roteiam pro sidecar. Sidecar é só para tarefas assíncronas com modal de
@@ -250,6 +280,19 @@ impresso no console é colado na UI); **nenhum header CORS** para outras origens
 chamada de rede externa; log local opcional. Alinhado com
 [[SECURITY-AND-ENTERPRISE-READINESS]] (o sidecar não altera a postura "dado nunca sai
 da máquina" — ele a preserva).
+
+### DEC-HX-009 — Recomendação proativa do motor no carregamento da base
+Decorrência direta da P4/P2: **ao carregar um dataset** (wizard de import — linhas ×
+colunas conhecidas no passo 2 — e abertura de projeto `.credito.json`), o app estima a
+capacidade do modo browser (RAM colunar projetada por dtype — mesma conta do orçamento
+de memória da H2 — mais, quando existir, o custo por tarefa medido pela telemetria H0)
+e, se a base provavelmente exceder a zona de conforto (~5MM de linhas ou ~1,2GB
+estimados), exibe uma **recomendação explícita e acionável** de ligar o Motor Python:
+o que acontece sem ele (amostragem/tetos declarados), o que muda com ele (íntegra, sem
+tetos) e o caminho para ligar (preferências / `instalar_motor`). **Nunca bloqueia** —
+é recomendação, não trava; o usuário pode seguir no browser com a degradação declarada.
+Sem sidecar detectável e sem instalação disponível, a recomendação degrada para o aviso
+informativo da H2.
 
 ## 7. Arquitetura proposta
 
@@ -269,8 +312,8 @@ da máquina" — ele a preserva).
 │          ▼                                                                 │
 │  ┌────────────────────────────────────────────┐                            │
 │  │ serve.py estendido (sidecar opcional)      │  Classe B sem teto         │
-│  │  /api/compute/{health,capabilities,token,  │  Classe C (tier full)      │
-│  │   datasets,jobs}                           │                            │
+│  │  /api/compute/{health,capabilities,token,  │  (análises novas: browser  │
+│  │   datasets,jobs}                           │   com teto ⇄ aqui íntegra) │
 │  │  tier stdlib: multiprocessing              │  dados SÓ em RAM           │
 │  │  tier full:   numpy/scipy/sklearn/duckdb   │  zero rede externa         │
 │  │               (wheels offline do release)  │                            │
@@ -283,22 +326,23 @@ da máquina" — ele a preserva).
 | Camada | Continua responsável por | Nunca faz |
 |---|---|---|
 | **Main thread (UI)** | Edição, drag/drop, render SVG, filtros de widget, preview, modais; ComputeRouter | Varredura de base (regra vigente desde M10) |
-| **Web Worker (JS)** | Tick, overlays, otimizadores, Goal Seek, Descoberta depth≤2, DocGen, dataset largo — **tudo Classe A** + Classe B dentro dos tetos | Tarefas Classe C |
+| **Web Worker (JS)** | Tick, overlays, otimizadores, Goal Seek, Descoberta depth≤2, DocGen, dataset largo — **tudo Classe A** + o baseline Classe B de toda análise nova, dentro dos tetos declarados (paridade total, P4) | Cargas acima dos tetos declarados (essas vão ao sidecar quando disponível) |
 | **Pool de workers (H3)** | Shards de validação em lote (candidatos independentes) | Estado próprio (stateless por job) |
-| **Sidecar Python** | Classe B sem tetos; Classe C (clusterização, stats); futuramente lote de re-simulação (H9, pós-GATE) | Tick de edição; persistência de dados; rede externa |
+| **Sidecar Python** | Classe B sem tetos (incl. clusterização/stats em escala); futuramente lote de re-simulação (H9, pós-GATE) | Tick de edição; persistência de dados; rede externa |
 
-### 7.3 Como um épico novo declara sua classe
+### 7.3 Como um épico novo declara seus tetos
 
-Critério (P4): **custo de reimplementar/validar em JS × valor de funcionar sem
-sidecar**. Exemplos aplicados:
+Com a paridade total (P4), a pergunta por feature deixou de ser "qual classe?" e
+passou a ser: **quais são os tetos declarados do baseline browser, e o que o sidecar
+remove?** Exemplos aplicados:
 
-| Feature futura | Classe | Racional |
+| Feature futura | Classe | Baseline browser (tetos declarados) → sidecar |
 |---|---|---|
-| Descoberta de Segmentos depth 3–4 | B | Motor JS já existe (depth 2); ampliar é só teto |
-| Clusterização de segmentos (k-means/hierárquico) | C | Reimplementar+validar sklearn em JS não se paga; valor offline baixo |
-| Seleção automática de indicadores (IV/PSI em massa) | B | `computeIV` já existe; o sidecar amplia o nº de colunas×bins |
-| Frente 5 (busca de estratégias, re-simulação por combinação) | B (pós-H9) | Exige motor de simulação em Python com GATE de paridade — investimento da Sessão H9 |
-| Bases 10MM+ linhas | B | Browser abre amostra declarada; sidecar processa a íntegra |
+| Descoberta de Segmentos depth 3–4 | B | Motor JS já existe (depth 2); sidecar libera depth 3–4 e teto maior de candidatos |
+| Clusterização de segmentos (k-means/hierárquico) | B | Baseline JS sobre a base **agregada** pelas dimensões (pós-agregação o nº de pontos é pequeno), com teto de dimensões/valores; sidecar remove tetos e acelera |
+| Seleção automática de indicadores (IV/PSI em massa) | B | `computeIV` já existe; browser limita nº de colunas×bins; sidecar amplia |
+| Frente 5 (busca de estratégias, re-simulação por combinação) | B (pós-H9) | Browser: lotes pequenos via pool H3; lotes grandes exigem o motor Python com GATE de paridade — investimento da Sessão H9 |
+| Bases acima da zona de conforto (~5MM; alvo P2 = 7MM) | B | Browser abre amostra declarada (com a recomendação DEC-HX-009); sidecar processa a íntegra |
 
 ## 8. Comunicação Browser ⇄ Python (protocolo v1)
 
@@ -342,9 +386,17 @@ upload em chunks com progresso ("Enviando base ao Motor Python — só na primei
 vez") → jobs seguintes reusam o `datasetId`.
 
 **Job com fallback:** UI posta tarefa → router consulta classe/capacidades →
-sidecar: cria job + polling; **erro/timeout/queda no meio** ⇒ Classe B re-executa no
-worker com os tetos (aviso discreto "concluído no modo browser"), Classe C falha
-declarada com motivo. Resultado entregue à UI **no mesmo formato do worker**.
+sidecar: cria job + polling; **erro/timeout/queda no meio** ⇒ re-executa no worker
+com os tetos declarados (aviso discreto "concluído no modo browser"). Com a paridade
+total (P4) **sempre existe um caminho browser** — nenhuma tarefa falha por ausência
+do sidecar. Resultado entregue à UI **no mesmo formato do worker**.
+
+**Recomendação no carregamento (DEC-HX-009):** wizard passo 2 (linhas × colunas ×
+dtypes conhecidos) ou abertura de projeto → estimativa de RAM colunar (mesma conta do
+orçamento da H2) acima da zona de conforto (~5MM linhas / ~1,2GB) → banner
+recomendando ligar o Motor Python, com as opções "continuar no browser (amostragem/
+tetos declarados)" e "como ligar o motor" (preferências / `instalar_motor`). Nunca
+bloqueia o import.
 
 **Desligar:** preferência off ⇒ router nem tenta; tudo volta ao comportamento atual.
 Não há estado a migrar (dados do sidecar são efêmeros em RAM).
@@ -367,7 +419,8 @@ Não há estado a migrar (dados do sidecar são efêmeros em RAM).
 | Tick de edição 1MM | ~0,7s | ~0,7s (inalterado — não roteia) | inalterado |
 | Validação de N recomendações | N × re-simulação sequencial | ÷ cores (pool H3) | ÷ cores + vetorização |
 | Descoberta depth 3–4, 1MM | inviável (teto) | inviável (teto declarado) | segundos (numpy + multicore) |
-| Clusterização | inexistente | inexistente | sklearn nativo |
+| Clusterização | inexistente | baseline JS sobre agregados, tetos declarados (P4) | sem tetos, vetorizada |
+| Base 7MM (alvo P2) | OOM | abre com dieta agressiva ou amostra declarada + recomendação DEC-HX-009 | íntegra (RAM do processo, fora da aba) |
 | Base 10MM | OOM | amostra declarada | íntegra (RAM do processo, fora da aba) |
 
 **Não esperar:** ganho do sidecar em tarefas curtas (<200ms — o roundtrip HTTP+
@@ -379,10 +432,11 @@ mais lento que o worker JS — ver DEC-HX-004).
 | Risco | Mitigação |
 |---|---|
 | **Drift numérico entre motores** (o pior risco) | DEC-HX-005: fixtures douradas cross-runtime como GATE bloqueante; sem GATE, não roteia. Dupla implementação restrita ao mínimo (Classe A só no worker até H9) |
-| Ambiente sem pip/internet | Wheels offline no zip (`release/python/wheels/`); falha na instalação ⇒ tier stdlib ⇒ falha ⇒ modo browser. Nunca um estado quebrado |
+| `pip` liberado mas pacote específico falha (P1) | **Sonda de ambiente (Sessão HP) antes da Fase 1** mede o que instala de fato na máquina corporativa; `instalar_motor` tenta o índice primeiro e cai para as wheels offline do zip (`release/python/wheels/`); falha total ⇒ tier stdlib ⇒ modo browser. Nunca um estado quebrado |
+| Custo de manter GATEs duplos (paridade total, P4) | Aceito conscientemente na validação das premissas; mitigado pelas MESMAS fixtures douradas alimentando Vitest e pytest (uma fonte, dois consumidores) e por baselines browser que compartilham primitivas já testadas do worker |
 | Antivírus/política corporativa bloqueia o processo Python | Já é risco do `serve.py` atual (mesmo processo); documentar no manual; modo browser é o fallback universal |
 | Porta ocupada / múltiplas instâncias | Porta configurável; token por instância; health-check identifica a versão |
-| Complexidade de manter dois runtimes | Classes A/B/C limitam o que é duplicado; protocolo versionado; pytest no CI ao lado do Vitest |
+| Complexidade de manter dois runtimes | Classes A/B limitam o que é duplicado; protocolo versionado; pytest no CI ao lado do Vitest |
 | UX confusa ("por que o resultado demorou/mudou?") | Badge de executor sempre visível; resultados **idênticos por contrato** (GATE); degradações sempre declaradas em texto |
 | Segurança do endpoint local | DEC-HX-008 (loopback + token + sem CORS + RAM-only); revisão na frente de segurança |
 
@@ -393,8 +447,10 @@ mais lento que o worker JS — ver DEC-HX-004).
    tier stdlib disponível sem passo extra; validações em lote ganham paralelismo.
 3. **Analista power-user:** roda `instalar_motor.bat` uma vez (venv + wheels
    offline) → tier full → Descoberta profunda, clusterização, bases grandes.
-4. **Base 10MM:** wizard detecta o tamanho, oferece "abrir amostra no navegador" ou
-   "processar íntegra no Motor Python" (se disponível).
+4. **Base acima da zona de conforto (5MM+; alvo P2 = 7MM):** o wizard detecta o
+   tamanho no carregamento e **recomenda proativamente** ligar o Motor Python
+   (DEC-HX-009), oferecendo "abrir amostra no navegador (limites declarados)" ou
+   "processar íntegra no Motor Python" (se disponível/instalável). Nunca bloqueia.
 
 ## 14. Cenários de teste (GATEs por fase)
 
@@ -407,7 +463,10 @@ mais lento que o worker JS — ver DEC-HX-004).
 - **Fase 2:** fixtures douradas por tarefa portada (DEC-HX-005); Descoberta depth 2
   idêntica nos dois motores sobre as fixtures de `segmentDiscovery.test.js`;
   determinismo do sidecar (mesma entrada ⇒ mesmo resultado, incl. seeds fixas em
-  clusterização).
+  clusterização). **Paridade total (P4):** toda análise nova tem GATE browser
+  (Vitest, baseline com tetos) E GATE Python (pytest) sobre as **mesmas** fixtures
+  douradas — dentro dos tetos do browser, os dois motores produzem o mesmo resultado
+  número a número.
 
 ## 15. Reutilização de componentes existentes
 
@@ -418,7 +477,7 @@ mais lento que o worker JS — ver DEC-HX-004).
 | `serializeCsvStore` + `buildProjectJSONChunks` (M3) | Formato de upload do dataset — zero formato novo |
 | `csvStoreVersion` (worker) | Chave de identidade/hash do dataset |
 | Padrão `AIProvider`/ADR-007 | Molde do `ComputeProvider` (opt-in, degradação limpa, capability-gated) |
-| Padrão botões ✨ desabilitados com motivo | UX da Classe C sem sidecar |
+| Padrão botões ✨ desabilitados com motivo | UX do estado transitório "baseline browser ainda não entregue" (DEC-HX-007) e dos avisos de teto declarado |
 | Modais `goalSeekModal`/`segmentDiscoveryModal` (loading/progresso) | UX de jobs longos |
 | GATEs/fixtures do Vitest | Fonte das fixtures douradas cross-runtime |
 | COOP/COEP (Fase 2 da Otimização) | Pré-requisito do pool de workers com SAB (H3) |
@@ -431,8 +490,12 @@ mais lento que o worker JS — ver DEC-HX-004).
   durante o upload (streaming), ecoado pelo cliente para verificação.
 - No tier full, converter colunas dict para `pandas.Categorical`/arrays numpy uma vez
   no registro do dataset — os jobs subsequentes operam vetorizado.
-- Clusterização: sempre com `random_state` fixo derivado do hash do dataset + params
-  (determinismo é contrato da casa).
+- Clusterização: sempre com seed fixa derivada do hash do dataset + params
+  (determinismo é contrato da casa). Com a paridade total (P4), o algoritmo-base
+  (Lloyd + inicialização k-means++ com PRNG **especificado**, ex.: mulberry32) é o
+  MESMO nos dois runtimes — é isso que torna o GATE cross-runtime possível; sklearn
+  entra como acelerador/extra (silhueta, hierárquico), não como definição do
+  resultado.
 - Futuro (não v1): Apache Arrow IPC como transporte alternativo negociado via
   `capabilities` (elimina base64 quando ambos os lados suportarem).
 
@@ -440,16 +503,20 @@ mais lento que o worker JS — ver DEC-HX-004).
 
 | Fase | Sessões ([[Hibrido-Prompts-Sessoes]]) | Entrega |
 |---|---|---|
+| **Sonda (a qualquer momento)** | HP (sonda do ambiente Python — pode rodar hoje, antes de qualquer código) | Relatório do que instala/importa na máquina corporativa real (P1); decide se as wheels offline são necessárias |
 | **Fase 0 — Browser primeiro** | H0 (telemetria), H1 (fluidez M12–M14), H2 (dieta de memória), H3 (pool de workers) | Headroom até ~5MM linhas; validações paralelas; números reais de custo por tarefa |
-| **Fase 1 — Fundação híbrida** | H4 (ComputeRouter), H5 (sidecar v1), H6 (UX do motor) | Sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark |
-| **Fase 2 — Cargas reais** | H7 (Descoberta profunda, Classe B), H8 (clusterização/stats, Classe C) | Primeiro valor de usuário do híbrido |
-| **Fase 3 — Paridade do motor (opcional)** | H9 (motor de simulação em Python + GATE) | Habilita Frente 5 e bases 10MM+ de ponta a ponta |
+| **Fase 1 — Fundação híbrida** | H4 (ComputeRouter), H5 (sidecar v1), H6 (UX do motor + recomendação DEC-HX-009) | Sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark |
+| **Fase 2 — Cargas reais** | H7 (Descoberta profunda), H8 (clusterização/stats — baseline browser + sidecar, paridade total) | Primeiro valor de usuário do híbrido |
+| **Fase 3 — Paridade do motor (opcional)** | H9 (motor de simulação em Python + GATE) | Habilita Frente 5 e bases 7–10MM+ de ponta a ponta |
 
 A Fase 0 tem valor independente: se o híbrido for adiado, nada dela é desperdiçado.
-As Fases 1–2 só começam quando um épico Classe B/C for priorizado de fato.
+Com o alvo de projeto de ~7MM de linhas (P2), as Fases 1–2 têm gatilho de produto
+próprio — o próprio alvo as justifica, sem esperar um épico analítico ser priorizado.
+A sonda HP é ortogonal e barata: rodá-la cedo tira o risco de ambiente do caminho.
 
 ---
 
-*Documento gerado a partir de leitura integral da wiki e do código em jul/2026.
-Plano de execução por sessões (com prompts e tags de modelo) em
-[[Hibrido-Prompts-Sessoes]].*
+*Documento gerado a partir de leitura integral da wiki e do código em jul/2026;
+premissas P1–P4 validadas com o usuário em 09/07/2026 (pip com sonda, alvo 7MM,
+browser-first confirmado, paridade total + recomendação proativa). Plano de execução
+por sessões (com prompts e tags de modelo) em [[Hibrido-Prompts-Sessoes]].*

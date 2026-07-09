@@ -80,12 +80,16 @@ da pirâmide de maturidade ([[Epicos-CopilotoIA]]).
 plano de sessões em [[Hibrido-Prompts-Sessoes]]. Motivação: a evolução para
 plataforma analítica (clusterização, seleção de indicadores, bases menos
 sumarizadas, Frente 5) traz carga multiplicativa e teto de memória que o navegador
-sozinho não sustenta acima de ~5MM de linhas. Princípio (espelho do ADR-007): o
-browser continua o caminho padrão e completo; um sidecar Python local (extensão do
-`serve.py` do release), **opt-in**, amplia limites e destrava análises novas —
-paridade numérica provada por GATEs cross-runtime. A Fase 0 do plano (telemetria,
+sozinho não sustenta acima de ~5MM de linhas — e o **alvo de projeto validado é
+~7MM** (1–2 anos), o que dá ao épico gatilho de produto próprio. Princípio (espelho
+do ADR-007): o browser continua o caminho padrão e completo; um sidecar Python local
+(extensão do `serve.py` do release), **opt-in**, amplia limites e acelera —
+**paridade total** (premissa validada): toda análise nova tem baseline browser com
+tetos declarados, nada é exclusivo do Python; paridade numérica provada por GATEs
+cross-runtime; e o app **recomenda proativamente** ligar o motor ao carregar uma
+base que o browser não sustentará (DEC-HX-009). A Fase 0 do plano (telemetria,
 fluidez M12–M14, dieta de memória, pool de workers) é browser-pura e tem valor
-independente do híbrido.
+independente do híbrido; a sonda de ambiente (Sessão HP) pode rodar desde já.
 
 ---
 
