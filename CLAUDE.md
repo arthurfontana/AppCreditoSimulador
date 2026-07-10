@@ -22,6 +22,7 @@ AppCreditoSimulador/
 │   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
 │   ├── goalSeek.js                # applyGoalSeekMoves — materialização de movimentos do Goal Seek (compartilhado worker/main)
 │   ├── policySimplify.js          # applySimplifyCandidates — materialização de candidatos de Simplificação (compartilhado worker/main)
+│   ├── computeRouter.js           # Execução Híbrida H4 — ComputeRouter + contrato ComputeProvider (worker default / sidecar Python opt-in)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
 │   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget
@@ -38,6 +39,7 @@ AppCreditoSimulador/
 │   ├── segmentDiscovery.test.js  # GATE Copiloto Sessão 10: subgrupo plantado achado com condições exatas; homogênea ⇒ zero; agregados ≡ matchLensRule; dispersion ≡ contagem por terminal; p-value binomial ≡ controle; FDR (BH); shrinkage rebaixa nicho; escopo por nó ≡ sub-base; dedup; determinismo
 │   └── workerPool.test.js         # GATE Execução Híbrida H3: pool ≡ single-worker número a número (Descoberta + Combinada) via pool mock (jobs fora de ordem); determinismo sob ordens de conclusão diferentes; fallback (pool null ≡ síncrono)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
+│   └── computeRouter.test.js      # GATE Execução Híbrida H4: Classe A jamais roteia; detecção (indisponível/lento/versão errada) silenciosa; Classe B sidecar (dataset por hash HEAD→POST, progresso) com fallback transparente na queda do job
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
 │   └── wiki/                     # Documentação sincronizada com GitHub Wiki
@@ -1234,6 +1236,62 @@ fallback e contrato dos testes.
   determinismo sob ordens de conclusão diferentes (reverse ≡ shuffle ≡ síncrono), (3) fallback
   (pool === null ≡ síncrono).
 
+## ComputeRouter (Execução Híbrida H4 — `src/computeRouter.js`)
+
+Fronteira única (DEC-HX-002) que decide, **por tarefa**, o executor: o Web Worker (default,
+completo) ou o **sidecar Python opt-in** (aceleração/ampliação de limites). A UI posta a mesma
+mensagem e recebe o **mesmo payload `*_RESULT`** — quem computou é invisível. Ver
+`docs/wiki/Arquitetura-Execucao-Hibrida.md` (DEC-HX-002/004/006/007, §8–§10). **Sessão H4 = só
+a costura do front (módulo + GATE), com sidecar mockado**; o sidecar Python (H5) e a UX/badge/
+recomendação (H6) vêm depois. Módulo **puro**, independente de React/`App.jsx` (sem ciclo de
+import): a main injeta worker, provider sidecar e o leitor da preferência; os chunks de dataset
+chegam por callback (`buildChunks`), então o router não conhece `columnar.js`.
+
+- **Interface `ComputeProvider`**: `health()` · `capabilities()` · `registerDataset({hash,
+  buildChunks})` · `runJob(task, params, {onProgress, signal, datasetId})` · `cancelJob(jobId)`.
+- **`createWorkerProvider(worker)`**: adapter fino do `postMessage` atual — **payloads
+  intocados** (DEC-HX-002). Correlaciona `runJob(task,…)` com a `*_RESULT` correspondente
+  (`RESULT_TYPE`/`resultTypeFor`) por FIFO (cada task é singular por gesto). Usa
+  `addEventListener` (aditivo): coexiste com o `onmessage` do App, resolve só as próprias
+  promessas, ignora mensagens sem promessa pendente. `registerDataset` é no-op (a base já vive
+  no worker via `UPDATE_CSV_STORE`); `cancelJob` no-op.
+- **`createSidecarProvider({url, token, fetchImpl?, pollIntervalMs?, healthTimeoutMs?, sleep?})`**:
+  fetch em `http://127.0.0.1` (URL vazia ⇒ mesma origem no release), header `X-Compute-Token` em
+  tudo exceto `/health`. `registerDataset` faz **HEAD `/datasets/{hash}` antes de POST**
+  (DEC-HX-006 — 200 pula o upload; 404 ⇒ `POST /datasets?hash=` com os chunks do
+  `serializeCsvStore`/M3 como corpo). `runJob`: `POST /jobs` → **polling** `GET /jobs/{id}` a
+  cada `pollIntervalMs` (~500ms) reportando `onProgress`; erro de rede/queda no meio ⇒ o await
+  **rejeita** (⇒ fallback do router); `signal` aborta e dispara `DELETE /jobs/{id}`.
+  `fetchImpl`/`sleep` são injetáveis (teste sem Python).
+- **Tabela de roteamento `TASK_CLASS`/`classOf` (DEC-HX-007, paridade total)**: **Classe A** =
+  todo o core de hoje (tick, overlay, otimizadores, Goal Seek, Simplify, DocGen, Descoberta
+  depth≤2, …) ⇒ **sempre worker**; o tick de edição e qualquer resposta síncrona a gesto
+  **jamais** roteiam (regra de ouro). **Classe B** = cargas ampliadas/análises novas (nenhuma em
+  produção ainda; `echo_stats` é o benchmark da H5) ⇒ tenta o sidecar com **fallback
+  transparente** ao worker. Default defensivo: task desconhecida ⇒ Classe A (nunca vaza pro
+  sidecar). **Nenhuma tarefa exige o sidecar** — sempre há caminho browser.
+- **`createComputeRouter({worker, sidecar?, getPreference, dataset?, protocolVersion?})`**:
+  `detect()` faz o pareamento no boot (§9) — só quando a preferência está ligada: `health`
+  (timeout 1s) → checa `protocolVersion` (mismatch ⇒ indisponível, nunca "tenta mesmo assim") →
+  token + `capabilities`; **ausência é estado normal e silencioso** (`detect` nunca lança;
+  `reason` ∈ `disabled|no_sidecar|unreachable|protocol_mismatch|ok`). `run(task, params, opts)`
+  aplica a tabela e devolve `{via:'worker'|'sidecar', result, fellBack?, error?}` — `result`
+  **sempre** no formato `*_RESULT`. `canRouteToSidecar(task)` = Classe B ∧ preferência ligada ∧
+  `status.available`.
+- **Preferência `computeSidecar {enabled, url}`** (estado `computeSidecar` em `App.jsx`, default
+  **off**): persistida dentro do contêiner `preferences` do Projeto (`buildProjectPayload`/
+  `loadProject`, **sem bump de schema**). Com desligado o router nem detecta e nada muda — o app
+  se comporta exatamente como antes (o wiring vivo do router entra na H5/H6).
+- **`hashChunks(chunks)`**: hash de conteúdo FNV-1a 32-bit hex dos chunks do dataset — papel do
+  `csvStoreVersion` (DEC-HX-006), computável na main; determinístico e sensível à fronteira dos
+  chunks (o sidecar reusa o dataset por HEAD 200).
+- **Teste**: `tests/computeRouter.test.js` — GATE H4 com **fetch mockado** (servidor fake em
+  memória): (1) Classe A jamais roteia mesmo com sidecar disponível; (2) detecção
+  indisponível/lento(timeout)/versão errada ⇒ status indisponível e silencioso; (3) Classe B
+  roteia pro sidecar com dataset por hash (HEAD 404→POST; HEAD 200 pula upload) e result idêntico
+  ao contrato; (4) queda no meio do job ⇒ fallback transparente ao worker; (5) preferência off ⇒
+  tudo no worker; WorkerProvider posta payload intocado e correlaciona a `*_RESULT`.
+
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
 - Estado local (array) persistido em `localStorage` implicitamente (futuro)
@@ -1413,7 +1471,8 @@ terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados comp
 (`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`) · Dashboard
 (`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
-negócio · preferências de aresta/espessura · viewport · aba ativa · painel colapsado.
+negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url}`, H4) ·
+viewport · aba ativa · painel colapsado.
 
 ## Auto-persistência de sessão (`sessionStorage`)
 
@@ -1722,7 +1781,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/hybrid-execution-worker-pool-09f0u4`
+`claude/computerouter-hybrid-execution-et4c6h`
 
 ## Roadmap futuro (não implementado)
 

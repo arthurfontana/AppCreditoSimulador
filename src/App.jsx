@@ -4304,6 +4304,11 @@ export default function App() {
   const [showEdgeVol,       setShowEdgeVol]        = useState(true);
   const [showEdgeInadReal,  setShowEdgeInadReal]   = useState(true);
   const [showEdgeInadInf,   setShowEdgeInadInf]    = useState(true);
+  // Execução Híbrida H4 — preferência do Motor Python (sidecar opt-in). Default OFF:
+  // com desligado o ComputeRouter nem tenta detectar; tudo roda no worker (DEC-HX-001).
+  // Persistida no contêiner `preferences` do Projeto (sem bump de schema). A UX (toggle,
+  // URL/token, badge) e o wiring do router vêm nas Sessões H5/H6.
+  const [computeSidecar,    setComputeSidecar]     = useState({ enabled: false, url: '' });
   // Feature: tooltips
   const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
   // Optimization modal
@@ -6223,6 +6228,7 @@ export default function App() {
         showEdgeVol,
         showEdgeInadReal,
         showEdgeInadInf,
+        computeSidecar,
       },
     };
   };
@@ -6321,6 +6327,12 @@ export default function App() {
     if (typeof pref.showEdgeVol === 'boolean') setShowEdgeVol(pref.showEdgeVol);
     if (typeof pref.showEdgeInadReal === 'boolean') setShowEdgeInadReal(pref.showEdgeInadReal);
     if (typeof pref.showEdgeInadInf === 'boolean') setShowEdgeInadInf(pref.showEdgeInadInf);
+    if (pref.computeSidecar && typeof pref.computeSidecar === 'object') {
+      setComputeSidecar({
+        enabled: pref.computeSidecar.enabled === true,
+        url: typeof pref.computeSidecar.url === 'string' ? pref.computeSidecar.url : '',
+      });
+    }
     // Limpa estado transitório de seleção/edição e o histórico (que é por
     // canvas e ficaria inconsistente após substituir todos os canvas).
     setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
