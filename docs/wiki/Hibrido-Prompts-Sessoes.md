@@ -592,7 +592,7 @@ os GATEs antes de propor.
 ## Checklist de Execução
 
 - [x] **Sessão HP** — Sonda do ambiente Python corporativo 🏷️ `[SONNET]` ✅ *(concluída 09/07/2026 — 4/4 pacotes OK via índice; sklearn com cold start de antivírus; wheels offline dispensáveis)*
-- [ ] **Sessão H0** — Telemetria local de custo 🏷️ `[SONNET]`
+- [x] **Sessão H0** — Telemetria local de custo 🏷️ `[SONNET]` ✅ *(concluída 10/07/2026 — wrapper fino + painel `?debug=perf`; revisão pós-sessão trocou o pareamento request/response de slot único por FILA FIFO por tipo: o debounce de 300ms não impede sobreposição de requests do mesmo tipo em base grande (tick ~0,7s), e o slot único subestimava justamente os ticks pesados)*
 - [ ] **Sessão H1** — Fluidez (M12+M13+M14) 🏷️ `[OPUS]`
 - [ ] **Sessão H2** — Dieta de memória (2–5MM linhas; alvo P2 = 7MM) 🏷️ `[OPUS]`
 - [ ] **Sessão H3** — Pool de workers 🏷️ `[OPUS]`
