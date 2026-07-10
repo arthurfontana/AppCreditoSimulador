@@ -5,7 +5,7 @@
 // Accessor colunar (Otimização de Memória — Fase 1). Os hot paths abaixo leem
 // as células via cellStr/cellNum/rowCount, que funcionam tanto sobre a base
 // colunar (produção) quanto sobre o legado string[][] (testes / GATE).
-import { cellStr, cellNum, rowCount, isColumnar } from './columnar.js';
+import { cellStr, cellNum, rowCount, isColumnar, buildCsvStoreMessage } from './columnar.js';
 import { applyGoalSeekMoves } from './goalSeek.js';
 import { applySimplifyCandidates } from './policySimplify.js';
 
@@ -3907,12 +3907,30 @@ function segGoalSeekObjective(finding, target, ctx) {
   return { target: ctx.spec.id === 'inadInferida' ? 'inadInferida' : 'inadReal', direction: 'decrease', magnitude: null, minimize };
 }
 
-// Anexa `recommendation` (patch + delta validado por re-simulação) aos achados acionáveis.
-// Valida só os top-N (SEG_MAX_VALIDATE) — o card só exibe delta quando validado (DEC-SD-003).
-function buildSegmentRecommendations(shapes, conns, csvStore, findings, ctx) {
-  const baselineSim = runSimulation(shapes, conns, csvStore);
-  const baseSnap = segSimSnapshot(baselineSim);
-  let validated = 0;
+// Uma validação = aplica os moves, re-simula e tira o snapshot. É a UNIDADE DE SHARD do pool
+// (Execução Híbrida H3): cada worker do pool roda EXATAMENTE isto para um candidato inteiro —
+// nenhuma paralelização intra-simulação. Pura em (shapes, conns, csvStore, moves), então o
+// resultado independe de qual worker rodou e de quando terminou — base do determinismo do pool.
+function segValidateMoves(shapes, conns, csvStore, moves) {
+  const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, moves);
+  return segSimSnapshot(runSimulation(ps, pc, csvStore));
+}
+
+// Envelope seguro {snapshot} | {error} — espelha o try/catch por candidato do caminho
+// original (um candidato que estoura vira delta null, sem derrubar o lote inteiro).
+function segValidateMovesSafe(shapes, conns, csvStore, moves) {
+  try { return { snapshot: segValidateMoves(shapes, conns, csvStore, moves) }; }
+  catch (err) { return { error: String((err && err.message) || err) }; }
+}
+
+// PLANO (puro, sem re-simular candidatos): monta o esqueleto de `recommendation` em cada
+// achado acionável e devolve os JOBS de validação (só os top-N acionáveis) + o baseSnap. Um
+// job = {id: finding.id, moves}. Teto SEG_MAX_VALIDATE idêntico ao original (o card só exibe
+// delta validado). Não re-simula nada — a execução dos jobs é o passo paralelizável.
+function segPlanRecommendations(shapes, conns, csvStore, findings, ctx) {
+  const baseSnap = segSimSnapshot(runSimulation(shapes, conns, csvStore));
+  const jobs = [];
+  let planned = 0;
   for (const f of findings) {
     if (f.code === 'asis_divergence' || f.code === 'anomaly') { f.recommendation = null; continue; }
     const target = segFindingTarget(f);
@@ -3922,7 +3940,7 @@ function buildSegmentRecommendations(shapes, conns, csvStore, findings, ctx) {
     const move = coincidence || segBuildBreakMove(f, target, ctx);
     if (!move) { f.recommendation = null; continue; }
 
-    const rec = {
+    f.recommendation = {
       kind: coincidence ? 'goal_seek_move' : 'add_break',
       targetTerminal: target,
       actionable: !f.locked,
@@ -3931,24 +3949,55 @@ function buildSegmentRecommendations(shapes, conns, csvStore, findings, ctx) {
       goalSeek: segGoalSeekObjective(f, target, ctx),
       delta: null,
     };
-    // Só re-simula os acionáveis top-N (o card só mostra delta validado).
-    if (rec.actionable && validated < SEG_MAX_VALIDATE) {
-      try {
-        const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, [move]);
-        const afterSim = runSimulation(ps, pc, csvStore);
-        const after = segSimSnapshot(afterSim);
-        rec.delta = {
-          before: baseSnap, after,
-          approvalDelta: after.approvalRate - baseSnap.approvalRate,
-          inadRealDelta: (after.inadReal ?? 0) - (baseSnap.inadReal ?? 0),
-          inadInfDelta: (after.inadInferida ?? 0) - (baseSnap.inadInferida ?? 0),
-          movedQty: Math.abs(after.approvedQty - baseSnap.approvedQty),
-        };
-        validated++;
-      } catch { rec.delta = null; }
+    // Só os acionáveis top-N viram job de re-simulação.
+    if (f.recommendation.actionable && planned < SEG_MAX_VALIDATE) {
+      jobs.push({ id: f.id, moves: [move] });
+      planned++;
     }
-    f.recommendation = rec;
   }
+  return { baseSnap, jobs };
+}
+
+// PREENCHIMENTO (puro): grava rec.delta a partir dos snapshots validados. `snapById`:
+// Map(finding.id → {snapshot}|{error}). Achado não validado (além do top-N, ou que estourou)
+// fica com delta null — idêntico ao try/catch original. Consumido por id (independe da ordem
+// em que os jobs terminaram — determinismo do pool).
+function segFillRecommendationDeltas(findings, baseSnap, snapById) {
+  for (const f of findings) {
+    const rec = f.recommendation;
+    if (!rec) continue;
+    const res = snapById.get(f.id);
+    if (!res || !res.snapshot) continue;
+    const after = res.snapshot;
+    rec.delta = {
+      before: baseSnap, after,
+      approvalDelta: after.approvalRate - baseSnap.approvalRate,
+      inadRealDelta: (after.inadReal ?? 0) - (baseSnap.inadReal ?? 0),
+      inadInfDelta: (after.inadInferida ?? 0) - (baseSnap.inadInferida ?? 0),
+      movedQty: Math.abs(after.approvedQty - baseSnap.approvedQty),
+    };
+  }
+}
+
+// Anexa `recommendation` (patch + delta validado por re-simulação) aos achados acionáveis.
+// Valida só os top-N (SEG_MAX_VALIDATE) — o card só exibe delta quando validado (DEC-SD-003).
+// SÍNCRONO — referência canônica, caminho single-worker e contrato dos testes (inalterado em
+// números): plano → validação inline sequencial → preenchimento.
+function buildSegmentRecommendations(shapes, conns, csvStore, findings, ctx) {
+  const { baseSnap, jobs } = segPlanRecommendations(shapes, conns, csvStore, findings, ctx);
+  const snapById = new Map();
+  for (const j of jobs) snapById.set(j.id, segValidateMovesSafe(shapes, conns, csvStore, j.moves));
+  segFillRecommendationDeltas(findings, baseSnap, snapById);
+  return baseSnap;
+}
+
+// PARALELO (H3) — mesmo plano/preenchimento; só a execução dos jobs vai ao pool (shard por
+// candidato). `pool` null/indisponível ⇒ cai no inline (fallback transparente). Como os jobs
+// são puros e re-ordenados por id ao consumir, o resultado é idêntico ao sequencial.
+async function buildSegmentRecommendationsPooled(shapes, conns, csvStore, findings, ctx, pool) {
+  const { baseSnap, jobs } = segPlanRecommendations(shapes, conns, csvStore, findings, ctx);
+  const snapById = await runValidationJobsVia(pool, shapes, conns, csvStore, jobs);
+  segFillRecommendationDeltas(findings, baseSnap, snapById);
   return baseSnap;
 }
 
@@ -4129,23 +4178,18 @@ function attachStability(findings, ctx) {
 // valida por UMA re-simulação real (nunca a soma dos deltas individuais: aplicar A muda a
 // população que chega ao ponto de B). Declara a interação quando o combinado diverge da
 // soma. `applies` = [{moves}] das recomendações selecionadas.
-function computeSegmentCombined(shapes, conns, csvStore, applies) {
-  const baseSnap = segSimSnapshot(runSimulation(shapes, conns, csvStore));
-  const list = (applies || []).filter(a => a && Array.isArray(a.moves));
-  // Delta individual de cada patch (isolado) — para comparar com o combinado.
+// Monta o resultado da aplicação combinada a partir dos snapshots (puro). `individualSnaps[i]`
+// é o snapshot de list[i] isolado; `combinedSnap` é o de TODOS os moves em sequência (UMA
+// re-simulação). Fonte única do cálculo de somas/interação (sync e pooled).
+function segAssembleCombined(baseSnap, list, individualSnaps, combinedSnap) {
   let sumApprovalDelta = 0, sumMovedQty = 0;
-  const individual = list.map(a => {
-    const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, a.moves);
-    const snap = segSimSnapshot(runSimulation(ps, pc, csvStore));
+  const individual = list.map((a, i) => {
+    const snap = individualSnaps[i];
     const approvalDelta = snap.approvalRate - baseSnap.approvalRate;
     const movedQty = Math.abs(snap.approvedQty - baseSnap.approvedQty);
     sumApprovalDelta += approvalDelta; sumMovedQty += movedQty;
     return { approvalDelta, movedQty };
   });
-  // Combinado: TODOS os moves em sequência sobre o MESMO canvas → uma re-simulação.
-  const allMoves = list.flatMap(a => a.moves);
-  const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, allMoves);
-  const combinedSnap = segSimSnapshot(runSimulation(ps, pc, csvStore));
   const combinedApprovalDelta = combinedSnap.approvalRate - baseSnap.approvalRate;
   const combinedMovedQty = Math.abs(combinedSnap.approvedQty - baseSnap.approvedQty);
   const denom = Math.max(1, Math.abs(sumMovedQty));
@@ -4167,15 +4211,49 @@ function computeSegmentCombined(shapes, conns, csvStore, applies) {
   };
 }
 
-// Ponto de entrada — orquestra os quatro estágios (padrão computeSimplify/computePolicyDoc).
-function computeSegmentDiscovery(shapes, conns, csvStore, scope, params = {}) {
+// SÍNCRONO — inalterado em números. baseSnap + N re-simulações INDIVIDUAIS + 1 COMBINADA,
+// todas inline. Referência canônica / fallback / contrato dos testes.
+function computeSegmentCombined(shapes, conns, csvStore, applies) {
+  const baseSnap = segSimSnapshot(runSimulation(shapes, conns, csvStore));
+  const list = (applies || []).filter(a => a && Array.isArray(a.moves));
+  const individualSnaps = list.map(a => segValidateMoves(shapes, conns, csvStore, a.moves));
+  const combinedSnap = segValidateMoves(shapes, conns, csvStore, list.flatMap(a => a.moves));
+  return segAssembleCombined(baseSnap, list, individualSnaps, combinedSnap);
+}
+
+// PARALELO (H3) — as N re-simulações INDIVIDUAIS (independentes) são shardadas no pool; a
+// re-simulação COMBINADA continua UMA só, inline (nunca shardada — é o contrato da DEC-SD-003:
+// aplicar A muda a população que chega a B). Job com erro/ausente é recomputado inline para o
+// resultado ficar completo (≡ ao sync). `pool` null ⇒ tudo inline (fallback transparente).
+async function computeSegmentCombinedPooled(shapes, conns, csvStore, applies, pool) {
+  const baseSnap = segSimSnapshot(runSimulation(shapes, conns, csvStore));
+  const list = (applies || []).filter(a => a && Array.isArray(a.moves));
+  const jobs = list.map((a, i) => ({ id: i, moves: a.moves }));
+  const snapById = await runValidationJobsVia(pool, shapes, conns, csvStore, jobs);
+  const individualSnaps = list.map((a, i) => {
+    const res = snapById.get(i);
+    return res && res.snapshot ? res.snapshot : segValidateMoves(shapes, conns, csvStore, a.moves);
+  });
+  // Combinado NÃO vai ao pool — é uma única re-simulação por definição.
+  const combinedSnap = segValidateMoves(shapes, conns, csvStore, list.flatMap(a => a.moves));
+  return segAssembleCombined(baseSnap, list, individualSnaps, combinedSnap);
+}
+
+// Estágios 1–3 + asis/anomaly/estabilidade, SEM as recomendações — parte comum ao ponto de
+// entrada síncrono e ao paralelo (H3), onde só a validação das recomendações é offloadada ao
+// pool. `generatedAt` é gravado uma vez aqui (mesmo contrato do original). As recomendações
+// são anexadas em `allFindings` in-place depois; `model.findings` referencia o mesmo array.
+function segBuildModelWithoutRecs(shapes, conns, csvStore, scope, params) {
   const spec = resolveRiskMetric(params.riskMetric || 'inadReal');
   const disc = discoverSegments(shapes, conns, csvStore, scope, spec, params);
   if (disc.empty) {
     return {
-      version: '1.0', generatedAt: new Date().toISOString(),
-      scope: disc.scope, population: disc.population, findings: [],
-      diagnostics: { candidatesTested: 0, discarded: { lowVolume: 0, notSignificant: 0, unstable: 0, duplicate: 0, noOpportunity: 0 } },
+      empty: true,
+      model: {
+        version: '1.0', generatedAt: new Date().toISOString(),
+        scope: disc.scope, population: disc.population, findings: [],
+        diagnostics: { candidatesTested: 0, discarded: { lowVolume: 0, notSignificant: 0, unstable: 0, duplicate: 0, noOpportunity: 0 } },
+      },
     };
   }
   disc.ctx.scope = disc.scope;
@@ -4183,20 +4261,41 @@ function computeSegmentDiscovery(shapes, conns, csvStore, scope, params = {}) {
   const explained = disc.candidates.map(c => explainSegment(c, disc.ctx));
   const { findings, diagnostics } = prioritizeFindings(explained, disc.ctx, params);
 
-  // Estágio 4: asis_divergence + anomaly (sem patch) + recomendações validadas + estabilidade.
+  // Estágio 4: asis_divergence + anomaly (sem patch) + estabilidade (recomendações à parte).
   const asis = detectAsIsDivergence(disc.ctx);
   const anomalies = detectAnomalies(disc.ctx);
   const allFindings = [...findings, ...asis.findings, ...anomalies];
   attachStability(allFindings, disc.ctx);
-  buildSegmentRecommendations(shapes, conns, csvStore, allFindings, disc.ctx);
 
   return {
-    version: '1.0', generatedAt: new Date().toISOString(),
-    scope: disc.scope, population: disc.population,
-    metric: { id: spec.id, label: spec.label, direction: spec.direction },
-    findings: allFindings, diagnostics,
-    asIsTotals: asis.totals,
+    empty: false, ctx: disc.ctx, allFindings,
+    model: {
+      version: '1.0', generatedAt: new Date().toISOString(),
+      scope: disc.scope, population: disc.population,
+      metric: { id: spec.id, label: spec.label, direction: spec.direction },
+      findings: allFindings, diagnostics,
+      asIsTotals: asis.totals,
+    },
   };
+}
+
+// Ponto de entrada SÍNCRONO — orquestra os quatro estágios (padrão computeSimplify/
+// computePolicyDoc). Inalterado em números (contrato dos testes / fallback).
+function computeSegmentDiscovery(shapes, conns, csvStore, scope, params = {}) {
+  const built = segBuildModelWithoutRecs(shapes, conns, csvStore, scope, params);
+  if (built.empty) return built.model;
+  buildSegmentRecommendations(shapes, conns, csvStore, built.allFindings, built.ctx);
+  return built.model;
+}
+
+// Ponto de entrada PARALELO (H3) — mesma descoberta/explicação; só a validação das
+// recomendações (top-N re-simulações independentes) é shardada no pool. Usado pelo handler da
+// mensagem; cai no inline quando `pool` é null/indisponível (fallback transparente).
+async function computeSegmentDiscoveryPooled(shapes, conns, csvStore, scope, params = {}, pool = null) {
+  const built = segBuildModelWithoutRecs(shapes, conns, csvStore, scope, params);
+  if (built.empty) return built.model;
+  await buildSegmentRecommendationsPooled(shapes, conns, csvStore, built.allFindings, built.ctx, pool);
+  return built.model;
 }
 
 // ── COMPUTE_POLICY_INSIGHTS — Copiloto Sessão 1 (lint estrutural, DEC-IA-006) ────
@@ -5303,12 +5402,123 @@ function getTickResult(shapes, conns) {
   return value;
 }
 
+// ── Pool de workers (Execução Híbrida H3, §7.2) ─────────────────────────────────────
+// Cargas embaraçosamente paralelas — a validação por re-simulação dos top-N da Descoberta
+// (buildSegmentRecommendations) e as N re-simulações INDIVIDUAIS da aplicação combinada — são
+// shardadas POR CANDIDATO num pool de workers aninhados: cada worker roda `segValidateMoves`
+// para um candidato inteiro (sem paralelização intra-simulação). Criado LAZY na 1ª tarefa
+// paralela; base semeada UMA vez por versão (sob crossOriginIsolated os buffers SAB são
+// compartilhados sem cópia — Fase 2; senão structured clone copia UMA vez por worker). Falha
+// em qualquer passo ⇒ pool null ⇒ caminho inline (fallback transparente). Os pool-workers são
+// o MESMO script e só recebem UPDATE_CSV_STORE + POOL_JOB, então nunca criam pool próprio
+// (sem recursão) e são stateless por job (só a base é estado, referenciada por versão).
+function poolSize() {
+  const hc = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 2;
+  return Math.max(1, Math.min(4, hc - 1));
+}
+
+let simPool = undefined; // undefined = não tentado; null = indisponível; obj = pool vivo
+function getSimPool() {
+  if (simPool !== undefined) return simPool;
+  simPool = createSimPool();
+  return simPool;
+}
+
+function createSimPool() {
+  if (typeof Worker === 'undefined') return null; // sem worker aninhado (ex.: Node/jsdom)
+  let workers;
+  try {
+    const n = poolSize();
+    workers = [];
+    for (let i = 0; i < n; i++) {
+      const w = new Worker(new URL('./simulation.worker.js', import.meta.url), { type: 'module' });
+      workers.push({ w, onDone: null });
+    }
+  } catch {
+    return null; // worker aninhado não suportado neste ambiente — fallback inline
+  }
+  if (!workers.length) return null;
+  const pool = { workers, seededVersion: -1, wired: false, tail: null };
+  pool.runValidationJobs = (shapes, conns, jobs) => runValidationJobsOnPool(pool, shapes, conns, jobs);
+  return pool;
+}
+
+// Semeia a base nos pool-workers quando a versão mudou (idempotente por versão).
+function ensurePoolSeeded(pool) {
+  if (pool.seededVersion === csvStoreVersion) return;
+  const { payload } = buildCsvStoreMessage(workerCsvStore); // SAB compartilha; senão clona 1×
+  for (const slot of pool.workers) slot.w.postMessage(payload);
+  pool.seededVersion = csvStoreVersion;
+}
+
+// Roda os jobs [{id, moves}] no pool → Map(id → {snapshot}|{error}). As respostas chegam FORA
+// DE ORDEM (colhidas por id no Map), mas os consumidores leem por id em ordem determinística.
+// Serializa as chamadas por pool (`pool.tail`) para não corromper o slot.onDone entre tarefas.
+function runValidationJobsOnPool(pool, shapes, conns, jobs) {
+  const runOnce = () => new Promise((resolve) => {
+    ensurePoolSeeded(pool);
+    if (!pool.wired) {
+      for (const slot of pool.workers) {
+        slot.w.onmessage = (e) => {
+          if (!e.data || e.data.type !== 'POOL_JOB_RESULT') return;
+          const cb = slot.onDone; slot.onDone = null;
+          if (cb) cb(e.data.error ? { error: e.data.error } : { snapshot: e.data.snapshot });
+        };
+        slot.w.onerror = () => { const cb = slot.onDone; slot.onDone = null; if (cb) cb({ error: 'worker_error' }); };
+      }
+      pool.wired = true;
+    }
+    const results = new Map();
+    const total = jobs.length;
+    if (total === 0) { resolve(results); return; }
+    let next = 0, done = 0;
+    const pump = (slot) => {
+      if (next >= total) return;
+      const job = jobs[next++];
+      slot.onDone = (res) => {
+        results.set(job.id, res);
+        if (++done === total) { resolve(results); return; }
+        pump(slot);
+      };
+      slot.w.postMessage({ type: 'POOL_JOB', jobId: job.id, shapes, conns, moves: job.moves });
+    };
+    for (const slot of pool.workers) pump(slot);
+  });
+  const prev = pool.tail || Promise.resolve();
+  const cur = prev.then(runOnce, runOnce);   // roda independentemente do desfecho da anterior
+  pool.tail = cur.then(() => {}, () => {});   // a cauda nunca rejeita (mantém a fila viva)
+  return cur;
+}
+
+// Executor de validações com fallback transparente: usa o pool quando disponível; senão (ou em
+// erro de orquestração) roda INLINE, sequencial e determinístico — idêntico ao single-worker.
+async function runValidationJobsVia(pool, shapes, conns, csvStore, jobs) {
+  if (pool && typeof pool.runValidationJobs === 'function') {
+    try { return await pool.runValidationJobs(shapes, conns, jobs); }
+    catch { /* cai no inline abaixo */ }
+  }
+  const map = new Map();
+  for (const j of jobs) map.set(j.id, segValidateMovesSafe(shapes, conns, csvStore, j.moves));
+  return map;
+}
+
 function handleMessage(e) {
   const { type } = e.data;
 
   if (type === 'UPDATE_CSV_STORE') {
     workerCsvStore = e.data.csvStore;
     csvStoreVersion++;
+    return;
+  }
+
+  // Shard do pool (H3): re-simula um candidato inteiro e devolve o snapshot. Chega SÓ nos
+  // pool-workers aninhados (nunca no worker principal, que não posta POOL_JOB a si mesmo).
+  if (type === 'POOL_JOB') {
+    const { jobId, shapes, conns = [], moves = [] } = e.data;
+    const res = segValidateMovesSafe(shapes, conns, workerCsvStore, moves);
+    self.postMessage(res.snapshot
+      ? { type: 'POOL_JOB_RESULT', jobId, snapshot: res.snapshot }
+      : { type: 'POOL_JOB_RESULT', jobId, error: res.error || 'job_error' });
     return;
   }
 
@@ -5421,17 +5631,27 @@ function handleMessage(e) {
   // não entra no cache do tick. `scope` = null (global) ou {nodeId} (população de um nó).
   if (type === 'COMPUTE_SEGMENT_DISCOVERY') {
     const { shapes, conns = [], scope = null, params = {} } = e.data;
-    const segmentModel = computeSegmentDiscovery(shapes, conns, workerCsvStore, scope, params);
-    self.postMessage({ type: 'SEGMENT_DISCOVERY_RESULT', segmentModel });
+    // H3: a validação dos top-N vai ao pool (shard por candidato); o resto roda aqui.
+    computeSegmentDiscoveryPooled(shapes, conns, workerCsvStore, scope, params, getSimPool())
+      .then((segmentModel) => self.postMessage({ type: 'SEGMENT_DISCOVERY_RESULT', segmentModel }))
+      .catch(() => {
+        const segmentModel = computeSegmentDiscovery(shapes, conns, workerCsvStore, scope, params);
+        self.postMessage({ type: 'SEGMENT_DISCOVERY_RESULT', segmentModel });
+      });
     return;
   }
 
   // Aplicação combinada de N recomendações (Copiloto Sessão 12) — delta combinado validado
-  // por UMA re-simulação real (nunca a soma dos individuais). `applies` = [{moves}].
+  // por UMA re-simulação real (nunca a soma dos individuais). `applies` = [{moves}]. H3: as N
+  // re-simulações INDIVIDUAIS vão ao pool; a COMBINADA continua uma só (não é shardada).
   if (type === 'COMPUTE_SEGMENT_COMBINED') {
     const { shapes, conns = [], applies = [] } = e.data;
-    const combined = computeSegmentCombined(shapes, conns, workerCsvStore, applies);
-    self.postMessage({ type: 'SEGMENT_COMBINED_RESULT', combined });
+    computeSegmentCombinedPooled(shapes, conns, workerCsvStore, applies, getSimPool())
+      .then((combined) => self.postMessage({ type: 'SEGMENT_COMBINED_RESULT', combined }))
+      .catch(() => {
+        const combined = computeSegmentCombined(shapes, conns, workerCsvStore, applies);
+        self.postMessage({ type: 'SEGMENT_COMBINED_RESULT', combined });
+      });
     return;
   }
 }
@@ -5479,8 +5699,12 @@ export {
   buildGlossary,
   computePolicyDoc,
   computeSegmentDiscovery,
+  computeSegmentDiscoveryPooled,
   computeSegmentCombined,
+  computeSegmentCombinedPooled,
   buildSegmentRecommendations,
+  buildSegmentRecommendationsPooled,
+  segValidateMoves,
   detectAsIsDivergence,
   detectAnomalies,
   discoverSegments,
