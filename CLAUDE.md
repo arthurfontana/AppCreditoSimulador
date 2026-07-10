@@ -1287,10 +1287,12 @@ chegam por callback (`buildChunks`), então o router não conhece `columnar.js`.
   aplica a tabela e devolve `{via:'worker'|'sidecar', result, fellBack?, error?}` — `result`
   **sempre** no formato `*_RESULT`. `canRouteToSidecar(task)` = Classe B ∧ preferência ligada ∧
   `status.available`.
-- **Preferência `computeSidecar {enabled, url}`** (estado `computeSidecar` em `App.jsx`, default
-  **off**): persistida dentro do contêiner `preferences` do Projeto (`buildProjectPayload`/
-  `loadProject`, **sem bump de schema**). Com desligado o router nem detecta e nada muda — o app
-  se comporta exatamente como antes (o wiring vivo do router entra na H5/H6).
+- **Preferência `computeSidecar {enabled, url, token}`** (estado `computeSidecar` em `App.jsx`,
+  default **off**): persistida dentro do contêiner `preferences` do Projeto
+  (`buildProjectPayload`/`loadProject`, **sem bump de schema**). Com desligado o router nem
+  detecta e nada muda — o app se comporta exatamente como antes. `url`/`token` só têm efeito no
+  modo dev (release é same-origin); o wiring vivo do router + a UX (badge, preferências,
+  degradação declarada) foram entregues na H6 — ver seção "UX do Motor Python".
 - **`hashChunks(chunks)`**: hash de conteúdo FNV-1a 32-bit hex dos chunks do dataset — papel do
   `csvStoreVersion` (DEC-HX-006), computável na main; determinístico e sensível à fronteira dos
   chunks (o sidecar reusa o dataset por HEAD 200).
@@ -1350,6 +1352,68 @@ navegador (DEC-HX-001).
   workflow **separado e opcional** `.github/workflows/test-sidecar.yml` (não bloqueia o build).
   **Não** é o GATE cross-runtime de fixtures douradas (DEC-HX-005) — esse chega na H7, quando
   houver dupla implementação de fato.
+
+## UX do Motor Python (Execução Híbrida H6 — badge, preferências, degradação declarada)
+
+Fecha a Fase 1 (fundação híbrida) ligando o `ComputeRouter` (H4) e o sidecar (H5) na UI —
+com o motor desligado (default), nada muda de comportamento (DEC-HX-001). Ver
+`docs/wiki/Arquitetura-Execucao-Hibrida.md` (DEC-HX-001/007/009, §9, §13).
+
+- **`src/computeRouter.js`** ganha funções PURAS de apresentação (testáveis sem React —
+  `tests/computeRouter.test.js`): `describeComputeBadge(prefEnabled, status)` (ícone/tom
+  ⚡ full · ⚙ stdlib · 🐍 cinza ausente/desligado + motivo por `reason`),
+  `describeCapabilitiesDetail(status)` (linhas do tooltip: pacotes/versão/loading, cores,
+  protocolVersion), `ceilingNotice({ceilingText, unlockedText}, status)` (degradação
+  declarada — paridade total P4, reutilizável por qualquer feature Classe B futura) e
+  `fallbackNoticeText(runResult)` (aviso "concluído no modo browser" quando um
+  `router.run()` cai do sidecar pro worker no meio do job).
+- **`src/columnar.js`** ganha `estimateColumnarRamBytes(csv)` / `estimateCsvStoreRamBytes(store)`
+  / `estimateCsvStoreRowCount(store)` / `formatRamBytes(b)` + as constantes
+  `RAM_COMFORT_BYTES` (~1,2GB) / `ROW_COMFORT_COUNT` (~5MM linhas) — a MESMA conta usada
+  pelo wizard (H2, pré-import) e por `loadProject` (pós-import, csvStore inteiro), para o
+  limiar do DEC-HX-009 nunca divergir entre os dois pontos de carregamento.
+- **`src/App.jsx`** (`IS_DEV_BUILD = import.meta.env.DEV`):
+  - `computeSidecar` ganha o campo `token` (persistido em `preferences`, ver abaixo);
+    `computeSidecarStatus`/`computeSidecarChecking` são efêmeros (sempre re-derivados por
+    `detect()`, nunca persistidos). `sidecarProviderRef` (recriado quando url/token mudam,
+    debounce 400ms) fala por trás de um proxy estável (`sidecarProxyRef`) referenciado pelo
+    único `computeRouterRef` (criado junto do worker) — trocar a preferência não recria o
+    router. `detectSidecar()` (re-checagem manual e automática) chama `router.detect()`.
+  - **`ComputeEngineBadge`** (ao lado do `BuildBadge`, header do painel, e repetido dentro da
+    seção de preferências): ⚡/⚙/🐍 + tooltip (pacotes, cores, protocolVersion); clique
+    re-checa.
+  - **Seção "🐍 Motor Python"** nas preferências (logo abaixo de Projeto): toggle
+    `enabled`, campos URL/token **só em `IS_DEV_BUILD`** (release é same-origin, sem
+    config), botão "Verificar conexão", e o **`SidecarTestPanel`** — smoke test ponta a
+    ponta (`echo_stats`) que fala DIRETO com `sidecarProviderRef` (não pelo
+    `ComputeRouter` — o worker não implementa `echo_stats`, então rotear por lá arriscaria
+    um fallback que trava esperando resposta que nunca chega): registra o csvStore atual
+    por hash (`registerDataset`, upload com aviso "só na primeira vez") e roda o job com
+    progresso (`ComputeJobProgress`, reusável) + cancelamento (`AbortController`).
+  - **`ComputeCeilingNotice`** (degradação declarada, padrão "botões ✨ do Copiloto" citado
+    no épico): usada nos dois banners DEC-HX-009 abaixo; reutilizável por H7/H8 quando
+    tarefas Classe B reais nascerem com tetos (ex.: profundidade da Descoberta).
+  - **Recomendação proativa (DEC-HX-009)**: o banner de RAM do wizard passo 2 (H2) ganhou o
+    limiar por LINHAS (`nRows > ROW_COMFORT_COUNT`, além do de bytes — uma base larga e rasa
+    passa de 5MM linhas sem estourar 1,2GB) e o `ComputeCeilingNotice` + botão **"🐍 Ligar
+    Motor Python"** (liga a preferência com um clique, sem sair do wizard). `loadProject`
+    ganhou o mesmo aviso (`projectLoadNotice`, dismissível, na seção Projeto) — estimado
+    sobre o `csvStore` inteiro do projeto (todas as bases), calculado **uma única vez**
+    sobre o `loadedStore` já deserializado (nunca reprocessa a base). Nenhum dos dois
+    bloqueia o carregamento.
+  - **`ComputeFallbackNotice`**: componente pronto para o aviso discreto de fallback; nenhuma
+    feature em produção roteia pro sidecar ainda (Classe B nasce em H7/H8), então fica
+    reservado para reuso — não é exercitado pelo `SidecarTestPanel` (que fala direto com o
+    sidecar, sem passar pelo `ComputeRouter`/fallback).
+  - `ComputeJobProgress` é o padrão visual que H7/H8 devem reusar no passo `loading` de
+    `goalSeekModal`/`simplifyModal`/`docModal`/`segmentDiscoveryModal` quando essas tarefas
+    passarem a rotear pro sidecar — hoje esses modais continuam com o texto simples (Classe
+    A, nunca roteiam).
+- **Persistência**: `buildProjectPayload`/`loadProject` — `preferences.computeSidecar` agora
+  inclui `token` (sem bump de schema, mesmo contêiner já coberto pela ⚠️ regra do CLAUDE.md).
+- **Teste**: `tests/computeRouter.test.js` (badge/tooltip/ceiling/fallback — puro) e
+  `tests/columnar.test.js` (estimativa de RAM — round-trip com `codesCtorForDict`, soma por
+  store, formatação).
 
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
@@ -1530,7 +1594,7 @@ terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados comp
 (`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`) · Dashboard
 (`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
-negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url}`, H4) ·
+negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`, H4/H6) ·
 viewport · aba ativa · painel colapsado.
 
 ## Auto-persistência de sessão (`sessionStorage`)
@@ -1848,7 +1912,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/hybrid-execution-sidecar-wwsbay`
+`claude/hybrid-execution-h6-v3u0jr`
 
 ## Roadmap futuro (não implementado)
 

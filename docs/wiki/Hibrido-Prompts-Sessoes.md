@@ -384,7 +384,24 @@ e o computeRouter (H4) antes de propor.
 
 ---
 
-## Sessão H6 — UX do Motor Híbrido 🏷️ [SONNET]
+## Sessão H6 — UX do Motor Híbrido 🏷️ [SONNET] — ✅ CONCLUÍDA
+
+**Status (10/07/2026)**: entregue. Preferência `computeSidecar {enabled, url, token}` ligada
+a um `ComputeRouter` real (`sidecarProviderRef` recriado por debounce, `computeRouterRef`
+único criado junto do worker via um proxy estável); `ComputeEngineBadge` (⚡/⚙/🐍 + tooltip)
+ao lado do `BuildBadge` e repetido na seção de preferências "🐍 Motor Python" (toggle,
+URL/token só em `IS_DEV_BUILD`, botão "Verificar conexão"); helpers puros reutilizáveis em
+`src/computeRouter.js` (`describeComputeBadge`, `describeCapabilitiesDetail`, `ceilingNotice`,
+`fallbackNoticeText`, GATE em `tests/computeRouter.test.js`); `ComputeCeilingNotice` (degradação
+declarada) e `ComputeJobProgress`/`ComputeFallbackNotice` (padrão de progresso/cancelamento e
+aviso de fallback, prontos para H7/H8 — nenhuma tarefa Classe B real ainda). Banners DEC-HX-009
+no wizard passo 2 (limiar por linhas ALÉM do de bytes — `RAM_COMFORT_BYTES`/`ROW_COMFORT_COUNT`
+em `src/columnar.js`, GATE em `tests/columnar.test.js`) e na abertura de projeto
+(`projectLoadNotice`, sobre o csvStore inteiro, uma só passada). `SidecarTestPanel` — smoke test
+ponta a ponta `echo_stats` (registro de dataset por hash + job com progresso/cancelamento),
+falando direto com o sidecar (não pelo `ComputeRouter`, que faria fallback pro worker — que não
+implementa `echo_stats`). Nenhum comportamento muda com o motor desligado (verificado: `npm
+test` verde, build de produção ok, fluxo exercitado num browser real via Playwright).
 
 **Documentação**: [[Arquitetura-Execucao-Hibrida]] (DEC-HX-001/007, §9, §13)
 
