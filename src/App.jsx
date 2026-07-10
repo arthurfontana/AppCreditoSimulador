@@ -1512,55 +1512,124 @@ export function pivotWidget(ds, config) {
     }
   }
 
-  // Buckets do eixo X (por índice de linha — sem materializar objetos).
-  const xBuckets = new Map();
-  {
-    const xCC = cols[xCol];
-    const L = act ? act.length : (ds.rowCount || 0);
-    if (xCC && xCC.kind === "dict") {
-      // M14: bucketiza por código do dicionário — trim/string só uma vez por código, e o
-      // agrupamento por linha vira um índice inteiro. Códigos distintos que colapsam no
-      // mesmo rótulo trimado são mesclados (mesma semântica do keyed-por-string anterior).
-      const codes = xCC.codes, dict = xCC.dict;
-      const codeKey = new Array(dict.length);       // rótulo trimado por código (null se vazio)
-      const codeBucket = new Array(dict.length);    // array de índices por código (null se vazio)
-      for (let i = 0; i < L; i++) {
-        const r = act ? act[i] : i;
+  // M14: acumulação [bucket][série] num ÚNICO passe pela base, em vez de bucketizar e
+  // depois re-varrer cada bucket por série (`filter` + `computeWidgetMetric`, O(linhas ×
+  // séries)). Cada linha resolve seu bucket (código do eixo X) e sua série (código do
+  // eixo de quebra, ou todas as séries de cenário) e soma os 6 componentes da métrica
+  // (mesma decomposição de `computeWidgetMetric`) na célula certa. A matemática é idêntica
+  // — só o momento/forma do cômputo muda.
+  const L = act ? act.length : (ds.rowCount || 0);
+  const qtyC = cols.qty, inadRC = cols.inadRRaw, altasC = cols.qtdAltas, inadIC = cols.inadIRaw, altasInfC = cols.qtdAltasInfer;
+
+  // Resolve o bucket (índice denso) de uma linha pelo eixo X, colapsando códigos/strings
+  // que trimam pro mesmo rótulo (mesma semântica do keyed-por-string anterior). Descobre
+  // os buckets sob demanda, na ordem em que aparecem; a ordenação final acontece depois.
+  const xCC = cols[xCol];
+  const bucketKeys = [];             // rótulo trimado por índice de bucket
+  const bucketKeyToIdx = new Map();  // rótulo → índice de bucket
+  const keyToBucket = (v) => {
+    let bi = bucketKeyToIdx.get(v);
+    if (bi === undefined) { bi = bucketKeys.length; bucketKeys.push(v); bucketKeyToIdx.set(v, bi); }
+    return bi;
+  };
+  let bucketOf;
+  if (xCC && xCC.kind === "dict") {
+    const codes = xCC.codes, dict = xCC.dict;
+    const codeToBucket = new Int32Array(dict.length); codeToBucket.fill(-2); // -2 = não resolvido
+    bucketOf = (r) => {
+      const code = codes[r];
+      if (code < 0 || code >= dict.length) return -1;
+      let bi = codeToBucket[code];
+      if (bi === -2) { const v = String(dict[code] ?? "").trim(); bi = v ? keyToBucket(v) : -1; codeToBucket[code] = bi; }
+      return bi;
+    };
+  } else {
+    bucketOf = (r) => { const v = awColStr(xCC, r).trim(); return v ? keyToBucket(v) : -1; };
+  }
+
+  // Modo de série: quebra por dimensão (todas as séries partilham a coluna de decisão e
+  // uma linha cai em NO MÁXIMO uma série, pela sua própria célula) vs. cenário (a linha
+  // contribui para TODAS as séries, cada uma com sua coluna de decisão).
+  const dimensionMode = seriesDefs.some(sd => sd.filterCol);
+  const nSeries = seriesDefs.length;
+  const apprInfoOf = (decisionCol) => {
+    const dc = cols[decisionCol];
+    const isDict = dc && dc.kind === "dict";
+    return { decC: dc, decIsDict: isDict, apprCode: isDict ? dc.dict.indexOf("APROVADO") : -1, decCodes: isDict ? dc.codes : null };
+  };
+  const isApprAt = (info, r) => info.decIsDict ? (info.decCodes[r] === info.apprCode) : (awColStr(info.decC, r) === "APROVADO");
+
+  let serieOf = null, sharedAppr = null, seriesAppr = null;
+  if (dimensionMode) {
+    sharedAppr = apprInfoOf(seriesDefs[0].decisionCol); // todas as séries: mesma decisão (simCol)
+    const fCC = cols[seriesDefs[0].filterCol];
+    const valToSeries = new Map(seriesDefs.map((sd, i) => [sd.filterVal, i]));
+    if (fCC && fCC.kind === "dict") {
+      const codes = fCC.codes, dict = fCC.dict;
+      const codeToSerie = new Int32Array(dict.length); codeToSerie.fill(-2);
+      serieOf = (r) => {
         const code = codes[r];
-        if (code < 0 || code >= dict.length) continue;
-        let arr = codeBucket[code];
-        if (arr === undefined) {
-          const v = String(dict[code] ?? "").trim();
-          codeKey[code] = v || null;
-          arr = v ? [] : null;
-          codeBucket[code] = arr;
-        }
-        if (arr) arr.push(r);
-      }
-      for (let code = 0; code < dict.length; code++) {
-        const arr = codeBucket[code];
-        if (!arr) continue;
-        const xv = codeKey[code];
-        const existing = xBuckets.get(xv);
-        if (existing) { for (let k = 0; k < arr.length; k++) existing.push(arr[k]); }
-        else xBuckets.set(xv, arr);
-      }
+        if (code < 0 || code >= dict.length) return valToSeries.has("") ? valToSeries.get("") : -1;
+        let si = codeToSerie[code];
+        if (si === -2) { const v = String(dict[code] ?? "").trim(); si = valToSeries.has(v) ? valToSeries.get(v) : -1; codeToSerie[code] = si; }
+        return si;
+      };
     } else {
-      for (let i = 0; i < L; i++) {
-        const r = act ? act[i] : i;
-        const xv = awColStr(xCC, r).trim();
-        if (!xv) continue;
-        let arr = xBuckets.get(xv);
-        if (!arr) { arr = []; xBuckets.set(xv, arr); }
-        arr.push(r);
+      serieOf = (r) => { const v = awColStr(fCC, r).trim(); return valToSeries.has(v) ? valToSeries.get(v) : -1; };
+    }
+  } else {
+    seriesAppr = seriesDefs.map(sd => apprInfoOf(sd.decisionCol));
+  }
+
+  // acc[bucketIdx][seriesIdx] = {t,a,ir,al,ii,ai} — 6 acumuladores por célula.
+  const acc = [];
+  const ensureBucket = (bi) => {
+    while (acc.length <= bi) {
+      const arr = new Array(nSeries);
+      for (let s = 0; s < nSeries; s++) arr[s] = { t: 0, a: 0, ir: 0, al: 0, ii: 0, ai: 0 };
+      acc.push(arr);
+    }
+  };
+  for (let i = 0; i < L; i++) {
+    const r = act ? act[i] : i;
+    const bi = bucketOf(r);
+    if (bi < 0) continue;
+    ensureBucket(bi);
+    const q = awColNum(qtyC, r);
+    const bucket = acc[bi];
+    if (dimensionMode) {
+      const si = serieOf(r);
+      if (si < 0) continue;
+      const cell = bucket[si];
+      cell.t += q;
+      if (isApprAt(sharedAppr, r)) { cell.a += q; cell.ir += awColNum(inadRC, r); cell.al += awColNum(altasC, r); cell.ii += awColNum(inadIC, r); cell.ai += awColNum(altasInfC, r); }
+    } else {
+      for (let s = 0; s < nSeries; s++) {
+        const cell = bucket[s];
+        cell.t += q;
+        if (isApprAt(seriesAppr[s], r)) { cell.a += q; cell.ir += awColNum(inadRC, r); cell.al += awColNum(altasC, r); cell.ii += awColNum(inadIC, r); cell.ai += awColNum(altasInfC, r); }
       }
     }
   }
-  if (xBuckets.size === 0) return { state: "empty" };
+  if (bucketKeys.length === 0) return { state: "empty" };
+
+  // Métrica a partir dos acumuladores — MESMAS fórmulas de `computeWidgetMetric`.
+  const metricFromAcc = (c) => {
+    switch (metricDef.id) {
+      case "approvalRate": return c.t > 0 ? (c.a / c.t) * 100 : null;
+      case "inadReal":     return c.al > 0 ? (c.ir / c.al) * 100 : null;
+      case "inadInferida": return c.ai > 0 ? (c.ii / c.ai) * 100 : (c.a > 0 ? (c.ii / c.a) * 100 : null);
+      case "qty":          return c.t;
+      case "approvedQty":  return c.a;
+      case "approvedAltasInfer": return c.ai;
+      default:             return null;
+    }
+  };
 
   const isTemporal = (temporalColumns || []).includes(xCol);
   const xCmp = makeCmp(xCol);
-  const sortedKeys = [...xBuckets.keys()].sort((a, b) => {
+  const order = bucketKeys.map((_, i) => i).sort((ia, ib) => {
+    const a = bucketKeys[ia], b = bucketKeys[ib];
     if (isTemporal) {
       const ka = parseTemporalKey(a), kb = parseTemporalKey(b);
       if (ka != null && kb != null) return ka - kb;
@@ -1569,17 +1638,10 @@ export function pivotWidget(ds, config) {
     }
     return xCmp(a, b);
   });
-
-  // Predicado de série por código, resolvido uma vez (reusado em todos os buckets do X).
-  const seriesPreds = seriesDefs.map(sd => sd.filterCol ? makeValPred(sd.filterCol, sd.filterVal) : null);
-  const data = sortedKeys.map((xv) => {
-    const bucketRows = xBuckets.get(xv); // array de índices de linha
-    const row = { x: xv };
-    seriesDefs.forEach((sd, si) => {
-      const pred = seriesPreds[si];
-      const subset = pred ? bucketRows.filter(pred) : bucketRows;
-      row[sd.label] = computeWidgetMetric(ds, subset, metricDef.id, sd.decisionCol);
-    });
+  const data = order.map((bi) => {
+    const row = { x: bucketKeys[bi] };
+    const bucket = acc[bi];
+    seriesDefs.forEach((sd, si) => { row[sd.label] = metricFromAcc(bucket[si]); });
     return row;
   });
   return { state: "ok", data, series: seriesDefs, metricDef, xCol, truncated: serieBy !== SERIE_CENARIO && serieBy !== SERIE_NONE && seriesDefs.length >= MAX_SERIES };
@@ -4292,6 +4354,14 @@ export default function App() {
   const dragR         = useRef(null);
   const pinchR        = useRef(null);
   const movedR        = useRef(false);
+  // M12: durante o arraste de shape(s) NÃO chamamos setShapes por frame (que invalidaria a
+  // cena memoizada inteira). Os ids arrastados saem da cena (dragIds) e são desenhados numa
+  // camada de overlay leve, transladada por dragDelta (atualizado via rAF). setShapes só no
+  // mouseup. dragDeltaR guarda o último delta para o commit; dragRafR faz o throttle por frame.
+  const [dragIds, setDragIds]   = useState(null);   // Set<id> dos shapes em arraste (ou null)
+  const [dragDelta, setDragDelta] = useState(null); // {dx,dy} em coords de mundo (ou null)
+  const dragDeltaR    = useRef(null);
+  const dragRafR      = useRef(0);
   const longTimer     = useRef(null);
   const connClickTimer= useRef(null);
 
@@ -4929,10 +4999,10 @@ export default function App() {
         // drag entire multi-selection — snapshot positions
         const snaps={};
         shapesR.current.forEach(s=>{if(ms.has(s.id)) snaps[s.id]={x:s.x,y:s.y};});
-        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,wx0:wx,wy0:wy,snaps,preSnap};
+        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,wx0:wx,wy0:wy,snaps,preSnap,ids:new Set(ms),active:false};
       } else {
         setSel(id); setMultiSel(new Set()); setPalette(false);
-        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,snaps:{},preSnap};
+        dragR.current={type:"shape",id,sx,sy,offX:wx-shape.x,offY:wy-shape.y,wx0:wx,wy0:wy,snaps:{},preSnap,ids:new Set([id]),active:false};
       }
     }
   };
@@ -4971,17 +5041,18 @@ export default function App() {
     if (Math.abs(dx)>3||Math.abs(dy)>3) movedR.current=true;
     if (dr.type==="pan"||dr.type==="midpan"){const ox=dr.ox,oy=dr.oy;setVp(v=>({...v,x:ox+dx,y:oy+dy}));}
     else if(dr.type==="shape"){
-      const id=dr.id,offX=dr.offX,offY=dr.offY,[wx,wy]=toWorld(sx,sy);
-      const ms=multiSelR.current;
-      if (ms.size>1&&ms.has(id)) {
-        // move all selected shapes preserving relative positions
-        const deltX=wx-dr.wx0, deltY=wy-dr.wy0;
-        setShapes(p=>p.map(s=>{
-          const snap=dr.snaps[s.id]; if(!snap) return s;
-          return {...s,x:snap.x+deltX,y:snap.y+deltY};
-        }));
-      } else {
-        setShapes(p=>p.map(s=>s.id===id?{...s,x:wx-offX,y:wy-offY}:s));
+      // M12: em vez de setShapes por frame (invalida a cena inteira), guardamos o delta e
+      // desenhamos os shapes arrastados numa camada de overlay (translate). setShapes só no up.
+      const [wx,wy]=toWorld(sx,sy);
+      const nd={dx:wx-dr.wx0, dy:wy-dr.wy0};
+      dragDeltaR.current=nd;
+      if (!dr.active) {
+        if (!movedR.current) return;   // ainda um clique, não um arraste
+        dr.active=true;
+        setDragIds(dr.ids);            // remove os arrastados da cena memoizada
+        setDragDelta(nd);             // e desenha no overlay — mesmo batch, sem flicker
+      } else if (!dragRafR.current) {
+        dragRafR.current=requestAnimationFrame(()=>{ dragRafR.current=0; setDragDelta(dragDeltaR.current); });
       }
     }
     else if(dr.type==="selRect"){
@@ -5015,6 +5086,25 @@ export default function App() {
     if ((dr?.type==="shape"||dr?.type==="resize")&&movedR.current&&dr.preSnap) {
       setUndoStack(prev=>[...prev.slice(-49),dr.preSnap]);
       setRedoStack([]);
+    }
+    // M12: commit do arraste — aplica o delta acumulado UMA vez (setShapes), depois desmonta
+    // o overlay. Antes disso os shapes arrastados viviam só como translate na camada leve.
+    if (dr?.type==="shape" && dr.active) {
+      const nd=dragDeltaR.current;
+      if (nd && (nd.dx!==0 || nd.dy!==0)) {
+        const ms=dr.ids, snaps=dr.snaps;
+        const hasSnaps = snaps && Object.keys(snaps).length>0;
+        setShapes(p=>p.map(s=>{
+          if(!ms.has(s.id)) return s;
+          const base=hasSnaps?(snaps[s.id]||{x:s.x,y:s.y}):{x:s.x,y:s.y};
+          return {...s, x:base.x+nd.dx, y:base.y+nd.dy};
+        }));
+      }
+    }
+    if (dr?.type==="shape") {
+      if (dragRafR.current){cancelAnimationFrame(dragRafR.current);dragRafR.current=0;}
+      dragDeltaR.current=null;
+      setDragIds(null); setDragDelta(null);
     }
     if(dr?.type==="selRect") setSelRect(null);
     if(dr?.type==="midpan"&&prevToolR.current!=null) setTool(prevToolR.current);
@@ -7213,9 +7303,11 @@ export default function App() {
   }, [simResult]);
 
   // ── Render: connection (adaptive routing) ─────────────────────
-  const renderConn = (conn) => {
+  const renderConn = (conn, byId = shapesById) => {
     if (hiddenPortIds.has(conn.from) || hiddenPortIds.has(conn.to)) return null; // port escondido em "Configurar nó"
-    const from=shapesById.get(conn.from), to=shapesById.get(conn.to); // M12: O(1) em vez de shapes.find
+    // M12: `byId` permite ao overlay de arraste resolver `from`/`to` com posições deslocadas
+    // (só o extremo arrastado se move); na cena normal usa o índice O(1) padrão.
+    const from=byId.get(conn.from), to=byId.get(conn.to);
     if (!from||!to) return null;
     const [fx,fy]=ctr(from), [tx,ty]=ctr(to);
     const dx=tx-fx, dy=ty-fy;
@@ -7269,11 +7361,6 @@ export default function App() {
       showEdgeInadReal && fmtPct(es.inadReal),
       showEdgeInadInf  && fmtPct(es.inadInferida),
     ].filter(Boolean).join(" · ") || null : null;
-
-    // Hover card position in screen coords
-    const isHovered = hoveredConn === conn.id;
-    const hcScreenX = lx * vp.s + vp.x + 10;
-    const hcScreenY = ly * vp.s + vp.y - 80;
 
     return (
       <g key={conn.id}>
@@ -7868,7 +7955,7 @@ export default function App() {
     const showTooltip=()=>{
       clearTimeout(tooltipTimer.current);
       tooltipTimer.current=setTimeout(()=>{
-        const sx2=shape.x*vp.s+vp.x, sy2=shape.y*vp.s+vp.y;
+        const vpc=vpR.current; const sx2=shape.x*vpc.s+vpc.x, sy2=shape.y*vpc.s+vpc.y;
         let lines=[label];
         if(type==="decision"){
           lines=[shape.label,shape.variableCol||""];
@@ -8657,6 +8744,49 @@ export default function App() {
     setVariableRankingModal(null);
   }, []); // eslint-disable-line
 
+  // M12: memoiza a CENA (frames + conexões + shapes) por seus insumos reativos, EXCLUINDO
+  // o viewport `vp`. Como o `transform` de pan/zoom mora no `<g>` raiz (fora deste memo) e as
+  // funções de render não leem `vp` (o tooltip usa vpR.current), pan e zoom reusam o MESMO
+  // elemento de cena — React pula a reconciliação de toda a subárvore (centenas de nós/matrizes
+  // de Cineminha) por frame, que era o re-render mais frequente e mais barato de eliminar.
+  // O array de deps enumera exaustivamente o que renderFrame/renderConn/renderShape produzem a
+  // partir do estado; qualquer mudança neles recomputa a cena (só posição/zoom não). Um dep a
+  // mais só causaria re-render extra (seguro), nunca cena obsoleta — por isso é abrangente.
+  // Durante o arraste (M12 item 3), os shapes/arestas em `dragIds` saem da cena e vão pro
+  // overlay leve — a cena recompõe só ao INICIAR/ENCERRAR o arraste (dragIds muda), nunca por
+  // frame (o dragDelta não é dep desta cena).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const sceneEl = useMemo(() => (
+    <>
+      {shapes.filter(s=>s.type==="frame" && !(dragIds&&dragIds.has(s.id))).map(renderFrame)}
+      {conns.filter(c=> !dragIds || (!dragIds.has(c.from) && !dragIds.has(c.to))).map(c=>renderConn(c))}
+      {shapes.filter(s=> !(dragIds&&dragIds.has(s.id))).map(renderShape)}
+    </>
+  ), [shapes, conns, sel, multiSel, fromId, tool, flowErrors, hiddenPortIds, simResult,
+      edgeColorScale, edgeQtyScale, enableDynThickness, showEdgeVol, showEdgeInadReal,
+      showEdgeInadInf, csvStore, nodeArrivals, lensCounts, incrementalResult, activeCell, dragIds]);
+
+  // Overlay de arraste: os shapes arrastados (transladados) + as arestas incidentes
+  // (recomputadas com o extremo arrastado deslocado). Re-renderiza por frame via dragDelta,
+  // mas fora da cena memoizada — só esta camada leve muda durante o arraste.
+  const dragOverlayEl = useMemo(() => {
+    if (!dragIds || !dragDelta) return null;
+    const dd = dragDelta;
+    const dragged = shapes.filter(s => dragIds.has(s.id));
+    const effById = new Map(shapesById);
+    for (const s of dragged) effById.set(s.id, { ...s, x: s.x + dd.dx, y: s.y + dd.dy });
+    const edges = conns.filter(c => (dragIds.has(c.from) || dragIds.has(c.to)) && !hiddenPortIds.has(c.from) && !hiddenPortIds.has(c.to));
+    return (
+      <g style={{pointerEvents:"none"}}>
+        {edges.map(c => renderConn(c, effById))}
+        <g transform={`translate(${dd.dx},${dd.dy})`}>
+          {dragged.map(s => s.type==="frame" ? renderFrame(s) : renderShape(s))}
+        </g>
+      </g>
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragIds, dragDelta, shapes, conns, shapesById, hiddenPortIds, simResult, sel, multiSel, fromId, tool, flowErrors, csvStore, nodeArrivals, lensCounts, edgeColorScale, edgeQtyScale, enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf, activeCell, incrementalResult]);
+
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
   // ────────────────────────────────────────────────────────────────────────────
@@ -9098,10 +9228,11 @@ export default function App() {
           </defs>
           <rect width="100%" height="100%" fill="url(#pg)"/>
           <g transform={`translate(${vp.x},${vp.y}) scale(${vp.s})`}>
-            {/* Frames render below everything else */}
-            {shapes.filter(s=>s.type==="frame").map(renderFrame)}
-            {conns.map(renderConn)}
-            {shapes.map(renderShape)}
+            {/* M12: cena memoizada (frames + conexões + shapes) — pan/zoom só mudam o transform
+                deste <g>, sem re-renderizar a subárvore. */}
+            {sceneEl}
+            {/* Overlay de arraste (shapes movidos + arestas incidentes), fora da cena memoizada */}
+            {dragOverlayEl}
             {/* Selection rectangle */}
             {selRect&&(()=>{
               const rx=Math.min(selRect.x1,selRect.x2), ry=Math.min(selRect.y1,selRect.y2);

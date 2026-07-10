@@ -431,7 +431,7 @@ util, embora raramente mudem em rajada.
 
 ---
 
-### M12 · P2 — Re-render integral do canvas a cada mousemove (pan/zoom/drag) — `Opus`
+### M12 · P2 — Re-render integral do canvas a cada mousemove (pan/zoom/drag) — `Opus` — **entregue (H1)**
 
 **Problema.** O App é um componente único (ADR-001): qualquer `setVp`
 (pan/zoom) ou `setShapes` (drag) re-executa o corpo inteiro — incluindo
@@ -465,9 +465,25 @@ frame). Agravantes medíveis:
 **Dependências.** Nenhuma. Item 3 é o mais invasivo; 1–2 já eliminam a maior
 parte do custo de pan/zoom.
 
+> **Entregue (H1).** (1) `shapesById` (useMemo Map) em `renderConn`/handlers;
+> (4) `flowErrors`/`hiddenPortIds` derivados de `topoKey` (chave topológica, sem
+> x/y). (2) A cena (frames + conexões + shapes) é um elemento **memoizado**
+> (`sceneEl = useMemo(...)`, deps = os insumos reativos do render EXCLUINDO `vp`);
+> o `transform` de pan/zoom mora no `<g>` raiz fora do memo, então pan/zoom reusam
+> o mesmo elemento e o React pula a reconciliação da subárvore. As funções de
+> render não leem `vp` (o tooltip passou a usar `vpR.current`; código morto de
+> hover card removido de `renderConn`). (3) O **arraste não chama `setShapes` por
+> frame**: os ids arrastados saem da cena (`dragIds`, muda só ao iniciar/encerrar)
+> e são desenhados numa **camada de overlay leve** transladada por `dragDelta`
+> (atualizado via rAF); as arestas incidentes são recomputadas com o extremo
+> arrastado deslocado (`renderConn(conn, effById)`); `setShapes` roda **uma vez no
+> mouseup** (undo inalterado, ainda com o snapshot pré-arraste). Verificado em
+> navegador (criação/arraste/undo, arraste com conexão seguindo, sem duplicação de
+> shape/aresta, pan/zoom sem erro). GATE `npm test` inalterado.
+
 ---
 
-### M13 · P2 — `validateFlow` copia o `Set` do caminho a cada aresta — `Sonnet`
+### M13 · P2 — `validateFlow` copia o `Set` do caminho a cada aresta — `Sonnet` — **entregue (H1)**
 
 **Problema.** O DFS de validação cria `new Set(path)` **por aresta visitada**
 (`App.jsx:667`) e re-visita subgrafos compartilhados por múltiplos caminhos —
@@ -483,9 +499,15 @@ cópias. ~30 linhas.
 
 **Dependências.** Nenhuma (independente de M12, que só muda *quando* roda).
 
+> **Entregue (H1).** `validateFlow` é um DFS iterativo com estado tricolor
+> (`IN_PROGRESS`/`DONE`) e resultado memoizado por nó (`okOf`) — cada nó é
+> expandido uma vez, back-edge para `IN_PROGRESS` sinaliza ciclo sem reconstruir
+> ancestrais. Sem `new Set(path)` por aresta. Combinado com M12 item 4, roda no
+> memo `flowErrors` só quando a topologia muda (`topoKey`), não por frame de drag.
+
 ---
 
-### M14 · P3 — Pivôs e filtros do Dashboard comparam strings por linha na main thread — `Opus`
+### M14 · P3 — Pivôs e filtros do Dashboard comparam strings por linha na main thread — `Opus` — **entregue (H1)**
 
 **Problema.** Cada `analyticsDataset` novo (a cada 300ms com o Dashboard
 aberto) faz **todos os widgets** recomputarem: `applyFiltersToDataset`
@@ -514,6 +536,19 @@ Dashboard "respira" mas trava a interação.
    provavelmente tornam isso desnecessário (mantém a simplicidade).
 
 **Dependências.** Nenhuma; consistente com M8 (mesma filosofia).
+
+> **Entregue (H1).** (1) `computeWidgetMetric` resolve o código de `"APROVADO"`
+> uma vez (coluna de decisão dict) e compara inteiros por linha;
+> `applyAnalyticsFilters` avalia cada cartão UMA vez por valor do dicionário
+> (máscara `passByCode`), restando um lookup de inteiro por linha. (2) `pivotWidget`
+> bucketiza por **código** do eixo X e acumula os 6 componentes da métrica numa
+> matriz `[bucket][série]` num **único passe** pela base — sem `filter` +
+> re-varredura por série (`O(linhas × séries)`). Dois modos: quebra por dimensão
+> (uma linha cai em ≤1 série, via código da coluna de quebra) e cenário (a linha
+> soma em todas as séries, cada uma com sua coluna de decisão). Fórmulas idênticas
+> às de `computeWidgetMetric` (mesmas semânticas de `null`). O item 3 (mover ao
+> worker) ficou desnecessário. Colunas não-dict mantêm o caminho por string. GATE
+> `tests/analytics.test.js` e suíte completa inalterados.
 
 ---
 
