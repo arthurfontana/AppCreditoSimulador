@@ -24,9 +24,15 @@
 > a contingência opcional. Detalhes em [[Arquitetura-Execucao-Hibrida]] (§5 P1,
 > DEC-HX-004).
 >
-> **🏷️ Tag de modelo**: `[OPUS]` para núcleos algorítmicos, refatoração estrutural,
-> protocolo/paridade cross-runtime e matemática sutil; `[SONNET]` para UI sobre padrões
-> consolidados, instrumentação e trabalho bem especificado.
+> **🏷️ Tag de modelo**: `[FABLE]` (Fable 5 — tier Mythos, acima do Opus) **reservado às
+> sessões de paridade numérica cross-runtime** (H7/H8/H9), onde o mesmo algoritmo vive em
+> dois runtimes e o GATE exige igualdade número a número — a classe de erro típica ali
+> (ordem de acumulação de ponto flutuante ao vetorizar, semântica de borda divergente
+> entre JS e numpy) é silenciosa em fixture pequena e cara de depurar depois, então o
+> upgrade de modelo custa menos que UMA sessão de retrabalho; `[OPUS]` para núcleos
+> algorítmicos, refatoração estrutural e matemática sutil **em runtime único**; `[SONNET]`
+> para UI sobre padrões consolidados, instrumentação e trabalho bem especificado.
+> Análise esforço × custo da atribuição de Fable 5 em 10/07/2026 (ver nota ao fim).
 >
 > **Regras transversais (valem para TODAS as sessões):**
 > 1. `npm test` passa inalterado ao fim — nenhuma sessão muda matemática do motor.
@@ -408,7 +414,15 @@ propor.
 
 ---
 
-## Sessão H7 — Primeira Carga Real: Descoberta Profunda (Classe B) 🏷️ [OPUS]
+## Sessão H7 — Primeira Carga Real: Descoberta Profunda (Classe B) 🏷️ [FABLE]
+
+> **Por que Fable 5**: primeiro port cross-runtime do projeto — vetorizar em numpy um
+> pipeline estatisticamente sutil (binomial exato/aproximado, Benjamini–Hochberg,
+> shrinkage, dedup, beam search com poda) mantendo igualdade número a número com o JS.
+> A ordem de operações da vetorização muda somas de ponto flutuante e a poda do beam;
+> um desvio passa nas fixtures pequenas e explode só em base real. Esta sessão também
+> **estabelece o padrão de GATE dourado** que H8/H9 herdam — errar aqui contamina as
+> seguintes.
 
 **Documentação**: [[Arquitetura-Execucao-Hibrida]] (DEC-HX-005/007, §7.3, §14) + [[Copiloto-DescobertaSegmentos]]
 
@@ -454,7 +468,15 @@ documento, a frente e o código antes de propor.
 
 ---
 
-## Sessão H8 — Clusterização e Estatísticas Avançadas (paridade total: baseline browser + sidecar) 🏷️ [OPUS]
+## Sessão H8 — Clusterização e Estatísticas Avançadas (paridade total: baseline browser + sidecar) 🏷️ [FABLE]
+
+> **Por que Fable 5**: dupla implementação NASCENDO junta (JS loop + numpy vetorizado)
+> com contrato de resultado idêntico via PRNG especificado (mulberry32) — a parte
+> difícil não é o k-means, é garantir que init k-means++, desempates e acumulação de
+> centroides produzam o MESMO resultado nos dois runtimes (soma vetorizada ≠ soma
+> sequencial em float). Se o custo pesar, o fallback razoável é [OPUS] com revisão
+> dedicada do GATE — mas o baseline browser + o GATE duplo na mesma sessão elevam o
+> risco de sutileza cruzada.
 
 **Documentação**: [[Arquitetura-Execucao-Hibrida]] (DEC-HX-005/007 — paridade total P4, §16)
 
@@ -514,7 +536,14 @@ código antes de propor.
 
 ---
 
-## Sessão H9 — Motor de Simulação em Python + Paridade Total (opcional) 🏷️ [OPUS]
+## Sessão H9 — Motor de Simulação em Python + Paridade Total (opcional) 🏷️ [FABLE]
+
+> **Por que Fable 5**: o GATE mais rígido do projeto — desfecho POR LINHA idêntico entre
+> o motor compilado M8 e um port numpy, replicando toda a semântica de borda
+> (trim/first-wins, teto de pares do cineminha, AND/OR do lens, fallback AS IS,
+> colunas não-dict). Vetorizar um walk de grafo por linha sem trair nenhum caso de borda
+> é a tarefa mais difícil de todo o plano; um drift aqui invalida a Frente 5 inteira.
+> É a sessão onde a diferença de modelo tem o maior valor esperado.
 
 **Documentação**: [[Arquitetura-Execucao-Hibrida]] (§7.3, §17 Fase 3) + [[Roadmap]] (Frente 5)
 
@@ -570,9 +599,28 @@ os GATEs antes de propor.
 - [ ] **Sessão H4** — ComputeRouter (front) 🏷️ `[OPUS]`
 - [ ] **Sessão H5** — Sidecar Python v1 🏷️ `[OPUS]`
 - [ ] **Sessão H6** — UX do motor híbrido + recomendação DEC-HX-009 🏷️ `[SONNET]`
-- [ ] **Sessão H7** — Descoberta profunda (Classe B) 🏷️ `[OPUS]`
-- [ ] **Sessão H8** — Clusterização (paridade total: baseline browser + sidecar) 🏷️ `[OPUS]`
-- [ ] **Sessão H9** — Motor em Python / batch_simulate 🏷️ `[OPUS]` *(só quando a Frente 5 ou bases 7–10MM+ forem priorizadas)*
+- [ ] **Sessão H7** — Descoberta profunda (Classe B) 🏷️ `[FABLE]`
+- [ ] **Sessão H8** — Clusterização (paridade total: baseline browser + sidecar) 🏷️ `[FABLE]`
+- [ ] **Sessão H9** — Motor em Python / batch_simulate 🏷️ `[FABLE]` *(só quando a Frente 5 ou bases 7–10MM+ forem priorizadas)*
+
+### 🏷️ Nota — análise esforço × custo da atribuição de Fable 5 (10/07/2026)
+
+Critério aplicado: Fable 5 custa sensivelmente mais por sessão que Opus, então só entra
+onde o **valor esperado do erro evitado** supera o sobrepreço — e a classe de erro mais
+cara deste plano é **drift numérico entre runtimes** (DEC-HX-005 lista como "o pior
+risco"): passa em fixture pequena, aparece semanas depois em base real, e o retrabalho
+consome uma sessão inteira de modelo caro + a confiança no GATE.
+
+| Sessão | Tag | Racional |
+|---|---|---|
+| H0, H6 | `[SONNET]` | Instrumentação e UI sobre padrões prontos — inalteradas |
+| H1, H2 | `[OPUS]` | A parte difícil (a especificação normativa em PERFORMANCE-ANALISE / §2.2) **já está escrita**; execução em runtime único com GATEs existentes como rede — Fable seria custo sem redução de risco proporcional |
+| H3, H4, H5 | `[OPUS]` | Engenharia sólida mas convencional (pool com re-ordenação determinística por id; router com contrato definido em §8; stdlib http.server no molde do serve.py) — o determinismo do H3 vem de arquitetura (shard por candidato + sort final), não de matemática sutil |
+| H7, H8, H9 | `[FABLE]` | Paridade numérica cross-runtime: dupla implementação com igualdade número a número, onde vetorizar muda ordem de acumulação de float e cada semântica de borda do M8 precisa ser traída em NENHUM caso. H7 ainda estabelece o padrão de fixtures douradas que H8/H9 herdam |
+
+Regra prática daqui pra frente: **`[FABLE]` quando (e só quando) a sessão cria ou
+estende uma dupla implementação sob GATE cross-runtime**; runtime único, mesmo
+algorítmico, fica em `[OPUS]`.
 
 ---
 
@@ -633,7 +681,11 @@ real (Frente 5, bases na íntegra acima do conforto do browser).
 
 ---
 
-**Última atualização**: 2026-07-09 (planejamento; revisado no mesmo dia com as
+**Última atualização**: 2026-07-10 (revisão de tags de modelo: H7/H8/H9 promovidas de
+`[OPUS]` para `[FABLE]` — Fable 5, tier acima do Opus — com análise esforço × custo
+registrada na Nota do Checklist; demais sessões inalteradas: a especificação normativa
+já escrita é o que torna Opus suficiente nelas). Histórico anterior:
+2026-07-09 (planejamento; revisado no mesmo dia com as
 premissas validadas pelo usuário: sonda HP nova, paridade total na H8, recomendação
 DEC-HX-009 na H6, install em camadas na H5, alvo de projeto 7MM. **Sessão HP
 executada e concluída no mesmo dia** — 2 rodadas na máquina corporativa: 4/4 pacotes
