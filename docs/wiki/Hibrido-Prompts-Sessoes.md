@@ -153,9 +153,27 @@ antes de propor.
 
 ---
 
-## Sessão H3 — Pool de Workers para Cargas Paralelas 🏷️ [OPUS]
+## Sessão H3 — Pool de Workers para Cargas Paralelas 🏷️ [OPUS] — ✅ CONCLUÍDA
 
 **Documentação**: [[Arquitetura-Execucao-Hibrida]] §7.2 e §14 (Fase 0)
+
+**Status (10/07/2026)**: entregue. Pool de workers **aninhados** (`navigator.hardware
+Concurrency − 1`, teto 4, criado lazy na 1ª tarefa paralela) em `src/simulation.worker.js`,
+shardando POR CANDIDATO as duas cargas embaraçosamente paralelas existentes: a validação por
+re-simulação dos top-N em `buildSegmentRecommendations` e as N re-simulações INDIVIDUAIS de
+`computeSegmentCombined` (a re-simulação COMBINADA continua **uma só**, inline — nunca
+shardada, DEC-SD-003). Unidade de shard = `segValidateMoves` (aplica moves + `runSimulation` +
+snapshot), pura, rodada por um pool-worker via `POOL_JOB`/`POOL_JOB_RESULT`. Base semeada UMA
+vez por versão via `buildCsvStoreMessage` (SAB compartilha sem cópia sob COI; senão clone único
+por worker). Resultados colhidos fora de ordem num `Map` por id e consumidos por id
+(determinístico). Entradas paralelas: `computeSegmentDiscoveryPooled`/`computeSegmentCombinedPooled`
+(usadas pelos handlers), com **fallback transparente** para o caminho síncrono quando o pool
+não sobe (`typeof Worker === 'undefined'` / erro de construção). Vite bundla o worker aninhado
+como `new Worker(self.location.href, {type:'module'})` (auto-referência ao mesmo script). GATE
+dedicado `tests/workerPool.test.js` (pool ≡ single-worker número a número + determinismo sob
+ordens de conclusão diferentes + fallback). Os caminhos síncronos (`computeSegmentDiscovery`/
+`computeSegmentCombined`/`buildSegmentRecommendations`) seguem inalterados em números
+(referência/fallback/contrato dos testes).
 
 **Pré-requisitos**: H0 (para medir o ganho). Recomendado após H1/H2, mas independente.
 

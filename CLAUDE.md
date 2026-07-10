@@ -36,6 +36,7 @@ AppCreditoSimulador/
 │   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
 │   ├── segmentDiscovery.test.js  # GATE Copiloto Sessão 10: subgrupo plantado achado com condições exatas; homogênea ⇒ zero; agregados ≡ matchLensRule; dispersion ≡ contagem por terminal; p-value binomial ≡ controle; FDR (BH); shrinkage rebaixa nicho; escopo por nó ≡ sub-base; dedup; determinismo
+│   └── workerPool.test.js         # GATE Execução Híbrida H3: pool ≡ single-worker número a número (Descoberta + Combinada) via pool mock (jobs fora de ordem); determinismo sob ordens de conclusão diferentes; fallback (pool null ≡ síncrono)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 ├── docs/
 │   ├── HANDOFF.md                # Documento de handoff para desenvolvimento corporativo
@@ -347,6 +348,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_POLICY_DOC` | `{shapes, conns, ir, canvases, options}` | Copiloto Sessão 6 — `ir` chega PRONTO (`buildPolicyIR` só existe em `App.jsx`); `canvases: [{id, nome, shapes, conns}]` para a comparação de cenários (mesmo formato de `COMPUTE_ANALYTICS_DATASET`); `options: {includeDomains, activeCanvasId?, activeCanvasName?, compare?:{shapes,conns}}`. Roda `computePolicyDoc`; responde com `POLICY_DOC_RESULT` |
 | `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10/12 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?}`. Roda `computeSegmentDiscovery` (achados + recomendações validadas + asis_divergence/anomaly + estabilidade); responde com `SEGMENT_DISCOVERY_RESULT` |
 | `COMPUTE_SEGMENT_COMBINED` | `{shapes, conns, applies}` | Copiloto Sessão 12 — aplicação combinada de N recomendações. `applies: [{moves}]`. Aplica os patches EM SEQUÊNCIA sobre UM clone e valida por UMA re-simulação real (`computeSegmentCombined`) — nunca a soma dos deltas; responde com `SEGMENT_COMBINED_RESULT` |
+| `POOL_JOB` | `{jobId, shapes, conns, moves}` | **Execução Híbrida H3** — shard do pool de workers aninhados. Chega SÓ nos pool-workers (o worker principal não posta a si mesmo): roda `segValidateMoves` (aplica moves + `runSimulation` + snapshot) sobre o `workerCsvStore` já semeado e responde com `POOL_JOB_RESULT`. Ver "Pool de Workers (Execução Híbrida H3)" |
 
 ### Mensagens de saída
 | type | payload |
@@ -362,6 +364,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `POLICY_DOC_RESULT` | `{docModel}` — ver seção "Documentação Automática" |
 | `SEGMENT_DISCOVERY_RESULT` | `{segmentModel}` — ver seção "Descoberta de Segmentos" |
 | `SEGMENT_COMBINED_RESULT` | `{combined}` — `{baseline, combined, combinedApprovalDelta, combinedMovedQty, sumApprovalDelta, sumMovedQty, individual, interaction:{interacts, overlapQty, note}}` (Sessão 12) |
+| `POOL_JOB_RESULT` | `{jobId, snapshot}` \| `{jobId, error}` — resposta do pool-worker a um `POOL_JOB` (H3). `snapshot` = resultado de `segValidateMoves`; `error` (candidato que estourou) vira delta null / recomputo inline no orquestrador |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -1188,6 +1191,49 @@ COMBINADO ≡ re-simulação dos N patches, e difere da soma dos individuais em 
 **`asis_divergence` ≡ `incrementalResult.impacted` agregado**; **anomaly (mediana/MAD)**; **selo de
 estabilidade temporal**; **nó travado ⇒ recomendação não acionável**; determinismo.
 
+## Pool de Workers (Execução Híbrida H3)
+
+Ver `docs/wiki/Arquitetura-Execucao-Hibrida.md` (§7.2) e `docs/wiki/Hibrido-Prompts-Sessoes.md`
+(Sessão H3). As duas cargas **embaraçosamente paralelas** existentes — a validação por
+re-simulação dos top-N em `buildSegmentRecommendations` e as N re-simulações **individuais** de
+`computeSegmentCombined` — são shardadas **por candidato** num pool de **workers aninhados**
+dentro de `src/simulation.worker.js`. A re-simulação **combinada** de `computeSegmentCombined`
+**permanece UMA só** (inline, nunca shardada — DEC-SD-003: aplicar A muda a população que chega a
+B). Nenhuma matemática mudou: os caminhos síncronos (`computeSegmentDiscovery`/
+`computeSegmentCombined`/`buildSegmentRecommendations`) seguem **inalterados** como referência,
+fallback e contrato dos testes.
+
+- **Unidade de shard**: `segValidateMoves(shapes, conns, csvStore, moves)` — aplica os moves
+  (`applyGoalSeekMoves`) + `runSimulation` + `segSimSnapshot`. **Pura** em (shapes, conns,
+  csvStore, moves), então o resultado independe de qual worker rodou e de quando terminou — base
+  do determinismo. Envelope seguro `segValidateMovesSafe` → `{snapshot}` \| `{error}` (espelha o
+  try/catch por candidato do caminho original).
+- **Plano/preenchimento** (puros, compartilhados sync/pooled): `segPlanRecommendations` monta o
+  esqueleto de `recommendation` em cada achado e devolve os JOBS `{id, moves}` (top-N acionáveis);
+  `segFillRecommendationDeltas` grava `rec.delta` a partir de `Map(id → snapshot)` — consumido por
+  id (independe da ordem de conclusão). `segAssembleCombined` monta o resultado da combinada a
+  partir dos snapshots (fonte única do cálculo de somas/interação).
+- **Entradas paralelas** (`async`, usadas pelos handlers): `computeSegmentDiscoveryPooled` e
+  `computeSegmentCombinedPooled` (via `buildSegmentRecommendationsPooled`). `segBuildModelWithoutRecs`
+  é a parte comum da descoberta (estágios 1–3 + asis/anomaly/estabilidade) sem as recomendações.
+- **Pool** (`getSimPool`/`createSimPool`, lazy): `min(navigator.hardwareConcurrency − 1, 4)`
+  workers aninhados (`new Worker(new URL('./simulation.worker.js', import.meta.url), {type:'module'})`
+  — Vite bundla como `new Worker(self.location.href, …)`, auto-referência ao mesmo script). Base
+  semeada **1×/versão** via `buildCsvStoreMessage` (SAB compartilha sem cópia sob
+  `crossOriginIsolated` — Fase 2; senão structured clone copia uma vez por worker). Cada worker
+  recebe só `UPDATE_CSV_STORE` + `POOL_JOB`, então **nunca cria pool próprio** (sem recursão) e é
+  **stateless por job** (só a base é estado, referenciada por versão). Chamadas ao pool
+  serializadas por `pool.tail` (não corrompe `slot.onDone` entre tarefas).
+- **Fallback transparente** (`runValidationJobsVia`): pool null/indisponível (`typeof Worker ===
+  'undefined'`, erro de construção, ou erro de orquestração) ⇒ roda os jobs **inline**, sequencial
+  e determinístico — idêntico ao single-worker. Os handlers `COMPUTE_SEGMENT_*` ainda têm um
+  `.catch` que recai no caminho síncrono.
+- **Teste**: `tests/workerPool.test.js` — GATE H3: em Node/jsdom não há Worker real, então o GATE
+  injeta um **pool mock** (roda cada job inline via `segValidateMoves` mas resolve **fora de
+  ordem**) e prova (1) pool ≡ single-worker **número a número** (Descoberta e Combinada), (2)
+  determinismo sob ordens de conclusão diferentes (reverse ≡ shuffle ≡ síncrono), (3) fallback
+  (pool === null ≡ síncrono).
+
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
 - Estado local (array) persistido em `localStorage` implicitamente (futuro)
@@ -1676,7 +1722,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/copiloto-session-12-recommendations-cpotc2`
+`claude/hybrid-execution-worker-pool-09f0u4`
 
 ## Roadmap futuro (não implementado)
 

@@ -365,6 +365,17 @@ informativo da H2.
 | **Pool de workers (H3)** | Shards de validação em lote (candidatos independentes) | Estado próprio (stateless por job) |
 | **Sidecar Python** | Classe B sem tetos (incl. clusterização/stats em escala); futuramente lote de re-simulação (H9, pós-GATE) | Tick de edição; persistência de dados; rede externa |
 
+> **Entregue (Sessão H3):** pool de workers **aninhados** em `src/simulation.worker.js`
+> (`navigator.hardwareConcurrency − 1`, teto 4, lazy). Sharda POR CANDIDATO a validação por
+> re-simulação dos top-N de `buildSegmentRecommendations` e as N re-simulações INDIVIDUAIS de
+> `computeSegmentCombined` (a COMBINADA permanece uma só re-simulação inline — DEC-SD-003).
+> Unidade de shard `segValidateMoves` (pura) rodada por `POOL_JOB`/`POOL_JOB_RESULT`; base
+> semeada 1×/versão via `buildCsvStoreMessage` (SAB sob COI, senão clone único por worker);
+> resultados colhidos fora de ordem e consumidos por id (determinístico). Entradas paralelas
+> `computeSegmentDiscoveryPooled`/`computeSegmentCombinedPooled` com **fallback transparente**
+> ao caminho síncrono quando o pool não sobe. Os caminhos síncronos seguem inalterados em
+> números. GATE `tests/workerPool.test.js` (pool ≡ single-worker + determinismo + fallback).
+
 ### 7.3 Como um épico novo declara seus tetos
 
 Com a paridade total (P4), a pergunta por feature deixou de ser "qual classe?" e
