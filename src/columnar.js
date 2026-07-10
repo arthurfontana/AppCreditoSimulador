@@ -5,7 +5,8 @@
 //   - métricas (qty, qtdAltas, qtdAltasInfer, inadReal, inadInferida) → Float64Array
 //     (números prontos, sem parseFloat por tick);
 //   - dimensões / ID / decisão (incl. __DECISAO_ORIGINAL) → dictionary encoding
-//     ({ dict: string[], codes: Int32Array }) — o dicionário JÁ é a lista de distintos.
+//     ({ dict: string[], codes }) — o dicionário JÁ é a lista de distintos; os códigos
+//     usam o menor typed array pela cardinalidade (Uint8/Uint16/Int32 — dieta H2).
 //
 // Tudo é acessado por um accessor uniforme (cellStr/cellNum/rowCount/…) que funciona
 // tanto sobre a base colunar (produção) quanto sobre o legado `string[][]` (usado nos
@@ -44,17 +45,44 @@ export function sharedBuffersAvailable() {
     && globalThis.crossOriginIsolated === true;
 }
 
-// Aloca um Float64Array/Int32Array sobre SharedArrayBuffer quando compartilhável;
-// senão sobre ArrayBuffer normal. Ambos têm a mesma semântica de leitura/escrita.
-function allocF64(n) {
+// Aloca um typed array (Float64/Int32/Uint16/Uint8) sobre SharedArrayBuffer quando
+// compartilhável; senão sobre ArrayBuffer normal. Ambos têm a mesma semântica de
+// leitura/escrita.
+function alloc(Ctor, n) {
   return sharedBuffersAvailable()
-    ? new Float64Array(new SharedArrayBuffer(n * Float64Array.BYTES_PER_ELEMENT))
-    : new Float64Array(n);
+    ? new Ctor(new SharedArrayBuffer(n * Ctor.BYTES_PER_ELEMENT))
+    : new Ctor(n);
 }
-function allocI32(n) {
-  return sharedBuffersAvailable()
-    ? new Int32Array(new SharedArrayBuffer(n * Int32Array.BYTES_PER_ELEMENT))
-    : new Int32Array(n);
+function allocF64(n) { return alloc(Float64Array, n); }
+function allocI32(n) { return alloc(Int32Array, n); }
+
+// ── Dieta de memória (Execução Híbrida H2, §2.2 Eixo 1) ─────────────────────────
+// Os códigos do dictionary encoding escolhem o MENOR typed array que comporta a
+// cardinalidade do dicionário: colunas de baixa cardinalidade (a maioria numa base
+// dimensional) passam de 4 bytes/linha (Int32) para 1 (Uint8) ou 2 (Uint16) — ~2× a
+// 4× menos RAM nas colunas de dimensão, sem mudar nenhum valor (é ganho de constante).
+// Fronteiras por CAPACIDADE do tipo (maior código representável): Uint8 0..255,
+// Uint16 0..65535, Int32 acima. Métricas seguem Float64Array (os GATEs de igualdade
+// numérica exigem — não são afetadas). Os códigos são LIDOS por indexação
+// (`codes[r]`) em todo consumidor (motor M8, M15, accessors), que é dtype-agnóstica:
+// nenhum caminho de leitura assume Int32Array.
+const CODES_CTOR_BY_NAME = { Uint8Array, Uint16Array, Int32Array };
+export function codesCtorForDict(dictLen) {
+  const maxCode = dictLen - 1;      // maior código a representar (dict é 0-based)
+  if (maxCode <= 0xFF) return Uint8Array;      // ≤ 255  → 1 byte/linha
+  if (maxCode <= 0xFFFF) return Uint16Array;   // ≤ 65535 → 2 bytes/linha
+  return Int32Array;                            // acima  → 4 bytes/linha
+}
+
+// Empacota códigos já preenchidos (num Int32Array/growable transitório, ou array
+// plano do formato legado) no MENOR typed array SAB-aware que comporta `dictLen`
+// valores distintos. Copia as `n` primeiras posições de `src`.
+function packCodes(src, n, dictLen) {
+  const codes = alloc(codesCtorForDict(dictLen), n);
+  if (src.length === n) codes.set(src);
+  else if (src.subarray) codes.set(src.subarray(0, n));
+  else codes.set(src.slice(0, n));
+  return codes;
 }
 
 // Um csv está sobre buffers compartilhados quando suas colunas são SAB-backed.
@@ -106,14 +134,16 @@ export function buildColumnar(headers, rows, columnTypes) {
     } else {
       const dict = [];
       const dictIndex = new Map();
-      const codes = allocI32(rowCount);
+      // tmp Int32 transitório: a cardinalidade final só é conhecida no fim do loop;
+      // packCodes reduz ao menor dtype (dieta de memória) na cópia final SAB-aware.
+      const tmp = new Int32Array(rowCount);
       for (let r = 0; r < rowCount; r++) {
         const v = rows[r][c] ?? '';
         let code = dictIndex.get(v);
         if (code === undefined) { code = dict.length; dict.push(v); dictIndex.set(v, code); }
-        codes[r] = code;
+        tmp[r] = code;
       }
-      columns[name] = { kind: 'dict', dict, codes };
+      columns[name] = { kind: 'dict', dict, codes: packCodes(tmp, rowCount, dict.length) };
     }
   }
   return { columns, rowCount };
@@ -313,8 +343,8 @@ export function parseCSVToColumnarAsync(text, delimiter, hasHeader, onProgress) 
       const finish = () => {
         const columns = {};
         for (let c = 0; c < nCols; c++) {
-          const codes = allocI32(n);          // exato + SAB-aware (Fase 2)
-          codes.set(codesBuf[c].subarray(0, n));
+          // menor dtype pela cardinalidade + SAB-aware (Fase 2) — dieta de memória (H2).
+          const codes = packCodes(codesBuf[c], n, dicts[c].length);
           codesBuf[c] = null;                 // solta o buffer growable
           columns[headers[c]] = { kind: 'dict', dict: dicts[c], codes };
         }
@@ -358,15 +388,15 @@ function numFromDictColumn(col, n, normalizeDecimal) {
 // cellStr produz, e a mesma que o caminho legado obtinha ao materializar a linha.
 function dictFromNumColumn(col, n) {
   const dict = []; const dictIndex = new Map();
-  const codes = allocI32(n);
+  const tmp = new Int32Array(n); // transitório; menor dtype só no fim (cardinalidade final)
   for (let r = 0; r < n; r++) {
     const v = col.data[r];
     const s = Number.isNaN(v) ? '' : String(v);
     let code = dictIndex.get(s);
     if (code === undefined) { code = dict.length; dict.push(s); dictIndex.set(s, code); }
-    codes[r] = code;
+    tmp[r] = code;
   }
-  return { kind: 'dict', dict, codes };
+  return { kind: 'dict', dict, codes: packCodes(tmp, n, dict.length) };
 }
 
 // Normalização de separador decimal sobre um dict column: transforma os VALORES
@@ -391,10 +421,11 @@ function normalizeDictDecimal(col, n) {
     translate[k] = code;
   }
   if (dict.length === src.length) {
-    // nenhum merge — translate é identidade; reusa os codes sem cópia
+    // nenhum merge — translate é identidade; reusa os codes sem cópia (já no dtype certo)
     return { kind: 'dict', dict, codes: col.codes };
   }
-  const codes = allocI32(n);
+  // merge encolhe o dicionário: dtype pode reduzir. dict.length já é conhecido aqui.
+  const codes = alloc(codesCtorForDict(dict.length), n);
   for (let r = 0; r < n; r++) codes[r] = translate[col.codes[r]];
   return { kind: 'dict', dict, codes };
 }
@@ -414,7 +445,7 @@ export function finalizeImportedColumns(headers, columns, n, columnTypes, decima
         : col.kind === 'num' ? col
         : numFromDictColumn(col, n, normalize);
     } else {
-      out[name] = !col ? { kind: 'dict', dict: [''], codes: allocI32(n) }
+      out[name] = !col ? { kind: 'dict', dict: [''], codes: alloc(codesCtorForDict(1), n) }
         : col.kind === 'dict' ? (normalize ? normalizeDictDecimal(col, n) : col)
         : dictFromNumColumn(col, n);
     }
@@ -429,7 +460,7 @@ export function finalizeImportedColumns(headers, columns, n, columnTypes, decima
 // primeira aparição nas linhas — idêntica à do caminho legado (append + build).
 export function deriveMappedDictColumn(srcCol, n, mapFn) {
   const dict = []; const dictIndex = new Map();
-  const codes = allocI32(n);
+  const tmp = new Int32Array(n); // transitório; menor dtype só no fim (dict derivado costuma ser minúsculo)
   const putCode = (mapped) => {
     let code = dictIndex.get(mapped);
     if (code === undefined) { code = dict.length; dict.push(mapped); dictIndex.set(mapped, code); }
@@ -441,17 +472,17 @@ export function deriveMappedDictColumn(srcCol, n, mapFn) {
       const sc = srcCol.codes[r];
       let dc = translate[sc];
       if (dc === -1) { dc = putCode(mapFn(srcCol.dict[sc])); translate[sc] = dc; }
-      codes[r] = dc;
+      tmp[r] = dc;
     }
   } else if (srcCol && srcCol.kind === 'num') {
     for (let r = 0; r < n; r++) {
       const v = srcCol.data[r];
-      codes[r] = putCode(mapFn(Number.isNaN(v) ? '' : String(v)));
+      tmp[r] = putCode(mapFn(Number.isNaN(v) ? '' : String(v)));
     }
   } else {
-    codes.fill(putCode(mapFn('')));
+    tmp.fill(putCode(mapFn('')));
   }
-  return { kind: 'dict', dict, codes };
+  return { kind: 'dict', dict, codes: packCodes(tmp, n, dict.length) };
 }
 
 // Modo de edição do wizard: reclassificar uma coluna (métrica ↔ dimensão) sem
@@ -465,7 +496,7 @@ export function retypeColumn(col, toNum, n) {
     if (col.kind === 'num') return col;
     return numFromDictColumn(col, n, false);
   }
-  if (!col) return { kind: 'dict', dict: [''], codes: allocI32(n) };
+  if (!col) return { kind: 'dict', dict: [''], codes: alloc(codesCtorForDict(1), n) };
   if (col.kind === 'dict') return col;
   return dictFromNumColumn(col, n);
 }
@@ -478,9 +509,16 @@ export function retypeColumn(col, toNum, n) {
 // (bytes crus do typed array, sem materializar array de números): elimina os
 // números boxed, produz um JSON ~30% menor que a mesma sequência em dígitos
 // decimais, e serializa/parseia mais rápido.
-// `deserializeColumns` aceita os DOIS formatos (base64 novo e array plano antigo)
-// — retrocompatibilidade com projetos/exports salvos antes desta mudança. Round-trip
-// (dos dois formatos) coberto em tests/columnar.test.js.
+// `deserializeColumns` aceita os TRÊS formatos aceitos hoje — retrocompatibilidade
+// com projetos/exports salvos antes de cada mudança; round-trip coberto em
+// tests/columnar.test.js:
+//   (a) base64 COM `dtype` (dieta de memória H2): os códigos são lidos com o ctor
+//       gravado (Uint8Array/Uint16Array/Int32Array);
+//   (b) base64 SEM `dtype` (schema 2.3): os códigos eram sempre Int32 — lidos como
+//       Int32Array e re-empacotados ao menor dtype na carga (packCodes);
+//   (c) array plano (schema ≤ 2.2): idem — re-empacotado ao menor dtype.
+// Em todos os casos os códigos carregados ficam no MENOR typed array pela
+// cardinalidade do dicionário (packCodes), SAB-aware. Métricas seguem Float64Array.
 
 // Codifica bytes em base64 em chunks (evita `String.fromCharCode(...bytes)` com
 // milhões de argumentos — estoura a pilha de chamada em arrays grandes).
@@ -518,7 +556,9 @@ function serializeColumns(columns) {
     if (col.kind === 'num') {
       out[name] = { kind: 'num', encoding: 'base64', length: col.data.length, data: typedArrayToBase64(col.data) };
     } else {
-      out[name] = { kind: 'dict', dict: col.dict, encoding: 'base64', length: col.codes.length, codes: typedArrayToBase64(col.codes) };
+      // `dtype` no envelope: sem ele, o leitor legado supõe Int32 (formato base64
+      // pré-dieta). Com ele, o menor dtype (Uint8/Uint16/Int32) é reconstruído fiel.
+      out[name] = { kind: 'dict', dict: col.dict, encoding: 'base64', dtype: col.codes.constructor.name, length: col.codes.length, codes: typedArrayToBase64(col.codes) };
     }
   }
   return out;
@@ -538,15 +578,18 @@ function deserializeColumns(columns) {
       }
       out[name] = { kind: 'num', data };
     } else {
-      let codes;
+      const dict = col.dict || [];
+      let raw;
       if (col.encoding === 'base64') {
-        codes = allocI32(col.length ?? 0);
-        codes.set(base64ToTypedArray(col.codes, Int32Array));
+        // dtype gravado (dieta H2) → ctor fiel; ausente (base64 pré-dieta) → Int32.
+        const Ctor = CODES_CTOR_BY_NAME[col.dtype] || Int32Array;
+        raw = base64ToTypedArray(col.codes, Ctor);
       } else {
-        const src = col.codes || []; // formato legado (schema ≤ 2.2): array plano
-        codes = allocI32(src.length); codes.set(src);
+        raw = col.codes || []; // formato legado (schema ≤ 2.2): array plano
       }
-      out[name] = { kind: 'dict', dict: col.dict || [], codes };
+      const length = col.length ?? raw.length;
+      // Re-empacota ao menor dtype pela cardinalidade — carga sempre na dieta.
+      out[name] = { kind: 'dict', dict, codes: packCodes(raw, length, dict.length) };
     }
   }
   return out;

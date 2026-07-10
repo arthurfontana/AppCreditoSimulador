@@ -192,7 +192,8 @@ AppCreditoSimulador/
 }
 // ColDef (em src/columnar.js):
 //   { kind: 'num', data: Float64Array }  — para colunas métricas (qty, qtdAltas, etc.)
-//   { kind: 'dict', dict: string[], codes: Int32Array }  — para dimensões/decisão
+//   { kind: 'dict', dict: string[], codes: Uint8Array|Uint16Array|Int32Array }  — dimensões/decisão
+//     (codes = menor typed array pela cardinalidade — dieta de memória H2; ver Fase 1)
 ```
 
 ### Lens Rule
@@ -1432,7 +1433,7 @@ da base. (A técnica vive hoje dentro de `parseCSVToColumnarAsync` — ver M1.)
 ### Fase 1 — Armazenamento colunar no `csvStore`
 `src/columnar.js` define a estrutura vetorizada e os accessors:
 - Colunas métricas (`METRIC_COL_TYPES = qty, qtdAltas, qtdAltasInfer, inadReal, inadInferida`) → `Float64Array` (números prontos, sem `parseFloat` por tick).
-- Dimensões/decisão/ID → *dictionary encoding* `{dict: string[], codes: Int32Array}` — o dicionário já é a lista de distintos.
+- Dimensões/decisão/ID → *dictionary encoding* `{dict: string[], codes}` — o dicionário já é a lista de distintos. Os `codes` usam o **menor typed array pela cardinalidade** (`codesCtorForDict`): `Uint8Array` (≤256 distintos), `Uint16Array` (≤65536), `Int32Array` acima — **dieta de memória H2** (Execução Híbrida §2.2 Eixo 1): colunas de baixa cardinalidade caem de 4 para 1–2 bytes/linha. Aplicado no import vetorizado (M1) e no `buildColumnar` legado; todo consumidor lê `codes[r]` por indexação (dtype-agnóstico — motor M8, M15, accessors). Métricas seguem `Float64Array` (GATEs de igualdade exigem).
 - **Accessors** (uso obrigatório em hot paths — não acessar `csv.rows[r][c]` diretamente):
   - `rowCount(csv)` — número de linhas
   - `cellStr(csv, r, c)` — equivalente exato a `row[c]` no legado
@@ -1498,6 +1499,12 @@ que sobravam ao **salvar** um projeto com base grande:
    de números, JSON ~30% menor que a mesma sequência em dígitos decimais.
    `deserializeColumns` aceita os dois formatos (`encoding:'base64'` novo e o array
    plano antigo, schema ≤ 2.2) — retrocompatibilidade coberta em `tests/columnar.test.js`.
+   **Dieta H2:** o envelope base64 de uma coluna dict ganhou o campo `dtype`
+   (`'Uint8Array'|'Uint16Array'|'Int32Array'`) para reconstruir os `codes` no dtype
+   certo. Retrocompatível com os **três formatos** aceitos: base64 **com** `dtype` (lê
+   fiel), base64 **sem** `dtype` (schema 2.3 = sempre Int32, lido como Int32 e
+   re-empacotado ao menor dtype) e array plano (schema ≤ 2.2, idem). Toda carga
+   termina no menor dtype pela cardinalidade (`packCodes`).
 2. **`JSON.stringify(payload)` monolítico.** Mesmo em base64, uma única chamada monta
    o projeto inteiro como uma string contígua antes de gravar. **Correção:**
    `buildProjectJSONChunks(payload)` (`App.jsx`) monta a "casca" do payload (tudo
