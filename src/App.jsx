@@ -71,6 +71,101 @@ function BuildBadge() {
   );
 }
 
+// ── H0: Telemetria local de custo (Execução Híbrida — opt-in ?debug=perf) ────
+// Mapa request (COMPUTE_*/RUN_SIMULATION) → tipo de resposta *_RESULT correspondente.
+// Usado só para casar timestamps por tipo — nunca payload. Ver
+// docs/wiki/Arquitetura-Execucao-Hibrida.md (Sessão H0).
+const PERF_REQUEST_TO_RESULT = {
+  RUN_SIMULATION:            'SIMULATION_RESULT',
+  COMPUTE_OVERLAY:           'OVERLAY_RESULT',
+  COMPUTE_ASIS_PREVIEW:      'ASIS_PREVIEW_RESULT',
+  COMPUTE_OPTIM:             'OPTIM_RESULT',
+  COMPUTE_JOHNNY:            'JOHNNY_RESULT',
+  COMPUTE_ANALYTICS_DATASET: 'ANALYTICS_RESULT',
+  COMPUTE_GOAL_SEEK:         'GOAL_SEEK_RESULT',
+  COMPUTE_SIMPLIFY:          'SIMPLIFY_RESULT',
+  COMPUTE_POLICY_DOC:        'POLICY_DOC_RESULT',
+  COMPUTE_SEGMENT_DISCOVERY: 'SEGMENT_DISCOVERY_RESULT',
+  COMPUTE_SEGMENT_COMBINED:  'SEGMENT_COMBINED_RESULT',
+  COMPUTE_POLICY_INSIGHTS:   'POLICY_INSIGHTS_RESULT',
+  COMPUTE_VARIABLE_RANKING:  'VARIABLE_RANKING_RESULT',
+};
+const PERF_RESULT_TO_REQUEST = Object.fromEntries(
+  Object.entries(PERF_REQUEST_TO_RESULT).map(([req, res]) => [res, req])
+);
+const PERF_RING_SIZE = 200;
+
+function perfPercentile(sortedAsc, p) {
+  const n = sortedAsc.length;
+  if (n === 0) return null;
+  const idx = Math.min(n - 1, Math.max(0, Math.ceil(p * n) - 1));
+  return sortedAsc[idx];
+}
+
+function PerfDebugPanel({ telemetryRef }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick(t => t + 1), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  const buffers = telemetryRef.current?.buffers;
+  const rows = buffers ? Array.from(buffers.entries()).map(([reqType, entries]) => {
+    const durations = entries.map(e => e.duration).sort((a, b) => a - b);
+    const n = durations.length;
+    const last = entries[entries.length - 1];
+    const avg = n ? durations.reduce((s, d) => s + d, 0) / n : null;
+    return {
+      reqType,
+      resType: PERF_REQUEST_TO_RESULT[reqType],
+      count: n,
+      lastMs: last ? last.duration : null,
+      avgMs: avg,
+      p95Ms: perfPercentile(durations, 0.95),
+      lastRowCount: last ? last.rowCount : null,
+      lastMemMB: last?.memory ? Math.round(last.memory.usedJSHeapSize / 1048576) : null,
+    };
+  }).sort((a, b) => a.reqType.localeCompare(b.reqType)) : [];
+
+  return (
+    <div style={{position:"fixed",bottom:12,right:12,zIndex:99999,background:"#0f172a",color:"#e2e8f0",
+      borderRadius:10,padding:"10px 12px",fontSize:11,fontFamily:"monospace",boxShadow:"0 8px 24px rgba(0,0,0,.35)",
+      maxWidth:600,maxHeight:360,overflow:"auto"}}>
+      <div style={{fontWeight:700,marginBottom:6,color:"#38bdf8"}}>⚡ H0 · Telemetria local do worker (?debug=perf)</div>
+      {rows.length === 0 ? (
+        <div style={{color:"#94a3b8"}}>Sem medições ainda — edite o canvas ou rode uma análise.</div>
+      ) : (
+        <table style={{borderCollapse:"collapse",width:"100%"}}>
+          <thead>
+            <tr style={{color:"#64748b",textAlign:"left"}}>
+              <th style={{padding:"2px 10px 4px 0"}}>tipo</th>
+              <th style={{padding:"2px 10px"}}>n</th>
+              <th style={{padding:"2px 10px"}}>última</th>
+              <th style={{padding:"2px 10px"}}>média</th>
+              <th style={{padding:"2px 10px"}}>p95</th>
+              <th style={{padding:"2px 10px"}}>linhas</th>
+              <th style={{padding:"2px 0"}}>heap JS</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.reqType}>
+                <td style={{padding:"2px 10px 2px 0"}}>{r.reqType}</td>
+                <td style={{padding:"2px 10px"}}>{r.count}</td>
+                <td style={{padding:"2px 10px"}}>{r.lastMs != null ? `${r.lastMs.toFixed(1)}ms` : "—"}</td>
+                <td style={{padding:"2px 10px"}}>{r.avgMs != null ? `${r.avgMs.toFixed(1)}ms` : "—"}</td>
+                <td style={{padding:"2px 10px"}}>{r.p95Ms != null ? `${r.p95Ms.toFixed(1)}ms` : "—"}</td>
+                <td style={{padding:"2px 10px"}}>{r.lastRowCount ?? "—"}</td>
+                <td style={{padding:"2px 0"}}>{r.lastMemMB != null ? `${r.lastMemMB}MB` : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 let _id = 1;
 const uid = () => `e${_id++}`;
 
@@ -4237,6 +4332,13 @@ export default function App() {
 
   // ── Web Worker — simulation off the main thread ───────────────
   const workerRef = useRef(null);
+  // H0 — Telemetria local de custo (opt-in ?debug=perf): {pending:Map, buffers:Map}.
+  // Só alocado/instrumentado quando o painel dev está ligado — zero overhead fora dele.
+  const perfTelemetryRef = useRef(null);
+  const debugPerf = useMemo(() => {
+    try { return new URLSearchParams(window.location.search).get('debug') === 'perf'; }
+    catch { return false; }
+  }, []);
   const pendingOptimShapeIdRef = useRef(null);
   const pendingRankingPortIdRef = useRef(null);
   // Prévia AS IS contextualizada (assignCinemaVar): token por shape p/ ignorar
@@ -4247,6 +4349,52 @@ export default function App() {
   useEffect(() => {
     const worker = new Worker(new URL('./simulation.worker.js', import.meta.url), { type: 'module' });
     workerRef.current = worker;
+
+    // H0 — Telemetria local de custo (opt-in ?debug=perf). Wrapper fino sobre o
+    // canal postMessage: mede a duração entre cada request (COMPUTE_*/RUN_SIMULATION)
+    // e seu *_RESULT casando por tipo (PERF_REQUEST_TO_RESULT), sem tocar no worker
+    // nem no handler `onmessage` abaixo (listener extra via addEventListener) — só
+    // timestamps + rowCount do csvStore no momento do envio + performance.memory
+    // quando existe. Acumula num ring buffer local de ~200 entradas por tipo. Nada é
+    // persistido nem sai da máquina. Se duas requisições do MESMO tipo forem disparadas
+    // antes da 1ª resposta voltar (não deveria acontecer — os disparos são debounced),
+    // o par mede o intervalo até a resposta mais recente, não FIFO por requisição —
+    // aceitável para telemetria aproximada de custo, não para correlação exata.
+    let restoreWorkerPostMessage = null;
+    if (debugPerf) {
+      const telemetry = { pending: new Map(), buffers: new Map() };
+      perfTelemetryRef.current = telemetry;
+      const origPostMessage = worker.postMessage.bind(worker);
+      worker.postMessage = (payload, transferOrOptions) => {
+        const reqType = payload && payload.type;
+        if (reqType && PERF_REQUEST_TO_RESULT[reqType]) {
+          let rowCountTotal = 0;
+          const cs = csvStoreR.current;
+          if (cs) for (const csvId in cs) rowCountTotal += cs[csvId]?.rowCount || 0;
+          telemetry.pending.set(reqType, { start: performance.now(), rowCount: rowCountTotal });
+        }
+        return origPostMessage(payload, transferOrOptions);
+      };
+      restoreWorkerPostMessage = () => { worker.postMessage = origPostMessage; };
+      worker.addEventListener('message', (e) => {
+        const reqType = PERF_RESULT_TO_REQUEST[e.data && e.data.type];
+        if (!reqType) return;
+        const pending = telemetry.pending.get(reqType);
+        if (!pending) return;
+        telemetry.pending.delete(reqType);
+        const duration = performance.now() - pending.start;
+        const mem = (typeof performance !== 'undefined' && performance.memory)
+          ? { usedJSHeapSize: performance.memory.usedJSHeapSize,
+              totalJSHeapSize: performance.memory.totalJSHeapSize,
+              jsHeapSizeLimit: performance.memory.jsHeapSizeLimit }
+          : null;
+        let arr = telemetry.buffers.get(reqType);
+        if (!arr) { arr = []; telemetry.buffers.set(reqType, arr); }
+        arr.push({ ts: Date.now(), duration, rowCount: pending.rowCount, memory: mem });
+        if (arr.length > PERF_RING_SIZE) arr.shift();
+      });
+    }
+
     worker.onmessage = (e) => {
       const { type: msgType } = e.data;
       if (msgType === 'SIMULATION_RESULT') {
@@ -4368,7 +4516,7 @@ export default function App() {
         setSegmentDiscoveryModal(m => (m ? { ...m, combined: { loading: false, result: combined } } : m));
       }
     };
-    return () => worker.terminate();
+    return () => { restoreWorkerPostMessage?.(); worker.terminate(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -13802,6 +13950,9 @@ export default function App() {
         </>,
         document.body
       )}
+
+      {/* H0 — painel dev de telemetria local de custo (?debug=perf) */}
+      {debugPerf && <PerfDebugPanel telemetryRef={perfTelemetryRef} />}
     </div>
   );
 }
