@@ -4356,10 +4356,15 @@ export default function App() {
     // nem no handler `onmessage` abaixo (listener extra via addEventListener) — só
     // timestamps + rowCount do csvStore no momento do envio + performance.memory
     // quando existe. Acumula num ring buffer local de ~200 entradas por tipo. Nada é
-    // persistido nem sai da máquina. Se duas requisições do MESMO tipo forem disparadas
-    // antes da 1ª resposta voltar (não deveria acontecer — os disparos são debounced),
-    // o par mede o intervalo até a resposta mais recente, não FIFO por requisição —
-    // aceitável para telemetria aproximada de custo, não para correlação exata.
+    // persistido nem sai da máquina. O pareamento é uma FILA FIFO por tipo: o debounce
+    // (300ms) só espaça os envios, não espera a resposta anterior — em base grande
+    // (tick ~0,7s) requests do MESMO tipo se sobrepõem justamente nos ticks pesados que
+    // este painel existe para medir, e um slot único subestimaria a duração e perderia
+    // amostras. FIFO é exato aqui porque o worker processa mensagens em ordem e todo
+    // request mapeado responde exatamente uma vez; a duração inclui a espera na fila do
+    // worker (custo real do canal, intencional). Exceção não capturada num handler do
+    // worker é o único caso sem resposta — o evento 'error' limpa as filas pendentes
+    // para não desalinhar os pares seguintes.
     let restoreWorkerPostMessage = null;
     if (debugPerf) {
       const telemetry = { pending: new Map(), buffers: new Map() };
@@ -4371,17 +4376,20 @@ export default function App() {
           let rowCountTotal = 0;
           const cs = csvStoreR.current;
           if (cs) for (const csvId in cs) rowCountTotal += cs[csvId]?.rowCount || 0;
-          telemetry.pending.set(reqType, { start: performance.now(), rowCount: rowCountTotal });
+          let queue = telemetry.pending.get(reqType);
+          if (!queue) { queue = []; telemetry.pending.set(reqType, queue); }
+          queue.push({ start: performance.now(), rowCount: rowCountTotal });
         }
         return origPostMessage(payload, transferOrOptions);
       };
       restoreWorkerPostMessage = () => { worker.postMessage = origPostMessage; };
+      worker.addEventListener('error', () => { telemetry.pending.clear(); });
       worker.addEventListener('message', (e) => {
         const reqType = PERF_RESULT_TO_REQUEST[e.data && e.data.type];
         if (!reqType) return;
-        const pending = telemetry.pending.get(reqType);
+        const queue = telemetry.pending.get(reqType);
+        const pending = queue && queue.shift();
         if (!pending) return;
-        telemetry.pending.delete(reqType);
         const duration = performance.now() - pending.start;
         const mem = (typeof performance !== 'undefined' && performance.memory)
           ? { usedJSHeapSize: performance.memory.usedJSHeapSize,
