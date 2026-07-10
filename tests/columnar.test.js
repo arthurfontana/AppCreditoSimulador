@@ -16,6 +16,7 @@ import {
   sharedBuffersAvailable,
   isSharedColumnar,
   buildCsvStoreMessage,
+  codesCtorForDict,
 } from '../src/columnar.js';
 
 // ── Parser mínimo (delimitador ';', sem aspas) — igual ao GATE ──────────────────
@@ -70,7 +71,8 @@ describe('buildColumnar — estrutura vetorizada', () => {
 
     const scol = columns['OPERACAO'];
     expect(scol.kind).toBe('dict');
-    expect(scol.codes).toBeInstanceOf(Int32Array);
+    // dieta H2: menor dtype pela cardinalidade (OPERACAO é baixa cardinalidade → Uint8).
+    expect(scol.codes).toBeInstanceOf(codesCtorForDict(scol.dict.length));
     // dict = lista de distintos por construção
     const idx = baseHeaders.indexOf('OPERACAO');
     const legacyDistinct = new Set(baseRows.map(r => r[idx] ?? ''));
@@ -140,7 +142,9 @@ describe('Round-trip do Projeto (.credito.json) preservando a base colunar', () 
     const rcsv = restored.base;
     expect(isColumnar(rcsv)).toBe(true);
     expect(rcsv.columns[WEIGHT_COL].data).toBeInstanceOf(Float64Array);
-    expect(rcsv.columns['OPERACAO'].codes).toBeInstanceOf(Int32Array);
+    // dieta de memória (H2): OPERACAO é de baixa cardinalidade → menor dtype (Uint8),
+    // não mais sempre Int32. O dtype reconstruído bate o esperado pela cardinalidade.
+    expect(rcsv.columns['OPERACAO'].codes).toBeInstanceOf(codesCtorForDict(rcsv.columns['OPERACAO'].dict.length));
     expect(rcsv.rowCount).toBe(baseRows.length);
     expect(rcsv.headers).toEqual(baseHeaders);
 
@@ -213,7 +217,8 @@ describe('Round-trip do Projeto (.credito.json) preservando a base colunar', () 
       const restored = deserializeCsvStore(JSON.parse(JSON.stringify(oldSerialized)));
       const rcsv = restored.base;
       expect(rcsv.columns[WEIGHT_COL].data).toBeInstanceOf(Float64Array);
-      expect(rcsv.columns.OPERACAO.codes).toBeInstanceOf(Int32Array);
+      // array plano legado é re-empacotado ao menor dtype na carga (dieta H2).
+      expect(rcsv.columns.OPERACAO.codes).toBeInstanceOf(codesCtorForDict(rcsv.columns.OPERACAO.dict.length));
       expect(Array.from(rcsv.columns[WEIGHT_COL].data)).toEqual(Array.from(store.base.columns[WEIGHT_COL].data));
       const opIdx = baseHeaders.indexOf('OPERACAO');
       expect(cellStr(rcsv, 0, opIdx)).toBe(baseRows[0][opIdx]);
@@ -232,6 +237,81 @@ describe('Round-trip do Projeto (.credito.json) preservando a base colunar', () 
       expect(got[4]).toBeCloseTo(123456789.987654, 6);
       expect(Array.from(restored.base.columns.d.codes)).toEqual([0, 1, 2, 2, 0]);
     });
+  });
+});
+
+// ── Dieta de memória (Execução Híbrida — Sessão H2, §2.2 Eixo 1) ────────────────
+// Os códigos do dictionary encoding escolhem o menor typed array pela cardinalidade.
+describe('Dieta de memória (H2) — dtype dos códigos pela cardinalidade', () => {
+  // csv colunar sintético com cardinalidade controlada numa dimensão ('DIM').
+  function makeCardCsv(distinct) {
+    const headers = ['DIM', WEIGHT_COL];
+    const rows = [];
+    for (let i = 0; i < distinct; i++) rows.push([`v${i}`, '1']);
+    rows.push(['v0', '2']); // uma repetição → n > distinct, sem novo valor no dict
+    const { columns, rowCount: rc } = buildColumnar(headers, rows, columnTypes);
+    return { name: 'card', headers, columns, rowCount: rc, columnTypes, varTypes: {}, asIsConfig: null };
+  }
+
+  it('codesCtorForDict escolhe Uint8/Uint16/Int32 pelas fronteiras de capacidade', () => {
+    expect(codesCtorForDict(1)).toBe(Uint8Array);
+    expect(codesCtorForDict(256)).toBe(Uint8Array);      // maior código 255
+    expect(codesCtorForDict(257)).toBe(Uint16Array);     // maior código 256
+    expect(codesCtorForDict(65536)).toBe(Uint16Array);   // maior código 65535
+    expect(codesCtorForDict(65537)).toBe(Int32Array);    // maior código 65536
+  });
+
+  it('buildColumnar dimensiona os códigos ao menor dtype; métrica segue Float64Array', () => {
+    const { columns } = buildColumnar(baseHeaders, baseRows, columnTypes);
+    const scol = columns['OPERACAO'];
+    expect(scol.kind).toBe('dict');
+    expect(scol.codes).toBeInstanceOf(codesCtorForDict(scol.dict.length));
+    expect(columns[WEIGHT_COL].data).toBeInstanceOf(Float64Array); // métrica inalterada
+  });
+
+  it.each([
+    ['Uint8Array', 3, Uint8Array],
+    ['Uint16Array', 300, Uint16Array],
+    ['Int32Array', 65537, Int32Array],
+  ])('round-trip base64 preserva códigos e dtype %s (célula a célula)', (name, distinct, Ctor) => {
+    const csv = makeCardCsv(distinct);
+    expect(csv.columns.DIM.codes).toBeInstanceOf(Ctor);
+
+    const ser = serializeCsvStore({ base: csv });
+    expect(ser.base.columns.DIM.encoding).toBe('base64');
+    expect(ser.base.columns.DIM.dtype).toBe(name); // dtype gravado no envelope
+
+    const restored = deserializeCsvStore(JSON.parse(JSON.stringify(ser))).base;
+    expect(restored.columns.DIM.codes).toBeInstanceOf(Ctor);
+    const dimIdx = csv.headers.indexOf('DIM');
+    for (let r = 0; r < csv.rowCount; r++) {
+      expect(cellStr(restored, r, dimIdx)).toBe(cellStr(csv, r, dimIdx));
+    }
+  });
+
+  it('deserialize aceita base64 legado SEM dtype (schema 2.3 = sempre Int32) e reconstrói igual', () => {
+    // O formato base64 pré-dieta só existia com códigos Int32; simula-se com uma
+    // coluna genuinamente Int32 (cardinalidade > 65536) cujo envelope perde o dtype.
+    const csv = makeCardCsv(65537);
+    const ser = serializeCsvStore({ base: csv });
+    delete ser.base.columns.DIM.dtype; // envelope pré-dieta
+    const restored = deserializeCsvStore(JSON.parse(JSON.stringify(ser))).base;
+    const dimIdx = csv.headers.indexOf('DIM');
+    for (let r = 0; r < csv.rowCount; r++) {
+      expect(cellStr(restored, r, dimIdx)).toBe(cellStr(csv, r, dimIdx));
+    }
+  });
+
+  it('runSimulation inalterado sobre base com códigos de dtype reduzido', () => {
+    // O GATE colunar acima já roda sobre makeColumnarCsv (agora com códigos Uint8);
+    // aqui reforça que uma base com dtype reduzido bate exatamente o legado string[][].
+    const legacyRes = runSimulation(SHAPES, CONNS, { base: makeLegacyCsv() });
+    const colCsv = makeColumnarCsv();
+    expect(colCsv.columns['OPERACAO'].codes).toBeInstanceOf(codesCtorForDict(colCsv.columns['OPERACAO'].dict.length));
+    const colRes = runSimulation(SHAPES, CONNS, { base: colCsv });
+    expect(colRes.approvedQty).toBeCloseTo(legacyRes.approvedQty, 6);
+    expect(colRes.totalQty).toBeCloseTo(legacyRes.totalQty, 6);
+    expect(colRes.inadInferida).toBeCloseTo(legacyRes.inadInferida, 12);
   });
 });
 

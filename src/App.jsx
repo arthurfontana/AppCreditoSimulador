@@ -4,7 +4,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
-import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn } from "./columnar.js";
+import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn, codesCtorForDict } from "./columnar.js";
 import { applyGoalSeekMoves } from "./goalSeek.js";
 import { applySimplifyCandidates } from "./policySimplify.js";
 
@@ -11613,8 +11613,48 @@ export default function App() {
                   { type:'inadInferida',   icon:'🎯', label:'Inadimplência Inferida', desc:'Inadimplência estimada pelo modelo' },
                 ];
 
+                // ── Estimativa de RAM colunar (Execução Híbrida H2 / DEC-HX-009) ──
+                // linhas × Σ(bytes por coluna): métricas = 8 (Float64), dimensões = o
+                // menor dtype de códigos pela cardinalidade (Uint8/Uint16/Int32 —
+                // codesCtorForDict). Acima de ~1,2GB o browser sai da zona de conforto.
+                const nRows = wizard.editCsvId ? (csvStore[wizard.editCsvId]?.rowCount || 0) : (wizard.parsedRowCount || 0);
+                const cardOf = (h) => {
+                  if (wizard.editCsvId) { const c = csvStore[wizard.editCsvId]?.columns?.[h]; return c && c.kind === 'dict' ? c.dict.length : null; }
+                  const c = wizard.parsedColumns?.[h]; return c && c.dict ? c.dict.length : null;
+                };
+                let ramBytesPerRow = 0;
+                for (const h of allHeaders) {
+                  if (METRIC_TYPES_SET.has((wizard.columnTypes||{})[h])) ramBytesPerRow += 8; // Float64
+                  else { const card = cardOf(h); ramBytesPerRow += card != null ? codesCtorForDict(card).BYTES_PER_ELEMENT : 4; }
+                }
+                if (wizard.asIsVar) ramBytesPerRow += 1; // __DECISAO_ORIGINAL (dict minúsculo → Uint8)
+                const ramEstBytes = nRows * ramBytesPerRow;
+                const RAM_WARN_BYTES = 1.2 * (1 << 30); // ~1,2GB
+                const ramOver = ramEstBytes > RAM_WARN_BYTES;
+                const fmtRam = (b) => b >= (1 << 30) ? (b / (1 << 30)).toFixed(2) + ' GB'
+                  : b >= (1 << 20) ? Math.round(b / (1 << 20)) + ' MB'
+                  : Math.max(1, Math.round(b / (1 << 10))) + ' KB';
+
                 return (
                   <>
+                    {/* ── Estimativa de RAM colunar (H2 / DEC-HX-009) ── */}
+                    {nRows > 0 && (
+                      <div style={{marginBottom:18,padding:"10px 14px",borderRadius:10,border:`1px solid ${ramOver?"#fca5a5":"#e2e8f0"}`,background:ramOver?"#fef2f2":"#f8fafc",display:"flex",alignItems:"flex-start",gap:10}}>
+                        <span style={{fontSize:16,lineHeight:1.2}}>{ramOver?"⚠️":"💾"}</span>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:12,fontWeight:600,color:ramOver?"#b91c1c":"#334155",lineHeight:1.4}}>
+                            Memória colunar estimada: ~{fmtRam(ramEstBytes)}
+                            <span style={{fontWeight:400,color:"#94a3b8"}}> · {nRows.toLocaleString('pt-BR')} linhas × {allHeaders.length} colunas</span>
+                          </div>
+                          {ramOver && (
+                            <div style={{fontSize:11,color:"#b91c1c",lineHeight:1.5,marginTop:3}}>
+                              Acima da zona de conforto do navegador (~1,2&nbsp;GB). A base pode abrir com lentidão ou esgotar a memória da aba. Considere sumarizar mais a base, reduzir colunas, ou processar a íntegra no Motor Python (quando disponível). O import não é bloqueado.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     {/* ── Métricas ── */}
                     <div style={{marginBottom:22}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>

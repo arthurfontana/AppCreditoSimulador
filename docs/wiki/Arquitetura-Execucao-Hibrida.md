@@ -81,6 +81,17 @@ navegador é ~2–4GB, e nenhuma otimização de código muda isso.
 Códigos `Int16`/`Uint8` para colunas de baixa cardinalidade (~metade das células de
 uma base dimensional) compram ~2×; é ganho de constante, não de ordem.
 
+> **Entregue (Sessão H2):** o dictionary encoding de `src/columnar.js` escolhe o menor
+> typed array pela cardinalidade (`codesCtorForDict`: `Uint8Array` ≤256 distintos,
+> `Uint16Array` ≤65536, `Int32Array` acima), no import vetorizado (M1) e no
+> `buildColumnar` legado. Métricas seguem `Float64Array` (GATEs de igualdade). Os
+> consumidores (motor M8, `computeAnalyticsDataset`/M15, accessors) leem `codes[r]` por
+> indexação (dtype-agnóstico); a serialização base64 (M3) ganhou um campo `dtype` no
+> envelope, retrocompatível com os três formatos aceitos. O passo 2 do wizard estima a
+> RAM colunar (linhas × Σ dtype por coluna) e avisa acima de ~1,2GB (semente da
+> DEC-HX-009). GATE em `tests/columnar.test.js` (round-trip dos três dtypes,
+> equivalência célula a célula e `runSimulation` inalterados).
+
 **Eixo 2 — Colunas: menos grave do que parece.** O motor compilado só toca colunas
 referenciadas pela política; quem sofre com largura é o **dataset analítico largo**
 (materializa todas as dimensões) e o import. Mitigável com colunas lazy no dataset
