@@ -1,0 +1,21 @@
+# Motor Python (Execução Híbrida) — dependências do tier `full`.
+#
+# A sonda HP (checar_ambiente.py, rodada 2x na máquina corporativa alvo em
+# 09/07/2026) confirmou que os quatro pacotes instalam E importam do índice
+# (numpy 2.5.1, scipy 1.18.0, scikit-learn 1.9.0, duckdb 1.5.4). Nenhuma wheel
+# offline é imprescindível nessa máquina — ver instalar_motor.bat (camada de
+# contingência --no-index --find-links wheels/).
+#
+# Versões deixadas SEM pin rígido de propósito: o instalador tenta o índice
+# corporativo primeiro, e travar versões exatas quebraria máquinas com um índice
+# levemente diferente. Os pisos abaixo refletem o que a sonda validou.
+#
+# Tier `full` (o que define o tier no sidecar): numpy + scipy.
+numpy>=1.24
+scipy>=1.10
+
+# Extras declarados por pacote em /capabilities (nunca gate do tier) — habilitam
+# análises futuras (H8: silhueta/hierárquico via sklearn; SQL ad-hoc via duckdb).
+# Carregados lazy, só no primeiro job que os usar.
+scikit-learn>=1.3
+duckdb>=0.9

@@ -56,9 +56,18 @@ AppCreditoSimulador/
 │   ├── index.html
 │   ├── assets/
 │   ├── iniciar.bat               # Abre a aplicação no navegador (Windows)
+│   ├── serve.py                  # Servidor local COOP/COEP + monta o sidecar em /api/compute/*
+│   ├── sidecar.py                # Execução Híbrida H5 — Motor Python (stdlib) importado por serve.py
+│   ├── python/                   # Instalação do Motor Python (opt-in)
+│   │   ├── requirements.txt      #   tier full (numpy/scipy) + extras (sklearn/duckdb)
+│   │   ├── instalar_motor.bat    #   venv + pip do índice; wheels/ como contingência (P1)
+│   │   ├── checar_ambiente.py    #   sonda HP (movida da raiz) — testa install/import na máquina
+│   │   └── wheels/               #   wheels offline de CONTINGÊNCIA (vazia por padrão; só LEIAME)
 │   └── ...
+├── tests_python/                 # GATE H5 (pytest): protocolo do sidecar (health/token/caps/dataset/job)
 ├── .github/workflows/
 │   ├── build-release.yml         # Build automático em push para main → commit em release/
+│   ├── test-sidecar.yml          # Job SEPARADO e OPCIONAL: pytest do sidecar (não bloqueia o build)
 │   └── sync-wiki.yml             # Sincroniza docs/wiki/ com o GitHub Wiki
 ├── vite.config.js                # Build config + injeção de metadados de build
 ├── vitest.config.js              # Config dos testes (jsdom)
@@ -1292,6 +1301,56 @@ chegam por callback (`buildChunks`), então o router não conhece `columnar.js`.
   ao contrato; (4) queda no meio do job ⇒ fallback transparente ao worker; (5) preferência off ⇒
   tudo no worker; WorkerProvider posta payload intocado e correlaciona a `*_RESULT`.
 
+## Sidecar Python (Execução Híbrida H5 — `release/sidecar.py`)
+
+O executor Python opt-in do outro lado do `ComputeRouter` (H4). Arquivo **único, stdlib
+apenas** (`http.server`/`ThreadingHTTPServer`, sem Flask), **importado por `release/serve.py`**
+e montado sob `/api/compute/*` na **mesma porta/origem** do app no release (DEC-HX-003) — o
+`iniciar.bat` sobe app + sidecar juntos, sem passo extra. Ver
+`docs/wiki/Arquitetura-Execucao-Hibrida.md` (DEC-HX-003/004/006/008, §8–§9). **É opt-in e
+silencioso**: sem os pacotes científicos, reporta tier `stdlib` e o app segue 100% no
+navegador (DEC-HX-001).
+
+- **Endpoints (§8)**: `GET /health` (sem token) · `GET /token` (sem token, mas **só à própria
+  origem** — GET same-origin não manda `Origin`; página de terceiro manda e cai fora da
+  allowlist) · `GET /capabilities` · `POST /datasets?hash=` + `HEAD /datasets/{hash}` ·
+  `POST /jobs` + `GET /jobs/{id}` + `DELETE /jobs/{id}`. Tudo exceto `/health` e `/token` exige
+  o header **`X-Compute-Token`** (token aleatório por boot, `secrets.token_urlsafe`). Bind
+  **exclusivo em `127.0.0.1`**; **nenhum header CORS** exceto a allowlist do origin do Vite sob
+  `--dev` (com preflight `OPTIONS`).
+- **Detecção de tier por warm-up ASSÍNCRONO no boot (DEC-HX-004)**: `start_warmup()` importa
+  numpy/scipy/sklearn/duckdb numa thread de fundo (a 1ª carga do sklearn mediu 38s sob antivírus
+  na sonda HP — por isso **nunca inline no request**). `get_capabilities()` responde imediato
+  com status **por pacote** (`{numpy:'2.5.1'|'loading'|null, ...}`), `cores`, `tasks`,
+  `protocolVersion=1`. **Tier `full` = numpy+scipy presentes**; sklearn/duckdb são extras por
+  pacote, **nunca gate do tier**.
+- **Datasets (DEC-HX-006)**: `POST /datasets?hash=` recebe o corpo = chunks base64 do
+  `serializeCsvStore`/M3 (`src/columnar.js`), faz `json.loads` e guarda **só em RAM** por hash
+  (idempotente: mesmo hash ⇒ `reused:true`, não re-parseia). Colunas métricas decodificadas com
+  `numpy.frombuffer('<f8')` (tier full) ou o módulo `array` (stdlib) — **nenhum formato novo**.
+- **Jobs**: `submit_job` roda a task num **processo filho** (`multiprocessing`, `_job_entry`
+  top-level p/ ser picklável sob spawn no Windows) com fila de progresso e resultado; uma thread
+  monitora e atualiza `status`/`progress`; `DELETE` faz `terminate()` (best-effort). Fallback
+  inline se `Process` não subir. `run_task(task, store, params, progress_cb)` é o mesmo executor
+  síncrono (usado pelo filho e direto nos testes). Task inicial **`echo_stats`** (rowCount + soma
+  de uma coluna métrica) — prova o round-trip contra o worker e serve de benchmark.
+- **Instalação em camadas (P1) — `release/python/`**: `requirements.txt` (numpy/scipy = tier
+  full; sklearn/duckdb extras) + `instalar_motor.bat` (venv + `pip install` **do índice**
+  primeiro; para o que falhar, `--no-index --find-links wheels/` como **contingência** — a sonda
+  HP não achou wheel imprescindível, então `wheels/` vem vazia com só um `LEIAME.txt` e o passo
+  de embarcá-las no `build-release.yml` está **documentado e desativado**). `checar_ambiente.py`
+  (a sonda HP) foi **movida da raiz** para `release/python/` (junto do instalador).
+- **Modo dev**: `python sidecar.py --dev [--port 8090] [--vite-origin http://localhost:5173]`
+  sobe **só a API** à parte, com CORS para o origin do Vite e o token impresso no console (colado
+  na UI). No release, `serve.py` chama `configure(dev=False)` + `start_warmup()`.
+- **Teste**: `tests_python/` (pytest, rodável sem numpy/scipy — os testes de tier manipulam o
+  estado do warm-up): health, token (gate de origem), auth por token, capabilities durante
+  (`loading`⇒stdlib) e após o warm-up (numpy+scipy⇒full, sklearn não é gate), dataset round-trip
+  por hash (POST idempotente + HEAD 200/404), ciclo de job `echo_stats` e cancelamento. CI:
+  workflow **separado e opcional** `.github/workflows/test-sidecar.yml` (não bloqueia o build).
+  **Não** é o GATE cross-runtime de fixtures douradas (DEC-HX-005) — esse chega na H7, quando
+  houver dupla implementação de fato.
+
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
 - Estado local (array) persistido em `localStorage` implicitamente (futuro)
@@ -1741,8 +1800,16 @@ Header do painel direito — ao lado do título "Painel".
 ### `build-release.yml`
 - Disparado em push para `main`
 - Executa `npm ci` + `npm run build`
-- Copia `dist/` → `release/` (preservando `iniciar.bat`)
+- Copia `dist/` → `release/` (preservando os artefatos de distribuição local que não vêm do
+  build do Vite: `iniciar.bat`, `serve.py`, `sidecar.py` e toda a pasta `release/python/`)
+- Passo de **wheels offline** do Motor Python documentado e **desativado** (contingência P1 —
+  ativar só se outra máquina reportar falha real de instalação pelo índice)
 - Commita com `[skip ci]` para evitar loop
+
+### `test-sidecar.yml`
+- Job **separado e opcional** (não bloqueia o build): `pytest tests_python/` sobre o
+  `release/sidecar.py`. Dispara em `workflow_dispatch` e em push/PR que toquem os arquivos do
+  sidecar. Roda sem numpy/scipy (os testes de tier manipulam o estado do warm-up).
 
 ### `sync-wiki.yml`
 - Disparado em push para `main` quando `docs/wiki/**` muda
@@ -1781,7 +1848,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/computerouter-hybrid-execution-et4c6h`
+`claude/hybrid-execution-sidecar-wwsbay`
 
 ## Roadmap futuro (não implementado)
 

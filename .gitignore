@@ -2,3 +2,14 @@ node_modules/
 dist/
 .env
 .env.local
+
+# Motor Python (sidecar) — artefatos locais
+__pycache__/
+*.pyc
+.venv/
+release/python/.venv/
+# wheels de contingência baixadas localmente (a pasta e o LEIAME.txt entram; .whl não)
+release/python/wheels/*.whl
+# relatórios da sonda de ambiente (contêm só metadados, mas são por-máquina)
+relatorio_ambiente.txt
+relatorio_ambiente.json
