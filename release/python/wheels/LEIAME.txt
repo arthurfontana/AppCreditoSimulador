@@ -1,0 +1,33 @@
+wheels/ — camada de CONTINGENCIA de instalacao offline (P1)
+===========================================================
+
+Esta pasta vem VAZIA de proposito.
+
+Por que existe
+--------------
+O `instalar_motor.bat` instala os pacotes do Motor Python em camadas:
+  1. Tenta `pip install` DO INDICE (PyPI / indice corporativo).
+  2. Para o que FALHAR, cai para `pip install --no-index --find-links wheels\`
+     usando os arquivos .whl que estiverem AQUI.
+
+A sonda HP (checar_ambiente.py), rodada 2x na maquina corporativa alvo em
+09/07/2026, confirmou que os quatro pacotes (numpy, scipy, scikit-learn, duckdb)
+instalam E importam DO INDICE naquela maquina. Ou seja: NENHUMA wheel offline foi
+imprescindivel — por isso esta pasta esta vazia por padrao, e o passo de embarcar
+wheels no build (CI) esta documentado mas DESATIVADO (ver
+.github/workflows/build-release.yml).
+
+Quando popular esta pasta
+-------------------------
+So se OUTRA maquina reportar falha REAL de instalacao pelo indice (proxy que
+bloqueia o pacote, ausencia de compilador, etc.). Nesse caso, numa maquina COM
+acesso ao indice e do MESMO sistema/arquitetura/versao de Python da maquina alvo,
+baixe as wheels (e as dependencias transitivas) para ca:
+
+    pip download -r ../requirements.txt -d .
+
+e redistribua o release com esta pasta preenchida. O `instalar_motor.bat` usara
+essas wheels automaticamente quando o indice falhar.
+
+Nada aqui e obrigatorio: sem os pacotes, o app roda 100% no navegador
+(tier stdlib). O Motor Python so ACELERA/AMPLIA — nunca e requisito.

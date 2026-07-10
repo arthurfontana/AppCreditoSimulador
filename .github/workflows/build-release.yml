@@ -30,25 +30,48 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Copiar dist/ para release/ (preserva iniciar.bat e serve.py)
+      - name: Copiar dist/ para release/ (preserva scripts locais + Motor Python)
         run: |
-          # Salva os arquivos de distribuição local (não vêm do build do Vite)
-          for f in iniciar.bat serve.py; do
+          # Salva os artefatos de distribuição local (não vêm do build do Vite):
+          # scripts de inicialização, o servidor COOP/COEP, o sidecar do Motor
+          # Python e toda a pasta release/python/ (instalador, requirements, sonda,
+          # wheels de contingência).
+          rm -rf /tmp/release-keep
+          mkdir -p /tmp/release-keep
+          for f in iniciar.bat serve.py sidecar.py; do
             if [ -f "release/$f" ]; then
-              cp "release/$f" "/tmp/$f"
+              cp "release/$f" "/tmp/release-keep/$f"
             fi
           done
+          if [ -d "release/python" ]; then
+            cp -r "release/python" "/tmp/release-keep/python"
+          fi
+
+          # ── CONTINGÊNCIA (P1) — wheels offline do Motor Python ──────────────
+          # A sonda HP (09/07/2026) confirmou que os 4 pacotes instalam do índice
+          # na máquina alvo, então este passo fica DOCUMENTADO E DESATIVADO. Ative
+          # (descomente) SÓ se outra máquina reportar falha real de instalação pelo
+          # índice — ele baixa as wheels para embarcar em release/python/wheels/:
+          #
+          #   python -m pip download -r release/python/requirements.txt \
+          #     -d /tmp/release-keep/python/wheels
+          #
+          # (idealmente numa máquina do MESMO SO/arquitetura/versão de Python da
+          # máquina alvo — ver release/python/wheels/LEIAME.txt).
 
           # Limpa e recria release/ com o conteúdo do build
           rm -rf release/*
           cp -r dist/. release/
 
-          # Restaura os arquivos de distribuição local
-          for f in iniciar.bat serve.py; do
-            if [ -f "/tmp/$f" ]; then
-              cp "/tmp/$f" "release/$f"
+          # Restaura os artefatos de distribuição local
+          for f in iniciar.bat serve.py sidecar.py; do
+            if [ -f "/tmp/release-keep/$f" ]; then
+              cp "/tmp/release-keep/$f" "release/$f"
             fi
           done
+          if [ -d "/tmp/release-keep/python" ]; then
+            cp -r "/tmp/release-keep/python" "release/python"
+          fi
 
       - name: Commit e push da release/
         run: |
