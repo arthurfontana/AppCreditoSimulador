@@ -383,3 +383,75 @@ export function createComputeRouter(config = {}) {
     get status() { return status; },
   };
 }
+
+// ── UX do motor (Sessão H6) ──────────────────────────────────────────────────────
+// Funções PURAS de apresentação sobre `status` (a forma devolvida por `detect()`/
+// `getStatus()`) — mantidas aqui (fora de App.jsx) para serem testáveis sem React/
+// jsdom, mesmo motivo do resto deste módulo. Elas só decidem TEXTO/ícone; nenhuma
+// decide roteamento (isso é `canRouteToSidecar`, acima). Reutilizadas pelo badge ao
+// lado do BuildBadge, pelos banners DEC-HX-009 (wizard/abertura de projeto) e pelo
+// helper de degradação declarada que tarefas Classe B futuras (H7/H8) reusam.
+
+const SIDECAR_REASON_LABEL = {
+  disabled: 'Motor Python desligado nas preferências.',
+  no_sidecar: 'Motor Python desligado nas preferências.',
+  unreachable: 'Sidecar não respondeu — verifique se o processo está rodando.',
+  protocol_mismatch: 'Motor Python desatualizado — atualize o release.',
+  not_detected: 'Ainda não verificado.',
+};
+
+// Badge de status (§9, DEC-HX-004): ⚡ tier full / ⚙ tier stdlib / 🐍 cinza ausente
+// (inclui desligado). `prefEnabled` reflete a preferência do usuário — o router nem
+// tenta detectar quando ela está off (ver `enabled()` acima), então o badge mostra
+// "desligado" sem inventar uma tentativa de conexão.
+export function describeComputeBadge(prefEnabled, status) {
+  if (!prefEnabled) {
+    return { icon: '🐍', tone: 'off', label: 'Motor Python', detail: 'Desligado — ative em Preferências.' };
+  }
+  if (!status || !status.available) {
+    const reason = status && status.reason;
+    return { icon: '🐍', tone: 'gray', label: 'Motor Python ausente', detail: SIDECAR_REASON_LABEL[reason] || 'Indisponível.' };
+  }
+  const caps = status.capabilities || {};
+  const detail = caps.cores != null ? `${caps.cores} núcleos` : null;
+  if (status.tier === 'full') {
+    return { icon: '⚡', tone: 'full', label: 'Motor Python: tier full', detail };
+  }
+  return { icon: '⚙', tone: 'stdlib', label: 'Motor Python: tier stdlib', detail };
+}
+
+// Linhas do tooltip do badge (pacotes com versão/'loading'/ausente, cores,
+// protocolVersion) — só formata o que `capabilities()` já devolveu (DEC-HX-004: status
+// POR PACOTE, warm-up assíncrono no sidecar).
+export function describeCapabilitiesDetail(status) {
+  const caps = (status && status.capabilities) || null;
+  if (!caps) return [];
+  const lines = [];
+  if (caps.packages && typeof caps.packages === 'object') {
+    for (const [name, v] of Object.entries(caps.packages)) {
+      lines.push({ label: name, value: v === 'loading' ? 'carregando…' : (v || 'ausente') });
+    }
+  }
+  if (caps.cores != null) lines.push({ label: 'cores', value: String(caps.cores) });
+  if (caps.protocolVersion != null) lines.push({ label: 'protocolo', value: String(caps.protocolVersion) });
+  return lines;
+}
+
+// Degradação declarada (paridade total, P4, DEC-HX-007): toda tarefa Classe B nasce
+// com um teto browser declarado na UI e um texto do que o Motor Python destrava. Helper
+// REUTILIZÁVEL — chamado tanto pelos banners DEC-HX-009 (import/abertura de projeto,
+// zona de conforto de RAM) quanto, no futuro, por controles de feature Classe B (H7
+// profundidade da Descoberta, H8 clusterização). Só decide TEXTO; nunca roteamento.
+export function ceilingNotice({ ceilingText, unlockedText } = {}, status) {
+  if (status && status.available) {
+    return { capped: false, text: unlockedText || null };
+  }
+  return { capped: true, text: ceilingText || null, cta: 'Saiba como ligar o Motor Python' };
+}
+
+// Aviso discreto "concluído no modo browser" (§9 — "Job com fallback"): só quando o
+// resultado de `router.run()` caiu do sidecar pro worker no meio do job.
+export function fallbackNoticeText(runResult) {
+  if (!runResult || !runResult.fellBack) return null;
+  return 'Concluído no modo browser — o Motor Python caiu no meio do job; o resultado é o mesmo, só sem a aceleração.';
+}

@@ -8,6 +8,10 @@ import {
   createWorkerProvider,
   createSidecarProvider,
   createComputeRouter,
+  describeComputeBadge,
+  describeCapabilitiesDetail,
+  ceilingNotice,
+  fallbackNoticeText,
 } from '../src/computeRouter.js';
 
 // ── GATE Execução Híbrida Sessão H4 (ComputeRouter + ComputeProvider) ────────────────
@@ -332,5 +336,90 @@ describe('H4 — WorkerProvider (adapter do postMessage, payloads intocados)', (
     // dispara uma mensagem qualquer sem runJob pendente — não deve lançar
     expect(() => listeners.forEach((fn) => fn({ data: { type: 'OVERLAY_RESULT' } }))).not.toThrow();
     expect(wp.id).toBe('worker');
+  });
+});
+
+// ── GATE Execução Híbrida Sessão H6 (UX do motor — funções puras) ────────────────────
+// docs/wiki/Arquitetura-Execucao-Hibrida.md (DEC-HX-001/007/009, §9). Só apresentação
+// (ícone/texto) sobre o `status` que `detect()`/`getStatus()` já devolvem — nenhuma
+// decide roteamento.
+describe('H6 — describeComputeBadge (badge ⚡ full / ⚙ stdlib / 🐍 ausente)', () => {
+  it('preferência desligada ⇒ tom "off", nunca finge ter verificado', () => {
+    const b = describeComputeBadge(false, { available: true, tier: 'full' });
+    expect(b.tone).toBe('off');
+    expect(b.icon).toBe('🐍');
+  });
+
+  it('ligada mas indisponível ⇒ tom "gray" com motivo legível por reason', () => {
+    const b1 = describeComputeBadge(true, { available: false, reason: 'unreachable' });
+    expect(b1.tone).toBe('gray');
+    expect(b1.detail).toMatch(/não respondeu/i);
+
+    const b2 = describeComputeBadge(true, { available: false, reason: 'protocol_mismatch' });
+    expect(b2.detail).toMatch(/desatualizado/i);
+
+    const b3 = describeComputeBadge(true, null);
+    expect(b3.tone).toBe('gray');
+  });
+
+  it('tier full ⇒ ⚡; tier stdlib ⇒ ⚙', () => {
+    const full = describeComputeBadge(true, { available: true, tier: 'full', capabilities: { cores: 8 } });
+    expect(full.icon).toBe('⚡');
+    expect(full.detail).toBe('8 núcleos');
+
+    const stdlib = describeComputeBadge(true, { available: true, tier: 'stdlib', capabilities: {} });
+    expect(stdlib.icon).toBe('⚙');
+  });
+});
+
+describe('H6 — describeCapabilitiesDetail (linhas do tooltip)', () => {
+  it('sem capabilities ⇒ lista vazia (nunca inventa pacote)', () => {
+    expect(describeCapabilitiesDetail({ available: false })).toEqual([]);
+  });
+
+  it('formata pacotes (versão/loading/ausente), cores e protocolVersion', () => {
+    const lines = describeCapabilitiesDetail({
+      capabilities: {
+        packages: { numpy: '2.5.1', sklearn: 'loading', duckdb: null },
+        cores: 8,
+        protocolVersion: 1,
+      },
+    });
+    expect(lines).toContainEqual({ label: 'numpy', value: '2.5.1' });
+    expect(lines).toContainEqual({ label: 'sklearn', value: 'carregando…' });
+    expect(lines).toContainEqual({ label: 'duckdb', value: 'ausente' });
+    expect(lines).toContainEqual({ label: 'cores', value: '8' });
+    expect(lines).toContainEqual({ label: 'protocolo', value: '1' });
+  });
+});
+
+describe('H6 — ceilingNotice (degradação declarada, paridade total P4)', () => {
+  const copy = { ceilingText: 'Profundidade limitada a 2 sem o Motor Python.', unlockedText: 'Sem tetos.' };
+
+  it('sidecar indisponível ⇒ capped=true com o texto de teto e CTA', () => {
+    const n = ceilingNotice(copy, { available: false });
+    expect(n.capped).toBe(true);
+    expect(n.text).toBe(copy.ceilingText);
+    expect(n.cta).toMatch(/saiba como ligar/i);
+  });
+
+  it('sidecar disponível ⇒ capped=false com o texto de desbloqueio', () => {
+    const n = ceilingNotice(copy, { available: true, tier: 'full' });
+    expect(n.capped).toBe(false);
+    expect(n.text).toBe(copy.unlockedText);
+    expect(n.cta).toBeUndefined();
+  });
+});
+
+describe('H6 — fallbackNoticeText (aviso "concluído no modo browser")', () => {
+  it('sem fellBack ⇒ null (silencioso — caminho normal)', () => {
+    expect(fallbackNoticeText({ via: 'sidecar', fellBack: false })).toBeNull();
+    expect(fallbackNoticeText({ via: 'worker' })).toBeNull();
+    expect(fallbackNoticeText(null)).toBeNull();
+  });
+
+  it('com fellBack ⇒ texto explicando a queda no meio do job', () => {
+    const t = fallbackNoticeText({ via: 'worker', fellBack: true, error: new Error('boom') });
+    expect(t).toMatch(/modo browser/i);
   });
 });

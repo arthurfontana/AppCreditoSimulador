@@ -4,9 +4,12 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
-import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn, codesCtorForDict } from "./columnar.js";
+import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn, codesCtorForDict, estimateColumnarRamBytes, estimateCsvStoreRamBytes, estimateCsvStoreRowCount, formatRamBytes, RAM_COMFORT_BYTES, ROW_COMFORT_COUNT } from "./columnar.js";
 import { applyGoalSeekMoves } from "./goalSeek.js";
 import { applySimplifyCandidates } from "./policySimplify.js";
+// Execução Híbrida H4/H6 — ComputeRouter (fronteira única worker/sidecar, DEC-HX-002)
+// + funções puras de UX do motor (badge, degradação declarada, aviso de fallback).
+import { createComputeRouter, createWorkerProvider, createSidecarProvider, describeComputeBadge, describeCapabilitiesDetail, ceilingNotice, fallbackNoticeText, hashChunks } from "./computeRouter.js";
 
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
@@ -14,6 +17,10 @@ const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   
 const BUILD_HASH   = typeof __BUILD_HASH__   !== "undefined" ? __BUILD_HASH__   : "local";
 const BUILD_BRANCH = typeof __BUILD_BRANCH__ !== "undefined" ? __BUILD_BRANCH__ : "local";
 const BUILD_AUTHOR = typeof __BUILD_AUTHOR__ !== "undefined" ? __BUILD_AUTHOR__ : "";
+// Modo dev do Vite (servidor local) — decide se os campos URL/token do Motor Python
+// aparecem nas preferências (DEC-HX-003: no release o sidecar é same-origin, sem
+// config; só no dev ele roda à parte e precisa de URL + token colado pela UI).
+const IS_DEV_BUILD = typeof import.meta !== "undefined" && !!(import.meta.env && import.meta.env.DEV);
 
 function formatBuildTime(iso) {
   try {
@@ -66,6 +73,185 @@ function BuildBadge() {
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Execução Híbrida H6: UX do Motor Python (badge, degradação declarada, jobs) ──
+// Componentes de apresentação puros sobre o `status` do ComputeRouter (H4/H5) — a
+// lógica de texto/ícone vive em src/computeRouter.js (testável sem React); aqui só o
+// JSX. Ver docs/wiki/Arquitetura-Execucao-Hibrida.md (DEC-HX-001/007/009, §9).
+const COMPUTE_BADGE_TONE = {
+  full:   { bg: "#f0fdf4", color: "#16a34a", border: "#bbf7d0" },
+  stdlib: { bg: "#eff6ff", color: "#2563eb", border: "#bfdbfe" },
+  gray:   { bg: "#f8fafc", color: "#94a3b8", border: "#e2e8f0" },
+  off:    { bg: "#f8fafc", color: "#94a3b8", border: "#e2e8f0" },
+};
+
+// Badge ao lado do BuildBadge: ⚡ tier full / ⚙ tier stdlib / 🐍 ausente (cinza,
+// inclui desligado). Clique dispara `onRecheck` — mesma re-checagem do boot
+// (DEC-HX-004: `capabilities` é barato, pode ser chamado sob demanda).
+function ComputeEngineBadge({ enabled, status, checking, onRecheck }) {
+  const [tip, setTip] = useState(false);
+  const badge = describeComputeBadge(enabled, status);
+  const detailLines = describeCapabilitiesDetail(status);
+  const tone = COMPUTE_BADGE_TONE[badge.tone] || COMPUTE_BADGE_TONE.off;
+
+  return (
+    <div style={{position:"relative",display:"inline-flex",alignItems:"center"}}
+      onMouseEnter={()=>setTip(true)} onMouseLeave={()=>setTip(false)}>
+      <span
+        onClick={onRecheck}
+        title="Clique para verificar a conexão com o Motor Python"
+        style={{
+          fontSize:9.5,fontWeight:600,color:tone.color,letterSpacing:.3,textTransform:"none",
+          background:tone.bg,borderRadius:6,padding:"2px 7px",cursor:"pointer",
+          border:`1px solid ${tone.border}`,whiteSpace:"nowrap",userSelect:"none",
+          transition:"all .15s",display:"inline-flex",alignItems:"center",gap:4,
+        }}>
+        <span style={{fontSize:11,lineHeight:1,opacity:checking?0.5:1}}>{checking ? "…" : badge.icon}</span>
+        {badge.label}
+      </span>
+      {tip && (
+        <div style={{
+          position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:9999,
+          background:"#1e293b",color:"#f8fafc",borderRadius:8,
+          padding:"10px 13px",fontSize:11,lineHeight:1.8,whiteSpace:"nowrap",
+          boxShadow:"0 8px 24px rgba(0,0,0,.25)",pointerEvents:"none",
+        }}>
+          <div style={{fontWeight:700,fontSize:11.5,marginBottom:4,borderBottom:"1px solid #334155",paddingBottom:4}}>
+            🐍 {badge.label}
+          </div>
+          {badge.detail && <div style={{color:"#94a3b8"}}>{badge.detail}</div>}
+          {detailLines.length > 0 && (
+            <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"1px 10px",marginTop:4}}>
+              {detailLines.map(l => (
+                <div key={l.label} style={{display:"contents"}}>
+                  <span style={{color:"#94a3b8"}}>{l.label}</span>
+                  <span style={{fontFamily:"monospace"}}>{l.value}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{marginTop:6,paddingTop:5,borderTop:"1px solid #334155",color:"#64748b",fontSize:10}}>
+            clique para verificar de novo
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Degradação declarada (paridade total, P4, DEC-HX-007): pílula reutilizável por
+// qualquer feature Classe B (hoje: só os banners DEC-HX-009; H7/H8 reusam para tetos
+// de profundidade/clusterização). `status` vem de `computeSidecarStatus`.
+function ComputeCeilingNotice({ ceilingText, unlockedText, status, onOpenPrefs }) {
+  const n = ceilingNotice({ ceilingText, unlockedText }, status);
+  if (!n.text) return null;
+  return (
+    <div style={{display:"flex",alignItems:"flex-start",gap:7,padding:"7px 10px",borderRadius:8,
+      background:n.capped?"#fdf4ff":"#f0fdf4",border:`1px solid ${n.capped?"#f0abfc":"#bbf7d0"}`,
+      fontSize:11,color:n.capped?"#86198f":"#15803d",lineHeight:1.5}}>
+      <span style={{fontSize:13,lineHeight:1.3}}>🐍</span>
+      <span style={{flex:1}}>{n.text}</span>
+      {n.capped && onOpenPrefs && (
+        <span onClick={onOpenPrefs} style={{textDecoration:"underline",cursor:"pointer",fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+          {n.cta}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Aviso discreto "concluído no modo browser" — renderizado quando um `router.run()`
+// caiu do sidecar pro worker no meio do job (fellBack:true). Nenhuma feature em
+// produção roteia pro sidecar ainda (Classe B nasce em H7/H8) — pronto para reuso.
+function ComputeFallbackNotice({ runResult }) {
+  const text = fallbackNoticeText(runResult);
+  if (!text) return null;
+  return (
+    <div style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",borderRadius:6,
+      background:"#f8fafc",border:"1px solid #e2e8f0",fontSize:10.5,color:"#94a3b8"}}>
+      <span>🌐</span>{text}
+    </div>
+  );
+}
+
+// Corpo do passo "loading" de um job do sidecar — progresso (0..1 ou indeterminado) +
+// cancelamento opcional. Mesmo espírito visual do texto simples que `goalSeekModal`/
+// `simplifyModal`/`docModal`/`segmentDiscoveryModal` usam hoje no passo `loading`
+// (todos Classe A, nunca roteiam pro sidecar — DEC-HX-007); esses modais continuam com
+// o texto simples porque não há progresso a mostrar. Este componente é o padrão que
+// H7/H8 devem usar quando uma tarefa Classe B de fato rotear pro sidecar.
+function ComputeJobProgress({ label, progress, via, onCancel }) {
+  const pct = progress == null ? null : Math.round(Math.min(1, Math.max(0, progress)) * 100);
+  const barColor = via === 'sidecar' ? "#7c3aed" : "#2563eb";
+  return (
+    <div style={{padding:"24px 4px",textAlign:"center"}}>
+      <p style={{fontSize:12.5,color:"#475569",marginBottom:10}}>{label}</p>
+      <div style={{height:6,borderRadius:4,background:"#e2e8f0",overflow:"hidden",marginBottom:8}}>
+        <div style={{height:"100%",borderRadius:4,background:barColor,
+          width: pct == null ? "60%" : `${pct}%`, transition:"width .2s ease"}}/>
+      </div>
+      <p style={{fontSize:11,color:"#94a3b8"}}>
+        {pct == null ? "processando…" : `${pct}%`}{via === 'sidecar' ? " · 🐍 Motor Python" : ""}
+      </p>
+      {onCancel && (
+        <button onClick={onCancel}
+          style={{marginTop:10,padding:"6px 14px",borderRadius:8,border:"1px solid #e2e8f0",
+            background:"#fff",color:"#64748b",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+          Cancelar
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Smoke test ponta a ponta do sidecar (`echo_stats` — §17 Fase 1: "sidecar opt-in
+// funcionando ponta a ponta com uma tarefa de eco/benchmark"). Fala com o
+// `sidecarProviderRef` DIRETO (não via ComputeRouter): é este componente que está
+// testando o sidecar em si, não uma feature Classe B com fallback — rotear pelo
+// worker aqui não faria sentido (o worker não implementa `echo_stats`, só o sidecar).
+function SidecarTestPanel({ status, test, onRun, onCancel, hasDataset }) {
+  if (!status || !status.available) {
+    return (
+      <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5}}>
+        Verifique a conexão acima antes de testar o round-trip.
+      </div>
+    );
+  }
+  const idle = !test || test.step === 'result' || test.step === 'error';
+  return (
+    <div style={{padding:"10px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fafafa"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom: test ? 8 : 0}}>
+        <span style={{fontSize:11.5,fontWeight:600,color:"#475569"}}>Testar Motor Python (echo_stats)</span>
+        {idle && (
+          <button onClick={onRun} disabled={!hasDataset}
+            title={hasDataset ? "" : "Importe uma base primeiro"}
+            style={{padding:"5px 10px",borderRadius:7,border:"none",background:hasDataset?"#7c3aed":"#e2e8f0",
+              color:hasDataset?"#fff":"#94a3b8",cursor:hasDataset?"pointer":"default",fontSize:11,fontWeight:600,fontFamily:"inherit"}}>
+            ▶ Testar
+          </button>
+        )}
+      </div>
+
+      {test?.step === 'uploading' && (
+        <ComputeJobProgress label="Enviando base ao Motor Python — só na primeira vez" progress={null} via="sidecar" onCancel={onCancel}/>
+      )}
+      {test?.step === 'running' && (
+        <ComputeJobProgress label="Rodando echo_stats no Motor Python…" progress={test.progress} via="sidecar" onCancel={onCancel}/>
+      )}
+      {test?.step === 'result' && test.result && (
+        <div style={{fontSize:11.5,color:"#15803d",lineHeight:1.6}}>
+          ✅ Round-trip OK — {(test.result.rowCount||0).toLocaleString('pt-BR')} linhas
+          {test.result.counted
+            ? <> · soma de <code>{test.result.col}</code> = {(test.result.sum||0).toLocaleString('pt-BR')}</>
+            : null}.
+        </div>
+      )}
+      {test?.step === 'error' && (
+        <div style={{fontSize:11.5,color:"#b91c1c",lineHeight:1.6}}>⚠️ {test.error}</div>
       )}
     </div>
   );
@@ -4304,11 +4490,25 @@ export default function App() {
   const [showEdgeVol,       setShowEdgeVol]        = useState(true);
   const [showEdgeInadReal,  setShowEdgeInadReal]   = useState(true);
   const [showEdgeInadInf,   setShowEdgeInadInf]    = useState(true);
-  // Execução Híbrida H4 — preferência do Motor Python (sidecar opt-in). Default OFF:
+  // Execução Híbrida H4/H6 — preferência do Motor Python (sidecar opt-in). Default OFF:
   // com desligado o ComputeRouter nem tenta detectar; tudo roda no worker (DEC-HX-001).
-  // Persistida no contêiner `preferences` do Projeto (sem bump de schema). A UX (toggle,
-  // URL/token, badge) e o wiring do router vêm nas Sessões H5/H6.
-  const [computeSidecar,    setComputeSidecar]     = useState({ enabled: false, url: '' });
+  // `url`/`token` só têm efeito no modo dev (release é same-origin, sem config — ver
+  // IS_DEV_BUILD). Persistida no contêiner `preferences` do Projeto (sem bump de schema).
+  const [computeSidecar,    setComputeSidecar]     = useState({ enabled: false, url: '', token: '' });
+  // Status detectado do sidecar (efêmero — nunca persistido, é sempre re-derivado por
+  // `detect()`). `reason` espelha o vocabulário do router: not_detected|disabled|
+  // no_sidecar|unreachable|protocol_mismatch|ok.
+  const [computeSidecarStatus, setComputeSidecarStatus] = useState({ available: false, tier: null, capabilities: null, reason: 'not_detected' });
+  const [computeSidecarChecking, setComputeSidecarChecking] = useState(false);
+  // Seção "Motor Python" das preferências — expandida sob demanda (inclusive pelos
+  // banners DEC-HX-009, que apontam pra cá via "Saiba como ligar").
+  const [sidecarPrefsOpen, setSidecarPrefsOpen] = useState(false);
+  // Teste ponta a ponta (echo_stats) — smoke test do round-trip Browser⇄Python (§17
+  // Fase 1: "sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark").
+  // null | {step:'uploading'|'running'|'result'|'error', progress, via, fellBack, result, error}
+  const [sidecarTest, setSidecarTest] = useState(null);
+  // Recomendação proativa (DEC-HX-009) ao abrir um projeto grande — dismissível.
+  const [projectLoadNotice, setProjectLoadNotice] = useState(null);
   // Feature: tooltips
   const [tooltip,    setTooltip]    = useState(null);   // null | {x,y,lines:[]}
   // Optimization modal
@@ -4403,6 +4603,9 @@ export default function App() {
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
   const canvasesR       = useRef(canvases);        useEffect(()=>{canvasesR.current=canvases},         [canvases]);
   const activeCanvasIdR = useRef(activeCanvasId);  useEffect(()=>{activeCanvasIdR.current=activeCanvasId},[activeCanvasId]);
+  // Execução Híbrida H6 — lido dentro do ComputeRouter (`getPreference`), que roda em
+  // callbacks assíncronos fora do ciclo de render (poll de job, detect no boot).
+  const computeSidecarR = useRef(computeSidecar); useEffect(()=>{computeSidecarR.current=computeSidecar},[computeSidecar]);
   const bwDragR = useRef(null);
 
   // ── Web Worker — simulation off the main thread ───────────────
@@ -4421,9 +4624,34 @@ export default function App() {
   const asIsPreviewTokenRef = useRef({});
   const asIsPreviewCounterRef = useRef(0);
 
+  // Execução Híbrida H4/H6 — ComputeRouter (fronteira única worker/sidecar). O
+  // `sidecarProviderRef` é recriado quando url/token mudam (effect abaixo); o router é
+  // criado UMA vez (junto do worker) referenciando um proxy estável cujos métodos só
+  // delegam pro provider corrente — assim o router não precisa ser recriado a cada
+  // troca de preferência (DEC-HX-002: nenhum outro código sabe/precisa saber disso).
+  const sidecarProviderRef = useRef(null);
+  const computeRouterRef = useRef(null);
+  const sidecarProxyRef = useRef({
+    health:          (...a) => sidecarProviderRef.current?.health(...a),
+    token_:          (...a) => sidecarProviderRef.current?.token_(...a),
+    capabilities:    (...a) => sidecarProviderRef.current?.capabilities(...a),
+    registerDataset: (...a) => sidecarProviderRef.current?.registerDataset(...a),
+    runJob:          (...a) => sidecarProviderRef.current?.runJob(...a),
+    cancelJob:       (...a) => sidecarProviderRef.current?.cancelJob(...a),
+  });
+
   useEffect(() => {
     const worker = new Worker(new URL('./simulation.worker.js', import.meta.url), { type: 'module' });
     workerRef.current = worker;
+
+    // ComputeRouter — Classe A (tudo hoje) sempre no worker; Classe B tentaria o
+    // sidecar via o proxy acima (DEC-HX-007). `getPreference` lê sempre o valor mais
+    // recente (ref mirror), então ligar/desligar o toggle não exige recriar o router.
+    computeRouterRef.current = createComputeRouter({
+      worker: createWorkerProvider(worker),
+      sidecar: sidecarProxyRef.current,
+      getPreference: () => computeSidecarR.current,
+    });
 
     // H0 — Telemetria local de custo (opt-in ?debug=perf). Wrapper fino sobre o
     // canal postMessage: mede a duração entre cada request (COMPUTE_*/RUN_SIMULATION)
@@ -4601,6 +4829,78 @@ export default function App() {
     };
     return () => { restoreWorkerPostMessage?.(); worker.terminate(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Execução Híbrida H6 — pareamento com o sidecar (§9 "Boot/pareamento"). Re-checagem
+  // manual (badge/botão "Verificar conexão") chama a mesma função. `detect()` do router
+  // já é NUNCA lança e é silencioso quando a preferência está desligada — chamamos
+  // incondicionalmente e deixamos o router decidir (evita duplicar a regra aqui).
+  const detectSidecar = useCallback(async () => {
+    if (!computeRouterRef.current) return;
+    setComputeSidecarChecking(true);
+    try {
+      const status = await computeRouterRef.current.detect();
+      setComputeSidecarStatus(status);
+    } finally {
+      setComputeSidecarChecking(false);
+    }
+  }, []);
+  const computeSidecarStatusR = useRef(computeSidecarStatus);
+  useEffect(()=>{computeSidecarStatusR.current=computeSidecarStatus},[computeSidecarStatus]);
+
+  // Sidecar provider é recriado quando URL/token mudam (o proxy acima garante que o
+  // router não precisa saber disso). Re-detecta em seguida — debounced (400ms) pra não
+  // disparar um round-trip HTTP a cada tecla digitada no campo de token/URL do modo dev.
+  useEffect(() => {
+    sidecarProviderRef.current = createSidecarProvider({
+      url: computeSidecar.url || (IS_DEV_BUILD ? 'http://127.0.0.1:8090' : ''),
+      token: computeSidecar.token || '',
+    });
+    if (!computeSidecar.enabled) {
+      setComputeSidecarStatus({ available: false, tier: null, capabilities: null, reason: 'disabled' });
+      return;
+    }
+    const t = setTimeout(() => { detectSidecar(); }, 400);
+    return () => clearTimeout(t);
+  }, [computeSidecar.enabled, computeSidecar.url, computeSidecar.token, detectSidecar]);
+
+  // Smoke test ponta a ponta (`echo_stats`, §17 Fase 1) — fala DIRETO com o
+  // `sidecarProviderRef` (não pelo ComputeRouter): registra o csvStore atual por hash
+  // (upload só na 1ª vez — DEC-HX-006) e roda `echo_stats` sobre a 1ª base carregada,
+  // com progresso + cancelamento (AbortController). Puramente demonstrativo/diagnóstico
+  // — nenhuma feature de produção depende deste caminho.
+  const sidecarTestAbortRef = useRef(null);
+  const runSidecarTest = useCallback(async () => {
+    const provider = sidecarProviderRef.current;
+    const store = csvStoreR.current;
+    const csvId = Object.keys(store || {})[0];
+    if (!provider || !csvId) return;
+    const ctrl = new AbortController();
+    sidecarTestAbortRef.current = ctrl;
+    setSidecarTest({ step: 'uploading', progress: null });
+    try {
+      const csv = store[csvId];
+      const metricCol = Object.entries(csv.columns || {}).find(([, c]) => c && c.kind === 'num')?.[0] || null;
+      const serialized = serializeCsvStore(store);
+      const buildChunks = () => [JSON.stringify(serialized)];
+      const hash = hashChunks(buildChunks());
+      const { datasetId } = await provider.registerDataset({ hash, buildChunks });
+      if (ctrl.signal.aborted) return;
+      setSidecarTest({ step: 'running', progress: 0 });
+      const result = await provider.runJob('echo_stats', { csvId, col: metricCol }, {
+        datasetId,
+        signal: ctrl.signal,
+        onProgress: (p) => setSidecarTest(t => (t && t.step === 'running' ? { ...t, progress: p } : t)),
+      });
+      setSidecarTest({ step: 'result', result });
+    } catch (err) {
+      if (ctrl.signal.aborted) { setSidecarTest(null); return; }
+      setSidecarTest({ step: 'error', error: (err && err.message) || 'Falha ao testar o Motor Python.' });
+    }
+  }, []);
+  const cancelSidecarTest = useCallback(() => {
+    sidecarTestAbortRef.current?.abort();
+    setSidecarTest(null);
   }, []);
 
   // Keep worker's csvStore in sync — send once per csvStore change (no debounce
@@ -6311,7 +6611,8 @@ export default function App() {
     setActiveCanvasId(actId);
     setShapes(canv[actId].shapes || []);
     setConns(canv[actId].conns || []);
-    setCsvStore(deserializeCsvStore(data.csvStore || {}));
+    const loadedStore = deserializeCsvStore(data.csvStore || {});
+    setCsvStore(loadedStore);
     setAnalyticsLayout(Array.isArray(data.analyticsLayout) ? data.analyticsLayout : []);
     setAnalyticsGroupings(Array.isArray(data.analyticsGroupings) ? data.analyticsGroupings : []);
     setAnalyticsPageFilters(Array.isArray(data.analyticsPageFilters) ? data.analyticsPageFilters : []);
@@ -6331,8 +6632,21 @@ export default function App() {
       setComputeSidecar({
         enabled: pref.computeSidecar.enabled === true,
         url: typeof pref.computeSidecar.url === 'string' ? pref.computeSidecar.url : '',
+        token: typeof pref.computeSidecar.token === 'string' ? pref.computeSidecar.token : '',
       });
     }
+    // Execução Híbrida H6 (DEC-HX-009) — recomendação proativa ao abrir um projeto
+    // grande. Mesma conta da H2 (linhas × Σ bytes/coluna), sobre o MESMO `loadedStore`
+    // já deserializado acima (nunca reprocessa a base — o próprio caso que estamos
+    // avisando é o de bases grandes, onde um 2º parse doeria). Nunca bloqueia.
+    try {
+      const totalRows  = estimateCsvStoreRowCount(loadedStore);
+      const totalBytes = estimateCsvStoreRamBytes(loadedStore);
+      setProjectLoadNotice(
+        (totalRows > ROW_COMFORT_COUNT || totalBytes > RAM_COMFORT_BYTES)
+          ? { totalRows, totalBytes } : null
+      );
+    } catch { /* estimativa é só um aviso — nunca impede o load */ }
     // Limpa estado transitório de seleção/edição e o histórico (que é por
     // canvas e ficaria inconsistente após substituir todos os canvas).
     setSel(null); setFromId(null); setPalette(false); setActiveCell(null);
@@ -9579,6 +9893,8 @@ export default function App() {
         <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
           <div style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",boxShadow:"0 0 0 3px #dbeafe",flexShrink:0}}/>
           <span style={{fontSize:13,fontWeight:600,color:"#1e293b",letterSpacing:.1,flex:1}}>Painel</span>
+          <ComputeEngineBadge enabled={computeSidecar.enabled} status={computeSidecarStatus}
+            checking={computeSidecarChecking} onRecheck={detectSidecar}/>
           <BuildBadge />
           <button
             onClick={()=>setPanelCollapsed(true)}
@@ -9619,6 +9935,108 @@ export default function App() {
               <span>{projectSaveNotice.kind==="ok" ? "✅" : "⚠️"}</span>
               <span style={{flex:1}}>{projectSaveNotice.msg}</span>
               <span onClick={()=>setProjectSaveNotice(null)} style={{cursor:"pointer",opacity:.6,fontWeight:700}} title="Dispensar">×</span>
+            </div>
+          )}
+          {/* Execução Híbrida H6 (DEC-HX-009) — recomendação proativa ao abrir um
+              projeto acima da zona de conforto. Nunca bloqueou o load (já aconteceu
+              acima); isto é só o aviso + atalho pra ligar o motor. Dismissível. */}
+          {projectLoadNotice && (
+            <div style={{marginTop:8,padding:"9px 10px",borderRadius:8,fontSize:11.5,lineHeight:1.5,display:"flex",alignItems:"flex-start",gap:7,
+              background:"#fdf4ff",border:"1px solid #f0abfc",color:"#86198f"}}>
+              <span style={{fontSize:14}}>🐍</span>
+              <span style={{flex:1}}>
+                Este projeto tem ~{projectLoadNotice.totalRows.toLocaleString('pt-BR')} linhas
+                (~{formatRamBytes(projectLoadNotice.totalBytes)} estimados) — acima da zona de
+                conforto do navegador (~5MM linhas / ~1,2GB). O app segue funcionando normalmente
+                no browser; para trabalhar sem tetos, {' '}
+                <span onClick={()=>{ setSidecarPrefsOpen(true); setProjectLoadNotice(null); }}
+                  style={{textDecoration:"underline",cursor:"pointer",fontWeight:600}}>
+                  saiba como ligar o Motor Python
+                </span>.
+              </span>
+              <span onClick={()=>setProjectLoadNotice(null)} style={{cursor:"pointer",opacity:.6,fontWeight:700}} title="Dispensar">×</span>
+            </div>
+          )}
+        </div>
+
+        {/* Motor Python (Execução Híbrida H4/H5/H6) — preferência opt-in. Desligado
+            por padrão: com o toggle off o ComputeRouter nem tenta detectar e NADA muda
+            no comportamento do app (DEC-HX-001). */}
+        <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer"}}
+            onClick={()=>setSidecarPrefsOpen(v=>!v)}>
+            <span style={{fontSize:11,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.6,display:"flex",alignItems:"center",gap:6}}>
+              🐍 Motor Python
+              <ComputeEngineBadge enabled={computeSidecar.enabled} status={computeSidecarStatus}
+                checking={computeSidecarChecking} onRecheck={(e)=>{e?.stopPropagation?.();detectSidecar();}}/>
+            </span>
+            <span style={{fontSize:11,color:"#94a3b8",transform:sidecarPrefsOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>▾</span>
+          </div>
+
+          {sidecarPrefsOpen && (
+            <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:10}}>
+              <p style={{fontSize:11,color:"#64748b",lineHeight:1.55}}>
+                Camada opcional de aceleração/ampliação de limites (clusterização, buscas mais
+                profundas, bases maiores) rodando localmente (127.0.0.1). Desligado, o app funciona
+                exatamente como hoje — nenhuma funcionalidade depende dele.
+              </p>
+              <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                <input type="checkbox" checked={computeSidecar.enabled}
+                  onChange={e=>setComputeSidecar(s=>({...s,enabled:e.target.checked}))}
+                  style={{width:15,height:15,accentColor:"#7c3aed"}}/>
+                Ligar Motor Python
+              </label>
+
+              {IS_DEV_BUILD && (
+                <>
+                  <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                    URL do sidecar (modo dev)
+                    <input type="text" value={computeSidecar.url}
+                      onChange={e=>setComputeSidecar(s=>({...s,url:e.target.value}))}
+                      placeholder="http://127.0.0.1:8090"
+                      style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                  </label>
+                  <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                    Token (impresso no console de <code>python sidecar.py --dev</code>)
+                    <input type="text" value={computeSidecar.token}
+                      onChange={e=>setComputeSidecar(s=>({...s,token:e.target.value}))}
+                      placeholder="cole o token aqui"
+                      style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"monospace",boxSizing:"border-box"}}/>
+                  </label>
+                </>
+              )}
+              {!IS_DEV_BUILD && (
+                <p style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5,margin:0}}>
+                  No release, o Motor Python roda na mesma origem do app (nenhuma URL/token a
+                  configurar) — <code>iniciar.bat</code> já sobe os dois juntos. Sem os pacotes
+                  instalados, o app segue 100% no navegador.
+                </p>
+              )}
+
+              <button onClick={detectSidecar} disabled={!computeSidecar.enabled || computeSidecarChecking}
+                style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e2e8f0",
+                  background: computeSidecar.enabled ? "#faf5ff" : "#f8fafc",
+                  color: computeSidecar.enabled ? "#7c3aed" : "#cbd5e1",
+                  cursor: computeSidecar.enabled ? "pointer" : "default",
+                  fontSize:12,fontWeight:600,fontFamily:"inherit"}}>
+                {computeSidecarChecking ? "Verificando…" : "🔄 Verificar conexão"}
+              </button>
+
+              {computeSidecar.enabled && (
+                <SidecarTestPanel
+                  status={computeSidecarStatus}
+                  test={sidecarTest}
+                  onRun={runSidecarTest}
+                  onCancel={cancelSidecarTest}
+                  hasDataset={Object.keys(csvStore).length > 0}
+                />
+              )}
+
+              <p style={{fontSize:10,color:"#94a3b8",lineHeight:1.5,margin:0}}>
+                Instalação (opcional): <code>release/python/instalar_motor.bat</code>. Sem pacotes
+                científicos instalados, o Motor Python roda em tier <b>stdlib</b> (só paralelismo);
+                com numpy/scipy, tier <b>full</b> (vetorizado).
+              </p>
             </div>
           )}
         </div>
@@ -11641,27 +12059,42 @@ export default function App() {
                 }
                 if (wizard.asIsVar) ramBytesPerRow += 1; // __DECISAO_ORIGINAL (dict minúsculo → Uint8)
                 const ramEstBytes = nRows * ramBytesPerRow;
-                const RAM_WARN_BYTES = 1.2 * (1 << 30); // ~1,2GB
-                const ramOver = ramEstBytes > RAM_WARN_BYTES;
-                const fmtRam = (b) => b >= (1 << 30) ? (b / (1 << 30)).toFixed(2) + ' GB'
-                  : b >= (1 << 20) ? Math.round(b / (1 << 20)) + ' MB'
-                  : Math.max(1, Math.round(b / (1 << 10))) + ' KB';
+                // Limiares compartilhados com loadProject (RAM_COMFORT_BYTES/ROW_COMFORT_COUNT,
+                // src/columnar.js) — "mesma conta" exigida pelo DEC-HX-009 nos dois pontos de
+                // carregamento (wizard e abertura de projeto).
+                const ramOver = ramEstBytes > RAM_COMFORT_BYTES || nRows > ROW_COMFORT_COUNT;
 
                 return (
                   <>
-                    {/* ── Estimativa de RAM colunar (H2 / DEC-HX-009) ── */}
+                    {/* ── Estimativa de RAM colunar (H2/H6 / DEC-HX-009) ── */}
                     {nRows > 0 && (
                       <div style={{marginBottom:18,padding:"10px 14px",borderRadius:10,border:`1px solid ${ramOver?"#fca5a5":"#e2e8f0"}`,background:ramOver?"#fef2f2":"#f8fafc",display:"flex",alignItems:"flex-start",gap:10}}>
                         <span style={{fontSize:16,lineHeight:1.2}}>{ramOver?"⚠️":"💾"}</span>
                         <div style={{flex:1}}>
                           <div style={{fontSize:12,fontWeight:600,color:ramOver?"#b91c1c":"#334155",lineHeight:1.4}}>
-                            Memória colunar estimada: ~{fmtRam(ramEstBytes)}
+                            Memória colunar estimada: ~{formatRamBytes(ramEstBytes)}
                             <span style={{fontWeight:400,color:"#94a3b8"}}> · {nRows.toLocaleString('pt-BR')} linhas × {allHeaders.length} colunas</span>
                           </div>
                           {ramOver && (
-                            <div style={{fontSize:11,color:"#b91c1c",lineHeight:1.5,marginTop:3}}>
-                              Acima da zona de conforto do navegador (~1,2&nbsp;GB). A base pode abrir com lentidão ou esgotar a memória da aba. Considere sumarizar mais a base, reduzir colunas, ou processar a íntegra no Motor Python (quando disponível). O import não é bloqueado.
-                            </div>
+                            <>
+                              <div style={{fontSize:11,color:"#b91c1c",lineHeight:1.5,marginTop:3,marginBottom:8}}>
+                                Acima da zona de conforto do navegador (~5MM linhas / ~1,2&nbsp;GB). A base pode
+                                abrir com lentidão ou esgotar a memória da aba. Considere sumarizar mais a base ou
+                                reduzir colunas. O import não é bloqueado.
+                              </div>
+                              <ComputeCeilingNotice
+                                ceilingText="Motor Python ausente — ligá-lo prepara o estudo para trabalhar sem tetos declarados assim que as tarefas passarem a suportar bases grandes."
+                                unlockedText={`Motor Python detectado (tier ${computeSidecarStatus.tier || '—'}) — este estudo já pode usá-lo conforme as tarefas passarem a suportar bases grandes.`}
+                                status={computeSidecarStatus}
+                                onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                              />
+                              {!computeSidecarStatus.available && (
+                                <button onClick={()=>setComputeSidecar(s=>({...s,enabled:true}))}
+                                  style={{marginTop:7,padding:"6px 12px",borderRadius:8,border:"none",background:"#7c3aed",color:"#fff",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                                  🐍 Ligar Motor Python
+                                </button>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>

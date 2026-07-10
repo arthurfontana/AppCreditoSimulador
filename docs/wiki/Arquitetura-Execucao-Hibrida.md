@@ -329,6 +329,14 @@ tetos) e o caminho para ligar (preferências / `instalar_motor`). **Nunca bloque
 Sem sidecar detectável e sem instalação disponível, a recomendação degrada para o aviso
 informativo da H2.
 
+> **Entregue (Sessão H6):** limiar por LINHAS (`ROW_COMFORT_COUNT`, ~5MM) somado ao de bytes
+> (`RAM_COMFORT_BYTES`, ~1,2GB — `src/columnar.js`, mesma conta nos dois pontos de
+> carregamento) porque uma base larga e rasa pode passar de 5MM linhas sem estourar 1,2GB. O
+> banner do wizard passo 2 (H2) ganhou o `ComputeCeilingNotice` (texto do teto/desbloqueio
+> conforme `computeSidecarStatus`) + botão "🐍 Ligar Motor Python" (liga a preferência com um
+> clique, sem sair do wizard); `loadProject` ganhou o mesmo aviso (`projectLoadNotice`,
+> dismissível) sobre o csvStore inteiro do projeto carregado. Nenhum dos dois bloqueia.
+
 ## 7. Arquitetura proposta
 
 ### 7.1 Topologia
@@ -552,7 +560,7 @@ mais lento que o worker JS — ver DEC-HX-004).
 |---|---|---|
 | **Sonda (✅ concluída 09/07/2026)** | HP (sonda do ambiente Python — `checar_ambiente.py`, rodada 2× na máquina corporativa) | Relatório entregue: os 4 pacotes instalam/importam do índice; **nenhuma wheel offline imprescindível**; sklearn com 1ª carga lenta (antivírus) ⇒ warm-up assíncrono na detecção de tier da H5 |
 | **Fase 0 — Browser primeiro** | H0 (telemetria), H1 (fluidez M12–M14), H2 (dieta de memória), H3 (pool de workers) | Headroom até ~5MM linhas; validações paralelas; números reais de custo por tarefa |
-| **Fase 1 — Fundação híbrida** | H4 (ComputeRouter), H5 (sidecar v1), H6 (UX do motor + recomendação DEC-HX-009) | Sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark |
+| **Fase 1 — Fundação híbrida (✅ concluída 10/07/2026)** | H4 (ComputeRouter), H5 (sidecar v1), H6 (UX do motor + recomendação DEC-HX-009) | Sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark |
 | **Fase 2 — Cargas reais** | H7 (Descoberta profunda), H8 (clusterização/stats — baseline browser + sidecar, paridade total) | Primeiro valor de usuário do híbrido |
 | **Fase 3 — Paridade do motor (opcional)** | H9 (motor de simulação em Python + GATE) | Habilita Frente 5 e bases 7–10MM+ de ponta a ponta |
 

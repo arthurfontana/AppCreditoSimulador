@@ -17,6 +17,12 @@ import {
   isSharedColumnar,
   buildCsvStoreMessage,
   codesCtorForDict,
+  estimateColumnarRamBytes,
+  estimateCsvStoreRamBytes,
+  estimateCsvStoreRowCount,
+  formatRamBytes,
+  RAM_COMFORT_BYTES,
+  ROW_COMFORT_COUNT,
 } from '../src/columnar.js';
 
 // ── Parser mínimo (delimitador ';', sem aspas) — igual ao GATE ──────────────────
@@ -384,5 +390,39 @@ describe('Fase 2 — buffers compartilhados (SharedArrayBuffer)', () => {
     // E o simulador ainda roda sobre o mesmo store (nada foi neutralizado).
     const res = runSimulation(SHAPES, CONNS, store);
     expect(res.approvedQty).toBeCloseTo(res.totalQty, 6); // lens sem regras aprova tudo
+  });
+});
+
+// ── GATE Execução Híbrida H2/H6 — estimativa de RAM colunar (DEC-HX-009) ─────────────
+describe('estimateColumnarRamBytes / estimateCsvStoreRamBytes (DEC-HX-009)', () => {
+  it('soma Float64 (métricas) + menor dtype de código (dimensões), linhas × colunas', () => {
+    const csv = makeColumnarCsv();
+    let expected = 0;
+    for (const col of Object.values(csv.columns)) {
+      expected += csv.rowCount * (col.kind === 'num' ? 8 : codesCtorForDict(col.dict.length).BYTES_PER_ELEMENT);
+    }
+    expect(estimateColumnarRamBytes(csv)).toBe(expected);
+  });
+
+  it('csv sem columns (legado string[][]) ⇒ 0, nunca lança', () => {
+    expect(estimateColumnarRamBytes(makeLegacyCsv())).toBe(0);
+    expect(estimateColumnarRamBytes(null)).toBe(0);
+  });
+
+  it('estimateCsvStoreRamBytes soma todos os datasets do store; estimateCsvStoreRowCount idem para linhas', () => {
+    const store = { a: makeColumnarCsv(), b: makeColumnarCsv() };
+    expect(estimateCsvStoreRamBytes(store)).toBe(2 * estimateColumnarRamBytes(makeColumnarCsv()));
+    expect(estimateCsvStoreRowCount(store)).toBe(2 * makeColumnarCsv().rowCount);
+  });
+
+  it('formatRamBytes escolhe GB/MB/KB pela magnitude', () => {
+    expect(formatRamBytes(500)).toBe('1 KB'); // piso de 1KB (nunca "0 KB")
+    expect(formatRamBytes(2 * (1 << 20))).toBe('2 MB');
+    expect(formatRamBytes(1.5 * (1 << 30))).toBe('1.50 GB');
+  });
+
+  it('RAM_COMFORT_BYTES/ROW_COMFORT_COUNT são os limiares documentados (~1,2GB / ~5MM linhas)', () => {
+    expect(RAM_COMFORT_BYTES).toBeCloseTo(1.2 * (1 << 30), 0);
+    expect(ROW_COMFORT_COUNT).toBe(5_000_000);
   });
 });

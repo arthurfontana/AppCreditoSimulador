@@ -628,3 +628,53 @@ export function deserializeCsvStore(store) {
   }
   return out;
 }
+
+// ── Estimativa de RAM colunar (Execução Híbrida H2/H6, DEC-HX-009) ──────────────
+// Mesma conta em dois lugares (wizard passo 2 — pré-import, e abertura de projeto —
+// pós-import): linhas × Σ bytes/coluna (Float64 pras métricas, o menor dtype de código
+// pela cardinalidade pras dimensões/decisão — `codesCtorForDict`, dieta H2). Acima da
+// zona de conforto (~5MM linhas OU ~1,2GB) o app recomenda proativamente ligar o Motor
+// Python (nunca bloqueia — DEC-HX-009).
+export const RAM_COMFORT_BYTES = 1.2 * (1 << 30); // ~1,2GB
+export const ROW_COMFORT_COUNT = 5_000_000;       // ~5MM linhas
+
+// Estima os bytes de UM dataset já em formato colunar (`{columns, rowCount}` — a forma
+// de `csvStore[csvId]` depois de importado/deserializado). Para o wizard, ANTES do
+// import (passo 2, onde métricas ainda não viraram Float64 — ver M1), o cálculo é feito
+// inline em App.jsx sobre `wizard.columnTypes`/`parsedColumns`, que ainda não tem o
+// `kind` final; esta função cobre o caso pós-import (csvStore real, `loadProject`).
+export function estimateColumnarRamBytes(csv) {
+  if (!csv || !csv.columns) return 0;
+  const n = csv.rowCount || 0;
+  let bytes = 0;
+  for (const col of Object.values(csv.columns)) {
+    if (!col) continue;
+    if (col.kind === 'num') bytes += n * 8;
+    else if (col.kind === 'dict') bytes += n * codesCtorForDict((col.dict || []).length).BYTES_PER_ELEMENT;
+  }
+  return bytes;
+}
+
+// Soma a estimativa de todos os datasets de um csvStore inteiro (abertura de projeto —
+// DEC-HX-009 avalia o estudo completo, não só a base ativa).
+export function estimateCsvStoreRamBytes(store) {
+  let total = 0;
+  for (const csv of Object.values(store || {})) total += estimateColumnarRamBytes(csv);
+  return total;
+}
+
+// Soma de linhas do csvStore inteiro — par do limiar de ~5MM linhas do DEC-HX-009
+// (independente do teto de bytes: uma base larga e rasa pode passar de 5MM linhas sem
+// estourar 1,2GB, mas ainda vale o aviso).
+export function estimateCsvStoreRowCount(store) {
+  let total = 0;
+  for (const csv of Object.values(store || {})) total += (csv && csv.rowCount) || 0;
+  return total;
+}
+
+// Formata bytes como GB/MB/KB (pt-BR) — usado nos banners H2/H6 e no wizard.
+export function formatRamBytes(b) {
+  if (b >= (1 << 30)) return (b / (1 << 30)).toFixed(2) + ' GB';
+  if (b >= (1 << 20)) return Math.round(b / (1 << 20)) + ' MB';
+  return Math.max(1, Math.round(b / (1 << 10))) + ' KB';
+}
