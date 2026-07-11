@@ -4820,8 +4820,18 @@ export default function App() {
         });
       } else if (msgType === 'SEGMENT_DISCOVERY_RESULT') {
         const { segmentModel } = e.data;
-        setSegmentDiscoveryModal(m => (m ? { ...m, step: 'result', segmentModel, varFilter: null,
+        setSegmentDiscoveryModal(m => (m ? { ...m, step: 'result', segmentModel, deepRun: null, varFilter: null,
           focusedId: segmentModel.findings?.[0]?.id ?? null, selectedIds: [], combined: null } : m));
+      } else if (msgType === 'SEGMENT_RECS_RESULT') {
+        // H7 — modelo da Descoberta profunda (sidecar) de volta do worker com as
+        // recomendações anexadas (patch + delta re-simulado real, DEC-SD-003).
+        const { segmentModel } = e.data;
+        setSegmentDiscoveryModal(m => {
+          if (!m) return m;
+          if (!segmentModel) return { ...m, step: 'form', deepRun: null };
+          return { ...m, step: 'result', segmentModel, deepRun: null, varFilter: null,
+            focusedId: segmentModel.findings?.[0]?.id ?? null, selectedIds: [], combined: null };
+        });
       } else if (msgType === 'SEGMENT_COMBINED_RESULT') {
         const { combined } = e.data;
         setSegmentDiscoveryModal(m => (m ? { ...m, combined: { loading: false, result: combined } } : m));
@@ -8750,26 +8760,98 @@ export default function App() {
     setSegmentDiscoveryModal({
       step: 'form',
       scope: scope || null,
-      params: { riskMetric: 'inadReal', minQty: null, maxDepth: 2 },
+      params: { riskMetric: 'inadReal', minQty: null, maxDepth: 2, beamWidth: null },
       varFilter: null,
       focusedId: null,
       selectedIds: [],
       combined: null,
+      deepRun: null,        // H7 — job Classe B em andamento ({phase, progress, via})
+      fallbackNotice: null, // H7 — "concluído no modo browser" quando o sidecar caiu
     });
   };
+
+  // Execução Híbrida H7 — Descoberta profunda (Classe B, DEC-HX-007). Depth ≤ 2 e beam
+  // padrão seguem 100% no caminho atual (COMPUTE_SEGMENT_DISCOVERY no worker — Classe A,
+  // intocado). Depth 3–4 / beam ampliado roteiam a task `segment_discovery` pelo
+  // ComputeRouter: sidecar (motor numpy, dataset por hash — DEC-HX-006) com fallback
+  // transparente ao worker CLAMPADO aos tetos browser. O modelo do sidecar volta SEM
+  // recomendações e passa pelo worker (COMPUTE_SEGMENT_RECS) para anexar patch + delta
+  // re-simulado de VERDADE (DEC-SD-003 — runSimulation continua single-sourced no worker).
+  const SEG_BROWSER_DEPTH = 2, SEG_BROWSER_BEAM = 8;
+  const segDiscoveryAbortRef = useRef(null);
 
   const runSegmentDiscovery = () => {
     const cur = segmentDiscoveryModalR.current;
     if (!cur) return;
-    setSegmentDiscoveryModal(m => ({ ...m, step: 'loading' }));
-    const { riskMetric, minQty, maxDepth } = cur.params;
-    workerRef.current?.postMessage({
-      type: 'COMPUTE_SEGMENT_DISCOVERY',
+    const { riskMetric, minQty, maxDepth, beamWidth } = cur.params;
+    const params = {
+      riskMetric, maxDepth,
+      ...(beamWidth != null ? { beamWidth } : {}),
+      ...(minQty != null ? { minQty } : {}),
+    };
+    const payload = {
       shapes: shapesR.current,
       conns: connsR.current,
       scope: cur.scope ? { nodeId: cur.scope.nodeId } : null,
-      params: { riskMetric, maxDepth, ...(minQty != null ? { minQty } : {}) },
-    });
+      params,
+    };
+    const isDeep = (maxDepth ?? SEG_BROWSER_DEPTH) > SEG_BROWSER_DEPTH ||
+      (beamWidth ?? SEG_BROWSER_BEAM) > SEG_BROWSER_BEAM;
+    if (!isDeep || !computeRouterRef.current) {
+      setSegmentDiscoveryModal(m => ({ ...m, step: 'loading', deepRun: null, fallbackNotice: null }));
+      workerRef.current?.postMessage({ type: 'COMPUTE_SEGMENT_DISCOVERY', ...payload });
+      return;
+    }
+    runDeepSegmentDiscovery(payload);
+  };
+
+  const runDeepSegmentDiscovery = async (payload) => {
+    const ctrl = new AbortController();
+    segDiscoveryAbortRef.current = ctrl;
+    setSegmentDiscoveryModal(m => (m ? {
+      ...m, step: 'loading', fallbackNotice: null,
+      deepRun: { phase: 'discovery', progress: null, via: 'sidecar' },
+    } : m));
+    try {
+      // Dataset por hash (DEC-HX-006): mesmos chunks do serializeCsvStore/M3 do
+      // SidecarTestPanel — HEAD 200 pula o upload nas execuções seguintes.
+      const serialized = serializeCsvStore(csvStoreR.current);
+      const buildChunks = () => [JSON.stringify(serialized)];
+      const hash = hashChunks(buildChunks());
+      const res = await computeRouterRef.current.run('segment_discovery', payload, {
+        dataset: { hash, buildChunks },
+        signal: ctrl.signal,
+        onProgress: (p) => setSegmentDiscoveryModal(m => (
+          m && m.deepRun ? { ...m, deepRun: { ...m.deepRun, progress: p } } : m)),
+      });
+      if (ctrl.signal.aborted) return;
+      if (res.via === 'sidecar') {
+        // Modelo sem recomendações → o worker anexa patch + delta re-simulado.
+        setSegmentDiscoveryModal(m => (m ? {
+          ...m, deepRun: { phase: 'recs', progress: null, via: 'worker' },
+        } : m));
+        workerRef.current?.postMessage({
+          type: 'COMPUTE_SEGMENT_RECS', ...payload,
+          segmentModel: res.result?.segmentModel ?? null,
+        });
+      } else {
+        // Fallback: o alias `segment_discovery` do worker clampou os tetos e já
+        // respondeu SEGMENT_DISCOVERY_RESULT (o onmessage pôs o resultado no modal);
+        // aqui só declaramos a degradação (paridade total, P4 — nunca silenciosa).
+        const notice = fallbackNoticeText(res) ||
+          'Motor Python indisponível — a Descoberta rodou no modo browser com os tetos declarados (profundidade ≤ 2, beam 8).';
+        setSegmentDiscoveryModal(m => (m ? { ...m, fallbackNotice: notice } : m));
+      }
+    } catch {
+      if (!ctrl.signal.aborted) {
+        setSegmentDiscoveryModal(m => (m ? { ...m, step: 'form', deepRun: null } : m));
+      }
+    }
+  };
+
+  const cancelDeepSegmentDiscovery = () => {
+    segDiscoveryAbortRef.current?.abort();
+    setSegmentDiscoveryModal(m => (m ? { ...m, step: 'form', deepRun: null } : m));
   };
 
   // Foca um card (quadrante → clique no ponto) e rola a lista até ele.
@@ -14092,8 +14174,15 @@ export default function App() {
 
       {/* ═══════════════ SEGMENT DISCOVERY MODAL — Descoberta de Segmentos (Copiloto Sessão 10/11) ═══════════════ */}
       {segmentDiscoveryModal&&(()=>{
-        const { step, scope, params, segmentModel, varFilter, focusedId, selectedIds = [], combined } = segmentDiscoveryModal;
+        const { step, scope, params, segmentModel, varFilter, focusedId, selectedIds = [], combined, deepRun, fallbackNotice } = segmentDiscoveryModal;
         const updParams = (patch) => setSegmentDiscoveryModal(m => ({ ...m, params: { ...m.params, ...patch } }));
+        // H7 — Descoberta profunda (Classe B): depth 3–4 / beam ampliado só quando o
+        // sidecar está pareado E declara a task `segment_discovery` em capabilities
+        // (tier full com o GATE dourado embarcado — DEC-HX-005). Sem ele, as opções
+        // ficam desabilitadas com o teto declarado (helper do H6).
+        const sidecarTasks = computeSidecarStatus?.capabilities?.tasks;
+        const deepOk = computeSidecar.enabled && !!computeSidecarStatus?.available &&
+          Array.isArray(sidecarTasks) && sidecarTasks.includes('segment_discovery');
         const findings = segmentModel?.findings || [];
         const selectedSet = new Set(selectedIds);
         const allVars = [...new Set(findings.flatMap(f => [
@@ -14127,13 +14216,19 @@ export default function App() {
                     </p>
                   </div>
                 </div>
-                <button onClick={()=>setSegmentDiscoveryModal(null)}
+                <button onClick={()=>{ segDiscoveryAbortRef.current?.abort(); setSegmentDiscoveryModal(null); }}
                   style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
                     cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
                     justifyContent:"center",fontFamily:"inherit"}}>✕</button>
               </div>
 
               <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
+                {step==='result' && fallbackNotice && (
+                  <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",borderRadius:8,marginBottom:12,
+                    background:"#f8fafc",border:"1px solid #e2e8f0",fontSize:10.5,color:"#94a3b8",lineHeight:1.5}}>
+                    <span>🌐</span><span>{fallbackNotice}</span>
+                  </div>
+                )}
                 {step==='form' && (
                   <div style={{display:"flex",flexDirection:"column",gap:14}}>
                     <p style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
@@ -14156,16 +14251,33 @@ export default function App() {
                           style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
                           <option value={1}>1 variável</option>
                           <option value={2}>2 variáveis</option>
+                          <option value={3} disabled={!deepOk}>3 variáveis{deepOk?' · 🐍':' — requer Motor Python'}</option>
+                          <option value={4} disabled={!deepOk}>4 variáveis{deepOk?' · 🐍':' — requer Motor Python'}</option>
                         </select>
                       </label>
-                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600,gridColumn:"1 / -1"}}>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
                         Volume mínimo por segmento
                         <input type="number" min="1" value={params.minQty ?? ''}
                           placeholder="automático (máx. entre 200 e 0,1% da população)"
                           onChange={e=>updParams({minQty: e.target.value===''?null:Number(e.target.value)})}
                           style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
                       </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Teto de candidatos (beam)
+                        <select value={params.beamWidth ?? 8} onChange={e=>updParams({beamWidth: Number(e.target.value) === 8 ? null : Number(e.target.value)})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value={8}>8 (padrão)</option>
+                          <option value={16} disabled={!deepOk}>16{deepOk?' · 🐍':' — requer Motor Python'}</option>
+                          <option value={32} disabled={!deepOk}>32{deepOk?' · 🐍':' — requer Motor Python'}</option>
+                        </select>
+                      </label>
                     </div>
+                    <ComputeCeilingNotice
+                      ceilingText="Sem o Motor Python, a Descoberta respeita os tetos do navegador: profundidade ≤ 2 variáveis e beam 8 (paridade total — nada deixa de funcionar, só os tetos)."
+                      unlockedText={`Motor Python detectado (tier ${computeSidecarStatus.tier || '—'}) — profundidade 3–4 e beam ampliado liberados; a varredura profunda roda vetorizada no sidecar.`}
+                      status={deepOk ? computeSidecarStatus : { available: false }}
+                      onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                    />
                     <button onClick={runSegmentDiscovery}
                       style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
                         background:"#4f46e5",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
@@ -14174,11 +14286,20 @@ export default function App() {
                   </div>
                 )}
 
-                {step==='loading' && (
+                {step==='loading' && (deepRun ? (
+                  <ComputeJobProgress
+                    label={deepRun.phase === 'recs'
+                      ? 'Validando recomendações por re-simulação (modo browser)…'
+                      : 'Descoberta profunda no Motor Python…'}
+                    progress={deepRun.progress}
+                    via={deepRun.via}
+                    onCancel={deepRun.phase === 'discovery' ? cancelDeepSegmentDiscovery : null}
+                  />
+                ) : (
                   <div style={{padding:"40px 0",textAlign:"center",color:"#4f46e5",fontSize:13}}>
                     Varrendo a base por segmentos…
                   </div>
-                )}
+                ))}
 
                 {step==='result' && segmentModel && (()=>{
                   if (findings.length === 0) {

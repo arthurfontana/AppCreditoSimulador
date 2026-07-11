@@ -1,0 +1,174 @@
+{
+  "name": "dispersion_multinode",
+  "store": {
+    "b": {
+      "name": "b",
+      "headers": [
+        "GRP",
+        "SEG",
+        "qty",
+        "qtdAltas",
+        "inadReal"
+      ],
+      "columnTypes": {
+        "GRP": "decision",
+        "SEG": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "GRP": {
+          "kind": "dict",
+          "dict": [
+            "A",
+            "B"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAABAQ=="
+        },
+        "SEG": {
+          "kind": "dict",
+          "dict": [
+            "X",
+            "Y"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAEAAQ=="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAADAckAAAAAAAABZQAAAAAAAAGlAAAAAAAAAWUA="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAADAckAAAAAAAABZQAAAAAAAAGlAAAAAAAAAWUA="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAAAAPkAAAAAAAAAkQAAAAAAAAERAAAAAAAAAJEA="
+        }
+      },
+      "rowCount": 4
+    }
+  },
+  "shapes": [
+    {
+      "id": "D1",
+      "type": "decision",
+      "label": "G1",
+      "variableCol": "GRP",
+      "csvId": "b"
+    },
+    {
+      "id": "pA",
+      "type": "port",
+      "label": "A"
+    },
+    {
+      "id": "pB",
+      "type": "port",
+      "label": "B"
+    },
+    {
+      "id": "AP",
+      "type": "approved",
+      "label": "Aprovado"
+    },
+    {
+      "id": "D2",
+      "type": "decision",
+      "label": "G2",
+      "variableCol": "GRP",
+      "csvId": "b"
+    },
+    {
+      "id": "pB2",
+      "type": "port",
+      "label": "B"
+    },
+    {
+      "id": "REJ",
+      "type": "rejected",
+      "label": "Reprovado"
+    }
+  ],
+  "conns": [
+    {
+      "id": "c1",
+      "from": "D1",
+      "to": "pA",
+      "label": "A"
+    },
+    {
+      "id": "c2",
+      "from": "pA",
+      "to": "AP"
+    },
+    {
+      "id": "c3",
+      "from": "D1",
+      "to": "pB",
+      "label": "B"
+    },
+    {
+      "id": "c4",
+      "from": "pB",
+      "to": "D2"
+    },
+    {
+      "id": "c5",
+      "from": "D2",
+      "to": "pB2",
+      "label": "B"
+    },
+    {
+      "id": "c6",
+      "from": "pB2",
+      "to": "REJ"
+    }
+  ],
+  "scope": null,
+  "params": {
+    "minQty": 1
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "scope": null,
+    "population": {
+      "qty": 700,
+      "decidedQty": 700
+    },
+    "metric": {
+      "id": "inadReal",
+      "label": "Inad. Real",
+      "direction": "lower"
+    },
+    "findings": [],
+    "diagnostics": {
+      "candidatesTested": 8,
+      "discarded": {
+        "lowVolume": 0,
+        "notSignificant": 3,
+        "unstable": 0,
+        "duplicate": 0,
+        "noOpportunity": 5
+      }
+    },
+    "asIsTotals": {
+      "rToA": 0,
+      "aToR": 0
+    }
+  }
+}

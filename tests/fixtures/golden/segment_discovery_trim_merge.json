@@ -1,0 +1,232 @@
+{
+  "name": "trim_merge",
+  "store": {
+    "seg": {
+      "name": "seg",
+      "headers": [
+        "SEG",
+        "qty",
+        "qtdAltas",
+        "inadReal"
+      ],
+      "columnTypes": {
+        "SEG": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "SEG": {
+          "kind": "dict",
+          "dict": [
+            "GOOD",
+            " GOOD ",
+            "BAD",
+            "BAD "
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAECAw=="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAADAgkAAAAAAAAB5QAAAAAAAQH9AAAAAAABAf0A="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAADAgkAAAAAAAAB5QAAAAAAAQH9AAAAAAABAf0A="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAAAAGEAAAAAAAAAQQAAAAAAAAFlAAAAAAAAAWUA="
+        }
+      },
+      "rowCount": 4
+    }
+  },
+  "shapes": [
+    {
+      "id": "L",
+      "type": "decision_lens",
+      "label": "Todos",
+      "rules": []
+    },
+    {
+      "id": "REJ",
+      "type": "rejected",
+      "label": "Reprovado"
+    }
+  ],
+  "conns": [
+    {
+      "id": "c1",
+      "from": "L",
+      "to": "REJ"
+    }
+  ],
+  "scope": null,
+  "params": {
+    "minQty": 1
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "scope": null,
+    "population": {
+      "qty": 2000,
+      "decidedQty": 2000
+    },
+    "metric": {
+      "id": "inadReal",
+      "label": "Inad. Real",
+      "direction": "lower"
+    },
+    "findings": [
+      {
+        "id": "het:(escopo)",
+        "code": "heterogeneous_block",
+        "segment": {
+          "conditions": [],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 2000,
+          "share": 1,
+          "qtdAltas": 2000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.105,
+          "inadInferida": null,
+          "refInadReal": null,
+          "refInadInferida": null,
+          "lift": null,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "SEG",
+              "value": null,
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 2000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 2000,
+            "approvedQty": 0,
+            "rejectedQty": 2000
+          },
+          "stability": null,
+          "pValue": null,
+          "qValue": null
+        },
+        "locked": false,
+        "priority": {
+          "score": 3180.220244812674,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": 1.6219123248544638,
+            "movedQty": 2000
+          },
+          "confidence": 0.9803921568627451,
+          "actionability": 1
+        },
+        "recommendation": null
+      },
+      {
+        "id": "seg:SEG=GOOD",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "SEG",
+              "operator": "equal",
+              "value": "GOOD",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.5,
+          "qtdAltas": 1000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.01,
+          "inadInferida": null,
+          "refInadReal": 0.2,
+          "refInadInferida": null,
+          "lift": 0.049999999999999996,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "SEG",
+              "value": "GOOD",
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 1000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 1000,
+            "approvedQty": 0,
+            "rejectedQty": 1000
+          },
+          "stability": null,
+          "pValue": 6.4396891692577194e-80,
+          "qValue": 1.2879378338515439e-79
+        },
+        "locked": false,
+        "priority": {
+          "score": 182.6923076923077,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.19,
+            "movedQty": 1000
+          },
+          "confidence": 0.9615384615384616,
+          "actionability": 1
+        },
+        "recommendation": null
+      }
+    ],
+    "diagnostics": {
+      "candidatesTested": 2,
+      "discarded": {
+        "lowVolume": 0,
+        "notSignificant": 0,
+        "unstable": 0,
+        "duplicate": 0,
+        "noOpportunity": 1
+      }
+    },
+    "asIsTotals": {
+      "rToA": 0,
+      "aToR": 0
+    }
+  }
+}

@@ -1,0 +1,276 @@
+{
+  "name": "planted_2d_beam2",
+  "store": {
+    "seg": {
+      "name": "seg",
+      "headers": [
+        "SCORE",
+        "CANAL",
+        "qty",
+        "qtdAltas",
+        "inadReal"
+      ],
+      "columnTypes": {
+        "SCORE": "decision",
+        "CANAL": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "SCORE": {
+          "kind": "dict",
+          "dict": [
+            "R08",
+            "R05"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAABAQ=="
+        },
+        "CANAL": {
+          "kind": "dict",
+          "dict": [
+            "Digital",
+            "Fisico"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAEAAQ=="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAABAj0AAAAAAAECPQAAAAAAAQI9AAAAAAABAj0A="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAABAj0AAAAAAAECPQAAAAAAAQI9AAAAAAABAj0A="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAAAANEAAAAAAAMB3QAAAAAAAwHdAAAAAAAAANEA="
+        }
+      },
+      "rowCount": 4
+    }
+  },
+  "shapes": [
+    {
+      "id": "L",
+      "type": "decision_lens",
+      "label": "Todos",
+      "rules": []
+    },
+    {
+      "id": "REJ",
+      "type": "rejected",
+      "label": "Reprovado"
+    }
+  ],
+  "conns": [
+    {
+      "id": "c1",
+      "from": "L",
+      "to": "REJ"
+    }
+  ],
+  "scope": null,
+  "params": {
+    "minQty": 1,
+    "beamWidth": 2
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "scope": null,
+    "population": {
+      "qty": 4000,
+      "decidedQty": 4000
+    },
+    "metric": {
+      "id": "inadReal",
+      "label": "Inad. Real",
+      "direction": "lower"
+    },
+    "findings": [
+      {
+        "id": "seg:CANAL=Digital&SCORE=R08",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "CANAL",
+              "operator": "equal",
+              "value": "Digital",
+              "logic": "AND",
+              "csvId": "seg"
+            },
+            {
+              "col": "SCORE",
+              "operator": "equal",
+              "value": "R08",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.25,
+          "qtdAltas": 1000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.02,
+          "inadInferida": null,
+          "refInadReal": 0.26,
+          "refInadInferida": null,
+          "lift": 0.07692307692307693,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "CANAL",
+              "value": "Digital",
+              "sharePct": 50
+            },
+            {
+              "col": "SCORE",
+              "value": "R08",
+              "sharePct": 50
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 1000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 1000,
+            "approvedQty": 0,
+            "rejectedQty": 1000
+          },
+          "stability": null,
+          "pValue": 1.0098980740932833e-98,
+          "qValue": 4.039592296373133e-98
+        },
+        "locked": false,
+        "priority": {
+          "score": 148.14814814814815,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.24000000000000002,
+            "movedQty": 1000
+          },
+          "confidence": 0.9259259259259259,
+          "actionability": 0.6666666666666666
+        },
+        "recommendation": null
+      },
+      {
+        "id": "seg:CANAL=Fisico&SCORE=R05",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "CANAL",
+              "operator": "equal",
+              "value": "Fisico",
+              "logic": "AND",
+              "csvId": "seg"
+            },
+            {
+              "col": "SCORE",
+              "operator": "equal",
+              "value": "R05",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.25,
+          "qtdAltas": 1000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.02,
+          "inadInferida": null,
+          "refInadReal": 0.26,
+          "refInadInferida": null,
+          "lift": 0.07692307692307693,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "CANAL",
+              "value": "Fisico",
+              "sharePct": 50
+            },
+            {
+              "col": "SCORE",
+              "value": "R05",
+              "sharePct": 50
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 1000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 1000,
+            "approvedQty": 0,
+            "rejectedQty": 1000
+          },
+          "stability": null,
+          "pValue": 1.0098980740932833e-98,
+          "qValue": 4.039592296373133e-98
+        },
+        "locked": false,
+        "priority": {
+          "score": 148.14814814814815,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.24000000000000002,
+            "movedQty": 1000
+          },
+          "confidence": 0.9259259259259259,
+          "actionability": 0.6666666666666666
+        },
+        "recommendation": null
+      }
+    ],
+    "diagnostics": {
+      "candidatesTested": 8,
+      "discarded": {
+        "lowVolume": 0,
+        "notSignificant": 4,
+        "unstable": 0,
+        "duplicate": 0,
+        "noOpportunity": 2
+      }
+    },
+    "asIsTotals": {
+      "rToA": 0,
+      "aToR": 0
+    }
+  }
+}

@@ -37,6 +37,9 @@ AppCreditoSimulador/
 │   ├── policyTemplates.test.js   # GATE Copiloto Sessão 2: biblioteca de políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
 │   ├── segmentDiscovery.test.js  # GATE Copiloto Sessão 10: subgrupo plantado achado com condições exatas; homogênea ⇒ zero; agregados ≡ matchLensRule; dispersion ≡ contagem por terminal; p-value binomial ≡ controle; FDR (BH); shrinkage rebaixa nicho; escopo por nó ≡ sub-base; dedup; determinismo
+│   ├── segmentDiscoveryGolden.test.js # GATE Execução Híbrida H7 (DEC-HX-005): gera/verifica as fixtures douradas (SegmentModel sem recomendações ≡ segBuildModelWithoutRecs; colunar ≡ legado; determinismo); costura sidecar→worker (attachSegmentRecommendations ≡ computeSegmentDiscovery); clamp dos tetos browser
+│   ├── fixtures/segmentFixtures.js    # entradas do GATE dourado H7 (espelham as fixtures de segmentDiscovery.test.js)
+│   ├── fixtures/golden/               # fixtures douradas cross-runtime (entrada serializada M3 + SegmentModel esperado; regenerar com UPDATE_GOLDEN=1)
 │   └── workerPool.test.js         # GATE Execução Híbrida H3: pool ≡ single-worker número a número (Descoberta + Combinada) via pool mock (jobs fora de ordem); determinismo sob ordens de conclusão diferentes; fallback (pool null ≡ síncrono)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 │   └── computeRouter.test.js      # GATE Execução Híbrida H4: Classe A jamais roteia; detecção (indisponível/lento/versão errada) silenciosa; Classe B sidecar (dataset por hash HEAD→POST, progresso) com fallback transparente na queda do job
@@ -62,9 +65,11 @@ AppCreditoSimulador/
 │   │   ├── requirements.txt      #   tier full (numpy/scipy) + extras (sklearn/duckdb)
 │   │   ├── instalar_motor.bat    #   venv + pip do índice; wheels/ como contingência (P1)
 │   │   ├── checar_ambiente.py    #   sonda HP (movida da raiz) — testa install/import na máquina
+│   │   ├── motor_segmentos.py    #   H7 — Descoberta de Segmentos vetorizada em numpy (task segment_discovery, tier full)
 │   │   └── wheels/               #   wheels offline de CONTINGÊNCIA (vazia por padrão; só LEIAME)
 │   └── ...
 ├── tests_python/                 # GATE H5 (pytest): protocolo do sidecar (health/token/caps/dataset/job)
+│                                 # + GATE H7 (test_segment_discovery.py): fixtures douradas número a número no motor Python
 ├── .github/workflows/
 │   ├── build-release.yml         # Build automático em push para main → commit em release/
 │   ├── test-sidecar.yml          # Job SEPARADO e OPCIONAL: pytest do sidecar (não bloqueia o build)
@@ -360,6 +365,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10/12 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?}`. Roda `computeSegmentDiscovery` (achados + recomendações validadas + asis_divergence/anomaly + estabilidade); responde com `SEGMENT_DISCOVERY_RESULT` |
 | `COMPUTE_SEGMENT_COMBINED` | `{shapes, conns, applies}` | Copiloto Sessão 12 — aplicação combinada de N recomendações. `applies: [{moves}]`. Aplica os patches EM SEQUÊNCIA sobre UM clone e valida por UMA re-simulação real (`computeSegmentCombined`) — nunca a soma dos deltas; responde com `SEGMENT_COMBINED_RESULT` |
 | `POOL_JOB` | `{jobId, shapes, conns, moves}` | **Execução Híbrida H3** — shard do pool de workers aninhados. Chega SÓ nos pool-workers (o worker principal não posta a si mesmo): roda `segValidateMoves` (aplica moves + `runSimulation` + snapshot) sobre o `workerCsvStore` já semeado e responde com `POOL_JOB_RESULT`. Ver "Pool de Workers (Execução Híbrida H3)" |
+| `segment_discovery` | `{shapes, conns, scope, params}` | **Execução Híbrida H7** — alias de FALLBACK da Descoberta profunda (Classe B): mesmo payload de `COMPUTE_SEGMENT_DISCOVERY`, mas com os params CLAMPADOS aos tetos browser (`clampSegmentParamsForBrowser`: maxDepth ≤ 2, beamWidth ≤ 8). É o que o ComputeRouter posta quando o job do sidecar cai/está indisponível (paridade total, P4); responde com o MESMO `SEGMENT_DISCOVERY_RESULT` |
+| `COMPUTE_SEGMENT_RECS` | `{shapes, conns, scope, params, segmentModel}` | **Execução Híbrida H7** — anexa recomendações (patch + delta re-simulado REAL, DEC-SD-003) ao `segmentModel` que o sidecar devolveu SEM elas: reconstrói o ctx barato (`discoverSegments` com maxDepth 1 — bins de nível 1/walk não dependem da profundidade) e roda `segPlanRecommendations`/validação (pool H3) sobre os findings recebidos. O motor de simulação segue single-sourced no worker (a dupla implementação dele é a H9); responde com `SEGMENT_RECS_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -376,6 +383,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `SEGMENT_DISCOVERY_RESULT` | `{segmentModel}` — ver seção "Descoberta de Segmentos" |
 | `SEGMENT_COMBINED_RESULT` | `{combined}` — `{baseline, combined, combinedApprovalDelta, combinedMovedQty, sumApprovalDelta, sumMovedQty, individual, interaction:{interacts, overlapQty, note}}` (Sessão 12) |
 | `POOL_JOB_RESULT` | `{jobId, snapshot}` \| `{jobId, error}` — resposta do pool-worker a um `POOL_JOB` (H3). `snapshot` = resultado de `segValidateMoves`; `error` (candidato que estourou) vira delta null / recomputo inline no orquestrador |
+| `SEGMENT_RECS_RESULT` | `{segmentModel}` — o modelo recebido em `COMPUTE_SEGMENT_RECS` com `recommendation` preenchida nos achados acionáveis (H7); em falha de anexo, o modelo volta como veio (cards sem delta validado, nunca erro silencioso) |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -1350,8 +1358,9 @@ navegador (DEC-HX-001).
   (`loading`⇒stdlib) e após o warm-up (numpy+scipy⇒full, sklearn não é gate), dataset round-trip
   por hash (POST idempotente + HEAD 200/404), ciclo de job `echo_stats` e cancelamento. CI:
   workflow **separado e opcional** `.github/workflows/test-sidecar.yml` (não bloqueia o build).
-  **Não** é o GATE cross-runtime de fixtures douradas (DEC-HX-005) — esse chega na H7, quando
-  houver dupla implementação de fato.
+  Desde a H7 o mesmo pytest também carrega o GATE cross-runtime de fixtures douradas
+  (DEC-HX-005) em `test_segment_discovery.py` — esse exige numpy (o CI instala; sem ele os
+  testes de paridade são pulados via `importorskip`, e a task nem é ofertada pelo sidecar).
 
 ## UX do Motor Python (Execução Híbrida H6 — badge, preferências, degradação declarada)
 
@@ -1414,6 +1423,57 @@ com o motor desligado (default), nada muda de comportamento (DEC-HX-001). Ver
 - **Teste**: `tests/computeRouter.test.js` (badge/tooltip/ceiling/fallback — puro) e
   `tests/columnar.test.js` (estimativa de RAM — round-trip com `codesCtorForDict`, soma por
   store, formatação).
+
+## Descoberta Profunda no Sidecar (Execução Híbrida H7 — primeira carga real Classe B)
+
+Primeira tarefa Classe B de produção (DEC-HX-007): a **Descoberta de Segmentos com
+profundidade 3–4 e beam ampliado** roda no sidecar Python (tier full), vetorizada com
+numpy. Depth ≤ 2 continua 100% no worker (Classe A, caminho intocado). Ver
+`docs/wiki/Arquitetura-Execucao-Hibrida.md` (DEC-HX-005/007) e a seção "Descoberta de
+Segmentos" acima.
+
+- **Divisão de trabalho (o ponto arquitetural da sessão)**: o sidecar porta SÓ os
+  estágios 1–3 + asis_divergence/anomaly/estabilidade — o equivalente exato de
+  `segBuildModelWithoutRecs` (worker), ou seja, o `SegmentModel` **sem** `recommendation`.
+  As recomendações (patch + delta validado por `runSimulation` REAL — DEC-SD-003/
+  DEC-IA-005) seguem **single-sourced no worker**: a main anexa via `COMPUTE_SEGMENT_RECS`
+  (reconstrói o ctx barato com `discoverSegments` depth 1 e roda
+  `segPlanRecommendations` + validação no pool H3). Duplicar o motor de simulação em
+  Python é a Sessão H9 — não vazou pra cá.
+- **Motor Python**: `release/python/motor_segmentos.py` (numpy apenas; scipy/sklearn não
+  são usados), carregado LAZY pelo `sidecar.py` no primeiro job. A task
+  `segment_discovery` **só aparece em `capabilities.tasks` no tier full**; no stdlib um
+  POST /jobs com ela leva 400 (o router cai no fallback browser). Paridade número a
+  número garantida por construção: toda soma de float replica a ORDEM SEQUENCIAL do JS
+  (`np.cumsum`/`np.bincount`, nunca `np.sum` pairwise), clones fiéis de `parseFloat`/
+  `String(número)`/`trim`/round do JS, e walk vetorizado por propagação de máscaras com
+  a MESMA semântica por-linha de `routeRow` (visited/ciclo, lastFlow, AS IS cru).
+- **Comparador especificado (`segStrCmp`)**: os desempates de ordenação do pipeline da
+  Descoberta (beam, hetCols, terminals, score, asis/anomaly, buckets temporais) trocaram
+  `localeCompare` (dependente de ICU/locale do runtime — quebraria o determinismo
+  cross-runtime E entre browsers) por comparação por **code unit UTF-16**, replicada no
+  Python via chave `encode('utf-16-be')`. Só afeta empates exatos; nenhuma matemática.
+- **Roteamento (front)**: formulário da Descoberta ganha profundidade 3–4 e "Teto de
+  candidatos (beam)" 16/32 **habilitados só quando** o sidecar está pareado E declara
+  `segment_discovery` em capabilities; sem ele, opções desabilitadas +
+  `ComputeCeilingNotice` (teto declarado, helper H6). `runSegmentDiscovery`: raso ⇒
+  `COMPUTE_SEGMENT_DISCOVERY` direto (como sempre); profundo ⇒ `router.run('segment_discovery',…)`
+  com dataset por hash (`serializeCsvStore` + `hashChunks`, HEAD→POST — DEC-HX-006),
+  progresso (`ComputeJobProgress`) e cancelamento (AbortController; abort NÃO dispara
+  fallback — mudança no `router.run`). Resultado do sidecar → `COMPUTE_SEGMENT_RECS` →
+  `SEGMENT_RECS_RESULT` abre o resultado. Queda/indisponibilidade ⇒ fallback transparente:
+  o worker responde ao alias `segment_discovery` com os params CLAMPADOS
+  (`clampSegmentParamsForBrowser`, depth ≤ 2/beam ≤ 8) e o modal declara "concluído no
+  modo browser" (`fallbackNotice`).
+- **GATE dourado (DEC-HX-005, bloqueante)**: `tests/segmentDiscoveryGolden.test.js` gera
+  `tests/fixtures/golden/segment_discovery_*.json` (entrada serializada M3 + modelo
+  esperado) a partir de `tests/fixtures/segmentFixtures.js` e FALHA se o motor JS
+  divergir do dourado commitado (regenerar: `UPDATE_GOLDEN=1`);
+  `tests_python/test_segment_discovery.py` roda as MESMAS entradas no motor Python
+  exigindo igualdade número a número (contagens exatas; floats rel 1e-9 — só
+  transcendentais log/exp/pow variam por ~1 ulp entre libm's; medido: 704/710 números
+  bit-idênticos, pior desvio 4e-16). Também: determinismo (incl. depth 4), gating por
+  tier e costura sidecar→worker (`attachSegmentRecommendations` ≡ `computeSegmentDiscovery`).
 
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
@@ -1873,7 +1933,9 @@ Header do painel direito — ao lado do título "Painel".
 ### `test-sidecar.yml`
 - Job **separado e opcional** (não bloqueia o build): `pytest tests_python/` sobre o
   `release/sidecar.py`. Dispara em `workflow_dispatch` e em push/PR que toquem os arquivos do
-  sidecar. Roda sem numpy/scipy (os testes de tier manipulam o estado do warm-up).
+  sidecar, o motor de segmentos ou as fixtures douradas. Instala numpy (H7): o GATE
+  cross-runtime da Descoberta profunda (DEC-HX-005) precisa rodar de verdade — os testes de
+  tier continuam manipulando o estado do warm-up (independem dos pacotes reais).
 
 ### `sync-wiki.yml`
 - Disparado em push para `main` quando `docs/wiki/**` muda
@@ -1912,7 +1974,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/hybrid-execution-h6-v3u0jr`
+`claude/segment-discovery-sidecar-vr56y0`
 
 ## Roadmap futuro (não implementado)
 

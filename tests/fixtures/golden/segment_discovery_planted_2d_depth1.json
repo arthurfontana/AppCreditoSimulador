@@ -1,0 +1,119 @@
+{
+  "name": "planted_2d_depth1",
+  "store": {
+    "seg": {
+      "name": "seg",
+      "headers": [
+        "SCORE",
+        "CANAL",
+        "qty",
+        "qtdAltas",
+        "inadReal"
+      ],
+      "columnTypes": {
+        "SCORE": "decision",
+        "CANAL": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "SCORE": {
+          "kind": "dict",
+          "dict": [
+            "R08",
+            "R05"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAABAQ=="
+        },
+        "CANAL": {
+          "kind": "dict",
+          "dict": [
+            "Digital",
+            "Fisico"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAEAAQ=="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAABAj0AAAAAAAECPQAAAAAAAQI9AAAAAAABAj0A="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAABAj0AAAAAAAECPQAAAAAAAQI9AAAAAAABAj0A="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAAAANEAAAAAAAMB3QAAAAAAAwHdAAAAAAAAANEA="
+        }
+      },
+      "rowCount": 4
+    }
+  },
+  "shapes": [
+    {
+      "id": "L",
+      "type": "decision_lens",
+      "label": "Todos",
+      "rules": []
+    },
+    {
+      "id": "REJ",
+      "type": "rejected",
+      "label": "Reprovado"
+    }
+  ],
+  "conns": [
+    {
+      "id": "c1",
+      "from": "L",
+      "to": "REJ"
+    }
+  ],
+  "scope": null,
+  "params": {
+    "minQty": 1,
+    "maxDepth": 1
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "scope": null,
+    "population": {
+      "qty": 4000,
+      "decidedQty": 4000
+    },
+    "metric": {
+      "id": "inadReal",
+      "label": "Inad. Real",
+      "direction": "lower"
+    },
+    "findings": [],
+    "diagnostics": {
+      "candidatesTested": 4,
+      "discarded": {
+        "lowVolume": 0,
+        "notSignificant": 4,
+        "unstable": 0,
+        "duplicate": 0,
+        "noOpportunity": 0
+      }
+    },
+    "asIsTotals": {
+      "rToA": 0,
+      "aToR": 0
+    }
+  }
+}

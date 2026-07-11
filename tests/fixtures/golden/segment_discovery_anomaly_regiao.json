@@ -1,0 +1,476 @@
+{
+  "name": "anomaly_regiao",
+  "store": {
+    "seg": {
+      "name": "seg",
+      "headers": [
+        "REGIAO",
+        "qty",
+        "qtdAltas",
+        "inadReal"
+      ],
+      "columnTypes": {
+        "REGIAO": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "REGIAO": {
+          "kind": "dict",
+          "dict": [
+            "N",
+            "S",
+            "L",
+            "O",
+            "??"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 5,
+          "codes": "AAECAwQ="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 5,
+          "data": "AAAAAABAj0AAAAAAAECPQAAAAAAAQI9AAAAAAABAj0AAAAAAAECPQA=="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 5,
+          "data": "AAAAAABAj0AAAAAAAECPQAAAAAAAQI9AAAAAAABAj0AAAAAAAECPQA=="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 5,
+          "data": "AAAAAAAAWUAAAAAAAEBaQAAAAAAAwFdAAAAAAACAW0AAAAAAACCMQA=="
+        }
+      },
+      "rowCount": 5
+    }
+  },
+  "shapes": [
+    {
+      "id": "L",
+      "type": "decision_lens",
+      "label": "Todos",
+      "rules": []
+    },
+    {
+      "id": "REJ",
+      "type": "rejected",
+      "label": "Reprovado"
+    }
+  ],
+  "conns": [
+    {
+      "id": "c1",
+      "from": "L",
+      "to": "REJ"
+    }
+  ],
+  "scope": null,
+  "params": {
+    "minQty": 1
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "scope": null,
+    "population": {
+      "qty": 5000,
+      "decidedQty": 5000
+    },
+    "metric": {
+      "id": "inadReal",
+      "label": "Inad. Real",
+      "direction": "lower"
+    },
+    "findings": [
+      {
+        "id": "het:(escopo)",
+        "code": "heterogeneous_block",
+        "segment": {
+          "conditions": [],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 5000,
+          "share": 1,
+          "qtdAltas": 5000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.262,
+          "inadInferida": null,
+          "refInadReal": null,
+          "refInadInferida": null,
+          "lift": null,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "REGIAO",
+              "value": null,
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 5000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 5000,
+            "approvedQty": 0,
+            "rejectedQty": 5000
+          },
+          "stability": null,
+          "pValue": null,
+          "qValue": null
+        },
+        "locked": false,
+        "priority": {
+          "score": 14138.45167898128,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": 2.8842441425121814,
+            "movedQty": 5000
+          },
+          "confidence": 0.9803921568627451,
+          "actionability": 1
+        },
+        "recommendation": null
+      },
+      {
+        "id": "seg:REGIAO=L",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "REGIAO",
+              "operator": "equal",
+              "value": "L",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.2,
+          "qtdAltas": 1000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.095,
+          "inadInferida": null,
+          "refInadReal": 0.30375,
+          "refInadInferida": null,
+          "lift": 0.3127572016460905,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "REGIAO",
+              "value": "L",
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 1000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 1000,
+            "approvedQty": 0,
+            "rejectedQty": 1000
+          },
+          "stability": null,
+          "pValue": 8.792452755073974e-57,
+          "qValue": 4.396226377536987e-56
+        },
+        "locked": false,
+        "priority": {
+          "score": 189.77272727272728,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.20875000000000002,
+            "movedQty": 1000
+          },
+          "confidence": 0.9090909090909091,
+          "actionability": 1
+        },
+        "recommendation": null
+      },
+      {
+        "id": "seg:REGIAO=N",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "REGIAO",
+              "operator": "equal",
+              "value": "N",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.2,
+          "qtdAltas": 1000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.1,
+          "inadInferida": null,
+          "refInadReal": 0.3025,
+          "refInadInferida": null,
+          "lift": 0.3305785123966942,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "REGIAO",
+              "value": "N",
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 1000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 1000,
+            "approvedQty": 0,
+            "rejectedQty": 1000
+          },
+          "stability": null,
+          "pValue": 3.1357130522591553e-53,
+          "qValue": 7.839282630647889e-53
+        },
+        "locked": false,
+        "priority": {
+          "score": 184.09090909090907,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.20249999999999999,
+            "movedQty": 1000
+          },
+          "confidence": 0.9090909090909091,
+          "actionability": 1
+        },
+        "recommendation": null
+      },
+      {
+        "id": "seg:REGIAO=S",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "REGIAO",
+              "operator": "equal",
+              "value": "S",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.2,
+          "qtdAltas": 1000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.105,
+          "inadInferida": null,
+          "refInadReal": 0.30125,
+          "refInadInferida": null,
+          "lift": 0.34854771784232363,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "REGIAO",
+              "value": "S",
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 1000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 1000,
+            "approvedQty": 0,
+            "rejectedQty": 1000
+          },
+          "stability": null,
+          "pValue": 7.963178593590537e-50,
+          "qValue": 1.3271964322650894e-49
+        },
+        "locked": false,
+        "priority": {
+          "score": 178.40909090909093,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.19625000000000004,
+            "movedQty": 1000
+          },
+          "confidence": 0.9090909090909091,
+          "actionability": 1
+        },
+        "recommendation": null
+      },
+      {
+        "id": "seg:REGIAO=O",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "REGIAO",
+              "operator": "equal",
+              "value": "O",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.2,
+          "qtdAltas": 1000,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.11,
+          "inadInferida": null,
+          "refInadReal": 0.3,
+          "refInadInferida": null,
+          "lift": 0.3666666666666667,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "REGIAO",
+              "value": "O",
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 1000,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 1000,
+            "approvedQty": 0,
+            "rejectedQty": 1000
+          },
+          "stability": null,
+          "pValue": 1.4566386395930888e-46,
+          "qValue": 1.820798299491361e-46
+        },
+        "locked": false,
+        "priority": {
+          "score": 172.72727272727272,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.19,
+            "movedQty": 1000
+          },
+          "confidence": 0.9090909090909091,
+          "actionability": 1
+        },
+        "recommendation": null
+      },
+      {
+        "id": "anomaly:REGIAO=??",
+        "code": "anomaly",
+        "segment": {
+          "conditions": [
+            {
+              "col": "REGIAO",
+              "operator": "equal",
+              "value": "??",
+              "logic": "AND",
+              "csvId": "seg"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.2,
+          "rate": 0.9,
+          "median": 0.105,
+          "mad": 0.0050000000000000044,
+          "z": 107.2454999999999,
+          "temporal": false,
+          "currentDecision": null,
+          "lift": null,
+          "inadReal": null,
+          "inadInferida": null
+        },
+        "explanation": {
+          "contributions": [],
+          "dispersion": null,
+          "stability": null,
+          "pValue": null,
+          "qValue": null
+        },
+        "priority": {
+          "score": 107245.4999999999,
+          "impact": {
+            "movedQty": 1000
+          },
+          "confidence": 1,
+          "actionability": 0
+        },
+        "recommendation": null
+      }
+    ],
+    "diagnostics": {
+      "candidatesTested": 5,
+      "discarded": {
+        "lowVolume": 0,
+        "notSignificant": 0,
+        "unstable": 0,
+        "duplicate": 0,
+        "noOpportunity": 1
+      }
+    },
+    "asIsTotals": {
+      "rToA": 0,
+      "aToR": 0
+    }
+  }
+}

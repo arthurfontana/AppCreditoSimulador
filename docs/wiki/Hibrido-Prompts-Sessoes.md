@@ -449,7 +449,7 @@ propor.
 
 ---
 
-## Sessão H7 — Primeira Carga Real: Descoberta Profunda (Classe B) 🏷️ [FABLE]
+## Sessão H7 — Primeira Carga Real: Descoberta Profunda (Classe B) 🏷️ [FABLE] — ✅ CONCLUÍDA
 
 > **Por que Fable 5**: primeiro port cross-runtime do projeto — vetorizar em numpy um
 > pipeline estatisticamente sutil (binomial exato/aproximado, Benjamini–Hochberg,
@@ -458,6 +458,32 @@ propor.
 > um desvio passa nas fixtures pequenas e explode só em base real. Esta sessão também
 > **estabelece o padrão de GATE dourado** que H8/H9 herdam — errar aqui contamina as
 > seguintes.
+
+**Status (11/07/2026)**: entregue. Task `segment_discovery` no sidecar
+(`release/python/motor_segmentos.py`, numpy apenas, import lazy; ofertada em
+`capabilities.tasks` SÓ no tier full — no stdlib um POST /jobs com ela leva 400 e o
+router cai no fallback browser). **Divisão de trabalho**: o Python porta os estágios
+1–3 + asis_divergence/anomaly/estabilidade — o equivalente EXATO de
+`segBuildModelWithoutRecs` (o SegmentModel SEM `recommendation`); as recomendações
+(patch + delta re-simulado real, DEC-SD-003) continuam single-sourced no worker, que
+as anexa via a mensagem nova `COMPUTE_SEGMENT_RECS` (ctx barato reconstruído com
+depth 1 + validação no pool H3) — duplicar `runSimulation` é a H9, e não vazou pra cá.
+Paridade por construção: somas de float em ORDEM SEQUENCIAL (np.cumsum/np.bincount,
+nunca np.sum pairwise), clones de parseFloat/String(número)/trim, walk vetorizado por
+propagação de máscaras com a semântica por-linha de routeRow, e o desempate de
+ordenação trocado de `localeCompare` (ICU/locale-dependente — quebraria o determinismo
+até entre browsers) pelo comparador especificado `segStrCmp` (code units UTF-16;
+`encode('utf-16-be')` no Python). Front: profundidade 3–4 + "Teto de candidatos" 16/32
+habilitados só com sidecar pareado E task declarada (senão `ComputeCeilingNotice` do
+H6); job com dataset por hash, progresso e cancelamento (abort NÃO dispara fallback);
+queda ⇒ alias `segment_discovery` no worker com params CLAMPADOS
+(`clampSegmentParamsForBrowser`) + aviso "concluído no modo browser". GATE dourado:
+`tests/segmentDiscoveryGolden.test.js` gera/trava `tests/fixtures/golden/` (16
+fixtures; drift do motor JS FALHA o teste; regenerar com `UPDATE_GOLDEN=1`) e
+`tests_python/test_segment_discovery.py` exige igualdade número a número (contagens
+exatas, floats rel 1e-9; medido na entrega: 704/710 números bit-idênticos, pior
+desvio 4e-16) + determinismo (incl. depth 4) + gating por tier. CI: `test-sidecar.yml`
+instala numpy e dispara também por mudanças no motor/fixtures douradas.
 
 **Documentação**: [[Arquitetura-Execucao-Hibrida]] (DEC-HX-005/007, §7.3, §14) + [[Copiloto-DescobertaSegmentos]]
 
@@ -634,7 +660,7 @@ os GATEs antes de propor.
 - [ ] **Sessão H4** — ComputeRouter (front) 🏷️ `[OPUS]`
 - [ ] **Sessão H5** — Sidecar Python v1 🏷️ `[OPUS]`
 - [ ] **Sessão H6** — UX do motor híbrido + recomendação DEC-HX-009 🏷️ `[SONNET]`
-- [ ] **Sessão H7** — Descoberta profunda (Classe B) 🏷️ `[FABLE]`
+- [x] **Sessão H7** — Descoberta profunda (Classe B) 🏷️ `[FABLE]` ✅ *(concluída 11/07/2026 — motor numpy `motor_segmentos.py` ≡ `segBuildModelWithoutRecs` sob GATE dourado; recomendações single-sourced no worker via `COMPUTE_SEGMENT_RECS`; depth 3–4/beam ampliado gated por capabilities; fallback clampado declarado)*
 - [ ] **Sessão H8** — Clusterização (paridade total: baseline browser + sidecar) 🏷️ `[FABLE]`
 - [ ] **Sessão H9** — Motor em Python / batch_simulate 🏷️ `[FABLE]` *(só quando a Frente 5 ou bases 7–10MM+ forem priorizadas)*
 
@@ -716,7 +742,9 @@ real (Frente 5, bases na íntegra acima do conforto do browser).
 
 ---
 
-**Última atualização**: 2026-07-10 (revisão de tags de modelo: H7/H8/H9 promovidas de
+**Última atualização**: 2026-07-11 (**Sessão H7 concluída** — Descoberta profunda no
+sidecar com GATE dourado cross-runtime; ver o Status na seção da H7). Histórico:
+2026-07-10 (revisão de tags de modelo: H7/H8/H9 promovidas de
 `[OPUS]` para `[FABLE]` — Fable 5, tier acima do Opus — com análise esforço × custo
 registrada na Nota do Checklist; demais sessões inalteradas: a especificação normativa
 já escrita é o que torna Opus suficiente nelas). Histórico anterior:

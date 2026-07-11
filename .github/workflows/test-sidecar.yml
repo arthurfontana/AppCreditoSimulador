@@ -10,13 +10,17 @@ on:
     paths:
       - 'release/sidecar.py'
       - 'release/serve.py'
+      - 'release/python/motor_segmentos.py'
       - 'tests_python/**'
+      - 'tests/fixtures/golden/**'
       - '.github/workflows/test-sidecar.yml'
   pull_request:
     paths:
       - 'release/sidecar.py'
       - 'release/serve.py'
+      - 'release/python/motor_segmentos.py'
       - 'tests_python/**'
+      - 'tests/fixtures/golden/**'
 
 permissions:
   contents: read
@@ -33,10 +37,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar pytest (o sidecar em si é stdlib puro)
+      - name: Instalar pytest + numpy (o sidecar é stdlib; o GATE H7 exige numpy)
         run: python -m pip install -r tests_python/requirements-dev.txt
 
-      # Sem numpy/scipy instalados: os testes de tier manipulam o estado do warm-up,
-      # então o GATE roda idêntico com ou sem os pacotes científicos.
+      # Os testes de tier continuam manipulando o estado do warm-up (independem dos
+      # pacotes reais). O numpy entra pelo GATE cross-runtime da Descoberta profunda
+      # (H7, DEC-HX-005): tests_python/test_segment_discovery.py roda as fixtures
+      # douradas de tests/fixtures/golden/ no motor Python exigindo igualdade número
+      # a número — sem ele os testes de paridade seriam pulados (importorskip) e o
+      # GATE não estaria de fato provado.
       - name: Rodar pytest
         run: python -m pytest tests_python/ -q

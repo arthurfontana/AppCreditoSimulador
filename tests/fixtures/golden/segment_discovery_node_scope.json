@@ -1,0 +1,287 @@
+{
+  "name": "node_scope",
+  "store": {
+    "b": {
+      "name": "b",
+      "headers": [
+        "GRP",
+        "SEG",
+        "qty",
+        "qtdAltas",
+        "inadReal"
+      ],
+      "columnTypes": {
+        "GRP": "decision",
+        "SEG": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "GRP": {
+          "kind": "dict",
+          "dict": [
+            "A",
+            "B"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAABAQ=="
+        },
+        "SEG": {
+          "kind": "dict",
+          "dict": [
+            "X",
+            "Y"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 4,
+          "codes": "AAEAAQ=="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAADAckAAAAAAAABpQAAAAAAAQH9AAAAAAABAf0A="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAADAckAAAAAAAABpQAAAAAAAQH9AAAAAAABAf0A="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 4,
+          "data": "AAAAAAAAGEAAAAAAAABEQAAAAAAAAFlAAAAAAAAAWUA="
+        }
+      },
+      "rowCount": 4
+    }
+  },
+  "shapes": [
+    {
+      "id": "D1",
+      "type": "decision",
+      "label": "G",
+      "variableCol": "GRP",
+      "csvId": "b"
+    },
+    {
+      "id": "pA",
+      "type": "port",
+      "label": "A"
+    },
+    {
+      "id": "pB",
+      "type": "port",
+      "label": "B"
+    },
+    {
+      "id": "REJ",
+      "type": "rejected",
+      "label": "Reprovado"
+    },
+    {
+      "id": "AP",
+      "type": "approved",
+      "label": "Aprovado"
+    }
+  ],
+  "conns": [
+    {
+      "id": "c1",
+      "from": "D1",
+      "to": "pA",
+      "label": "A"
+    },
+    {
+      "id": "c2",
+      "from": "pA",
+      "to": "REJ"
+    },
+    {
+      "id": "c3",
+      "from": "D1",
+      "to": "pB",
+      "label": "B"
+    },
+    {
+      "id": "c4",
+      "from": "pB",
+      "to": "AP"
+    }
+  ],
+  "scope": {
+    "nodeId": "pA"
+  },
+  "params": {
+    "minQty": 1
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "scope": {
+      "nodeId": "pA",
+      "label": "A"
+    },
+    "population": {
+      "qty": 500,
+      "decidedQty": 500
+    },
+    "metric": {
+      "id": "inadReal",
+      "label": "Inad. Real",
+      "direction": "lower"
+    },
+    "findings": [
+      {
+        "id": "het:(escopo)",
+        "code": "heterogeneous_block",
+        "segment": {
+          "conditions": [],
+          "scope": {
+            "nodeId": "pA",
+            "label": "A"
+          }
+        },
+        "metrics": {
+          "qty": 500,
+          "share": 1,
+          "qtdAltas": 500,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.092,
+          "inadInferida": null,
+          "refInadReal": null,
+          "refInadInferida": null,
+          "lift": null,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "SEG",
+              "value": null,
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 500,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 500,
+            "approvedQty": 0,
+            "rejectedQty": 500
+          },
+          "stability": null,
+          "pValue": null,
+          "qValue": null
+        },
+        "locked": false,
+        "priority": {
+          "score": 635.153662046842,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": 1.2957134705755577,
+            "movedQty": 500
+          },
+          "confidence": 0.9803921568627451,
+          "actionability": 1
+        },
+        "recommendation": null
+      },
+      {
+        "id": "seg:SEG=X",
+        "code": "approvable_low_risk",
+        "segment": {
+          "conditions": [
+            {
+              "col": "SEG",
+              "operator": "equal",
+              "value": "X",
+              "logic": "AND",
+              "csvId": "b"
+            }
+          ],
+          "scope": {
+            "nodeId": "pA",
+            "label": "A"
+          }
+        },
+        "metrics": {
+          "qty": 300,
+          "share": 0.6,
+          "qtdAltas": 300,
+          "qtdAltasInfer": 0,
+          "inadReal": 0.02,
+          "inadInferida": null,
+          "refInadReal": 0.2,
+          "refInadInferida": null,
+          "lift": 0.09999999999999999,
+          "currentDecision": "rejected"
+        },
+        "explanation": {
+          "contributions": [
+            {
+              "col": "SEG",
+              "value": "X",
+              "sharePct": 100
+            }
+          ],
+          "dispersion": {
+            "nodesCount": 1,
+            "terminals": [
+              {
+                "terminal": "rejected",
+                "qty": 300,
+                "sharePct": 100
+              }
+            ],
+            "currentDecision": "rejected",
+            "decidedQty": 300,
+            "approvedQty": 0,
+            "rejectedQty": 300
+          },
+          "stability": null,
+          "pValue": 4.320226655092415e-21,
+          "qValue": 1.0800566637731039e-20
+        },
+        "locked": false,
+        "priority": {
+          "score": 52.25806451612904,
+          "impact": {
+            "deltaApproval": null,
+            "deltaInadInf": -0.18000000000000002,
+            "movedQty": 300
+          },
+          "confidence": 0.967741935483871,
+          "actionability": 1
+        },
+        "recommendation": null
+      }
+    ],
+    "diagnostics": {
+      "candidatesTested": 5,
+      "discarded": {
+        "lowVolume": 0,
+        "notSignificant": 1,
+        "unstable": 0,
+        "duplicate": 1,
+        "noOpportunity": 2
+      }
+    },
+    "asIsTotals": {
+      "rToA": 0,
+      "aToR": 0
+    }
+  }
+}
