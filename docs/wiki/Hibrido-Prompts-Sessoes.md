@@ -661,7 +661,7 @@ os GATEs antes de propor.
 - [ ] **Sessão H5** — Sidecar Python v1 🏷️ `[OPUS]`
 - [ ] **Sessão H6** — UX do motor híbrido + recomendação DEC-HX-009 🏷️ `[SONNET]`
 - [x] **Sessão H7** — Descoberta profunda (Classe B) 🏷️ `[FABLE]` ✅ *(concluída 11/07/2026 — motor numpy `motor_segmentos.py` ≡ `segBuildModelWithoutRecs` sob GATE dourado; recomendações single-sourced no worker via `COMPUTE_SEGMENT_RECS`; depth 3–4/beam ampliado gated por capabilities; fallback clampado declarado)*
-- [ ] **Sessão H8** — Clusterização (paridade total: baseline browser + sidecar) 🏷️ `[FABLE]`
+- [x] **Sessão H8** — Clusterização (paridade total: baseline browser + sidecar) 🏷️ `[FABLE]` ✅ *(concluída 11/07/2026 — `computeClusterSegments` no worker (k-means Lloyd + k-means++ sobre mulberry32, seed derivada de dataset+params, tetos declarados 3 dims/k 8/2.000 pontos) ≡ `motor_clusters.py` numpy no sidecar sob GATE dourado bit-exato (matemática racional+sqrt, sem transcendental); extras sklearn (silhueta/k automático, hierárquico) fora do dourado e gated por capabilities; modal 🧩 sempre habilitado com fallback clampado declarado; 👁 Ver no Dashboard converte cluster → FilterCard[] básico)*
 - [ ] **Sessão H9** — Motor em Python / batch_simulate 🏷️ `[FABLE]` *(só quando a Frente 5 ou bases 7–10MM+ forem priorizadas)*
 
 ### 🏷️ Nota — análise esforço × custo da atribuição de Fable 5 (10/07/2026)

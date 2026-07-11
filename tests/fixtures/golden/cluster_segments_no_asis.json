@@ -1,0 +1,197 @@
+{
+  "name": "no_asis",
+  "store": {
+    "clu": {
+      "name": "clu",
+      "headers": [
+        "GRUPO",
+        "qty",
+        "qtdAltas",
+        "inadReal"
+      ],
+      "columnTypes": {
+        "GRUPO": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "GRUPO": {
+          "kind": "dict",
+          "dict": [
+            "G1",
+            "G2",
+            "G3",
+            "G4",
+            "G5"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 5,
+          "codes": "AAECAwQ="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 5,
+          "data": "AAAAAABAj0AAAAAAAMCSQAAAAAAAIIxAAAAAAAAwkUAAAAAAAEB/QA=="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 5,
+          "data": "AAAAAAAgjEAAAAAAAECPQAAAAAAAAIlAAAAAAACwjUAAAAAAAAAAAA=="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 5,
+          "data": "AAAAAAAAMkAAAAAAAAA2QAAAAAAAAHRAAAAAAABgeEAAAAAAAAAAAA=="
+        }
+      },
+      "rowCount": 5
+    }
+  },
+  "params": {
+    "csvId": "clu",
+    "dims": [
+      "GRUPO"
+    ],
+    "k": 2
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "error": null,
+    "dataset": {
+      "csvId": "clu",
+      "name": "clu",
+      "rowCount": 5
+    },
+    "params": {
+      "csvId": "clu",
+      "dims": [
+        "GRUPO"
+      ],
+      "k": 2,
+      "kRequested": 2,
+      "features": [
+        "inadReal"
+      ],
+      "seed": 1296894771,
+      "method": "kmeans",
+      "autoK": false,
+      "maxPoints": null
+    },
+    "ceilings": null,
+    "population": {
+      "qty": 4700,
+      "decidedQty": 0,
+      "groupCount": 5,
+      "points": 5
+    },
+    "features": [
+      {
+        "id": "inadReal",
+        "label": "Inad. Real",
+        "mean": 0.21160115356885364,
+        "std": 0.1719083594326171,
+        "scopeRate": 0.2054794520547945
+      }
+    ],
+    "clusters": [
+      {
+        "id": "c1",
+        "size": 3,
+        "qty": 2700,
+        "share": 0.574468085106383,
+        "decidedQty": 0,
+        "approvalRate": null,
+        "inadReal": 0.021052631578947368,
+        "inadInferida": null,
+        "centroid": {
+          "inadReal": 0.055236935565702694
+        },
+        "conditions": [
+          {
+            "col": "GRUPO",
+            "operator": "in",
+            "value": "G2, G1, G5",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "GRUPO",
+            "values": [
+              {
+                "value": "G2",
+                "qty": 1200,
+                "share": 0.4444444444444444
+              },
+              {
+                "value": "G1",
+                "qty": 1000,
+                "share": 0.37037037037037035
+              },
+              {
+                "value": "G5",
+                "qty": 500,
+                "share": 0.18518518518518517
+              }
+            ]
+          }
+        ],
+        "mix": null
+      },
+      {
+        "id": "c2",
+        "size": 2,
+        "qty": 2000,
+        "share": 0.425531914893617,
+        "decidedQty": 0,
+        "approvalRate": null,
+        "inadReal": 0.4057142857142857,
+        "inadInferida": null,
+        "centroid": {
+          "inadReal": 0.4057894736842105
+        },
+        "conditions": [
+          {
+            "col": "GRUPO",
+            "operator": "in",
+            "value": "G4, G3",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "GRUPO",
+            "values": [
+              {
+                "value": "G4",
+                "qty": 1100,
+                "share": 0.55
+              },
+              {
+                "value": "G3",
+                "qty": 900,
+                "share": 0.45
+              }
+            ]
+          }
+        ],
+        "mix": null
+      }
+    ],
+    "quality": {
+      "method": "kmeans",
+      "inertia": 470.6382311817486,
+      "totalSS": 5248.2201473314135,
+      "explainedVariance": 0.9103242207892029,
+      "iterations": 1,
+      "converged": true,
+      "silhouette": null
+    }
+  }
+}

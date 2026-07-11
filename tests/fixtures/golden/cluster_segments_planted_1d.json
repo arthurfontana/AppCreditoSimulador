@@ -1,0 +1,300 @@
+{
+  "name": "planted_1d",
+  "store": {
+    "clu": {
+      "name": "clu",
+      "headers": [
+        "SEGMENTO",
+        "__DECISAO_ORIGINAL",
+        "qty",
+        "qtdAltas",
+        "qtdAltasInfer",
+        "inadReal",
+        "inadInferida"
+      ],
+      "columnTypes": {
+        "SEGMENTO": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "qtdAltasInfer": "qtdAltasInfer",
+        "inadReal": "inadReal",
+        "inadInferida": "inadInferida"
+      },
+      "columns": {
+        "SEGMENTO": {
+          "kind": "dict",
+          "dict": [
+            "S1",
+            "S2",
+            "S3",
+            "S4",
+            "S5",
+            "S6",
+            "S7",
+            "S8",
+            "S9"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 18,
+          "codes": "AAABAQICAwMEBAUFBgYHBwgI"
+        },
+        "__DECISAO_ORIGINAL": {
+          "kind": "dict",
+          "dict": [
+            "APROVADO",
+            "REPROVADO"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 18,
+          "codes": "AAEAAQABAAEAAQABAAEAAQAB"
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 18,
+          "data": "AAAAAAAAiUAAAAAAAABpQAAAAAAAAIlAAAAAAAAAaUAAAAAAAACJQAAAAAAAAGlAAAAAAAAAeUAAAAAAAAB5QAAAAAAAAHlAAAAAAAAAeUAAAAAAAAB5QAAAAAAAAHlAAAAAAAAAXkAAAAAAAAB+QAAAAAAAAF5AAAAAAAAAfkAAAAAAAABeQAAAAAAAAH5A"
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 18,
+          "data": "AAAAAADghUAAAAAAAAAAAAAAAAAA4IVAAAAAAAAAAAAAAAAAAOCFQAAAAAAAAAAAAAAAAADAd0AAAAAAAAAAAAAAAAAAwHdAAAAAAAAAAAAAAAAAAMB3QAAAAAAAAAAAAAAAAACAW0AAAAAAAAAAAAAAAAAAgFtAAAAAAAAAAAAAAAAAAIBbQAAAAAAAAAAA"
+        },
+        "qtdAltasInfer": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 18,
+          "data": "AAAAAADghUAAAAAAAAAAAAAAAAAA4IVAAAAAAAAAAAAAAAAAAOCFQAAAAAAAAAAAAAAAAADAd0AAAAAAAAAAAAAAAAAAwHdAAAAAAAAAAAAAAAAAAMB3QAAAAAAAAAAAAAAAAACAW0AAAAAAAAAAAAAAAAAAgFtAAAAAAAAAAAAAAAAAAIBbQAAAAAAAAAAA"
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 18,
+          "data": "AAAAAAAALEAAAAAAAAAAAAAAAAAAADBAAAAAAAAAAAAAAAAAAAAoQAAAAAAAAAAAAAAAAACATEAAAAAAAAAAAAAAAAAAAE5AAAAAAAAAAAAAAAAAAABLQAAAAAAAAAAAAAAAAAAARkAAAAAAAAAAAAAAAAAAAEdAAAAAAAAAAAAAAAAAAABFQAAAAAAAAAAA"
+        },
+        "inadInferida": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 18,
+          "data": "AAAAAAAALEAAAAAAAAAAAAAAAAAAAC5AAAAAAAAAAAAAAAAAAAAqQAAAAAAAAAAAAAAAAACAS0AAAAAAAAAAAAAAAAAAAE1AAAAAAAAAAAAAAAAAAABKQAAAAAAAAAAAAAAAAACARUAAAAAAAAAAAAAAAAAAgEZAAAAAAAAAAAAAAAAAAIBEQAAAAAAAAAAA"
+        }
+      },
+      "rowCount": 18
+    }
+  },
+  "params": {
+    "csvId": "clu",
+    "dims": [
+      "SEGMENTO"
+    ],
+    "k": 3
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "error": null,
+    "dataset": {
+      "csvId": "clu",
+      "name": "clu",
+      "rowCount": 18
+    },
+    "params": {
+      "csvId": "clu",
+      "dims": [
+        "SEGMENTO"
+      ],
+      "k": 3,
+      "kRequested": 3,
+      "features": [
+        "approvalRate",
+        "inadReal",
+        "inadInferida"
+      ],
+      "seed": 2697009692,
+      "method": "kmeans",
+      "autoK": false,
+      "maxPoints": null
+    },
+    "ceilings": null,
+    "population": {
+      "qty": 7200,
+      "decidedQty": 7200,
+      "groupCount": 9,
+      "points": 9
+    },
+    "features": [
+      {
+        "id": "approvalRate",
+        "label": "Taxa de Aprovação (AS IS)",
+        "mean": 0.5000000000000001,
+        "std": 0.24494897427831783,
+        "scopeRate": 0.55
+      },
+      {
+        "id": "inadReal",
+        "label": "Inad. Real",
+        "mean": 0.19,
+        "std": 0.15797402644985586,
+        "scopeRate": 0.09663865546218488
+      },
+      {
+        "id": "inadInferida",
+        "label": "Inad. Inferida",
+        "mean": 0.1852153110047847,
+        "std": 0.15438893957779126,
+        "scopeRate": 0.09411764705882353
+      }
+    ],
+    "clusters": [
+      {
+        "id": "c1",
+        "size": 3,
+        "qty": 3000,
+        "share": 0.4166666666666667,
+        "decidedQty": 3000,
+        "approvalRate": 0.8,
+        "inadReal": 0.02,
+        "inadInferida": 0.02,
+        "centroid": {
+          "approvalRate": 0.8,
+          "inadReal": 0.01999999999999999,
+          "inadInferida": 0.01999999999999999
+        },
+        "conditions": [
+          {
+            "col": "SEGMENTO",
+            "operator": "in",
+            "value": "S1, S2, S3",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "SEGMENTO",
+            "values": [
+              {
+                "value": "S1",
+                "qty": 1000,
+                "share": 0.3333333333333333
+              },
+              {
+                "value": "S2",
+                "qty": 1000,
+                "share": 0.3333333333333333
+              },
+              {
+                "value": "S3",
+                "qty": 1000,
+                "share": 0.3333333333333333
+              }
+            ]
+          }
+        ],
+        "mix": null
+      },
+      {
+        "id": "c2",
+        "size": 3,
+        "qty": 2400,
+        "share": 0.3333333333333333,
+        "decidedQty": 2400,
+        "approvalRate": 0.5,
+        "inadReal": 0.15,
+        "inadInferida": 0.14473684210526316,
+        "centroid": {
+          "approvalRate": 0.5,
+          "inadReal": 0.15,
+          "inadInferida": 0.14473684210526316
+        },
+        "conditions": [
+          {
+            "col": "SEGMENTO",
+            "operator": "in",
+            "value": "S4, S5, S6",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "SEGMENTO",
+            "values": [
+              {
+                "value": "S4",
+                "qty": 800,
+                "share": 0.3333333333333333
+              },
+              {
+                "value": "S5",
+                "qty": 800,
+                "share": 0.3333333333333333
+              },
+              {
+                "value": "S6",
+                "qty": 800,
+                "share": 0.3333333333333333
+              }
+            ]
+          }
+        ],
+        "mix": null
+      },
+      {
+        "id": "c3",
+        "size": 3,
+        "qty": 1800,
+        "share": 0.25,
+        "decidedQty": 1800,
+        "approvalRate": 0.2,
+        "inadReal": 0.4,
+        "inadInferida": 0.39090909090909093,
+        "centroid": {
+          "approvalRate": 0.2,
+          "inadReal": 0.4,
+          "inadInferida": 0.39090909090909093
+        },
+        "conditions": [
+          {
+            "col": "SEGMENTO",
+            "operator": "in",
+            "value": "S7, S8, S9",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "SEGMENTO",
+            "values": [
+              {
+                "value": "S7",
+                "qty": 600,
+                "share": 0.3333333333333333
+              },
+              {
+                "value": "S8",
+                "qty": 600,
+                "share": 0.3333333333333333
+              },
+              {
+                "value": "S9",
+                "qty": 600,
+                "share": 0.3333333333333333
+              }
+            ]
+          }
+        ],
+        "mix": null
+      }
+    ],
+    "quality": {
+      "method": "kmeans",
+      "inertia": 41.54373134432129,
+      "totalSS": 19968.047690527528,
+      "explainedVariance": 0.9979194895771394,
+      "iterations": 1,
+      "converged": true,
+      "silhouette": null
+    }
+  }
+}
