@@ -72,8 +72,15 @@ WARMUP_PACKAGES = [
 ]
 
 # Tasks que o sidecar sabe executar (informativo em /capabilities; o roteamento por
-# classe vive no front — DEC-HX-007).
+# classe vive no front — DEC-HX-007). `segment_discovery` (Execução Híbrida H7 —
+# Descoberta profunda, motor numpy em release/python/motor_segmentos.py) é declarada
+# SÓ no tier full: no tier stdlib ela não aparece em capabilities e um POST /jobs com
+# ela é recusado — o front então nem oferece depth 3–4 (teto declarado, DEC-HX-007) e
+# qualquer tentativa cai no fallback browser. GATE cross-runtime (DEC-HX-005):
+# tests_python/test_segment_discovery.py sobre as fixtures douradas do Vitest — sem o
+# GATE verde a task não é embarcada/ofertada.
 KNOWN_TASKS = ("echo_stats",)
+FULL_TIER_TASKS = ("segment_discovery",)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado global (protegido por locks; RAM apenas)
@@ -153,6 +160,17 @@ def _present(pkgs, name):
     return bool(v) and v != "loading"
 
 
+def available_tasks():
+    """Tasks ofertadas AGORA: as de base sempre; as de tier full só com numpy+scipy
+    presentes (warm-up concluído) — capacidades declaradas, nunca presumidas."""
+    pkgs = _package_snapshot()
+    tier_full = _present(pkgs, "numpy") and _present(pkgs, "scipy")
+    tasks = list(KNOWN_TASKS)
+    if tier_full:
+        tasks.extend(FULL_TIER_TASKS)
+    return tasks
+
+
 def get_capabilities():
     """Payload de /capabilities. Tier `full` = numpy(+scipy) presentes; sklearn e
     duckdb são extras declarados por pacote, nunca gate do tier."""
@@ -162,7 +180,7 @@ def get_capabilities():
         "tier": tier,
         "packages": pkgs,
         "cores": os.cpu_count() or 1,
-        "tasks": list(KNOWN_TASKS),
+        "tasks": available_tasks(),
         "protocolVersion": PROTOCOL_VERSION,
     }
 
@@ -200,6 +218,25 @@ def math_fsum(seq):
     return math.fsum(seq)
 
 
+_seg_engine = None
+
+
+def _load_segment_engine():
+    """Import LAZY do motor da Descoberta (release/python/motor_segmentos.py) — só no
+    primeiro job que o usa (padrão DEC-HX-004: nada de import pesado inline no boot).
+    O arquivo mora em release/python/ (pasta preservada pelo build-release.yml)."""
+    global _seg_engine
+    if _seg_engine is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "python", "motor_segmentos.py")
+        spec = importlib.util.spec_from_file_location("motor_segmentos", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _seg_engine = mod
+    return _seg_engine
+
+
 def run_task(task, store, params, progress_cb=None):
     """Executa uma task de forma SÍNCRONA sobre um `store` já parseado (JSON do
     serializeCsvStore). Usada tanto pelo processo filho (jobs) quanto direto nos
@@ -211,6 +248,20 @@ def run_task(task, store, params, progress_cb=None):
         if progress_cb:
             progress_cb(1.0)
         return result
+    if task == "segment_discovery":
+        # Execução Híbrida H7 — Descoberta profunda (tier full apenas; numpy). O
+        # `result` tem o MESMO formato do payload SEGMENT_DISCOVERY_RESULT do worker
+        # ({segmentModel}), SEM as recomendações (o front as anexa via
+        # COMPUTE_SEGMENT_RECS no worker — runSimulation continua single-sourced lá).
+        p = params or {}
+        engine = _load_segment_engine()
+        model = engine.compute_segment_model(
+            store, p.get("shapes") or [], p.get("conns") or [],
+            p.get("scope"), p.get("params") or {}, progress_cb,
+        )
+        if progress_cb:
+            progress_cb(1.0)
+        return {"segmentModel": model}
     raise ValueError("unknown task: %r" % (task,))
 
 
@@ -538,8 +589,9 @@ def handle_api(handler, method):
             _send(handler, 409, {"error": "protocol mismatch"})
             return True
         task = req.get("task")
-        if task not in KNOWN_TASKS:
-            _send(handler, 400, {"error": "unknown task: %r" % (task,)})
+        if task not in available_tasks():
+            # inclui task de tier full pedida no tier stdlib — o router faz fallback
+            _send(handler, 400, {"error": "unknown or unavailable task: %r" % (task,)})
             return True
         dataset_id = req.get("datasetId")
         with _datasets_lock:

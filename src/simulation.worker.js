@@ -3217,6 +3217,26 @@ const SEG_MIN_INCREMENTAL_DEV = 0.1;   // ganho relativo mínimo de |desvio| do 
 const SEG_ACTION_DEPTH_PENALTY = 0.5;  // acionabilidade cai a cada condição extra
 const SEG_LOCKED_PENALTY = 0.2;        // segmento decidido em nó 🔒 travado
 const SEG_BINOM_EXACT_MAX = 1000;      // n ≤ isto ⇒ binomial exato; acima ⇒ aprox. normal
+// Tetos declarados do baseline BROWSER (Execução Híbrida H7, DEC-HX-007): profundidade e
+// beam acima disso são Classe B — só com o Motor Python (sidecar); o fallback clampa aqui.
+const SEG_BROWSER_MAX_DEPTH = SEG_MAX_DEPTH_DEFAULT;
+const SEG_BROWSER_MAX_BEAM = SEG_BEAM_WIDTH;
+
+// Comparador de desempate ESPECIFICADO do pipeline da Descoberta (Execução Híbrida H7,
+// DEC-HX-005): comparação lexicográfica por code unit UTF-16 — determinística e idêntica
+// em qualquer runtime (o motor Python replica byte a byte via encode('utf-16-be')).
+// `localeCompare` (usado antes) depende da versão do ICU e do locale do ambiente, o que
+// quebraria o contrato "mesma entrada ⇒ mesmo SegmentModel nos dois motores". Afeta SÓ
+// desempates (valores exatamente iguais de qualidade/score) — nenhuma matemática muda.
+function segStrCmp(a, b) {
+  const sa = String(a), sb = String(b);
+  const n = Math.min(sa.length, sb.length);
+  for (let i = 0; i < n; i++) {
+    const ca = sa.charCodeAt(i), cb = sb.charCodeAt(i);
+    if (ca !== cb) return ca < cb ? -1 : 1;
+  }
+  return sa.length === sb.length ? 0 : (sa.length < sb.length ? -1 : 1);
+}
 
 // Resolve o `riskMetric` do formulário no objeto estruturado da DEC-SD-006. As duas
 // únicas métricas que a base tem hoje; a generalização (margem/churn/CAC) é extensão do
@@ -3523,7 +3543,7 @@ function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {
       beam.push({ ...seg, q: quality(bin.agg) });
     }
   }
-  beam.sort((a, b) => (b.q - a.q) || sigOf(a.conds).localeCompare(sigOf(b.conds)));
+  beam.sort((a, b) => (b.q - a.q) || segStrCmp(sigOf(a.conds), sigOf(b.conds)));
   beam = beam.slice(0, beamWidth);
 
   // Níveis 2..maxDepth: estende só os nós do beam, agregando as linhas do PAI por uma nova
@@ -3551,7 +3571,7 @@ function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {
         }
       }
     }
-    next.sort((a, b) => (b.q - a.q) || sigOf(a.conds).localeCompare(sigOf(b.conds)));
+    next.sort((a, b) => (b.q - a.q) || segStrCmp(sigOf(a.conds), sigOf(b.conds)));
     beam = next.slice(0, beamWidth);
   }
 
@@ -3566,7 +3586,7 @@ function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {
         .map(b => ({ altas: segMetricDen(b.agg, spec), maus: segMetricNum(b.agg, spec) }))
         .filter(b => b.altas > 0);
       return { col, iv: bins.length >= 2 ? computeIV(bins) : null };
-    }).filter(h => h.iv != null && isFinite(h.iv)).sort((a, b) => b.iv - a.iv || a.col.localeCompare(b.col));
+    }).filter(h => h.iv != null && isFinite(h.iv)).sort((a, b) => b.iv - a.iv || segStrCmp(a.col, b.col));
     if (hetCols.length && hetCols[0].iv >= SEG_HET_MIN_IV) {
       candidates.push({ kind: 'het', conds: [], agg: scopeAgg, rows: scopeRows, hetCols });
     }
@@ -3609,7 +3629,7 @@ function segDispersion(rows, rowInfo) {
   }
   const terminals = Object.entries(byTerminal)
     .map(([terminal, qty]) => ({ terminal, qty, sharePct: reached > 0 ? (qty / reached) * 100 : 0 }))
-    .sort((a, b) => b.qty - a.qty || a.terminal.localeCompare(b.terminal));
+    .sort((a, b) => b.qty - a.qty || segStrCmp(a.terminal, b.terminal));
   return { nodesCount: nodes.size, terminals, currentDecision, decidedQty, approvedQty: apr, rejectedQty: rej };
 }
 
@@ -3739,7 +3759,7 @@ function prioritizeFindings(explained, ctx, params = {}) {
     f.recommendation = null; // Sessão 12
   }
 
-  kept.sort((a, b) => (b.priority.score - a.priority.score) || a.id.localeCompare(b.id));
+  kept.sort((a, b) => (b.priority.score - a.priority.score) || segStrCmp(a.id, b.id));
 
   // Dedup estrutural: filho aninhado (superconjunto de condições) sem ganho incremental de
   // |desvio| sobre um pai JÁ mantido não aparece (parcimônia — regra 5 do épico).
@@ -4052,7 +4072,7 @@ function detectAsIsDivergence(ctx) {
         });
       }
     }
-    findings.sort((a, b) => b._sortKey - a._sortKey || a.id.localeCompare(b.id));
+    findings.sort((a, b) => b._sortKey - a._sortKey || segStrCmp(a.id, b.id));
     findings.forEach(f => { delete f._sortKey; });
   }
   return { findings, totals: { rToA: totRToA, aToR: totAToR } };
@@ -4116,7 +4136,7 @@ function detectAnomalies(ctx) {
     }
     scanBins(temporalCol, [...byCohort.entries()], true);
   }
-  findings.sort((a, b) => b._sortKey - a._sortKey || a.id.localeCompare(b.id));
+  findings.sort((a, b) => b._sortKey - a._sortKey || segStrCmp(a.id, b.id));
   findings.forEach(f => { delete f._sortKey; });
   return findings;
 }
@@ -4134,7 +4154,7 @@ function attachStability(findings, ctx) {
   const buckets = [...new Set(ctx.scopeRows.map(tKey))].sort((a, b) => {
     const na = parseFloat(a), nb = parseFloat(b);
     if (!isNaN(na) && !isNaN(nb)) return na - nb;
-    return String(a).localeCompare(String(b));
+    return segStrCmp(a, b);
   });
   if (buckets.length < 2) return;
   const half = Math.ceil(buckets.length / 2);
@@ -4296,6 +4316,41 @@ async function computeSegmentDiscoveryPooled(shapes, conns, csvStore, scope, par
   if (built.empty) return built.model;
   await buildSegmentRecommendationsPooled(shapes, conns, csvStore, built.allFindings, built.ctx, pool);
   return built.model;
+}
+
+// ── Execução Híbrida H7 — Descoberta profunda (Classe B) ─────────────────────────
+// O sidecar Python roda os estágios 1–3 + asis/anomaly/estabilidade (o SegmentModel SEM
+// recomendações — `segBuildModelWithoutRecs` é o contrato/fixture dourada do GATE
+// cross-runtime, DEC-HX-005). As RECOMENDAÇÕES continuam single-sourced AQUI (patch +
+// delta validado por runSimulation real — DEC-SD-003/DEC-IA-005): duplicar o motor de
+// simulação em Python é a Sessão H9, não esta. As duas pontas abaixo fecham o ciclo:
+
+// Clampa os params aos tetos declarados do baseline browser (paridade total, P4):
+// usado pelo fallback transparente quando um job profundo (depth 3–4 / beam ampliado)
+// cai do sidecar de volta pro worker — o resultado é o comportamento atual, declarado.
+function clampSegmentParamsForBrowser(params = {}) {
+  const out = { ...params };
+  if (out.maxDepth != null && out.maxDepth > SEG_BROWSER_MAX_DEPTH) out.maxDepth = SEG_BROWSER_MAX_DEPTH;
+  if (out.beamWidth != null && out.beamWidth > SEG_BROWSER_MAX_BEAM) out.beamWidth = SEG_BROWSER_MAX_BEAM;
+  return out;
+}
+
+// Anexa recomendações (patch + delta re-simulado de verdade) a um SegmentModel computado
+// FORA deste worker (sidecar H7). O ctx necessário (bins de nível 1, walk do escopo,
+// coders, rootId) NÃO depende de maxDepth — é reconstruído barato com uma descoberta
+// depth-1 (sem o beam profundo, que foi exatamente o que o sidecar acelerou). Os achados
+// chegam por JSON (sem `_raw`/`kind`) — `segPlanRecommendations` só lê campos públicos.
+async function attachSegmentRecommendations(shapes, conns, csvStore, scope, params, segmentModel, pool = null) {
+  if (!segmentModel || !Array.isArray(segmentModel.findings) || segmentModel.findings.length === 0) {
+    return segmentModel;
+  }
+  const spec = resolveRiskMetric((params || {}).riskMetric || 'inadReal');
+  const disc = discoverSegments(shapes, conns, csvStore, scope, spec, { ...(params || {}), maxDepth: 1 });
+  if (disc.empty) return segmentModel;
+  disc.ctx.scope = disc.scope;
+  disc.ctx.lockedIds = shapes.filter(s => s.locked).map(s => s.id);
+  await buildSegmentRecommendationsPooled(shapes, conns, csvStore, segmentModel.findings, disc.ctx, pool);
+  return segmentModel;
 }
 
 // ── COMPUTE_POLICY_INSIGHTS — Copiloto Sessão 1 (lint estrutural, DEC-IA-006) ────
@@ -5654,6 +5709,39 @@ function handleMessage(e) {
       });
     return;
   }
+
+  // Execução Híbrida H7 — fallback BROWSER da Descoberta profunda (Classe B). O
+  // ComputeRouter posta a MESMA task do sidecar ('segment_discovery') quando o job cai
+  // (queda/timeout/indisponível): aqui ela vira a Descoberta atual com os params
+  // CLAMPADOS aos tetos declarados (depth ≤ 2, beam ≤ 8 — paridade total, P4), e a UI
+  // recebe o mesmo SEGMENT_DISCOVERY_RESULT de sempre + o aviso "concluído no modo
+  // browser" (fallbackNoticeText, H6).
+  if (type === 'segment_discovery') {
+    const { shapes, conns = [], scope = null, params = {} } = e.data;
+    const clamped = clampSegmentParamsForBrowser(params);
+    computeSegmentDiscoveryPooled(shapes, conns, workerCsvStore, scope, clamped, getSimPool())
+      .then((segmentModel) => self.postMessage({ type: 'SEGMENT_DISCOVERY_RESULT', segmentModel }))
+      .catch(() => {
+        const segmentModel = computeSegmentDiscovery(shapes, conns, workerCsvStore, scope, clamped);
+        self.postMessage({ type: 'SEGMENT_DISCOVERY_RESULT', segmentModel });
+      });
+    return;
+  }
+
+  // Execução Híbrida H7 — anexa recomendações (patch + delta re-simulado REAL,
+  // DEC-SD-003) ao SegmentModel que o sidecar devolveu sem elas. O motor de simulação
+  // continua single-sourced neste worker (a dupla implementação dele é a Sessão H9).
+  if (type === 'COMPUTE_SEGMENT_RECS') {
+    const { shapes, conns = [], scope = null, params = {}, segmentModel = null } = e.data;
+    attachSegmentRecommendations(shapes, conns, workerCsvStore, scope, params, segmentModel, getSimPool())
+      .then((model) => self.postMessage({ type: 'SEGMENT_RECS_RESULT', segmentModel: model }))
+      .catch(() => {
+        // Falha ao anexar (ctx irreconstituível etc.): devolve o modelo como veio —
+        // cards sem delta validado (recommendation null), nunca um erro silencioso.
+        self.postMessage({ type: 'SEGMENT_RECS_RESULT', segmentModel });
+      });
+    return;
+  }
 }
 
 // Só registra o handler em contexto de worker real; permite importar as funções
@@ -5702,6 +5790,10 @@ export {
   computeSegmentDiscoveryPooled,
   computeSegmentCombined,
   computeSegmentCombinedPooled,
+  segBuildModelWithoutRecs,
+  attachSegmentRecommendations,
+  clampSegmentParamsForBrowser,
+  segStrCmp,
   buildSegmentRecommendations,
   buildSegmentRecommendationsPooled,
   segValidateMoves,

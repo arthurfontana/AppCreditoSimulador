@@ -143,6 +143,8 @@ describe('H4 — tabela de roteamento / metadados', () => {
     expect(classOf('COMPUTE_ASIS_PREVIEW')).toBe('A');
     expect(classOf('COMPUTE_SEGMENT_DISCOVERY')).toBe('A'); // depth ≤ 2 é Classe A
     expect(classOf('echo_stats')).toBe('B');
+    // H7 — Descoberta PROFUNDA (depth 3–4/beam ampliado) é Classe B
+    expect(classOf('segment_discovery')).toBe('B');
     // default defensivo: tarefa desconhecida NUNCA vaza pro sidecar
     expect(classOf('TAREFA_INEXISTENTE')).toBe('A');
   });
@@ -151,6 +153,8 @@ describe('H4 — tabela de roteamento / metadados', () => {
     expect(resultTypeFor('RUN_SIMULATION')).toBe('SIMULATION_RESULT');
     expect(resultTypeFor('COMPUTE_SEGMENT_COMBINED')).toBe('SEGMENT_COMBINED_RESULT');
     expect(resultTypeFor('echo_stats')).toBe('echo_stats_RESULT');
+    // H7 — o fallback do worker (alias clampado) responde a MESMA *_RESULT de sempre
+    expect(resultTypeFor('segment_discovery')).toBe('SEGMENT_DISCOVERY_RESULT');
   });
 
   it('hashChunks é determinístico e sensível ao conteúdo e à fronteira dos chunks', () => {

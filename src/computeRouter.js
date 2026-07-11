@@ -54,6 +54,12 @@ export const TASK_CLASS = {
   COMPUTE_SEGMENT_COMBINED: 'A',
   // Classe B — sidecar com fallback transparente ao worker
   echo_stats: 'B',
+  // H7 — Descoberta PROFUNDA (depth 3–4 / beam ampliado). A mesma task existe nas duas
+  // pontas: no sidecar (motor numpy, tier full — só aparece em capabilities.tasks com o
+  // GATE dourado embarcado) e no worker (alias que CLAMPA os params aos tetos browser —
+  // fallback transparente, paridade total P4). Depth ≤ 2 continua indo pelo caminho
+  // Classe A de sempre (COMPUTE_SEGMENT_DISCOVERY) — o tick/gesto nunca passa por aqui.
+  segment_discovery: 'B',
 };
 
 // Default DEFENSIVO: tarefa desconhecida vira Classe A (worker — o caminho completo).
@@ -78,6 +84,7 @@ export const RESULT_TYPE = {
   COMPUTE_POLICY_DOC: 'POLICY_DOC_RESULT',
   COMPUTE_SEGMENT_DISCOVERY: 'SEGMENT_DISCOVERY_RESULT',
   COMPUTE_SEGMENT_COMBINED: 'SEGMENT_COMBINED_RESULT',
+  segment_discovery: 'SEGMENT_DISCOVERY_RESULT', // H7 — fallback do worker responde igual
 };
 
 export function resultTypeFor(task) {
@@ -367,6 +374,9 @@ export function createComputeRouter(config = {}) {
       const result = await sidecar.runJob(task, params, { ...opts, datasetId });
       return { via: 'sidecar', result };
     } catch (error) {
+      // Cancelamento do USUÁRIO não é queda: abortar o job não dispara uma execução
+      // browser que ninguém pediu — propaga para o caller encerrar em silêncio (H7).
+      if (opts.signal && opts.signal.aborted) throw error;
       // Fallback TRANSPARENTE ao worker (tetos declarados) — nenhuma tarefa exige o
       // sidecar (P4). O erro é anexado só para telemetria/badge, não propagado.
       const result = await worker.runJob(task, params, opts);

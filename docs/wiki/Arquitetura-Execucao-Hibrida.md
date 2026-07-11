@@ -277,6 +277,17 @@ somas de ponto flutuante, documentada por fixture). Sem GATE verde, a tarefa nã
 roteia pro sidecar. É a extensão natural da cultura de GATEs da casa para dois
 runtimes.
 
+> **Entregue (Sessão H7 — primeira aplicação da DEC):** GATE dourado da Descoberta de
+> Segmentos — `tests/segmentDiscoveryGolden.test.js` (gera/trava 16 fixtures em
+> `tests/fixtures/golden/`; drift do motor JS falha o teste) +
+> `tests_python/test_segment_discovery.py` (mesmas entradas no motor numpy
+> `release/python/motor_segmentos.py`; contagens exatas, floats rel 1e-9; medido na
+> entrega: 704/710 números bit-idênticos, pior desvio 4e-16 — só transcendentais).
+> Duas lições viram padrão para H8/H9: (1) toda soma de float replica a ORDEM
+> SEQUENCIAL do JS (np.cumsum/np.bincount, nunca np.sum pairwise); (2) desempates de
+> ordenação usam comparador ESPECIFICADO (`segStrCmp`, code units UTF-16) — nunca
+> `localeCompare`, que depende do ICU/locale do runtime.
+
 ### DEC-HX-006 — Dados sobem uma vez, referenciados por hash
 O dataset é registrado no sidecar **uma vez por versão** (`POST /api/compute/datasets`,
 corpo = os mesmos chunks de `serializeCsvStore`/`buildProjectJSONChunks` do M3 —
@@ -561,7 +572,7 @@ mais lento que o worker JS — ver DEC-HX-004).
 | **Sonda (✅ concluída 09/07/2026)** | HP (sonda do ambiente Python — `checar_ambiente.py`, rodada 2× na máquina corporativa) | Relatório entregue: os 4 pacotes instalam/importam do índice; **nenhuma wheel offline imprescindível**; sklearn com 1ª carga lenta (antivírus) ⇒ warm-up assíncrono na detecção de tier da H5 |
 | **Fase 0 — Browser primeiro** | H0 (telemetria), H1 (fluidez M12–M14), H2 (dieta de memória), H3 (pool de workers) | Headroom até ~5MM linhas; validações paralelas; números reais de custo por tarefa |
 | **Fase 1 — Fundação híbrida (✅ concluída 10/07/2026)** | H4 (ComputeRouter), H5 (sidecar v1), H6 (UX do motor + recomendação DEC-HX-009) | Sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark |
-| **Fase 2 — Cargas reais** | H7 (Descoberta profunda), H8 (clusterização/stats — baseline browser + sidecar, paridade total) | Primeiro valor de usuário do híbrido |
+| **Fase 2 — Cargas reais** | **H7 ✅ (Descoberta profunda — concluída 11/07/2026)**, H8 (clusterização/stats — baseline browser + sidecar, paridade total) | Primeiro valor de usuário do híbrido: Descoberta depth 3–4/beam ampliado no sidecar (numpy), GATE dourado cross-runtime estabelecido |
 | **Fase 3 — Paridade do motor (opcional)** | H9 (motor de simulação em Python + GATE) | Habilita Frente 5 e bases 7–10MM+ de ponta a ponta |
 
 A Fase 0 tem valor independente: se o híbrido for adiado, nada dela é desperdiçado.

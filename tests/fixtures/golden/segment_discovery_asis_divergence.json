@@ -1,0 +1,194 @@
+{
+  "name": "asis_divergence",
+  "store": {
+    "b": {
+      "name": "b",
+      "headers": [
+        "SCORE",
+        "qty",
+        "qtdAltas",
+        "inadReal",
+        "__DECISAO_ORIGINAL"
+      ],
+      "columnTypes": {
+        "SCORE": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "inadReal": "inadReal"
+      },
+      "columns": {
+        "SCORE": {
+          "kind": "dict",
+          "dict": [
+            "R08",
+            "R05"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 2,
+          "codes": "AAE="
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 2,
+          "data": "AAAAAABAj0AAAAAAAECPQA=="
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 2,
+          "data": "AAAAAABAj0AAAAAAAECPQA=="
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 2,
+          "data": "AAAAAAAANEAAAAAAAABpQA=="
+        },
+        "__DECISAO_ORIGINAL": {
+          "kind": "dict",
+          "dict": [
+            "REPROVADO"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 2,
+          "codes": "AAA="
+        }
+      },
+      "rowCount": 2
+    }
+  },
+  "shapes": [
+    {
+      "id": "D",
+      "type": "decision",
+      "label": "SCORE",
+      "variableCol": "SCORE",
+      "csvId": "b"
+    },
+    {
+      "id": "pA",
+      "type": "port",
+      "label": "R08"
+    },
+    {
+      "id": "pR",
+      "type": "port",
+      "label": "R05"
+    },
+    {
+      "id": "AP",
+      "type": "approved",
+      "label": "Aprovado"
+    },
+    {
+      "id": "REJ",
+      "type": "rejected",
+      "label": "Reprovado"
+    }
+  ],
+  "conns": [
+    {
+      "id": "c1",
+      "from": "D",
+      "to": "pA",
+      "label": "R08"
+    },
+    {
+      "id": "c2",
+      "from": "pA",
+      "to": "AP"
+    },
+    {
+      "id": "c3",
+      "from": "D",
+      "to": "pR",
+      "label": "R05"
+    },
+    {
+      "id": "c4",
+      "from": "pR",
+      "to": "REJ"
+    }
+  ],
+  "scope": null,
+  "params": {
+    "minQty": 1
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "scope": null,
+    "population": {
+      "qty": 2000,
+      "decidedQty": 2000
+    },
+    "metric": {
+      "id": "inadReal",
+      "label": "Inad. Real",
+      "direction": "lower"
+    },
+    "findings": [
+      {
+        "id": "asis:SCORE=R08",
+        "code": "asis_divergence",
+        "segment": {
+          "conditions": [
+            {
+              "col": "SCORE",
+              "operator": "equal",
+              "value": "R08",
+              "logic": "AND",
+              "csvId": "b"
+            }
+          ],
+          "scope": null
+        },
+        "metrics": {
+          "qty": 1000,
+          "share": 0.5,
+          "rToA": 1000,
+          "aToR": 0,
+          "rToAShare": 1,
+          "aToRShare": 0,
+          "currentDecision": null,
+          "lift": null,
+          "inadReal": null,
+          "inadInferida": null
+        },
+        "explanation": {
+          "contributions": [],
+          "dispersion": null,
+          "stability": null,
+          "pValue": null,
+          "qValue": null
+        },
+        "priority": {
+          "score": 1000,
+          "impact": {
+            "movedQty": 1000
+          },
+          "confidence": 1,
+          "actionability": 1
+        },
+        "recommendation": null
+      }
+    ],
+    "diagnostics": {
+      "candidatesTested": 2,
+      "discarded": {
+        "lowVolume": 0,
+        "notSignificant": 0,
+        "unstable": 0,
+        "duplicate": 0,
+        "noOpportunity": 2
+      }
+    },
+    "asIsTotals": {
+      "rToA": 1000,
+      "aToR": 0
+    }
+  }
+}
