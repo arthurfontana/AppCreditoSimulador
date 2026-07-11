@@ -4353,6 +4353,488 @@ async function attachSegmentRecommendations(shapes, conns, csvStore, scope, para
   return segmentModel;
 }
 
+// ── COMPUTE_CLUSTER_SEGMENTS — Execução Híbrida H8 (Clusterização de Segmentos) ──
+// docs/wiki/Arquitetura-Execucao-Hibrida.md (DEC-HX-005/007 — paridade total P4, §16).
+// Primeira análise NOVA nascida já com os dois executores: este baseline browser
+// (Classe B dentro dos tetos declarados) e a task `cluster_segments` do sidecar
+// (release/python/motor_clusters.py, tier full) — MESMO algoritmo determinístico,
+// mesma seed ⇒ mesmo ClusterModel número a número (GATE dourado cross-runtime em
+// tests/clusterSegmentsGolden.test.js + tests_python/test_cluster_segments.py).
+//
+// O QUE FAZ: agrega a base pelas dimensões Filtro selecionadas (grupo = tupla de
+// valores distintos, em ordem de 1ª aparição na base — pós-agregação o nº de pontos é
+// pequeno, viável em JS), monta um vetor de features por grupo (taxas: aprovação AS IS,
+// inad. real, inad. inferida — padronizadas z-score) e roda k-means (Lloyd) com
+// inicialização k-means++ sobre PRNG ESPECIFICADO (mulberry32, seed derivada de
+// dataset + params — determinismo é contrato da casa, §16). Pontos são PONDERADOS pelo
+// volume (qty) do grupo: um grupo de 1MM de propostas pesa mais que um de 10.
+//
+// CONTRATO DE PARIDADE (DEC-HX-005 — as lições da H7 aplicadas por construção):
+//   · toda soma de float em ordem SEQUENCIAL fixa (linhas em ordem crescente; grupos em
+//     ordem de 1ª aparição; features em ordem canônica) — o motor numpy replica com
+//     np.cumsum/np.bincount, nunca np.sum (pairwise);
+//   · TODA a matemática do k-means é racional + sqrt (IEEE, bit-exata nos dois
+//     runtimes) — nenhum transcendental no caminho do GATE;
+//   · desempates de ordenação por segStrCmp (code units UTF-16), nunca localeCompare;
+//   · mulberry32 = aritmética inteira de 32 bits (Math.imul ↔ máscara & 0xFFFFFFFF).
+//
+// Tetos declarados do baseline BROWSER (paridade total, P4): dimensões, k e nº de
+// pontos agregados. O sidecar remove os tetos e ganha extras via sklearn (silhueta
+// para k automático, hierárquico como alternativa) — extras NUNCA entram no GATE
+// dourado (só rodam quando explicitamente pedidos, e o form só os oferece com o
+// sidecar pareado declarando sklearn).
+const CLUSTER_DEFAULT_K = 4;
+const CLUSTER_MAX_ITER = 100;
+const CLUSTER_BROWSER_MAX_DIMS = 3;
+const CLUSTER_BROWSER_MAX_K = 8;
+const CLUSTER_BROWSER_MAX_POINTS = 2000;
+const CLUSTER_METRIC_TYPES = new Set(['qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida']);
+
+// FNV-1a 32-bit sobre code units UTF-16 (mesma família do hashChunks do router; local
+// porque o worker não importa computeRouter.js). Determinístico nos dois runtimes.
+function clusterFnv1a32(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+// Seed derivada do dataset + params (§16): csvId, dims, k, features e rowCount — tudo
+// disponível identicamente nos dois runtimes ANTES de rodar (o front não precisa
+// mandar seed; `params.seed` explícito é override de teste).
+function clusterSeedOf(csvId, dims, k, featureIds, nRows) {
+  return clusterFnv1a32([
+    String(csvId), dims.join('\x1f'), String(k), featureIds.join('\x1f'), String(nRows),
+  ].join('\x1e'));
+}
+
+// PRNG especificado (§16): mulberry32 — 32-bit, replicável em qualquer runtime.
+// Devolve floats em [0,1) com divisão exata por 2^32.
+function clusterMulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), a | 1);
+    t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Soma sequencial (ordem do array) — o espelho JS do seq_sum do motor Python.
+function cluSeqSum(arr) {
+  let s = 0;
+  for (let i = 0; i < arr.length; i++) s += arr[i];
+  return s;
+}
+
+// Leitor de dimensão com MERGE de valores que colidem após trim (espelho de Csv.view
+// do motor Python): dict-encoded lê O(1) por linha via remap; legado cai no cellStr.
+function cluDimReader(csv, colIdx) {
+  const col = dictColAt(csv, colIdx);
+  if (col) {
+    const tvals = trimmedDictVals(col.dict);
+    const vals = [];
+    const seen = new Map();
+    const remap = new Int32Array(tvals.length);
+    for (let k = 0; k < tvals.length; k++) {
+      let g = seen.get(tvals[k]);
+      if (g === undefined) { g = vals.length; vals.push(tvals[k]); seen.set(tvals[k], g); }
+      remap[k] = g;
+    }
+    return { mode: 'code', codes: col.codes, remap, vals };
+  }
+  return { mode: 'row', colIdx };
+}
+function cluDimValue(reader, csv, r) {
+  return reader.mode === 'code'
+    ? reader.vals[reader.remap[reader.codes[r]]]
+    : (cellStr(csv, r, reader.colIdx) ?? '').toString().trim();
+}
+
+// Decisão AS IS por linha: 1 APROVADO · 2 REPROVADO · 0 outro/ausente — MESMA
+// semântica de runSimulation (uppercase do valor CRU de __DECISAO_ORIGINAL, sem trim).
+function cluDecisionCoder(csv) {
+  const idx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+  if (idx < 0) return null;
+  const col = dictColAt(csv, idx);
+  if (col) {
+    const per = new Int8Array(col.dict.length);
+    for (let k = 0; k < col.dict.length; k++) {
+      const u = String(col.dict[k] ?? '').toUpperCase();
+      per[k] = u === 'APROVADO' ? 1 : u === 'REPROVADO' ? 2 : 0;
+    }
+    return { mode: 'code', codes: col.codes, per };
+  }
+  return { mode: 'row', colIdx: idx };
+}
+function cluDecisionOf(coder, csv, r) {
+  if (coder.mode === 'code') return coder.per[coder.codes[r]];
+  const u = String(cellStr(csv, r, coder.colIdx) ?? '').toUpperCase();
+  return u === 'APROVADO' ? 1 : u === 'REPROVADO' ? 2 : 0;
+}
+
+// Clampa os params aos tetos declarados do baseline browser (paridade total, P4) —
+// aplicado pelos handlers das mensagens (o motor em si é livre de teto: é o mesmo
+// que roda no sidecar via numpy). Mesmo papel de clampSegmentParamsForBrowser (H7).
+function clampClusterParamsForBrowser(params = {}) {
+  const out = { ...params };
+  if (Array.isArray(out.dims) && out.dims.length > CLUSTER_BROWSER_MAX_DIMS) {
+    out.dims = out.dims.slice(0, CLUSTER_BROWSER_MAX_DIMS);
+  }
+  if (out.k != null && out.k > CLUSTER_BROWSER_MAX_K) out.k = CLUSTER_BROWSER_MAX_K;
+  if (out.maxPoints == null || out.maxPoints > CLUSTER_BROWSER_MAX_POINTS) {
+    out.maxPoints = CLUSTER_BROWSER_MAX_POINTS;
+  }
+  if (out.autoK) out.autoK = false;                       // silhueta/k automático = extra sklearn (sidecar)
+  if (out.method && out.method !== 'kmeans') out.method = 'kmeans'; // hierárquico = extra sklearn (sidecar)
+  return out;
+}
+
+// k-means Lloyd + init k-means++ ponderado, 100% determinístico. `X` é colunar por
+// feature (Float64Array por feature, nP pontos), `w` os pesos (volume). Empate de
+// atribuição fica no MENOR índice de centroide; cluster que esvazia mantém o
+// centroide anterior (regra simples e idêntica nos dois runtimes); cluster com
+// pontos mas peso total zero usa a média NÃO ponderada.
+function cluKmeans(X, w, kEff, seed, maxIter) {
+  const nF = X.length, nP = w.length;
+  const rand = clusterMulberry32(seed);
+  const centroids = [];
+  const chosenSet = new Set();
+
+  const dist2At = (i, c) => {
+    let d = 0;
+    for (let f = 0; f < nF; f++) { const diff = X[f][i] - c[f]; d += diff * diff; }
+    return d;
+  };
+  // Sorteio ponderado por varredura cumulativa (== np.searchsorted(cumsum, r*total,
+  // 'right') no Python). Pesos todos zero ⇒ primeiro índice ainda não escolhido,
+  // SEM consumir o PRNG (regra especificada, idêntica nos dois runtimes).
+  const pickWeighted = (weights) => {
+    const total = cluSeqSum(weights);
+    if (total > 0) {
+      const target = rand() * total;
+      let acc = 0;
+      for (let i = 0; i < nP; i++) { acc += weights[i]; if (acc > target) return i; }
+      return nP - 1;
+    }
+    for (let i = 0; i < nP; i++) if (!chosenSet.has(i)) return i;
+    return 0;
+  };
+
+  // k-means++: 1º centroide sorteado por w; seguintes por w·D² (D² = distância ao
+  // centroide mais próximo já escolhido, mantida incrementalmente).
+  const first = pickWeighted(w);
+  chosenSet.add(first);
+  centroids.push(Float64Array.from({ length: nF }, (_, f) => X[f][first]));
+  const D2 = new Float64Array(nP);
+  for (let i = 0; i < nP; i++) D2[i] = dist2At(i, centroids[0]);
+  const wD2 = new Float64Array(nP);
+  while (centroids.length < kEff) {
+    for (let i = 0; i < nP; i++) wD2[i] = w[i] * D2[i];
+    const idx = pickWeighted(wD2);
+    chosenSet.add(idx);
+    const c = Float64Array.from({ length: nF }, (_, f) => X[f][idx]);
+    centroids.push(c);
+    for (let i = 0; i < nP; i++) { const d = dist2At(i, c); if (d < D2[i]) D2[i] = d; }
+  }
+
+  const nC = centroids.length;
+  const assign = new Int32Array(nP);
+  const prev = new Int32Array(nP);
+  const assignAll = () => {
+    for (let i = 0; i < nP; i++) {
+      let best = Infinity, bi = 0;
+      for (let c = 0; c < nC; c++) {
+        const d = dist2At(i, centroids[c]);
+        if (d < best) { best = d; bi = c; }
+      }
+      assign[i] = bi;
+    }
+  };
+  const wsum = new Float64Array(nC);
+  const cnt = new Int32Array(nC);
+  const sums = Array.from({ length: nC }, () => new Float64Array(nF));
+  const usums = Array.from({ length: nC }, () => new Float64Array(nF));
+  const update = () => {
+    wsum.fill(0); cnt.fill(0);
+    for (let c = 0; c < nC; c++) { sums[c].fill(0); usums[c].fill(0); }
+    for (let i = 0; i < nP; i++) {
+      const c = assign[i];
+      wsum[c] += w[i]; cnt[c]++;
+      for (let f = 0; f < nF; f++) { sums[c][f] += w[i] * X[f][i]; usums[c][f] += X[f][i]; }
+    }
+    for (let c = 0; c < nC; c++) {
+      if (cnt[c] === 0) continue; // vazio: mantém o centroide anterior
+      if (wsum[c] > 0) for (let f = 0; f < nF; f++) centroids[c][f] = sums[c][f] / wsum[c];
+      else for (let f = 0; f < nF; f++) centroids[c][f] = usums[c][f] / cnt[c];
+    }
+  };
+
+  assignAll();
+  let iterations = 0, converged = false;
+  for (let it = 0; it < maxIter; it++) {
+    iterations = it + 1;
+    update();
+    prev.set(assign);
+    assignAll();
+    let same = true;
+    for (let i = 0; i < nP; i++) if (assign[i] !== prev[i]) { same = false; break; }
+    if (same) { converged = true; break; }
+  }
+
+  let inertia = 0;
+  for (let i = 0; i < nP; i++) inertia += w[i] * dist2At(i, centroids[assign[i]]);
+  return { assign, centroids, iterations, converged, inertia };
+}
+
+// Ponto de entrada — devolve o ClusterModel (padrão docModel/SegmentModel: dados
+// CRUS, nunca prosa). Não depende de shapes/conns: a clusterização é sobre a BASE
+// agregada, não sobre o grafo da política.
+function computeClusterSegments(csvStore, params = {}) {
+  const model = {
+    version: '1.0', generatedAt: new Date().toISOString(), error: null,
+    dataset: null, params: null, ceilings: null, population: null,
+    features: [], clusters: [], quality: null,
+  };
+
+  // csv alvo: explícito ou o de maior nº de linhas (empate ⇒ 1º na ordem do store).
+  const ids = Object.keys(csvStore || {});
+  let csvId = params.csvId != null && csvStore[params.csvId] ? params.csvId : null;
+  if (!csvId) {
+    let best = -1;
+    for (const id of ids) { const n = rowCount(csvStore[id]); if (n > best) { best = n; csvId = id; } }
+  }
+  const csv = csvId ? csvStore[csvId] : null;
+  const nRows = csv ? rowCount(csv) : 0;
+  if (!csv || nRows === 0) { model.error = 'no_rows'; return model; }
+  model.dataset = { csvId, name: csv.name || csvId, rowCount: nRows };
+
+  // Dimensões: só colunas presentes e NÃO métricas (coluna métrica como eixo de
+  // agrupamento não tem semântica de segmento — e o formulário só oferece Filtro).
+  const types = csv.columnTypes || {};
+  const dims = (Array.isArray(params.dims) ? params.dims : [])
+    .filter(c => csv.headers.includes(c) && !CLUSTER_METRIC_TYPES.has(types[c]));
+  if (dims.length === 0) { model.error = 'no_dims'; return model; }
+
+  // ── Agregação: grupo = tupla de valores das dims, em ordem de 1ª aparição ──────
+  const readers = dims.map(c => cluDimReader(csv, csv.headers.indexOf(c)));
+  const idxs = segColIdxs(csv);
+  const dec = cluDecisionCoder(csv);
+  const groupIndex = new Map();
+  const groupVals = [];
+  const gidOfRow = new Int32Array(nRows);
+  const buf = new Array(dims.length);
+  for (let r = 0; r < nRows; r++) {
+    for (let d = 0; d < dims.length; d++) buf[d] = cluDimValue(readers[d], csv, r);
+    const key = buf.join('\x1f');
+    let g = groupIndex.get(key);
+    if (g === undefined) { g = groupVals.length; groupIndex.set(key, g); groupVals.push(buf.slice()); }
+    gidOfRow[r] = g;
+  }
+  const nG = groupVals.length;
+  const gQty = new Float64Array(nG), gAltas = new Float64Array(nG), gAltasInf = new Float64Array(nG),
+        gInadR = new Float64Array(nG), gInadI = new Float64Array(nG),
+        gAppr = new Float64Array(nG), gDec = new Float64Array(nG);
+  for (let r = 0; r < nRows; r++) {
+    const g = gidOfRow[r];
+    const s = segReadSums(csv, r, idxs);
+    gQty[g] += s.qty; gAltas[g] += s.qtdAltas; gAltasInf[g] += s.qtdAltasInfer;
+    gInadR[g] += s.inadReal; gInadI[g] += s.inadInferida;
+    if (dec) {
+      const dc = cluDecisionOf(dec, csv, r);
+      if (dc === 1) { gAppr[g] += s.qty; gDec[g] += s.qty; }
+      else if (dc === 2) gDec[g] += s.qty;
+    }
+  }
+  const popQty = cluSeqSum(gQty);
+  const popDec = cluSeqSum(gDec);
+
+  // ── Teto de pontos (degradação DECLARADA, nunca silenciosa): mantém os maiores por
+  // volume (empate ⇒ 1ª aparição), preservando a ordem de aparição entre os mantidos.
+  const maxPoints = params.maxPoints != null ? params.maxPoints : null;
+  let keep;
+  if (maxPoints != null && nG > maxPoints) {
+    const order = Array.from({ length: nG }, (_, i) => i)
+      .sort((a, b) => (gQty[b] - gQty[a]) || (a - b));
+    keep = order.slice(0, maxPoints).sort((a, b) => a - b);
+    let keptQty = 0;
+    for (const g of keep) keptQty += gQty[g];
+    model.ceilings = {
+      pointsTruncated: true, totalGroups: nG, keptGroups: keep.length,
+      keptQtyShare: popQty > 0 ? keptQty / popQty : null,
+    };
+  } else {
+    keep = Array.from({ length: nG }, (_, i) => i);
+  }
+  const nP = keep.length;
+  const takeF64 = (src) => { const out = new Float64Array(nP); for (let i = 0; i < nP; i++) out[i] = src[keep[i]]; return out; };
+  const kQty = takeF64(gQty), kAltas = takeF64(gAltas), kAltasInf = takeF64(gAltasInf),
+        kInadR = takeF64(gInadR), kInadI = takeF64(gInadI), kAppr = takeF64(gAppr), kDec = takeF64(gDec);
+  const gidToKept = new Int32Array(nG).fill(-1);
+  for (let i = 0; i < nP; i++) gidToKept[keep[i]] = i;
+
+  // ── Features (ordem CANÔNICA fixa — parte da seed): taxa por grupo, com fallback
+  // para a taxa do escopo quando o denominador do grupo é zero (nunca NaN no vetor).
+  const featureDefs = [
+    { id: 'approvalRate', label: 'Taxa de Aprovação (AS IS)', num: kAppr, den: kDec, present: !!dec },
+    { id: 'inadReal', label: 'Inad. Real', num: kInadR, den: kAltas, present: idxs.inadReal >= 0 && idxs.qtdAltas >= 0 },
+    { id: 'inadInferida', label: 'Inad. Inferida', num: kInadI, den: kAltasInf, present: idxs.inadInferida >= 0 && idxs.qtdAltasInfer >= 0 },
+  ];
+  const wanted = Array.isArray(params.features) && params.features.length ? new Set(params.features) : null;
+  const feats = [];
+  for (const fd of featureDefs) {
+    if (!fd.present) continue;
+    if (wanted && !wanted.has(fd.id)) continue;
+    const scopeDen = cluSeqSum(fd.den);
+    if (scopeDen <= 0) continue;
+    const scopeRate = cluSeqSum(fd.num) / scopeDen;
+    const raw = new Float64Array(nP);
+    for (let i = 0; i < nP; i++) raw[i] = fd.den[i] > 0 ? fd.num[i] / fd.den[i] : scopeRate;
+    feats.push({ id: fd.id, label: fd.label, raw, scopeRate });
+  }
+  if (feats.length === 0) { model.error = 'no_features'; return model; }
+  const featIds = feats.map(f => f.id);
+
+  // Padronização z-score por feature (métricas em escalas distintas). std==0 ⇒
+  // feature constante ⇒ coordenada 0 (não descarta: o centroide ainda a reporta).
+  const X = [];
+  for (const ft of feats) {
+    const mean = cluSeqSum(ft.raw) / nP;
+    let varAcc = 0;
+    for (let i = 0; i < nP; i++) { const d = ft.raw[i] - mean; varAcc += d * d; }
+    const std = Math.sqrt(varAcc / nP);
+    ft.mean = mean; ft.std = std;
+    const col = new Float64Array(nP);
+    if (std > 0) for (let i = 0; i < nP; i++) col[i] = (ft.raw[i] - mean) / std;
+    X.push(col);
+  }
+
+  // ── k-means determinístico (pesos = volume; fallback peso 1 se a base não tem qty) ──
+  const kReq = params.k != null ? params.k : CLUSTER_DEFAULT_K;
+  const kEff = Math.max(1, Math.min(kReq, nP));
+  const seed = params.seed != null ? (params.seed >>> 0) : clusterSeedOf(csvId, dims, kReq, featIds, nRows);
+  let w = kQty;
+  if (cluSeqSum(w) <= 0) { w = new Float64Array(nP).fill(1); }
+  const km = cluKmeans(X, w, kEff, seed, params.maxIter != null ? params.maxIter : CLUSTER_MAX_ITER);
+
+  // Variância explicada (qualidade interpretável): 1 − inertia/SS_total, com SS_total
+  // medido ao centroide global ponderado — mesma métrica do "between/total" clássico.
+  const totalW = cluSeqSum(w);
+  const gc = new Float64Array(X.length);
+  for (let f = 0; f < X.length; f++) {
+    let acc = 0;
+    for (let i = 0; i < nP; i++) acc += w[i] * X[f][i];
+    gc[f] = acc / totalW;
+  }
+  let totalSS = 0;
+  for (let i = 0; i < nP; i++) {
+    let d = 0;
+    for (let f = 0; f < X.length; f++) { const diff = X[f][i] - gc[f]; d += diff * diff; }
+    totalSS += w[i] * d;
+  }
+
+  // ── Perfil por cluster (agregação exata sobre os grupos, em ordem de 1ª aparição) ──
+  const nC = km.centroids.length;
+  const cQty = new Float64Array(nC), cAltas = new Float64Array(nC), cAltasInf = new Float64Array(nC),
+        cInadR = new Float64Array(nC), cInadI = new Float64Array(nC),
+        cAppr = new Float64Array(nC), cDec = new Float64Array(nC);
+  const cSize = new Int32Array(nC);
+  for (let i = 0; i < nP; i++) {
+    const c = km.assign[i];
+    cSize[c]++;
+    cQty[c] += kQty[i]; cAltas[c] += kAltas[i]; cAltasInf[c] += kAltasInf[i];
+    cInadR[c] += kInadR[i]; cInadI[c] += kInadI[i]; cAppr[c] += kAppr[i]; cDec[c] += kDec[i];
+  }
+  // Valores por dimensão dentro de cada cluster (volume por valor, p/ condições e card).
+  const dimValQty = Array.from({ length: nC }, () => dims.map(() => new Map()));
+  for (let i = 0; i < nP; i++) {
+    const c = km.assign[i];
+    const tuple = groupVals[keep[i]];
+    for (let d = 0; d < dims.length; d++) {
+      const m = dimValQty[c][d];
+      m.set(tuple[d], (m.get(tuple[d]) || 0) + kQty[i]);
+    }
+  }
+  // Mix de risco por cluster (quando a base tem coluna mixRisco): acumulado por LINHA
+  // em ordem de linha (linhas de grupos truncados ficam fora — cluster indefinido).
+  const mixColName = Object.entries(types).find(([, t]) => t === 'mixRisco')?.[0] ?? null;
+  let mixByCluster = null;
+  if (mixColName) {
+    const mixReader = cluDimReader(csv, csv.headers.indexOf(mixColName));
+    mixByCluster = Array.from({ length: nC }, () => new Map());
+    for (let r = 0; r < nRows; r++) {
+      const ki = gidToKept[gidOfRow[r]];
+      if (ki < 0) continue;
+      const c = km.assign[ki];
+      const v = cluDimValue(mixReader, csv, r);
+      const qty = idxs.qty >= 0 ? (cellNum(csv, r, idxs.qty) || 0) : 1;
+      const m = mixByCluster[c];
+      m.set(v, (m.get(v) || 0) + qty);
+    }
+  }
+
+  // Ordena clusters por volume desc (empate ⇒ índice do centroide) e monta a saída.
+  const rank = Array.from({ length: nC }, (_, c) => c)
+    .sort((a, b) => (cQty[b] - cQty[a]) || (a - b));
+  const sortedValEntries = (m) => [...m.entries()]
+    .map(([value, qty]) => ({ value, qty }))
+    .sort((a, b) => (b.qty - a.qty) || segStrCmp(a.value, b.value));
+  model.clusters = rank.map((c, pos) => {
+    const centroid = {};
+    for (let f = 0; f < feats.length; f++) {
+      // De-padroniza (z·std + mean) — mesma fórmula nos dois runtimes (bit-exata).
+      centroid[feats[f].id] = km.centroids[c][f] * feats[f].std + feats[f].mean;
+    }
+    const dimsOut = dims.map((col, d) => ({
+      col,
+      values: sortedValEntries(dimValQty[c][d]).map(e => ({
+        value: e.value, qty: e.qty, share: cQty[c] > 0 ? e.qty / cQty[c] : null,
+      })),
+    }));
+    return {
+      id: `c${pos + 1}`,
+      size: cSize[c],
+      qty: cQty[c],
+      share: popQty > 0 ? cQty[c] / popQty : null,
+      decidedQty: cDec[c],
+      approvalRate: cDec[c] > 0 ? cAppr[c] / cDec[c] : null,
+      inadReal: cAltas[c] > 0 ? cInadR[c] / cAltas[c] : null,
+      inadInferida: cAltasInf[c] > 0 ? cInadI[c] / cAltasInf[c] : null,
+      centroid,
+      // Condições no formato LensRule (DEC-SD-001 — a mesma lingua franca dos
+      // segmentos): uma regra `in` por dimensão, materializável em filtro/lens.
+      conditions: dimsOut.map(dm => ({
+        col: dm.col, operator: 'in', value: dm.values.map(v => v.value).join(', '), logic: 'AND',
+      })),
+      dims: dimsOut,
+      mix: mixByCluster
+        ? sortedValEntries(mixByCluster[c]).map(e => ({
+            value: e.value, qty: e.qty, share: cQty[c] > 0 ? e.qty / cQty[c] : null,
+          }))
+        : null,
+    };
+  });
+
+  model.population = { qty: popQty, decidedQty: popDec, groupCount: nG, points: nP };
+  model.features = feats.map(f => ({ id: f.id, label: f.label, mean: f.mean, std: f.std, scopeRate: f.scopeRate }));
+  model.params = {
+    csvId, dims, k: kEff, kRequested: kReq, features: featIds, seed,
+    method: 'kmeans', autoK: false, maxPoints,
+  };
+  model.quality = {
+    method: 'kmeans',
+    inertia: km.inertia,
+    totalSS,
+    explainedVariance: totalSS > 0 ? 1 - km.inertia / totalSS : null,
+    iterations: km.iterations,
+    converged: km.converged,
+    silhouette: null, // extra sklearn (sidecar) — nunca preenchido no baseline browser
+  };
+  return model;
+}
+
 // ── COMPUTE_POLICY_INSIGHTS — Copiloto Sessão 1 (lint estrutural, DEC-IA-006) ────
 // Achados são FATOS estruturais sobre o grafo do canvas ativo — nunca bloqueiam a
 // simulação (só informam). Reaproveita o `nodeArrivals`/`lensCounts` que o tick já
@@ -5728,6 +6210,28 @@ function handleMessage(e) {
     return;
   }
 
+  // Execução Híbrida H8 — Clusterização de Segmentos (baseline browser, Classe B
+  // dentro dos tetos). O handler CLAMPA os params aos tetos declarados (paridade
+  // total, P4): o motor em si é livre de teto — é o mesmo algoritmo que roda sem
+  // limites no sidecar (motor_clusters.py), sob o GATE dourado da DEC-HX-005.
+  if (type === 'COMPUTE_CLUSTER_SEGMENTS') {
+    const { params = {} } = e.data;
+    const clusterModel = computeClusterSegments(workerCsvStore, clampClusterParamsForBrowser(params));
+    self.postMessage({ type: 'CLUSTER_SEGMENTS_RESULT', clusterModel });
+    return;
+  }
+
+  // Execução Híbrida H8 — fallback BROWSER da task do sidecar ('cluster_segments'):
+  // o ComputeRouter posta a MESMA task quando o job cai (queda/timeout/indisponível);
+  // aqui ela roda com os tetos declarados e a UI recebe o mesmo CLUSTER_SEGMENTS_RESULT
+  // + o aviso "concluído no modo browser" (fallbackNoticeText, H6) — padrão H7.
+  if (type === 'cluster_segments') {
+    const { params = {} } = e.data;
+    const clusterModel = computeClusterSegments(workerCsvStore, clampClusterParamsForBrowser(params));
+    self.postMessage({ type: 'CLUSTER_SEGMENTS_RESULT', clusterModel });
+    return;
+  }
+
   // Execução Híbrida H7 — anexa recomendações (patch + delta re-simulado REAL,
   // DEC-SD-003) ao SegmentModel que o sidecar devolveu sem elas. O motor de simulação
   // continua single-sourced neste worker (a dupla implementação dele é a Sessão H9).
@@ -5794,6 +6298,10 @@ export {
   attachSegmentRecommendations,
   clampSegmentParamsForBrowser,
   segStrCmp,
+  computeClusterSegments,
+  clampClusterParamsForBrowser,
+  clusterSeedOf,
+  clusterMulberry32,
   buildSegmentRecommendations,
   buildSegmentRecommendationsPooled,
   segValidateMoves,

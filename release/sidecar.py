@@ -79,8 +79,14 @@ WARMUP_PACKAGES = [
 # qualquer tentativa cai no fallback browser. GATE cross-runtime (DEC-HX-005):
 # tests_python/test_segment_discovery.py sobre as fixtures douradas do Vitest — sem o
 # GATE verde a task não é embarcada/ofertada.
+# `cluster_segments` (Execução Híbrida H8 — Clusterização de Segmentos, motor numpy em
+# release/python/motor_clusters.py) segue o mesmo contrato da H7: tier full apenas,
+# GATE dourado cross-runtime (tests_python/test_cluster_segments.py sobre as fixtures
+# geradas por tests/clusterSegmentsGolden.test.js) — sem GATE verde a task não é
+# embarcada/ofertada. sklearn é EXTRA da task (silhueta p/ k automático, hierárquico),
+# nunca gate do tier (DEC-HX-004).
 KNOWN_TASKS = ("echo_stats",)
-FULL_TIER_TASKS = ("segment_discovery",)
+FULL_TIER_TASKS = ("segment_discovery", "cluster_segments")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado global (protegido por locks; RAM apenas)
@@ -219,22 +225,38 @@ def math_fsum(seq):
 
 
 _seg_engine = None
+_cluster_engine = None
+
+
+def _load_engine_module(filename):
+    """Import LAZY de um motor de release/python/ (padrão DEC-HX-004: nada de import
+    pesado inline no boot; a pasta é preservada pelo build-release.yml)."""
+    import importlib.util
+    name = filename[:-3]  # sem o .py
+    if name in sys.modules:
+        return sys.modules[name]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python", filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _load_segment_engine():
-    """Import LAZY do motor da Descoberta (release/python/motor_segmentos.py) — só no
-    primeiro job que o usa (padrão DEC-HX-004: nada de import pesado inline no boot).
-    O arquivo mora em release/python/ (pasta preservada pelo build-release.yml)."""
+    """Motor da Descoberta (H7) — só no primeiro job que o usa."""
     global _seg_engine
     if _seg_engine is None:
-        import importlib.util
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "python", "motor_segmentos.py")
-        spec = importlib.util.spec_from_file_location("motor_segmentos", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _seg_engine = mod
+        _seg_engine = _load_engine_module("motor_segmentos.py")
     return _seg_engine
+
+
+def _load_cluster_engine():
+    """Motor da Clusterização (H8) — só no primeiro job que o usa."""
+    global _cluster_engine
+    if _cluster_engine is None:
+        _cluster_engine = _load_engine_module("motor_clusters.py")
+    return _cluster_engine
 
 
 def run_task(task, store, params, progress_cb=None):
@@ -262,6 +284,17 @@ def run_task(task, store, params, progress_cb=None):
         if progress_cb:
             progress_cb(1.0)
         return {"segmentModel": model}
+    if task == "cluster_segments":
+        # Execução Híbrida H8 — Clusterização de Segmentos (tier full apenas; numpy;
+        # sklearn como extra opcional). O `result` tem o MESMO formato do payload
+        # CLUSTER_SEGMENTS_RESULT do worker ({clusterModel}) — executor invisível
+        # (DEC-HX-002); aqui SEM os tetos declarados do baseline browser.
+        p = params or {}
+        engine = _load_cluster_engine()
+        model = engine.compute_cluster_model(store, p.get("params") or {}, progress_cb)
+        if progress_cb:
+            progress_cb(1.0)
+        return {"clusterModel": model}
     raise ValueError("unknown task: %r" % (task,))
 
 

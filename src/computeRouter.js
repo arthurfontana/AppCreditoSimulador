@@ -60,6 +60,11 @@ export const TASK_CLASS = {
   // fallback transparente, paridade total P4). Depth ≤ 2 continua indo pelo caminho
   // Classe A de sempre (COMPUTE_SEGMENT_DISCOVERY) — o tick/gesto nunca passa por aqui.
   segment_discovery: 'B',
+  // H8 — Clusterização de Segmentos. Mesma dupla implementação da H7: dentro dos tetos
+  // browser a UI posta COMPUTE_CLUSTER_SEGMENTS direto no worker (nem passa por aqui);
+  // acima dos tetos (mais dims/k, autoK/hierárquico via sklearn) roteia esta task ao
+  // sidecar (motor_clusters.py, tier full) com fallback transparente ao worker CLAMPADO.
+  cluster_segments: 'B',
 };
 
 // Default DEFENSIVO: tarefa desconhecida vira Classe A (worker — o caminho completo).
@@ -85,6 +90,8 @@ export const RESULT_TYPE = {
   COMPUTE_SEGMENT_DISCOVERY: 'SEGMENT_DISCOVERY_RESULT',
   COMPUTE_SEGMENT_COMBINED: 'SEGMENT_COMBINED_RESULT',
   segment_discovery: 'SEGMENT_DISCOVERY_RESULT', // H7 — fallback do worker responde igual
+  COMPUTE_CLUSTER_SEGMENTS: 'CLUSTER_SEGMENTS_RESULT',
+  cluster_segments: 'CLUSTER_SEGMENTS_RESULT',   // H8 — fallback do worker responde igual
 };
 
 export function resultTypeFor(task) {

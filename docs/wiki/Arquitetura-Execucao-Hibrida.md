@@ -288,6 +288,17 @@ runtimes.
 > ordenação usam comparador ESPECIFICADO (`segStrCmp`, code units UTF-16) — nunca
 > `localeCompare`, que depende do ICU/locale do runtime.
 
+> **Entregue (Sessão H8 — segunda aplicação da DEC, primeira feature NASCIDA dupla):**
+> GATE dourado da Clusterização de Segmentos — `tests/clusterSegmentsGolden.test.js`
+> (gera/trava 4 fixtures `cluster_segments_*.json` em `tests/fixtures/golden/`) +
+> `tests_python/test_cluster_segments.py` (mesmas entradas no motor numpy
+> `release/python/motor_clusters.py`). Diferente da H7, aqui NÃO há transcendental no
+> caminho do GATE: toda a matemática do k-means (agregação, z-score, distâncias,
+> centroides, mulberry32) é racional + sqrt (IEEE, bit-exata nos dois runtimes) — a
+> tolerância 1e-9 do comparador é folga defensiva. Os extras sklearn (silhueta/k
+> automático, hierárquico) ficam FORA do dourado por construção: só rodam quando
+> explicitamente pedidos, e o form só os oferece com o sidecar declarando sklearn.
+
 ### DEC-HX-006 — Dados sobem uma vez, referenciados por hash
 O dataset é registrado no sidecar **uma vez por versão** (`POST /api/compute/datasets`,
 corpo = os mesmos chunks de `serializeCsvStore`/`buildProjectJSONChunks` do M3 —
@@ -404,7 +415,7 @@ remove?** Exemplos aplicados:
 | Feature futura | Classe | Baseline browser (tetos declarados) → sidecar |
 |---|---|---|
 | Descoberta de Segmentos depth 3–4 | B | Motor JS já existe (depth 2); sidecar libera depth 3–4 e teto maior de candidatos |
-| Clusterização de segmentos (k-means/hierárquico) | B | Baseline JS sobre a base **agregada** pelas dimensões (pós-agregação o nº de pontos é pequeno), com teto de dimensões/valores; sidecar remove tetos e acelera |
+| Clusterização de segmentos (k-means/hierárquico) — **✅ entregue (H8)** | B | Baseline JS sobre a base **agregada** pelas dimensões (pós-agregação o nº de pontos é pequeno), com tetos declarados (3 dims, k ≤ 8, 2.000 pontos); sidecar remove os tetos, acelera (numpy) e ganha extras sklearn (silhueta/k automático, hierárquico) |
 | Seleção automática de indicadores (IV/PSI em massa) | B | `computeIV` já existe; browser limita nº de colunas×bins; sidecar amplia |
 | Frente 5 (busca de estratégias, re-simulação por combinação) | B (pós-H9) | Browser: lotes pequenos via pool H3; lotes grandes exigem o motor Python com GATE de paridade — investimento da Sessão H9 |
 | Bases acima da zona de conforto (~5MM; alvo P2 = 7MM) | B | Browser abre amostra declarada (com a recomendação DEC-HX-009); sidecar processa a íntegra |
@@ -572,7 +583,7 @@ mais lento que o worker JS — ver DEC-HX-004).
 | **Sonda (✅ concluída 09/07/2026)** | HP (sonda do ambiente Python — `checar_ambiente.py`, rodada 2× na máquina corporativa) | Relatório entregue: os 4 pacotes instalam/importam do índice; **nenhuma wheel offline imprescindível**; sklearn com 1ª carga lenta (antivírus) ⇒ warm-up assíncrono na detecção de tier da H5 |
 | **Fase 0 — Browser primeiro** | H0 (telemetria), H1 (fluidez M12–M14), H2 (dieta de memória), H3 (pool de workers) | Headroom até ~5MM linhas; validações paralelas; números reais de custo por tarefa |
 | **Fase 1 — Fundação híbrida (✅ concluída 10/07/2026)** | H4 (ComputeRouter), H5 (sidecar v1), H6 (UX do motor + recomendação DEC-HX-009) | Sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark |
-| **Fase 2 — Cargas reais** | **H7 ✅ (Descoberta profunda — concluída 11/07/2026)**, H8 (clusterização/stats — baseline browser + sidecar, paridade total) | Primeiro valor de usuário do híbrido: Descoberta depth 3–4/beam ampliado no sidecar (numpy), GATE dourado cross-runtime estabelecido |
+| **Fase 2 — Cargas reais (✅ concluída 11/07/2026)** | **H7 ✅ (Descoberta profunda)**, **H8 ✅ (Clusterização de Segmentos — baseline browser + sidecar, paridade total)** | Primeiro valor de usuário do híbrido: Descoberta depth 3–4/beam ampliado no sidecar (numpy) + primeira análise INÉDITA nascida dupla (k-means determinístico sobre mulberry32, mesmo ClusterModel nos dois motores sob GATE dourado; sklearn como extra: silhueta/k automático, hierárquico) |
 | **Fase 3 — Paridade do motor (opcional)** | H9 (motor de simulação em Python + GATE) | Habilita Frente 5 e bases 7–10MM+ de ponta a ponta |
 
 A Fase 0 tem valor independente: se o híbrido for adiado, nada dela é desperdiçado.

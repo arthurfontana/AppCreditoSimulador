@@ -38,8 +38,11 @@ AppCreditoSimulador/
 │   ├── projectSave.test.js       # buildProjectJSONChunks ≡ JSON.stringify (M3)
 │   ├── segmentDiscovery.test.js  # GATE Copiloto Sessão 10: subgrupo plantado achado com condições exatas; homogênea ⇒ zero; agregados ≡ matchLensRule; dispersion ≡ contagem por terminal; p-value binomial ≡ controle; FDR (BH); shrinkage rebaixa nicho; escopo por nó ≡ sub-base; dedup; determinismo
 │   ├── segmentDiscoveryGolden.test.js # GATE Execução Híbrida H7 (DEC-HX-005): gera/verifica as fixtures douradas (SegmentModel sem recomendações ≡ segBuildModelWithoutRecs; colunar ≡ legado; determinismo); costura sidecar→worker (attachSegmentRecommendations ≡ computeSegmentDiscovery); clamp dos tetos browser
+│   ├── clusterSegments.test.js   # GATE Execução Híbrida H8 (baseline browser): clusters plantados recuperados; perfil ≡ agregação manual; determinismo; colunar ≡ legado; clamp/truncamento declarados; degradação de features; mulberry32 especificado
+│   ├── clusterSegmentsGolden.test.js  # GATE Execução Híbrida H8 (DEC-HX-005): gera/verifica as fixtures douradas do ClusterModel (determinismo; colunar ≡ legado; ≡ dourado commitado)
 │   ├── fixtures/segmentFixtures.js    # entradas do GATE dourado H7 (espelham as fixtures de segmentDiscovery.test.js)
-│   ├── fixtures/golden/               # fixtures douradas cross-runtime (entrada serializada M3 + SegmentModel esperado; regenerar com UPDATE_GOLDEN=1)
+│   ├── fixtures/clusterFixtures.js    # entradas dos GATEs H8 (clusters plantados 1D/2D+mix, truncamento, sem AS IS)
+│   ├── fixtures/golden/               # fixtures douradas cross-runtime (entrada serializada M3 + SegmentModel/ClusterModel esperado; regenerar com UPDATE_GOLDEN=1)
 │   └── workerPool.test.js         # GATE Execução Híbrida H3: pool ≡ single-worker número a número (Descoberta + Combinada) via pool mock (jobs fora de ordem); determinismo sob ordens de conclusão diferentes; fallback (pool null ≡ síncrono)
 │   └── simulationTick.test.js    # GATE M6: passe único do tick ≡ composição das 4 funções originais
 │   └── computeRouter.test.js      # GATE Execução Híbrida H4: Classe A jamais roteia; detecção (indisponível/lento/versão errada) silenciosa; Classe B sidecar (dataset por hash HEAD→POST, progresso) com fallback transparente na queda do job
@@ -66,10 +69,11 @@ AppCreditoSimulador/
 │   │   ├── instalar_motor.bat    #   venv + pip do índice; wheels/ como contingência (P1)
 │   │   ├── checar_ambiente.py    #   sonda HP (movida da raiz) — testa install/import na máquina
 │   │   ├── motor_segmentos.py    #   H7 — Descoberta de Segmentos vetorizada em numpy (task segment_discovery, tier full)
+│   │   ├── motor_clusters.py     #   H8 — Clusterização de Segmentos em numpy (task cluster_segments, tier full; sklearn como extra)
 │   │   └── wheels/               #   wheels offline de CONTINGÊNCIA (vazia por padrão; só LEIAME)
 │   └── ...
 ├── tests_python/                 # GATE H5 (pytest): protocolo do sidecar (health/token/caps/dataset/job)
-│                                 # + GATE H7 (test_segment_discovery.py): fixtures douradas número a número no motor Python
+│                                 # + GATE H7 (test_segment_discovery.py) e GATE H8 (test_cluster_segments.py): fixtures douradas número a número no motor Python
 ├── .github/workflows/
 │   ├── build-release.yml         # Build automático em push para main → commit em release/
 │   ├── test-sidecar.yml          # Job SEPARADO e OPCIONAL: pytest do sidecar (não bloqueia o build)
@@ -367,6 +371,8 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `POOL_JOB` | `{jobId, shapes, conns, moves}` | **Execução Híbrida H3** — shard do pool de workers aninhados. Chega SÓ nos pool-workers (o worker principal não posta a si mesmo): roda `segValidateMoves` (aplica moves + `runSimulation` + snapshot) sobre o `workerCsvStore` já semeado e responde com `POOL_JOB_RESULT`. Ver "Pool de Workers (Execução Híbrida H3)" |
 | `segment_discovery` | `{shapes, conns, scope, params}` | **Execução Híbrida H7** — alias de FALLBACK da Descoberta profunda (Classe B): mesmo payload de `COMPUTE_SEGMENT_DISCOVERY`, mas com os params CLAMPADOS aos tetos browser (`clampSegmentParamsForBrowser`: maxDepth ≤ 2, beamWidth ≤ 8). É o que o ComputeRouter posta quando o job do sidecar cai/está indisponível (paridade total, P4); responde com o MESMO `SEGMENT_DISCOVERY_RESULT` |
 | `COMPUTE_SEGMENT_RECS` | `{shapes, conns, scope, params, segmentModel}` | **Execução Híbrida H7** — anexa recomendações (patch + delta re-simulado REAL, DEC-SD-003) ao `segmentModel` que o sidecar devolveu SEM elas: reconstrói o ctx barato (`discoverSegments` com maxDepth 1 — bins de nível 1/walk não dependem da profundidade) e roda `segPlanRecommendations`/validação (pool H3) sobre os findings recebidos. O motor de simulação segue single-sourced no worker (a dupla implementação dele é a H9); responde com `SEGMENT_RECS_RESULT` |
+| `COMPUTE_CLUSTER_SEGMENTS` | `{params}` | **Execução Híbrida H8** — Clusterização de Segmentos (baseline browser, Classe B dentro dos tetos). `params: {csvId?, dims, k?, features?, seed?, maxPoints?}`. O handler CLAMPA aos tetos declarados (`clampClusterParamsForBrowser`: dims ≤ 3, k ≤ 8, maxPoints 2000, sem extras) e roda `computeClusterSegments`; responde com `CLUSTER_SEGMENTS_RESULT` |
+| `cluster_segments` | `{params}` | **Execução Híbrida H8** — alias de FALLBACK da Clusterização (Classe B): mesma task do sidecar, params CLAMPADOS aos tetos browser. É o que o ComputeRouter posta quando o job do sidecar cai/está indisponível (paridade total, P4); responde com o MESMO `CLUSTER_SEGMENTS_RESULT` |
 
 ### Mensagens de saída
 | type | payload |
@@ -384,6 +390,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `SEGMENT_COMBINED_RESULT` | `{combined}` — `{baseline, combined, combinedApprovalDelta, combinedMovedQty, sumApprovalDelta, sumMovedQty, individual, interaction:{interacts, overlapQty, note}}` (Sessão 12) |
 | `POOL_JOB_RESULT` | `{jobId, snapshot}` \| `{jobId, error}` — resposta do pool-worker a um `POOL_JOB` (H3). `snapshot` = resultado de `segValidateMoves`; `error` (candidato que estourou) vira delta null / recomputo inline no orquestrador |
 | `SEGMENT_RECS_RESULT` | `{segmentModel}` — o modelo recebido em `COMPUTE_SEGMENT_RECS` com `recommendation` preenchida nos achados acionáveis (H7); em falha de anexo, o modelo volta como veio (cards sem delta validado, nunca erro silencioso) |
+| `CLUSTER_SEGMENTS_RESULT` | `{clusterModel}` — ver seção "Clusterização de Segmentos (Execução Híbrida H8)" |
 
 ### Funções no worker
 - `computeSimulationTick(shapes, conns, csvStore, lensPopulations)` (M6 — passe único do tick de edição): funde, numa única iteração por csv×linha, o que antes eram 4 varreduras completas e independentes da base (`runSimulation` + `computeSimulatedDecisions` + `computeIncrementalResult` + `computeNodeArrivals`). Índices de coluna e mapas de aresta por nó são resolvidos uma vez por nó/csv (não por linha); o "visited" do walk é um array de época reutilizado (sem `new Set()` por linha); o buffer do caminho (edgeStats) é reaproveitado entre linhas. Preserva a diferença sutil entre as raízes usadas pela simulação/overlay (só a 1ª raiz por csv) e pelas chegadas por nó (todas as raízes, critério mais estrito — exclui nós logo abaixo de um Decision Lens). Retorna `{simResult, incrementalResult, nodeArrivals}`. Chamada por `getTickResult` (cache single-slot chaveado por `csvStoreVersion + shapes + conns`, mesmo padrão do `cachedCanvasOverlay`): a primeira das mensagens `RUN_SIMULATION`/`COMPUTE_OVERLAY` de um mesmo tick computa o passe único; a segunda só lê do cache. Equivalência numérica exaustiva com o caminho antigo em `tests/simulationTick.test.js`
@@ -1283,8 +1290,9 @@ chegam por callback (`buildChunks`), então o router não conhece `columnar.js`.
 - **Tabela de roteamento `TASK_CLASS`/`classOf` (DEC-HX-007, paridade total)**: **Classe A** =
   todo o core de hoje (tick, overlay, otimizadores, Goal Seek, Simplify, DocGen, Descoberta
   depth≤2, …) ⇒ **sempre worker**; o tick de edição e qualquer resposta síncrona a gesto
-  **jamais** roteiam (regra de ouro). **Classe B** = cargas ampliadas/análises novas (nenhuma em
-  produção ainda; `echo_stats` é o benchmark da H5) ⇒ tenta o sidecar com **fallback
+  **jamais** roteiam (regra de ouro). **Classe B** = cargas ampliadas/análises novas
+  (`echo_stats` — benchmark da H5; `segment_discovery` — Descoberta profunda, H7;
+  `cluster_segments` — Clusterização, H8) ⇒ tenta o sidecar com **fallback
   transparente** ao worker. Default defensivo: task desconhecida ⇒ Classe A (nunca vaza pro
   sidecar). **Nenhuma tarefa exige o sidecar** — sempre há caminho browser.
 - **`createComputeRouter({worker, sidecar?, getPreference, dataset?, protocolVersion?})`**:
@@ -1474,6 +1482,70 @@ Segmentos" acima.
   transcendentais log/exp/pow variam por ~1 ulp entre libm's; medido: 704/710 números
   bit-idênticos, pior desvio 4e-16). Também: determinismo (incl. depth 4), gating por
   tier e costura sidecar→worker (`attachSegmentRecommendations` ≡ `computeSegmentDiscovery`).
+
+## Clusterização de Segmentos (Execução Híbrida H8 — paridade total, primeira análise nascida dupla)
+
+Primeira análise INÉDITA do épico híbrido, nascida já com os DOIS executores sob GATE
+dourado (DEC-HX-005/007, P4): agrupa os segmentos da base (tuplas das dimensões Filtro
+escolhidas) por perfil de comportamento — aprovação AS IS, inad. real, inad. inferida —
+via k-means determinístico. Ver `docs/wiki/Arquitetura-Execucao-Hibrida.md` (§7.3, §16).
+
+- **Motor (worker, `computeClusterSegments`)**: agrega a base pelas `params.dims` (grupo
+  = tupla de valores TRIMADOS, em ordem de 1ª aparição; merge de valores que colidem no
+  trim — espelho de `Csv.view` do Python), monta features de taxa por grupo (ordem
+  canônica `approvalRate`→`inadReal`→`inadInferida`, cada uma só se as colunas existem e
+  o denominador do escopo > 0; grupo com denominador 0 cai na taxa do escopo — nunca NaN),
+  padroniza z-score e roda **k-means Lloyd + init k-means++ PONDERADO pelo volume** sobre
+  PRNG especificado (`clusterMulberry32`; seed = `clusterSeedOf(csvId, dims, k, features,
+  rowCount)` — FNV-1a 32-bit de code units UTF-16; `params.seed` = override de teste).
+  Regras especificadas (idênticas nos dois runtimes): empate de atribuição no menor
+  índice de centroide; cluster vazio mantém o centroide anterior; cluster com pontos mas
+  peso zero usa média não ponderada; sem coluna `qty` ⇒ peso 1. TODA a matemática é
+  racional + sqrt (bit-exata cross-runtime — nenhum transcendental no caminho do GATE).
+- **ClusterModel** (padrão docModel/SegmentModel — dados crus, nunca prosa):
+  `{version, generatedAt, error, dataset:{csvId,name,rowCount}, params:{csvId,dims,k,
+  kRequested,features,seed,method,autoK,maxPoints}, ceilings:null|{pointsTruncated,
+  totalGroups,keptGroups,keptQtyShare}, population:{qty,decidedQty,groupCount,points},
+  features:[{id,label,mean,std,scopeRate}], clusters, quality:{method,inertia,totalSS,
+  explainedVariance,iterations,converged,silhouette}}`. Cada cluster: `{id:'c1'…(ordenados
+  por volume desc), size, qty, share, decidedQty, approvalRate, inadReal, inadInferida,
+  centroid:{featureId:valor na escala original}, conditions:[LensRule 'in' por dimensão —
+  mesma lingua franca DEC-SD-001], dims:[{col, values:[{value,qty,share}] por volume
+  desc/segStrCmp}], mix:null|[{value,qty,share}] (coluna mixRisco)}`. `error`:
+  `no_rows|no_dims|no_features` (degradação declarada, nunca silenciosa).
+- **Tetos declarados do browser** (`clampClusterParamsForBrowser`, aplicado pelos
+  handlers — o motor em si é livre de teto): `CLUSTER_BROWSER_MAX_DIMS=3`,
+  `CLUSTER_BROWSER_MAX_K=8`, `CLUSTER_BROWSER_MAX_POINTS=2000` (acima, mantém os maiores
+  grupos por volume e DECLARA em `ceilings`), extras desligados. Dimensões tipadas como
+  métrica são rejeitadas (`no_dims` se nada sobra).
+- **Sidecar (`release/python/motor_clusters.py`, task `cluster_segments`, tier full)**:
+  MESMO algoritmo vetorizado em numpy (np.cumsum/np.bincount — ordem sequencial; mulberry32
+  com máscara 32-bit), SEM tetos. Reusa a infra do `motor_segmentos.py` (Csv/views/seq_sum).
+  **Extras sklearn** (declarados por pacote, nunca gate do tier, lazy): `params.autoK` —
+  testa k=2…k e escolhe pela silhueta (empate ⇒ menor k; seed por k candidato, então o
+  vencedor ≡ rodada fixa com aquele k); `params.method='hierarchical'` — ward sobre as
+  features padronizadas. sklearn ausente ⇒ degrada ao k-means com `quality.note:
+  'sklearn_unavailable'` (nunca erro). Extras NUNCA entram no GATE dourado.
+- **Front (`clusterModal`, efêmero — padrão `segmentDiscoveryModal`)**: botão **🧩
+  Clusterizar Segmentos** na seção Fluxo, SEMPRE habilitado (paridade total). Form: base
+  (se multi-csv), chips de dimensões (máx. 3 sem sidecar), k (2–8; 10/12/16 gated),
+  método/autoK (gated por sidecar + sklearn nas capabilities) + `ComputeCeilingNotice`.
+  Dentro dos tetos ⇒ `COMPUTE_CLUSTER_SEGMENTS` direto no worker; acima ⇒
+  `router.run('cluster_segments',…)` com dataset por hash (DEC-HX-006), progresso
+  (`ComputeJobProgress`) e cancelamento; queda ⇒ fallback clampado + aviso (`fallbackNotice`).
+  Diferente da H7, o resultado do sidecar já é final (não há etapa de recomendações).
+  Resultado: quadrante Volume × Risco (Recharts, `ClusterQuadrant`) + cards
+  (`ClusterCard`) + **👁 Ver no Dashboard** (`viewClusterInDashboard`): um `FilterCard`
+  de página por dimensão em modo BÁSICO (`selected` = lista exata de valores — lossless
+  mesmo com vírgula no valor, que quebraria o `in` do modo avançado).
+- **GATE duplo (DEC-HX-005)**: `tests/clusterSegments.test.js` (clusters plantados
+  recuperados; perfil ≡ agregação manual; determinismo; colunar ≡ legado; clamp;
+  truncamento declarado; degradação de features; erros) +
+  `tests/clusterSegmentsGolden.test.js` (gera/trava `tests/fixtures/golden/
+  cluster_segments_*.json` de `tests/fixtures/clusterFixtures.js`; regenerar:
+  `UPDATE_GOLDEN=1`) + `tests_python/test_cluster_segments.py` (MESMAS fixtures no motor
+  numpy, igualdade número a número; determinismo sem tetos; extras sklearn por
+  determinismo/contrato — pulados sem sklearn; gating por tier).
 
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
@@ -1974,7 +2046,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 ```
 
 ## Branch de desenvolvimento atual
-`claude/segment-discovery-sidecar-vr56y0`
+`claude/hybrid-execution-segment-clustering-rka9qg`
 
 ## Roadmap futuro (não implementado)
 

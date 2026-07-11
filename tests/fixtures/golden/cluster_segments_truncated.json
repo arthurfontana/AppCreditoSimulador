@@ -1,0 +1,247 @@
+{
+  "name": "truncated",
+  "store": {
+    "clu": {
+      "name": "clu",
+      "headers": [
+        "FAIXA",
+        "__DECISAO_ORIGINAL",
+        "qty",
+        "qtdAltas",
+        "qtdAltasInfer",
+        "inadReal",
+        "inadInferida"
+      ],
+      "columnTypes": {
+        "FAIXA": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "qtdAltasInfer": "qtdAltasInfer",
+        "inadReal": "inadReal",
+        "inadInferida": "inadInferida"
+      },
+      "columns": {
+        "FAIXA": {
+          "kind": "dict",
+          "dict": [
+            "F1",
+            "F2",
+            "F3",
+            "F4",
+            "F8",
+            "F9"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAABAQICAwMEBAUF"
+        },
+        "__DECISAO_ORIGINAL": {
+          "kind": "dict",
+          "dict": [
+            "APROVADO",
+            "REPROVADO"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAEAAQABAAEAAQAB"
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAACIs0AAAAAAAECPQAAAAAAAQK9AAAAAAABwl0AAAAAAAACJQAAAAAAAMKFAAAAAAADAgkAAAAAAALCdQAAAAAAAAFlAAAAAAADAYkAAAAAAAIBWQAAAAAAAgFtA"
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAABAr0AAAAAAAAAAAAAAAAAAAKlAAAAAAAAAAAAAAAAAAOCFQAAAAAAAAAAAAAAAAABAf0AAAAAAAAAAAAAAAAAAAFRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "qtdAltasInfer": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAABAr0AAAAAAAAAAAAAAAAAAAKlAAAAAAAAAAAAAAAAAAOCFQAAAAAAAAAAAAAAAAABAf0AAAAAAAAAAAAAAAAAAAFRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAAVEAAAAAAAAAAAAAAAAAAAGRAAAAAAAAAAAAAAAAAAIBhQAAAAAAAAAAAAAAAAADAYkAAAAAAAAAAAAAAAAAAABBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "inadInferida": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAACAU0AAAAAAAAAAAAAAAAAAwGJAAAAAAAAAAAAAAAAAAEBgQAAAAAAAAAAAAAAAAACAYUAAAAAAAAAAAAAAAAAAABBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      "rowCount": 12
+    }
+  },
+  "params": {
+    "csvId": "clu",
+    "dims": [
+      "FAIXA"
+    ],
+    "k": 2,
+    "maxPoints": 4
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "error": null,
+    "dataset": {
+      "csvId": "clu",
+      "name": "clu",
+      "rowCount": 12
+    },
+    "params": {
+      "csvId": "clu",
+      "dims": [
+        "FAIXA"
+      ],
+      "k": 2,
+      "kRequested": 2,
+      "features": [
+        "approvalRate",
+        "inadReal",
+        "inadInferida"
+      ],
+      "seed": 2446635806,
+      "method": "kmeans",
+      "autoK": false,
+      "maxPoints": 4
+    },
+    "ceilings": {
+      "pointsTruncated": true,
+      "totalGroups": 6,
+      "keptGroups": 4,
+      "keptQtyShare": 0.9742120343839542
+    },
+    "population": {
+      "qty": 17450,
+      "decidedQty": 17450,
+      "groupCount": 6,
+      "points": 4
+    },
+    "features": [
+      {
+        "id": "approvalRate",
+        "label": "Taxa de Aprovação (AS IS)",
+        "mean": 0.5168181818181818,
+        "std": 0.26630670436493964,
+        "scopeRate": 0.611764705882353
+      },
+      {
+        "id": "inadReal",
+        "label": "Inad. Real",
+        "mean": 0.14250000000000002,
+        "std": 0.11366067921669305,
+        "scopeRate": 0.0630952380952381
+      },
+      {
+        "id": "inadInferida",
+        "label": "Inad. Inferida",
+        "mean": 0.13302232142857146,
+        "std": 0.10569716120878396,
+        "scopeRate": 0.05928571428571429
+      }
+    ],
+    "clusters": [
+      {
+        "id": "c1",
+        "size": 2,
+        "qty": 11500,
+        "share": 0.6590257879656161,
+        "decidedQty": 11500,
+        "approvalRate": 0.782608695652174,
+        "inadReal": 0.03333333333333333,
+        "inadInferida": 0.03166666666666667,
+        "centroid": {
+          "approvalRate": 0.782608695652174,
+          "inadReal": 0.03434782608695651,
+          "inadInferida": 0.03259239130434782
+        },
+        "conditions": [
+          {
+            "col": "FAIXA",
+            "operator": "in",
+            "value": "F1, F2",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "FAIXA",
+            "values": [
+              {
+                "value": "F1",
+                "qty": 6000,
+                "share": 0.5217391304347826
+              },
+              {
+                "value": "F2",
+                "qty": 5500,
+                "share": 0.4782608695652174
+              }
+            ]
+          }
+        ],
+        "mix": null
+      },
+      {
+        "id": "c2",
+        "size": 2,
+        "qty": 5500,
+        "share": 0.3151862464183381,
+        "decidedQty": 5500,
+        "approvalRate": 0.2545454545454545,
+        "inadReal": 0.24166666666666667,
+        "inadInferida": 0.225,
+        "centroid": {
+          "approvalRate": 0.2545454545454545,
+          "inadReal": 0.24545454545454548,
+          "inadInferida": 0.2285714285714286
+        },
+        "conditions": [
+          {
+            "col": "FAIXA",
+            "operator": "in",
+            "value": "F3, F4",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "FAIXA",
+            "values": [
+              {
+                "value": "F3",
+                "qty": 3000,
+                "share": 0.5454545454545454
+              },
+              {
+                "value": "F4",
+                "qty": 2500,
+                "share": 0.45454545454545453
+              }
+            ]
+          }
+        ],
+        "mix": null
+      }
+    ],
+    "quality": {
+      "method": "kmeans",
+      "inertia": 3001.859219985903,
+      "totalSS": 43256.9877805836,
+      "explainedVariance": 0.9306040625109517,
+      "iterations": 1,
+      "converged": true,
+      "silhouette": null
+    }
+  }
+}

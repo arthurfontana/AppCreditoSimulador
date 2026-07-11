@@ -1,0 +1,321 @@
+{
+  "name": "planted_2d_mix",
+  "store": {
+    "clu": {
+      "name": "clu",
+      "headers": [
+        "REGIAO",
+        "CANAL",
+        "MIX",
+        "__DECISAO_ORIGINAL",
+        "qty",
+        "qtdAltas",
+        "qtdAltasInfer",
+        "inadReal",
+        "inadInferida"
+      ],
+      "columnTypes": {
+        "REGIAO": "decision",
+        "CANAL": "decision",
+        "MIX": "mixRisco",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "qtdAltasInfer": "qtdAltasInfer",
+        "inadReal": "inadReal",
+        "inadInferida": "inadInferida"
+      },
+      "columns": {
+        "REGIAO": {
+          "kind": "dict",
+          "dict": [
+            "R1",
+            "R2",
+            "R3"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAAAAAEBAQECAgIC"
+        },
+        "CANAL": {
+          "kind": "dict",
+          "dict": [
+            "Digital",
+            "Fisico"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAABAQAAAQEAAAEB"
+        },
+        "MIX": {
+          "kind": "dict",
+          "dict": [
+            "Baixo",
+            "Alto",
+            "Medio"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAAAAAEBAQECAgEB"
+        },
+        "__DECISAO_ORIGINAL": {
+          "kind": "dict",
+          "dict": [
+            "APROVADO",
+            "REPROVADO"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAEAAQABAAEAAQAB"
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAgjEAAAAAAAABZQAAAAAAAkIpAAAAAAADAYkAAAAAAAABpQAAAAAAAAIlAAAAAAACAZkAAAAAAAKCJQAAAAAAAgGtAAAAAAABgiEAAAAAAAABkQAAAAAAAQIpA"
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAAiUAAAAAAAAAAAAAAAAAAwIdAAAAAAAAAAAAAAAAAAIBmQAAAAAAAAAAAAAAAAAAAZEAAAAAAAAAAAAAAAAAAAGlAAAAAAAAAAAAAAAAAAIBhQAAAAAAAAAAA"
+        },
+        "qtdAltasInfer": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAAiUAAAAAAAAAAAAAAAAAAwIdAAAAAAAAAAAAAAAAAAIBmQAAAAAAAAAAAAAAAAAAAZEAAAAAAAAAAAAAAAAAAAGlAAAAAAAAAAAAAAAAAAIBhQAAAAAAAAAAA"
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAAMEAAAAAAAAAAAAAAAAAAADNAAAAAAAAAAAAAAAAAAIBPQAAAAAAAAAAAAAAAAACATUAAAAAAAAAAAAAAAAAAgFFAAAAAAAAAAAAAAAAAAABKQAAAAAAAAAAA"
+        },
+        "inadInferida": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAALkAAAAAAAAAAAAAAAAAAADJAAAAAAAAAAAAAAAAAAIBOQAAAAAAAAAAAAAAAAACATEAAAAAAAAAAAAAAAAAAAFFAAAAAAAAAAAAAAAAAAABJQAAAAAAAAAAA"
+        }
+      },
+      "rowCount": 12
+    }
+  },
+  "params": {
+    "csvId": "clu",
+    "dims": [
+      "REGIAO",
+      "CANAL"
+    ],
+    "k": 2
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "error": null,
+    "dataset": {
+      "csvId": "clu",
+      "name": "clu",
+      "rowCount": 12
+    },
+    "params": {
+      "csvId": "clu",
+      "dims": [
+        "REGIAO",
+        "CANAL"
+      ],
+      "k": 2,
+      "kRequested": 2,
+      "features": [
+        "approvalRate",
+        "inadReal",
+        "inadInferida"
+      ],
+      "seed": 1307014166,
+      "method": "kmeans",
+      "autoK": false,
+      "maxPoints": null
+    },
+    "ceilings": null,
+    "population": {
+      "qty": 6000,
+      "decidedQty": 6000,
+      "groupCount": 6,
+      "points": 6
+    },
+    "features": [
+      {
+        "id": "approvalRate",
+        "label": "Taxa de Aprovação (AS IS)",
+        "mean": 0.4183333333333334,
+        "std": 0.32374973187462086,
+        "scopeRate": 0.41833333333333333
+      },
+      {
+        "id": "inadReal",
+        "label": "Inad. Real",
+        "mean": 0.24752976190476192,
+        "std": 0.159339704197092,
+        "scopeRate": 0.12455357142857143
+      },
+      {
+        "id": "inadInferida",
+        "label": "Inad. Inferida",
+        "mean": 0.23911932609301034,
+        "std": 0.1542481515727776,
+        "scopeRate": 0.12008928571428572
+      }
+    ],
+    "clusters": [
+      {
+        "id": "c1",
+        "size": 4,
+        "qty": 4000,
+        "share": 0.6666666666666666,
+        "decidedQty": 4000,
+        "approvalRate": 0.19,
+        "inadReal": 0.3588235294117647,
+        "inadInferida": 0.34705882352941175,
+        "centroid": {
+          "approvalRate": 0.19000000000000003,
+          "inadReal": 0.3600446428571428,
+          "inadInferida": 0.3480704365079365
+        },
+        "conditions": [
+          {
+            "col": "REGIAO",
+            "operator": "in",
+            "value": "R2, R3",
+            "logic": "AND"
+          },
+          {
+            "col": "CANAL",
+            "operator": "in",
+            "value": "Digital, Fisico",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "REGIAO",
+            "values": [
+              {
+                "value": "R2",
+                "qty": 2000,
+                "share": 0.5
+              },
+              {
+                "value": "R3",
+                "qty": 2000,
+                "share": 0.5
+              }
+            ]
+          },
+          {
+            "col": "CANAL",
+            "values": [
+              {
+                "value": "Digital",
+                "qty": 2000,
+                "share": 0.5
+              },
+              {
+                "value": "Fisico",
+                "qty": 2000,
+                "share": 0.5
+              }
+            ]
+          }
+        ],
+        "mix": [
+          {
+            "value": "Alto",
+            "qty": 3000,
+            "share": 0.75
+          },
+          {
+            "value": "Medio",
+            "qty": 1000,
+            "share": 0.25
+          }
+        ]
+      },
+      {
+        "id": "c2",
+        "size": 2,
+        "qty": 2000,
+        "share": 0.3333333333333333,
+        "decidedQty": 2000,
+        "approvalRate": 0.875,
+        "inadReal": 0.022435897435897436,
+        "inadInferida": 0.021153846153846155,
+        "centroid": {
+          "approvalRate": 0.875,
+          "inadReal": 0.022499999999999992,
+          "inadInferida": 0.02121710526315787
+        },
+        "conditions": [
+          {
+            "col": "REGIAO",
+            "operator": "in",
+            "value": "R1",
+            "logic": "AND"
+          },
+          {
+            "col": "CANAL",
+            "operator": "in",
+            "value": "Digital, Fisico",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "REGIAO",
+            "values": [
+              {
+                "value": "R1",
+                "qty": 2000,
+                "share": 1
+              }
+            ]
+          },
+          {
+            "col": "CANAL",
+            "values": [
+              {
+                "value": "Digital",
+                "qty": 1000,
+                "share": 0.5
+              },
+              {
+                "value": "Fisico",
+                "qty": 1000,
+                "share": 0.5
+              }
+            ]
+          }
+        ],
+        "mix": [
+          {
+            "value": "Baixo",
+            "qty": 2000,
+            "share": 1
+          }
+        ]
+      }
+    ],
+    "quality": {
+      "method": "kmeans",
+      "inertia": 60.6005084877982,
+      "totalSS": 18000,
+      "explainedVariance": 0.9966333050840112,
+      "iterations": 1,
+      "converged": true,
+      "silhouette": null
+    }
+  }
+}

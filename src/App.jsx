@@ -2739,6 +2739,120 @@ function SegmentQuadrant({ findings, focusedId, onPick }) {
   );
 }
 
+// ── Clusterização de Segmentos — apresentação (Execução Híbrida H8) ──────────────
+// Paleta fixa por posição (clusters já vêm ordenados por volume desc do motor).
+const CLUSTER_COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ef4444', '#0ea5e9', '#a855f7',
+  '#f97316', '#14b8a6', '#e11d48', '#84cc16', '#64748b', '#d946ef'];
+const clusterColor = (id) => CLUSTER_COLORS[(parseInt(String(id).slice(1), 10) - 1 + CLUSTER_COLORS.length * 4) % CLUSTER_COLORS.length];
+
+// Quadrante Volume × Risco (Recharts, DEC-AW-001) — cada cluster é um ponto (x=volume,
+// y=risco em %, tamanho=share, cor=cluster). Clique foca o card (mesmo padrão do
+// SegmentQuadrant). O risco exibido é a 1ª taxa disponível (inad. real → inferida).
+function ClusterQuadrant({ clusters, focusedId, onPick }) {
+  const data = clusters.map(c => ({
+    id: c.id,
+    qty: c.qty,
+    risk: (c.inadReal ?? c.inadInferida ?? 0) * 100,
+    share: (c.share ?? 0) * 100,
+  }));
+  return (
+    <div>
+      <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>
+        Quadrante Volume × Risco — clique num ponto para focar o card
+      </p>
+      <ResponsiveContainer width="100%" height={200}>
+        <ScatterChart margin={{top:8,right:16,bottom:8,left:8}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+          <XAxis type="number" dataKey="qty" name="Volume" tickFormatter={fmtQty} tick={{fontSize:10,fill:'#94a3b8'}}/>
+          <YAxis type="number" dataKey="risk" name="Inadimplência (%)" tickFormatter={(v)=>`${v.toFixed(1)}%`} tick={{fontSize:10,fill:'#94a3b8'}}/>
+          <ZAxis type="number" dataKey="share" range={[80, 420]} name="Share"/>
+          <Tooltip cursor={{strokeDasharray:'3 3'}} formatter={(v, name)=>name==='Volume'?fmtQty(v):`${Number(v).toFixed(2)}%`}/>
+          <Scatter data={data} onClick={(p)=>onPick(p?.payload?.id ?? p?.id)} cursor="pointer">
+            {data.map((d,i)=>(
+              <Cell key={i} fill={clusterColor(d.id)}
+                stroke={d.id===focusedId?'#1e293b':'none'} strokeWidth={d.id===focusedId?2:0}/>
+            ))}
+          </Scatter>
+        </ScatterChart>
+      </ResponsiveContainer>
+      <div style={{display:"flex",gap:12,marginTop:2,flexWrap:"wrap"}}>
+        {clusters.map(c=>(
+          <span key={c.id} style={{fontSize:10,color:"#64748b",display:"flex",alignItems:"center",gap:4}}>
+            <span style={{width:8,height:8,borderRadius:"50%",background:clusterColor(c.id),display:"inline-block"}}/>
+            Cluster {String(c.id).slice(1)} · {fmtQty(c.qty)}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Card de um cluster — dados crus do ClusterModel: volume/share, taxas, perfil por
+// dimensão (top valores por volume), mix de risco e centroide. Ação: 👁 Ver no Dashboard.
+function ClusterCard({ cluster, model, focused, onFocus, onViewDashboard }) {
+  const color = clusterColor(cluster.id);
+  const num = String(cluster.id).slice(1);
+  const MAX_VALS = 5;
+  return (
+    <div id={`clucard-${cluster.id}`} onClick={()=>onFocus(cluster.id)}
+      style={{padding:"12px 14px",borderRadius:12,background:"#fafafa",
+        border:`1.5px solid ${focused ? color : "#e2e8f0"}`,
+        boxShadow:focused?`0 0 0 3px ${color}22`:"none",cursor:"pointer"}}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:8}}>
+        <span style={{width:12,height:12,borderRadius:"50%",background:color,flexShrink:0,marginTop:3}}/>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#1e293b"}}>Cluster {num} <span style={{fontWeight:500,color:"#94a3b8"}}>· {cluster.size} grupo{cluster.size!==1?'s':''}</span></div>
+        </div>
+        <div style={{textAlign:"right",flexShrink:0}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#1e293b"}}>{fmtQty(cluster.qty)}</div>
+          <div style={{fontSize:10,color:"#94a3b8"}}>{cluster.share!=null?`${(cluster.share*100).toFixed(1)}% do total`:"—"}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:8,fontSize:11.5,color:"#475569"}}>
+        <span>Aprovação AS IS: <b style={{color:"#1e293b"}}>{fmtPct(cluster.approvalRate)}</b></span>
+        <span>Inad. Real: <b style={{color:cluster.inadReal!=null&&cluster.inadReal>0.05?"#dc2626":"#1e293b"}}>{fmtPct(cluster.inadReal)}</b></span>
+        <span>Inad. Inferida: <b style={{color:cluster.inadInferida!=null&&cluster.inadInferida>0.05?"#dc2626":"#1e293b"}}>{fmtPct(cluster.inadInferida)}</b></span>
+      </div>
+      <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5}}>
+        {cluster.dims.map(dm=>(
+          <div key={dm.col} style={{display:"flex",alignItems:"baseline",gap:6,flexWrap:"wrap"}}>
+            <span style={{fontSize:10,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.4,flexShrink:0}}>{dm.col}:</span>
+            {dm.values.slice(0,MAX_VALS).map(v=>(
+              <span key={v.value} title={`${fmtQty(v.qty)} propostas${v.share!=null?` · ${(v.share*100).toFixed(1)}% do cluster`:''}`}
+                style={{fontSize:10.5,padding:"1px 7px",borderRadius:10,background:"#fff",border:"1px solid #e2e8f0",color:"#475569"}}>
+                {v.value === '' ? '(vazio)' : v.value}{v.share!=null?` ${(v.share*100).toFixed(0)}%`:''}
+              </span>
+            ))}
+            {dm.values.length>MAX_VALS && (
+              <span style={{fontSize:10,color:"#94a3b8"}}>+{dm.values.length-MAX_VALS} valor{dm.values.length-MAX_VALS!==1?'es':''}</span>
+            )}
+          </div>
+        ))}
+        {cluster.mix && cluster.mix.length>0 && (
+          <div style={{display:"flex",alignItems:"baseline",gap:6,flexWrap:"wrap"}}>
+            <span style={{fontSize:10,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.4,flexShrink:0}}>Mix de risco:</span>
+            <span style={{fontSize:10.5,color:"#64748b"}}>
+              {cluster.mix.slice(0,4).map(mx=>`${mx.value === '' ? '(vazio)' : mx.value} ${(mx.share!=null?mx.share*100:0).toFixed(0)}%`).join(' · ')}
+              {cluster.mix.length>4?` · +${cluster.mix.length-4}`:''}
+            </span>
+          </div>
+        )}
+      </div>
+      <div style={{display:"flex",gap:6,marginTop:9,paddingTop:8,borderTop:"1px dashed #e2e8f0",alignItems:"center",flexWrap:"wrap"}}>
+        <span style={{fontSize:10,color:"#cbd5e1",flex:1}} title={`Centroide: ${model.features.map(f=>`${f.label} ${fmtPct(cluster.centroid[f.id])}`).join(' · ')}`}>
+          ⌖ {model.features.map(f=>`${f.label.replace(' (AS IS)','')} ${fmtPct(cluster.centroid[f.id])}`).join(' · ')}
+        </span>
+        <button onClick={(e)=>{e.stopPropagation();onViewDashboard(cluster);}}
+          title="Filtrar o Dashboard inteiro para a população deste cluster (um FilterCard por dimensão)"
+          style={{padding:"4px 10px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4338ca",
+            cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit",flexShrink:0}}>
+          👁 Ver no Dashboard
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Resolve os cenários Baseline (A) e Comparação (B) do KPI a partir dos ids salvos
 // no WidgetConfig, com fallback retrocompatível (DEC-AW-008): A = AS IS, B = 1º canvas.
 export function resolveKpiScenarios(scenarios, kpiA, kpiB) {
@@ -4528,6 +4642,11 @@ export default function App() {
   // patch nesta sessão, só descoberta + explicação + priorização + navegação).
   // null | {step:'form'|'loading'|'result', scope:null|{nodeId}, params, segmentModel?, varFilter?, focusedId?}
   const [segmentDiscoveryModal, setSegmentDiscoveryModal] = useState(null);
+  // Clusterização de Segmentos (Execução Híbrida H8) — modal EFÊMERO (padrão
+  // segmentDiscoveryModal: não persiste; ⚠️ regra do CLAUDE.md não se aplica).
+  // null | {step:'form'|'loading'|'result', csvId, dims:string[], k, autoK, method,
+  //         model?, focusedId?, deepRun?, fallbackNotice?}
+  const [clusterModal, setClusterModal] = useState(null);
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
@@ -4598,6 +4717,7 @@ export default function App() {
   const simplifyModalR = useRef(simplifyModal); useEffect(()=>{simplifyModalR.current=simplifyModal},[simplifyModal]);
   const docModalR = useRef(docModal); useEffect(()=>{docModalR.current=docModal},[docModal]);
   const segmentDiscoveryModalR = useRef(segmentDiscoveryModal); useEffect(()=>{segmentDiscoveryModalR.current=segmentDiscoveryModal},[segmentDiscoveryModal]);
+  const clusterModalR = useRef(clusterModal); useEffect(()=>{clusterModalR.current=clusterModal},[clusterModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
@@ -4835,6 +4955,13 @@ export default function App() {
       } else if (msgType === 'SEGMENT_COMBINED_RESULT') {
         const { combined } = e.data;
         setSegmentDiscoveryModal(m => (m ? { ...m, combined: { loading: false, result: combined } } : m));
+      } else if (msgType === 'CLUSTER_SEGMENTS_RESULT') {
+        // H8 — Clusterização (baseline browser direto OU fallback clampado do alias
+        // `cluster_segments`; o resultado do sidecar não passa por aqui — chega pelo
+        // await de runDeepClusterSegments).
+        const { clusterModel } = e.data;
+        setClusterModal(m => (m ? { ...m, step: 'result', model: clusterModel, deepRun: null,
+          focusedId: clusterModel?.clusters?.[0]?.id ?? null } : m));
       }
     };
     return () => { restoreWorkerPostMessage?.(); worker.terminate(); };
@@ -8994,6 +9121,120 @@ export default function App() {
     applySegmentMovesAsScenario(moves, `${(cur.selectedIds || []).length} exceções combinadas`);
   };
 
+  // ── Clusterização de Segmentos — Execução Híbrida H8 (DEC-HX-005/007, P4) ────────
+  // Botão SEMPRE habilitado (paridade total): dentro dos tetos do browser (≤3 dims,
+  // k ≤ 8, k-means) a task roda direto no worker (COMPUTE_CLUSTER_SEGMENTS, clampada);
+  // acima deles (mais dims/k, k automático por silhueta, hierárquico — extras sklearn)
+  // roteia `cluster_segments` pelo ComputeRouter: sidecar (motor_clusters.py, dataset
+  // por hash — DEC-HX-006) com fallback transparente ao worker CLAMPADO + aviso.
+  const CLU_BROWSER_DIMS = 3, CLU_BROWSER_K = 8;
+  const clusterAbortRef = useRef(null);
+
+  const openClusterModal = () => {
+    const store = csvStoreR.current || {};
+    // default = base de maior nº de linhas (mesmo critério do motor)
+    let csvId = null, best = -1;
+    for (const id of Object.keys(store)) {
+      const n = store[id]?.rowCount || 0;
+      if (n > best) { best = n; csvId = id; }
+    }
+    setClusterModal({
+      step: 'form', csvId, dims: [], k: 4, autoK: false, method: 'kmeans',
+      model: null, focusedId: null, deepRun: null, fallbackNotice: null,
+    });
+  };
+
+  const runClusterSegments = () => {
+    const cur = clusterModalR.current;
+    if (!cur || !cur.csvId || cur.dims.length === 0) return;
+    const params = {
+      csvId: cur.csvId, dims: cur.dims, k: cur.k,
+      ...(cur.autoK ? { autoK: true } : {}),
+      ...(cur.method !== 'kmeans' ? { method: cur.method } : {}),
+    };
+    const isDeep = cur.dims.length > CLU_BROWSER_DIMS || cur.k > CLU_BROWSER_K ||
+      cur.autoK || cur.method !== 'kmeans';
+    if (!isDeep || !computeRouterRef.current) {
+      setClusterModal(m => ({ ...m, step: 'loading', deepRun: null, fallbackNotice: null }));
+      workerRef.current?.postMessage({ type: 'COMPUTE_CLUSTER_SEGMENTS', params });
+      return;
+    }
+    runDeepClusterSegments(params);
+  };
+
+  const runDeepClusterSegments = async (params) => {
+    const ctrl = new AbortController();
+    clusterAbortRef.current = ctrl;
+    setClusterModal(m => (m ? {
+      ...m, step: 'loading', fallbackNotice: null,
+      deepRun: { progress: null, via: 'sidecar' },
+    } : m));
+    try {
+      // Dataset por hash (DEC-HX-006) — mesmos chunks do serializeCsvStore/M3 da H7;
+      // HEAD 200 pula o upload nas execuções seguintes.
+      const serialized = serializeCsvStore(csvStoreR.current);
+      const buildChunks = () => [JSON.stringify(serialized)];
+      const hash = hashChunks(buildChunks());
+      const res = await computeRouterRef.current.run('cluster_segments', { params }, {
+        dataset: { hash, buildChunks },
+        signal: ctrl.signal,
+        onProgress: (p) => setClusterModal(m => (
+          m && m.deepRun ? { ...m, deepRun: { ...m.deepRun, progress: p } } : m)),
+      });
+      if (ctrl.signal.aborted) return;
+      if (res.via === 'sidecar') {
+        // Diferente da Descoberta (H7), não há etapa de recomendações no worker: o
+        // ClusterModel do sidecar já é final — mesmo payload do CLUSTER_SEGMENTS_RESULT.
+        const clusterModel = res.result?.clusterModel ?? null;
+        setClusterModal(m => (m ? {
+          ...m, step: 'result', model: clusterModel, deepRun: null,
+          focusedId: clusterModel?.clusters?.[0]?.id ?? null,
+        } : m));
+      } else {
+        // Fallback: o alias `cluster_segments` do worker clampou os tetos e já
+        // respondeu CLUSTER_SEGMENTS_RESULT (o onmessage pôs o resultado no modal);
+        // aqui só declaramos a degradação (paridade total, P4 — nunca silenciosa).
+        const notice = fallbackNoticeText(res) ||
+          'Motor Python indisponível — a clusterização rodou no modo browser com os tetos declarados (até 3 dimensões, k ≤ 8, 2.000 pontos, k-means).';
+        setClusterModal(m => (m ? { ...m, fallbackNotice: notice } : m));
+      }
+    } catch {
+      if (!ctrl.signal.aborted) {
+        setClusterModal(m => (m ? { ...m, step: 'form', deepRun: null } : m));
+      }
+    }
+  };
+
+  const cancelDeepClusterSegments = () => {
+    clusterAbortRef.current?.abort();
+    setClusterModal(m => (m ? { ...m, step: 'form', deepRun: null } : m));
+  };
+
+  // Foca um card (quadrante → clique no ponto) e rola a lista até ele.
+  const focusCluster = (clusterId) => {
+    setClusterModal(m => (m ? { ...m, focusedId: clusterId } : m));
+    requestAnimationFrame(() => {
+      document.getElementById(`clucard-${clusterId}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  };
+
+  // 👁 Ver no Dashboard — converte o cluster em FilterCard[] de filtro de PÁGINA (um
+  // cartão por dimensão, modo BÁSICO com a lista exata de valores — lossless mesmo
+  // quando um valor contém vírgula, o que quebraria o operador `in` do modo avançado;
+  // as `conditions` LensRule do modelo continuam disponíveis para lens/relatórios).
+  const viewClusterInDashboard = (cluster) => {
+    const cards = (cluster?.dims || [])
+      .filter(d => (d.values || []).length > 0)
+      .map(d => ({
+        id: uid(), dim: d.col, mode: 'basic',
+        selected: d.values.map(v => v.value), rules: [],
+      }));
+    if (cards.length === 0) return;
+    setAnalyticsPageFilters(cards);
+    setActiveTab('analysis');
+    setClusterModal(null);
+  };
+
   // ── Documentação Automática — Copiloto Sessão 6 (DEC-IA-006) ─────────────────
   // "📄 Documentar política" abre o formulário de composição (toggle de domínios, cenários
   // a comparar, comparação estrutural); ao confirmar, `ir` é construído aqui (buildPolicyIR
@@ -10184,6 +10425,13 @@ export default function App() {
               onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#a5b4fc";}}
               onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#c7d2fe";}}>
               <span style={{fontSize:16}}>🔍</span> Descobrir Segmentos
+            </button>
+            <button onClick={openClusterModal}
+              title="Agrupar segmentos parecidos por comportamento (aprovação AS IS, inadimplência) via k-means determinístico — sempre disponível; o Motor Python remove os tetos e libera k automático/hierárquico"
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #ddd6fe",background:"#f5f3ff",color:"#6d28d9",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#ede9fe";e.currentTarget.style.borderColor="#c4b5fd";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#f5f3ff";e.currentTarget.style.borderColor="#ddd6fe";}}>
+              <span style={{fontSize:16}}>🧩</span> Clusterizar Segmentos
             </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
@@ -14403,6 +14651,224 @@ export default function App() {
                     </div>
                   );
                 })()}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ CLUSTER MODAL — Clusterização de Segmentos (Execução Híbrida H8) ═══════════════ */}
+      {clusterModal&&(()=>{
+        const { step, csvId, dims, k, autoK, method, model, focusedId, deepRun, fallbackNotice } = clusterModal;
+        const upd = (patch) => setClusterModal(m => ({ ...m, ...patch }));
+        // H8 — tetos declarados (paridade total, P4): dims > 3 / k > 8 e os extras
+        // sklearn (k automático por silhueta, hierárquico) só quando o sidecar está
+        // pareado E declara a task `cluster_segments` em capabilities (tier full com o
+        // GATE dourado embarcado); sklearn é declarado POR PACOTE (DEC-HX-004).
+        const sidecarTasks = computeSidecarStatus?.capabilities?.tasks;
+        const deepOk = computeSidecar.enabled && !!computeSidecarStatus?.available &&
+          Array.isArray(sidecarTasks) && sidecarTasks.includes('cluster_segments');
+        const skVer = computeSidecarStatus?.capabilities?.packages?.sklearn;
+        const sklearnOk = deepOk && !!skVer && skVer !== 'loading';
+        const csv = csvId ? csvStore[csvId] : null;
+        const availableDims = csv
+          ? csv.headers.filter(h => (csv.columnTypes||{})[h] === 'decision')
+          : [];
+        const dimsCapped = !deepOk && dims.length >= CLU_BROWSER_DIMS;
+        const toggleDim = (col) => upd({
+          dims: dims.includes(col) ? dims.filter(d => d !== col) : [...dims, col],
+        });
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth: step==='result' ? 940 : 520,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#f5f3ff 0%,#ede9fe 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#ddd6fe",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>🧩</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Clusterização de Segmentos</h2>
+                    <p style={{fontSize:11,color:"#6d28d9"}}>
+                      Agrupa segmentos parecidos por comportamento (k-means determinístico)
+                    </p>
+                  </div>
+                </div>
+                <button onClick={()=>{ clusterAbortRef.current?.abort(); setClusterModal(null); }}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
+                {step==='result' && fallbackNotice && (
+                  <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",borderRadius:8,marginBottom:12,
+                    background:"#f8fafc",border:"1px solid #e2e8f0",fontSize:10.5,color:"#94a3b8",lineHeight:1.5}}>
+                    <span>🌐</span><span>{fallbackNotice}</span>
+                  </div>
+                )}
+
+                {step==='form' && (!csvId ? (
+                  <div style={{padding:"24px 0",textAlign:"center",color:"#94a3b8",fontSize:12.5,lineHeight:1.6}}>
+                    Nenhuma base carregada — importe um CSV para clusterizar segmentos.
+                  </div>
+                ) : (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <p style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
+                      A base é agregada pelas dimensões escolhidas (cada combinação de valores vira um
+                      ponto, ponderado pelo volume) e os pontos são agrupados por perfil de
+                      comportamento — aprovação AS IS, inad. real e inad. inferida. Mesmo dataset e
+                      parâmetros ⇒ mesmo resultado, no navegador ou no Motor Python.
+                    </p>
+                    {Object.keys(csvStore).length>1 && (
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Base de dados
+                        <select value={csvId} onChange={e=>upd({csvId:e.target.value,dims:[]})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          {Object.entries(csvStore).map(([id,c])=>(<option key={id} value={id}>{c.name||id}</option>))}
+                        </select>
+                      </label>
+                    )}
+                    <div>
+                      <div style={{fontSize:11.5,color:"#475569",fontWeight:600,marginBottom:6}}>
+                        Dimensões (colunas Filtro) — {dims.length} selecionada{dims.length!==1?'s':''}
+                        {!deepOk && <span style={{fontWeight:400,color:"#94a3b8"}}> · máx. 3 sem o Motor Python</span>}
+                      </div>
+                      {availableDims.length===0 ? (
+                        <div style={{fontSize:11.5,color:"#94a3b8"}}>Esta base não tem colunas classificadas como Filtro.</div>
+                      ) : (
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                          {availableDims.map(col=>{
+                            const on = dims.includes(col);
+                            const blocked = !on && dimsCapped;
+                            return (
+                              <button key={col} onClick={()=>!blocked&&toggleDim(col)} disabled={blocked}
+                                title={blocked?"Teto do navegador: 3 dimensões — ligue o Motor Python para mais":col}
+                                style={{padding:"4px 11px",borderRadius:20,border:`1.5px solid ${on?'#7c3aed':'#e2e8f0'}`,
+                                  background:on?'#f5f3ff':'#fff',color:blocked?'#cbd5e1':(on?'#6d28d9':'#64748b'),
+                                  cursor:blocked?'not-allowed':'pointer',fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                                {on?'✓ ':''}{col}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Nº de clusters (k){autoK?' — máximo p/ busca':''}
+                        <select value={k} onChange={e=>upd({k:Number(e.target.value)})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          {[2,3,4,5,6,7,8].map(v=>(<option key={v} value={v}>{v}</option>))}
+                          {[10,12,16].map(v=>(<option key={v} value={v} disabled={!deepOk}>{v}{deepOk?' · 🐍':' — requer Motor Python'}</option>))}
+                        </select>
+                      </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Método
+                        <select value={method} onChange={e=>upd({method:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value="kmeans">k-means (padrão, determinístico)</option>
+                          <option value="hierarchical" disabled={!sklearnOk}>Hierárquico (ward){sklearnOk?' · 🐍':' — requer Motor Python + sklearn'}</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11.5,color:sklearnOk?"#475569":"#cbd5e1",fontWeight:600,cursor:sklearnOk?"pointer":"not-allowed"}}>
+                      <input type="checkbox" checked={autoK} disabled={!sklearnOk}
+                        onChange={e=>upd({autoK:e.target.checked})}/>
+                      k automático pela silhueta (testa 2…k e escolhe o melhor){sklearnOk?' · 🐍':' — requer Motor Python + sklearn'}
+                    </label>
+                    <ComputeCeilingNotice
+                      ceilingText="Sem o Motor Python, a clusterização respeita os tetos do navegador: até 3 dimensões, k ≤ 8, 2.000 pontos agregados e só k-means (paridade total — nada deixa de funcionar, só os tetos)."
+                      unlockedText={`Motor Python detectado (tier ${computeSidecarStatus.tier || '—'}) — dimensões/k ampliados liberados${sklearnOk ? ', com k automático (silhueta) e hierárquico via sklearn' : ''}; a clusterização roda vetorizada no sidecar.`}
+                      status={deepOk ? computeSidecarStatus : { available: false }}
+                      onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                    />
+                    <button onClick={runClusterSegments} disabled={dims.length===0}
+                      style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
+                        background:dims.length===0?"#e2e8f0":"#7c3aed",color:dims.length===0?"#94a3b8":"#fff",
+                        cursor:dims.length===0?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                      🧩 Clusterizar
+                    </button>
+                  </div>
+                ))}
+
+                {step==='loading' && (deepRun ? (
+                  <ComputeJobProgress
+                    label="Clusterização no Motor Python…"
+                    progress={deepRun.progress}
+                    via={deepRun.via}
+                    onCancel={cancelDeepClusterSegments}
+                  />
+                ) : (
+                  <div style={{padding:"40px 0",textAlign:"center",color:"#6d28d9",fontSize:13}}>
+                    Agregando a base e agrupando segmentos…
+                  </div>
+                ))}
+
+                {step==='result' && model && (model.error ? (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <div style={{padding:"14px 16px",borderRadius:10,background:"#fffbeb",border:"1px solid #fde68a",
+                      fontSize:12.5,color:"#92400e",lineHeight:1.6}}>
+                      {model.error==='no_rows' && 'A base selecionada não tem linhas para agrupar.'}
+                      {model.error==='no_dims' && 'Nenhuma dimensão válida — escolha ao menos uma coluna Filtro.'}
+                      {model.error==='no_features' && 'A base não tem métricas suficientes (inadimplência/AS IS) para montar o perfil dos grupos.'}
+                    </div>
+                    <button onClick={()=>setClusterModal(m=>({...m,step:'form'}))}
+                      style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                        color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",alignSelf:"flex-start"}}>
+                      ← Ajustar parâmetros
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                      <div style={{fontSize:12,color:"#64748b"}}>
+                        <b>{model.clusters.length}</b> cluster{model.clusters.length!==1?'s':''} sobre <b>{model.population.points}</b> segmento{model.population.points!==1?'s':''} agregados
+                        {' '}· população: <b>{fmtQty(model.population.qty)}</b>
+                        {model.quality?.explainedVariance!=null && <> · variância explicada: <b>{(model.quality.explainedVariance*100).toFixed(1)}%</b></>}
+                        {model.quality?.silhouette!=null && <> · silhueta: <b>{model.quality.silhouette.toFixed(3)}</b></>}
+                        {model.quality?.method==='hierarchical' && ' · hierárquico'}
+                      </div>
+                      <button onClick={()=>setClusterModal(m=>({...m,step:'form'}))}
+                        style={{padding:"6px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                          color:"#475569",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                        ← Ajustar parâmetros
+                      </button>
+                    </div>
+
+                    {model.ceilings?.pointsTruncated && (
+                      <div style={{display:"flex",gap:6,padding:"7px 10px",borderRadius:8,background:"#fdf4ff",
+                        border:"1px solid #f0abfc",fontSize:11,color:"#86198f",lineHeight:1.5}}>
+                        <span>✂</span>
+                        <span>Teto de pontos do navegador: {model.ceilings.keptGroups} de {model.ceilings.totalGroups} grupos
+                          mantidos ({model.ceilings.keptQtyShare!=null?`${(model.ceilings.keptQtyShare*100).toFixed(1)}% do volume`:'—'}) —
+                          os menores ficaram fora do agrupamento. O Motor Python processa a íntegra.</span>
+                      </div>
+                    )}
+
+                    {model.clusters.length>1 && (
+                      <ClusterQuadrant clusters={model.clusters} focusedId={focusedId} onPick={focusCluster}/>
+                    )}
+
+                    <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:360,overflowY:"auto",paddingRight:2}}>
+                      {model.clusters.map(c=>(
+                        <ClusterCard key={c.id} cluster={c} model={model}
+                          focused={focusedId===c.id} onFocus={focusCluster}
+                          onViewDashboard={viewClusterInDashboard}/>
+                      ))}
+                    </div>
+
+                    <div style={{fontSize:10.5,color:"#94a3b8",padding:"8px 10px",borderRadius:8,background:"#f8fafc",border:"1px solid #f1f5f9"}}>
+                      🔬 k-means {model.quality?.converged?'convergiu':'parou'} em {model.quality?.iterations} iteraç{model.quality?.iterations!==1?'ões':'ão'}
+                      {' '}· features: {model.features.map(f=>f.label).join(', ')}
+                      {' '}· seed {model.params?.seed} (determinístico — mesmo resultado em qualquer executor)
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
