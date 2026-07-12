@@ -4,9 +4,12 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
-import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, retypeColumn, codesCtorForDict, estimateColumnarRamBytes, estimateCsvStoreRamBytes, estimateCsvStoreRowCount, formatRamBytes, RAM_COMFORT_BYTES, ROW_COMFORT_COUNT } from "./columnar.js";
+import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, deriveClusterColumn, retypeColumn, codesCtorForDict, estimateColumnarRamBytes, estimateCsvStoreRamBytes, estimateCsvStoreRowCount, formatRamBytes, RAM_COMFORT_BYTES, ROW_COMFORT_COUNT } from "./columnar.js";
 import { applyGoalSeekMoves } from "./goalSeek.js";
 import { applySimplifyCandidates } from "./policySimplify.js";
+// Variável de Cluster (interpretação da Clusterização H8 — vira coluna Filtro derivada,
+// editável, arrastável ao canvas). Módulo puro compartilhado (materialização em columnar.js).
+import { suggestClusterVarName, suggestClusterLabels, buildClusterDefFromModel, isClusterVar, renameClusterGroup, toggleValueInGroup, clusterMembershipTable, renameClusterColumnRefs, renameClusterLabelRefs } from "./clusterVar.js";
 // Execução Híbrida H4/H6 — ComputeRouter (fronteira única worker/sidecar, DEC-HX-002)
 // + funções puras de UX do motor (badge, degradação declarada, aviso de fallback).
 import { createComputeRouter, createWorkerProvider, createSidecarProvider, describeComputeBadge, describeCapabilitiesDetail, ceilingNotice, fallbackNoticeText, hashChunks } from "./computeRouter.js";
@@ -4447,6 +4450,25 @@ export function renderDocMarkdown(docModel) {
     ));
   }
 
+  // Regras das Variáveis de Cluster (interpretação da Clusterização) — os grupos e as
+  // faixas de valor por dimensão que definem cada cluster. Valores concretos só quando
+  // includeDomains (o worker já redige em describeClusterRules).
+  const clusterVars = (glossary || []).filter(g => g.cluster);
+  if (clusterVars.length) {
+    p('');
+    p('### Regras dos Clusters');
+    p('');
+    for (const g of clusterVars) {
+      p(`**${g.col}** — agrupa por ${g.cluster.dims.join(', ') || '—'} (${g.cluster.method || 'k-means'}); fora dos grupos → _${g.cluster.unmatchedLabel}_.`);
+      p('');
+      for (const grp of g.cluster.groups) {
+        const dimsTxt = grp.dims.map(d => d.values ? `${d.col}: ${d.values.join(', ')}` : `${d.col}: ${d.valueCount} valor(es)`).join(' · ');
+        p(`- **${grp.label}** — ${dimsTxt || '—'}`);
+      }
+      p('');
+    }
+  }
+
   return L.join('\n');
 }
 
@@ -4556,6 +4578,19 @@ export function renderDocHTML(docModel) {
     ]),
   ));
 
+  const clusterVarsH = (glossary || []).filter(g => g.cluster);
+  if (clusterVarsH.length) {
+    h(3, 'Regras dos Clusters');
+    for (const g of clusterVarsH) {
+      para(`**${g.col}** — agrupa por ${escHtml(g.cluster.dims.join(', ') || '—')} (${escHtml(g.cluster.method || 'k-means')}); fora dos grupos → _${escHtml(g.cluster.unmatchedLabel)}_.`);
+      const items = g.cluster.groups.map(grp => {
+        const dimsTxt = grp.dims.map(d => d.values ? `${d.col}: ${escHtml(d.values.join(', '))}` : `${d.col}: ${d.valueCount} valor(es)`).join(' · ');
+        return `<li><strong>${escHtml(grp.label)}</strong> — ${dimsTxt || '—'}</li>`;
+      }).join('');
+      S.push(`<ul>${items}</ul>`);
+    }
+  }
+
   S.push('</body></html>');
   return S.join('\n');
 }
@@ -4663,6 +4698,9 @@ export default function App() {
   // null | {step:'form'|'loading'|'result', csvId, dims:string[], k, autoK, method,
   //         model?, focusedId?, deepRun?, fallbackNotice?}
   const [clusterModal, setClusterModal] = useState(null);
+  // Editor de Variável de Cluster (aberto pelo ✏️ no chip do painel) — efêmero.
+  // null | {csvId, col, draft:ClusterDef, baseValuesByDim:{[dim]:string[]}, notice?, confirmDelete?}
+  const [clusterVarModal, setClusterVarModal] = useState(null);
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
@@ -4734,6 +4772,7 @@ export default function App() {
   const docModalR = useRef(docModal); useEffect(()=>{docModalR.current=docModal},[docModal]);
   const segmentDiscoveryModalR = useRef(segmentDiscoveryModal); useEffect(()=>{segmentDiscoveryModalR.current=segmentDiscoveryModal},[segmentDiscoveryModal]);
   const clusterModalR = useRef(clusterModal); useEffect(()=>{clusterModalR.current=clusterModal},[clusterModal]);
+  const clusterVarModalR = useRef(clusterVarModal); useEffect(()=>{clusterVarModalR.current=clusterVarModal},[clusterVarModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
@@ -6657,7 +6696,7 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.5",
+      schemaVersion: "2.6",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
@@ -9268,6 +9307,178 @@ export default function App() {
     setClusterModal(null);
   };
 
+  // ── Variável de Cluster — transformar o resultado numa coluna Filtro arrastável ──
+  // Aplica um transform (shapes,conns)=>{shapes,conns} a TODAS as abas + à working copy
+  // ativa (rename de coluna/rótulo reflete em todo canvas). O transform deve ser PURO
+  // (é chamado uma vez por aba). Ver renameClusterColumnRefs/renameClusterLabelRefs.
+  const applyRefTransformAllCanvases = (transform) => {
+    const activeId = activeCanvasIdR.current;
+    setCanvases(prev => {
+      const next = {};
+      for (const [id, cv] of Object.entries(prev)) {
+        const src = id === activeId
+          ? { shapes: shapesR.current, conns: connsR.current }
+          : { shapes: cv.shapes || [], conns: cv.conns || [] };
+        const t = transform(src.shapes, src.conns);
+        next[id] = { ...cv, shapes: t.shapes, conns: t.conns };
+      }
+      return next;
+    });
+    const t = transform(shapesR.current, connsR.current);
+    setShapes(t.shapes); setConns(t.conns);
+  };
+
+  // Passo "Salvar como variável" — pré-preenche nome da variável e rótulos dos clusters
+  // com sugestões editáveis (comportamento: aprovação/risco), único vs. headers da base.
+  const openClusterSaveStep = () => {
+    const cur = clusterModalR.current;
+    if (!cur || !cur.model || cur.model.error || !cur.csvId) return;
+    const headers = csvStoreR.current[cur.csvId]?.headers || [];
+    setClusterModal(m => ({
+      ...m, step: 'save',
+      save: {
+        varName: suggestClusterVarName(cur.model, headers),
+        labels: suggestClusterLabels(cur.model),
+        unmatched: 'Fora dos clusters',
+        error: null,
+      },
+    }));
+  };
+
+  // Materializa a variável: valida nomes, deriva a coluna dict (deriveClusterColumn),
+  // e a insere no csvStore (headers/columns/columnTypes/varTypes) junto da DEFINIÇÃO
+  // editável (clusterDefs[col]). A coluna passa a aparecer como chip Filtro (decisionVars),
+  // arrastável ao canvas; a mudança de csvStore re-semeia o worker e re-simula.
+  const saveClusterVariable = () => {
+    const cur = clusterModalR.current;
+    if (!cur || !cur.model || !cur.csvId || !cur.save) return;
+    const { model, csvId, save } = cur;
+    const csv = csvStoreR.current[csvId];
+    if (!csv) return;
+    const varName = (save.varName || '').trim();
+    const labels = (save.labels || []).map(l => (l || '').trim());
+    const unmatched = (save.unmatched || '').trim() || 'Fora dos clusters';
+    if (!varName) return setClusterModal(m => ({ ...m, save: { ...m.save, error: 'Dê um nome à variável.' } }));
+    if ((csv.headers || []).includes(varName))
+      return setClusterModal(m => ({ ...m, save: { ...m.save, error: `Já existe uma coluna "${varName}" nesta base.` } }));
+    if (labels.some(l => !l))
+      return setClusterModal(m => ({ ...m, save: { ...m.save, error: 'Todo cluster precisa de um nome.' } }));
+    if (new Set(labels).size !== labels.length)
+      return setClusterModal(m => ({ ...m, save: { ...m.save, error: 'Os nomes dos clusters devem ser distintos.' } }));
+
+    const def = buildClusterDefFromModel(model, { col: varName, csvId, labels, unmatchedLabel: unmatched, genId: uid });
+    const colData = deriveClusterColumn(csv, def);
+    setCsvStore(prev => {
+      const c = prev[csvId]; if (!c) return prev;
+      return {
+        ...prev,
+        [csvId]: {
+          ...c,
+          headers: [...c.headers, varName],
+          columns: { ...c.columns, [varName]: colData },
+          columnTypes: { ...(c.columnTypes || {}), [varName]: 'decision' },
+          varTypes: { ...(c.varTypes || {}), [varName]: 'categorical' },
+          clusterDefs: { ...(c.clusterDefs || {}), [varName]: def },
+        },
+      };
+    });
+    setClusterModal(m => ({ ...m, step: 'saved', savedCol: varName, savedCsvId: csvId }));
+  };
+
+  // ── Editor da Variável de Cluster (✏️ no chip do painel) ─────────────────────────
+  const openClusterVarEdit = (csvId, col) => {
+    const csv = csvStoreR.current[csvId];
+    const def = csv?.clusterDefs?.[col];
+    if (!def) return;
+    // Valores distintos por dimensão (da base) — garante que valores não atribuídos a
+    // nenhum cluster apareçam na matriz de edição.
+    const baseValuesByDim = {};
+    for (const dc of (def.dims || [])) {
+      const ci = csv.headers.indexOf(dc);
+      baseValuesByDim[dc] = ci >= 0 ? distinctColValues(csv, ci).map(v => (v ?? '').toString().trim()) : [];
+    }
+    setClusterVarModal({ csvId, col, draft: JSON.parse(JSON.stringify(def)), baseValuesByDim, error: null, confirmDelete: false });
+  };
+
+  // Salva a edição: re-materializa a coluna, renomeia a coluna e/ou os rótulos e
+  // propaga as referências (losango/porta/Cineminha/lens) por todas as abas.
+  const saveClusterVarEdit = () => {
+    const cur = clusterVarModalR.current;
+    if (!cur) return;
+    const { csvId, col: oldCol, draft } = cur;
+    const csv = csvStoreR.current[csvId];
+    if (!csv) return;
+    const origDef = csv.clusterDefs?.[oldCol];
+    const newCol = (draft.col || '').trim();
+    if (!newCol) return setClusterVarModal(m => ({ ...m, error: 'Dê um nome à variável.' }));
+    if (newCol !== oldCol && (csv.headers || []).includes(newCol))
+      return setClusterVarModal(m => ({ ...m, error: `Já existe uma coluna "${newCol}" nesta base.` }));
+    const labels = (draft.groups || []).map(g => (g.label || '').trim());
+    if (labels.some(l => !l)) return setClusterVarModal(m => ({ ...m, error: 'Todo cluster precisa de um nome.' }));
+    if (new Set(labels).size !== labels.length)
+      return setClusterVarModal(m => ({ ...m, error: 'Os nomes dos clusters devem ser distintos.' }));
+
+    // Def final (com col e labels normalizados).
+    const finalDef = {
+      ...draft, col: newCol, csvId,
+      groups: (draft.groups || []).map((g, i) => ({ ...g, label: labels[i] })),
+    };
+    const colData = deriveClusterColumn(csv, finalDef);
+
+    // Mapa de rótulos renomeados (por id de grupo) para propagar às portas/domínios.
+    const labelMap = {};
+    for (const g of (origDef?.groups || [])) {
+      const ng = finalDef.groups.find(x => x.id === g.id);
+      if (ng && ng.label !== g.label) labelMap[g.label] = ng.label;
+    }
+
+    // csvStore: (re)materializa + rename de chave se o nome mudou.
+    setCsvStore(prev => {
+      const c = prev[csvId]; if (!c) return prev;
+      const headers = c.headers.map(h => (h === oldCol ? newCol : h));
+      const columns = { ...c.columns }; if (newCol !== oldCol) delete columns[oldCol]; columns[newCol] = colData;
+      const columnTypes = { ...(c.columnTypes || {}) };
+      const varTypes = { ...(c.varTypes || {}) };
+      const clusterDefs = { ...(c.clusterDefs || {}) };
+      if (newCol !== oldCol) {
+        columnTypes[newCol] = columnTypes[oldCol] || 'decision'; delete columnTypes[oldCol];
+        varTypes[newCol] = varTypes[oldCol] || 'categorical'; delete varTypes[oldCol];
+        delete clusterDefs[oldCol];
+      }
+      clusterDefs[newCol] = finalDef;
+      return { ...prev, [csvId]: { ...c, headers, columns, columnTypes, varTypes, clusterDefs } };
+    });
+
+    // Referências no canvas (todas as abas): rename de coluna e depois de rótulos.
+    if (newCol !== oldCol || Object.keys(labelMap).length > 0) {
+      pushHistory();
+      applyRefTransformAllCanvases((shapes, conns) => {
+        let s = shapes, cn = conns;
+        if (newCol !== oldCol) { const t = renameClusterColumnRefs(s, cn, csvId, oldCol, newCol); s = t.shapes; cn = t.conns; }
+        if (Object.keys(labelMap).length > 0) { const t = renameClusterLabelRefs(s, cn, csvId, newCol, labelMap); s = t.shapes; cn = t.conns; }
+        return { shapes: s, conns: cn };
+      });
+    }
+    setClusterVarModal(null);
+  };
+
+  // Remove a variável de cluster (coluna + definição). Nós que a referenciam ficam sem
+  // domínio (mesma degradação de variável ausente já tratada pelo app) — avisamos no modal.
+  const deleteClusterVariable = () => {
+    const cur = clusterVarModalR.current;
+    if (!cur) return;
+    const { csvId, col } = cur;
+    setCsvStore(prev => {
+      const c = prev[csvId]; if (!c) return prev;
+      const columns = { ...c.columns }; delete columns[col];
+      const columnTypes = { ...(c.columnTypes || {}) }; delete columnTypes[col];
+      const varTypes = { ...(c.varTypes || {}) }; delete varTypes[col];
+      const clusterDefs = { ...(c.clusterDefs || {}) }; delete clusterDefs[col];
+      return { ...prev, [csvId]: { ...c, headers: c.headers.filter(h => h !== col), columns, columnTypes, varTypes, clusterDefs } };
+    });
+    setClusterVarModal(null);
+  };
+
   // ── Documentação Automática — Copiloto Sessão 6 (DEC-IA-006) ─────────────────
   // "📄 Documentar política" abre o formulário de composição (toggle de domínios, cenários
   // a comparar, comparação estrutural); ao confirmar, `ir` é construído aqui (buildPolicyIR
@@ -10540,21 +10751,39 @@ export default function App() {
               const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase();
               const q = norm(varSearch);
               const filtered = q ? decisionVars.filter(({col})=>norm(col).includes(q)) : decisionVars;
-              return filtered.length>0 ? filtered.map(({col,csvId})=>(
+              return filtered.length>0 ? filtered.map(({col,csvId})=>{
+                const isClu = isClusterVar(csvStore, csvId, col);
+                // Chip de cluster: tom roxo + 🧩 + ✏️ (editar regras/renomear); chip normal: âmbar.
+                const base = isClu
+                  ? {border:"#ddd6fe",bg:"#f5f3ff",hoverBg:"#ede9fe",hoverBorder:"#c4b5fd",color:"#6d28d9",icon:"🧩"}
+                  : {border:"#fde68a",bg:"#fef9c3",hoverBg:"#fef3c7",hoverBorder:"#f59e0b",color:"#92400e",icon:"◇"};
+                return (
                 <div key={`${csvId}-${col}`}
                   onMouseDown={(e)=>startPanelDrag(e,col,csvId)}
                   onTouchStart={(e)=>startPanelDrag(e,col,csvId)}
                   style={{display:"flex",alignItems:"center",gap:6,padding:"7px 10px",borderRadius:8,
-                    border:"1.5px solid #fde68a",background:"#fef9c3",marginBottom:4,
-                    cursor:"grab",userSelect:"none",fontSize:12,fontWeight:500,color:"#92400e",transition:"all .12s",
+                    border:`1.5px solid ${base.border}`,background:base.bg,marginBottom:4,
+                    cursor:"grab",userSelect:"none",fontSize:12,fontWeight:500,color:base.color,transition:"all .12s",
                     touchAction:"none"}}
-                  onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
-                  onMouseLeave={e=>{e.currentTarget.style.background="#fef9c3";e.currentTarget.style.borderColor="#fde68a";}}>
-                  <span>◇</span>
-                  <span style={{flex:1}}>{col}</span>
+                  onMouseEnter={e=>{e.currentTarget.style.background=base.hoverBg;e.currentTarget.style.borderColor=base.hoverBorder;}}
+                  onMouseLeave={e=>{e.currentTarget.style.background=base.bg;e.currentTarget.style.borderColor=base.border;}}>
+                  <span>{base.icon}</span>
+                  <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{col}</span>
+                  {isClu && (
+                    <button
+                      title="Editar variável de cluster (renomear, mover públicos entre clusters)"
+                      onMouseDown={(e)=>{e.stopPropagation();}}
+                      onTouchStart={(e)=>{e.stopPropagation();}}
+                      onClick={(e)=>{e.stopPropagation();openClusterVarEdit(csvId,col);}}
+                      style={{width:20,height:20,borderRadius:6,border:"1px solid #ddd6fe",background:"#fff",color:"#7c3aed",
+                        cursor:"pointer",fontSize:11,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,padding:0,lineHeight:1}}>
+                      ✏️
+                    </button>
+                  )}
                   <span style={{fontSize:14,opacity:.5}}>⠿</span>
                 </div>
-              )) : (
+                );
+              }) : (
                 <div style={{padding:"8px 4px",fontSize:11.5,color:"#94a3b8",textAlign:"center"}}>
                   Nenhuma variável encontrada
                 </div>
@@ -14922,6 +15151,20 @@ export default function App() {
                       </button>
                     </div>
 
+                    {/* CTA — transformar o resultado numa variável de fluxo arrastável */}
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",
+                      padding:"10px 14px",borderRadius:10,background:"#f5f3ff",border:"1px solid #ddd6fe"}}>
+                      <div style={{fontSize:11.5,color:"#5b21b6",lineHeight:1.5,flex:1,minWidth:220}}>
+                        <b>Usar no fluxo?</b> Salve estes clusters como uma variável Filtro — vira um chip
+                        arrastável ao canvas para abrir a política por cluster (e você renomeia/edita depois).
+                      </div>
+                      <button onClick={openClusterSaveStep}
+                        style={{padding:"9px 16px",borderRadius:9,border:"none",background:"#7c3aed",color:"#fff",
+                          cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit",flexShrink:0}}>
+                        ➕ Salvar como variável
+                      </button>
+                    </div>
+
                     {model.ceilings?.pointsTruncated && (
                       <div style={{display:"flex",gap:6,padding:"7px 10px",borderRadius:8,background:"#fdf4ff",
                         border:"1px solid #f0abfc",fontSize:11,color:"#86198f",lineHeight:1.5}}>
@@ -14951,6 +15194,229 @@ export default function App() {
                     </div>
                   </div>
                 ))}
+
+                {/* ── Passo "Salvar como variável" — nomes editáveis + sugestões ── */}
+                {step==='save' && model && clusterModal.save && (()=>{
+                  const save = clusterModal.save;
+                  const updSave = (patch)=>setClusterModal(m=>({...m,save:{...m.save,...patch,error:null}}));
+                  const setLabel = (i,val)=>updSave({labels:save.labels.map((l,j)=>j===i?val:l)});
+                  return (
+                    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                      <div style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
+                        A variável vira uma coluna Filtro na base <b>{csvStore[csvId]?.name||csvId}</b> com um valor por
+                        cluster. As regras (faixas de valor por dimensão) vêm do agrupamento; você pode
+                        renomear tudo agora e editar/mover públicos depois pelo ✏️ no painel.
+                      </div>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Nome da variável
+                        <input value={save.varName} onChange={e=>updSave({varName:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"8px 10px",borderRadius:8,border:"1.5px solid #ddd6fe",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </label>
+                      <div>
+                        <div style={{fontSize:11.5,color:"#475569",fontWeight:600,marginBottom:6}}>Nome de cada cluster</div>
+                        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                          {model.clusters.map((c,i)=>(
+                            <div key={c.id} style={{display:"flex",alignItems:"center",gap:8}}>
+                              <span style={{width:12,height:12,borderRadius:"50%",background:clusterColor(c.id),flexShrink:0}}/>
+                              <input value={save.labels[i]??''} onChange={e=>setLabel(i,e.target.value)}
+                                style={{flex:1,padding:"6px 9px",borderRadius:7,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                              <span style={{fontSize:10.5,color:"#94a3b8",flexShrink:0,minWidth:110,textAlign:"right"}}
+                                title="Perfil deste cluster">
+                                {fmtQty(c.qty)} · {fmtPct(c.approvalRate)} apr · {fmtPct(c.inadInferida??c.inadReal)} inad
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Rótulo para registros fora de todos os clusters
+                        <input value={save.unmatched} onChange={e=>updSave({unmatched:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 9px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </label>
+                      {model.clusters.length>1 && (model.params?.dims?.length||0)>1 && (
+                        <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5,padding:"6px 10px",borderRadius:8,background:"#f8fafc",border:"1px solid #f1f5f9"}}>
+                          ℹ Com 2+ dimensões as regras são faixas de valor por dimensão (aproximação editável);
+                          para 1 dimensão reproduzem o agrupamento exatamente.
+                        </div>
+                      )}
+                      {save.error && (
+                        <div style={{fontSize:11.5,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"7px 10px"}}>{save.error}</div>
+                      )}
+                      <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+                        <button onClick={()=>setClusterModal(m=>({...m,step:'result',save:null}))}
+                          style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                          ← Voltar
+                        </button>
+                        <button onClick={saveClusterVariable}
+                          style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#7c3aed",color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                          ✓ Criar variável
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ── Confirmação de criação ── */}
+                {step==='saved' && (
+                  <div style={{display:"flex",flexDirection:"column",gap:14,padding:"8px 0"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,padding:"14px 16px",borderRadius:12,background:"#f0fdf4",border:"1px solid #bbf7d0"}}>
+                      <span style={{fontSize:24}}>✅</span>
+                      <div style={{fontSize:12.5,color:"#166534",lineHeight:1.5}}>
+                        Variável <b>{clusterModal.savedCol}</b> criada! Ela já aparece em <b>Variáveis de Decisão</b> no
+                        painel — arraste ao canvas para abrir a política por cluster. Edite ou renomeie a qualquer
+                        momento pelo ✏️ no chip.
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                      <button onClick={()=>{const cid=clusterModal.savedCsvId,cc=clusterModal.savedCol;setClusterModal(null);openClusterVarEdit(cid,cc);}}
+                        style={{padding:"9px 16px",borderRadius:9,border:"1px solid #ddd6fe",background:"#f5f3ff",color:"#6d28d9",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                        ✏️ Editar regras
+                      </button>
+                      <button onClick={()=>setClusterModal(null)}
+                        style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#7c3aed",color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                        Concluir
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ EDITOR DE VARIÁVEL DE CLUSTER (renomear + mover públicos) ═══════════════ */}
+      {clusterVarModal&&(()=>{
+        const { csvId, col, draft, baseValuesByDim, error, confirmDelete } = clusterVarModal;
+        const upd = (patch)=>setClusterVarModal(m=>({...m,...patch,error:null}));
+        const setDraft = (nd)=>upd({draft:nd});
+        const setLabel = (gid,val)=>setDraft(renameClusterGroup(draft,gid,val));
+        const toggle = (dim,value,gid)=>setDraft(toggleValueInGroup(draft,dim,value,gid));
+        const membership = clusterMembershipTable(draft, baseValuesByDim);
+        const groups = draft.groups||[];
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:760,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 24px",
+                borderBottom:"1px solid #e2e8f0",flexShrink:0,background:"linear-gradient(135deg,#f5f3ff 0%,#ede9fe 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#ddd6fe",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>🧩</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Editar Variável de Cluster</h2>
+                    <p style={{fontSize:11,color:"#6d28d9"}}>Renomeie a variável e os clusters, e mova públicos entre eles</p>
+                  </div>
+                </div>
+                <button onClick={()=>setClusterVarModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",cursor:"pointer",
+                    fontSize:15,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:16}}>
+                <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                  Nome da variável
+                  <input value={draft.col} onChange={e=>setDraft({...draft,col:e.target.value})}
+                    style={{width:"100%",marginTop:4,padding:"8px 10px",borderRadius:8,border:"1.5px solid #ddd6fe",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                </label>
+
+                <div>
+                  <div style={{fontSize:11.5,color:"#475569",fontWeight:600,marginBottom:6}}>Clusters ({groups.length})</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                    {groups.map((g,i)=>(
+                      <div key={g.id} style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{width:12,height:12,borderRadius:"50%",background:clusterColor(`c${i+1}`),flexShrink:0}}/>
+                        <input value={g.label} onChange={e=>setLabel(g.id,e.target.value)}
+                          style={{flex:1,padding:"6px 9px",borderRadius:7,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{fontSize:11.5,color:"#475569",fontWeight:600,marginBottom:2}}>Composição dos clusters</div>
+                  <p style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5,marginBottom:8}}>
+                    Marque em qual cluster cada valor entra. Desmarcar em um e marcar em outro = mover o público.
+                    Um valor sem nenhum cluster marcado cai em <b>{draft.unmatchedLabel}</b>.
+                  </p>
+                  <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                    {membership.map(dm=>(
+                      <div key={dm.col} style={{border:"1px solid #f1f5f9",borderRadius:10,overflow:"hidden"}}>
+                        <div style={{padding:"7px 12px",background:"#f8fafc",fontSize:11,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:.4,borderBottom:"1px solid #f1f5f9"}}>
+                          {dm.col} <span style={{fontWeight:400,color:"#94a3b8"}}>· {dm.values.length} valor{dm.values.length!==1?'es':''}</span>
+                        </div>
+                        <div style={{maxHeight:210,overflowY:"auto"}}>
+                          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+                            <thead>
+                              <tr style={{position:"sticky",top:0,background:"#fff",boxShadow:"0 1px 0 #f1f5f9"}}>
+                                <th style={{textAlign:"left",padding:"6px 10px",color:"#94a3b8",fontWeight:600}}>Valor</th>
+                                {groups.map((g,i)=>(
+                                  <th key={g.id} title={g.label} style={{padding:"6px 6px",color:clusterColor(`c${i+1}`),fontWeight:700,textAlign:"center",whiteSpace:"nowrap",maxWidth:96,overflow:"hidden",textOverflow:"ellipsis"}}>
+                                    {g.label}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dm.values.map(row=>{
+                                const inSet = new Set(row.groupIds);
+                                const orphan = inSet.size===0;
+                                return (
+                                  <tr key={row.value} style={{borderTop:"1px solid #f8fafc",background:orphan?"#fffbeb":"transparent"}}>
+                                    <td style={{padding:"5px 10px",color:"#334155",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}
+                                      title={orphan?`${row.value||'(vazio)'} — fora dos clusters`:(row.value||'(vazio)')}>
+                                      {row.value===''?'(vazio)':row.value}{orphan?' ⚠':''}
+                                    </td>
+                                    {groups.map(g=>(
+                                      <td key={g.id} style={{padding:"5px 6px",textAlign:"center"}}>
+                                        <input type="checkbox" checked={inSet.has(g.id)}
+                                          onChange={()=>toggle(dm.col,row.value,g.id)}
+                                          style={{cursor:"pointer",width:15,height:15}}/>
+                                      </td>
+                                    ))}
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {error && (
+                  <div style={{fontSize:11.5,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"7px 10px"}}>{error}</div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,padding:"12px 24px",borderTop:"1px solid #e2e8f0",flexShrink:0}}>
+                {confirmDelete ? (
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:11.5,color:"#b91c1c"}}>Excluir a variável?</span>
+                    <button onClick={deleteClusterVariable}
+                      style={{padding:"7px 12px",borderRadius:8,border:"none",background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:11.5,fontWeight:700,fontFamily:"inherit"}}>Sim, excluir</button>
+                    <button onClick={()=>upd({confirmDelete:false})}
+                      style={{padding:"7px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>Cancelar</button>
+                  </div>
+                ) : (
+                  <button onClick={()=>upd({confirmDelete:true})}
+                    style={{padding:"8px 12px",borderRadius:8,border:"1px solid #fecaca",background:"#fff1f2",color:"#e11d48",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                    🗑 Excluir variável
+                  </button>
+                )}
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setClusterVarModal(null)}
+                    style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                    Cancelar
+                  </button>
+                  <button onClick={saveClusterVarEdit}
+                    style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#7c3aed",color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                    ✓ Salvar
+                  </button>
+                </div>
               </div>
             </div>
           </div>

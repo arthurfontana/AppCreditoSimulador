@@ -22,6 +22,7 @@ AppCreditoSimulador/
 │   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
 │   ├── goalSeek.js                # applyGoalSeekMoves — materialização de movimentos do Goal Seek (compartilhado worker/main)
 │   ├── policySimplify.js          # applySimplifyCandidates — materialização de candidatos de Simplificação (compartilhado worker/main)
+│   ├── clusterVar.js              # Variável de Cluster — sugestões de nome, def a partir do ClusterModel, descrição das regras (docs) e edição (compartilhado main/worker/teste; materialização em columnar.js)
 │   ├── computeRouter.js           # Execução Híbrida H4 — ComputeRouter + contrato ComputeProvider (worker default / sidecar Python opt-in)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
@@ -40,6 +41,7 @@ AppCreditoSimulador/
 │   ├── segmentDiscoveryGolden.test.js # GATE Execução Híbrida H7 (DEC-HX-005): gera/verifica as fixtures douradas (SegmentModel sem recomendações ≡ segBuildModelWithoutRecs; colunar ≡ legado; determinismo); costura sidecar→worker (attachSegmentRecommendations ≡ computeSegmentDiscovery); clamp dos tetos browser
 │   ├── clusterSegments.test.js   # GATE Execução Híbrida H8 (baseline browser): clusters plantados recuperados; perfil ≡ agregação manual; determinismo; colunar ≡ legado; clamp/truncamento declarados; degradação de features; mulberry32 especificado
 │   ├── clusterSegmentsGolden.test.js  # GATE Execução Híbrida H8 (DEC-HX-005): gera/verifica as fixtures douradas do ClusterModel (determinismo; colunar ≡ legado; ≡ dourado commitado)
+│   ├── clusterVar.test.js        # GATE Variável de Cluster: materialização (1D exata / 2D first-match-overlap / trim / fora dos grupos / dim ausente); sugestões de nome únicas; redação de regras (docs); edição (rename/toggle/move); propagação de refs (coluna/rótulo → losango/porta/Cineminha/lens); round-trip de persistência; integração ClusterModel real → def → coluna
 │   ├── fixtures/segmentFixtures.js    # entradas do GATE dourado H7 (espelham as fixtures de segmentDiscovery.test.js)
 │   ├── fixtures/clusterFixtures.js    # entradas dos GATEs H8 (clusters plantados 1D/2D+mix, truncamento, sem AS IS)
 │   ├── fixtures/golden/               # fixtures douradas cross-runtime (entrada serializada M3 + SegmentModel/ClusterModel esperado; regenerar com UPDATE_GOLDEN=1)
@@ -210,6 +212,7 @@ AppCreditoSimulador/
   columnTypes,   // {[colName]: COL_TYPE}
   varTypes,      // {[colName]: 'categorical'|'ordinal'}
   asIsConfig,    // null | { col: string, mapping: {[value]: 'APROVADO'|'REPROVADO'|'IGNORAR'} }
+  clusterDefs,   // opcional {[col]: ClusterDef} — Variáveis de Cluster derivadas (ver "Variável de Cluster")
 }
 // ColDef (em src/columnar.js):
 //   { kind: 'num', data: Float64Array }  — para colunas métricas (qty, qtdAltas, etc.)
@@ -1563,6 +1566,73 @@ via k-means determinístico. Ver `docs/wiki/Arquitetura-Execucao-Hibrida.md` (§
   numpy, igualdade número a número; determinismo sem tetos; extras sklearn por
   determinismo/contrato — pulados sem sklearn; gating por tier).
 
+## Variável de Cluster (`csvStore[csvId].clusterDefs`, `src/clusterVar.js`)
+
+Transforma o resultado da Clusterização (que é uma ANÁLISE efêmera — o `ClusterModel`
+não persiste, não vira coluna) numa **variável de fluxo reutilizável**: uma **coluna
+Filtro derivada** na base, cujos valores são os clusters. O usuário arrasta o chip ao
+canvas (losango/Cineminha) e segue com aberturas/políticas — como qualquer variável de
+decisão. O k-means é o PONTO DE PARTIDA; o usuário cura os grupos depois (renomear, mover
+um público de um cluster para outro) — padrão proposta→refino do app.
+
+### Representação (coluna real + definição editável)
+- A variável é uma **coluna dict-encoded** materializada no `csvStore[csvId]`
+  (`headers`/`columns`/`columnTypes[col]='decision'`/`varTypes[col]='categorical'`) — por
+  isso aparece automaticamente em `decisionVars` (chip arrastável), funciona em
+  `createDecisionNode`/`assignCinemaVar`, alimenta o glossário da doc e persiste, tudo pela
+  plumbing existente. **Nenhuma feature nova de fluxo** — é uma coluna Filtro comum.
+- A **definição editável** vive em `csvStore[csvId].clusterDefs[col]` (viaja com a base,
+  auto-persiste via `serializeCsvStore`/`deserializeCsvStore` que preservam campos extras,
+  e chega ao worker no `UPDATE_CSV_STORE` — usada pela doc):
+  ```js
+  { id, col, csvId, source:'cluster', dims:[dimCol...],
+    groups:[{ id, label, clusterId, members:{[dimCol]:[valTrimado...]} }],  // ordem first-match (volume desc)
+    unmatchedLabel, meta:{k,seed,features,explainedVariance,silhouette,method,generatedAt}, createdAt }
+  ```
+
+### Regras (bounding box, first-match-wins) — `deriveClusterColumn` (`src/columnar.js`)
+Cada cluster = listas de valores por dimensão (bounding box do que o k-means agrupou); a
+linha recebe o rótulo do **PRIMEIRO grupo** cujas listas contêm o valor da linha (TRIMADO,
+mesma semântica de `cluDimValue`) em **todas** as dimensões; sem casar nenhum ⇒
+`unmatchedLabel`. **Exato para 1 dimensão**; aproximação editável por faixas para 2+
+(mesma técnica do "👁 Ver no Dashboard"). Materialização O(linhas × grupos × dims) com
+máscara `Uint8Array` por (grupo, dim) sobre o dicionário (O(distintos)) + early-break —
+roda na main no salvar/editar. Dimensão ausente na base = curinga (não fragmenta).
+
+### `src/clusterVar.js` (puro, compartilhado main/worker/teste)
+`suggestClusterVarName`/`suggestClusterLabels` (sugestões únicas por comportamento —
+aprovação/risco), `buildClusterDefFromModel` (def a partir do `ClusterModel` +
+`cluster.dims[].values`), `describeClusterRules` (descrição CRUA das regras p/ docs, redige
+os valores concretos N2 sem `includeDomains`), `isClusterVar`, e as edições PURAS:
+`renameClusterGroup`, `toggleValueInGroup` (checkbox — mantém sobreposição),
+`moveValueToGroup` (posse exclusiva), `clusterMembershipTable`, `renameClusterColumnRefs`
+(propaga rename de coluna a losango/Cineminha/lens) e `renameClusterLabelRefs` (propaga
+rename de rótulo a portas/arestas + domínio/células de Cineminha).
+
+### UI (`App.jsx`)
+- **Salvar como variável**: botão **➕ Salvar como variável** no resultado do `clusterModal`
+  → passo `step:'save'` com nome da variável + rótulos por cluster (sugestões editáveis) +
+  rótulo "fora dos clusters"; `saveClusterVariable` valida, materializa (`deriveClusterColumn`)
+  e insere a coluna + `clusterDefs[col]` no `csvStore` (`step:'saved'` confirma). A mudança
+  de `csvStore` re-semeia o worker e re-simula.
+- **Editar/renomear**: chip de cluster no painel (tom roxo + 🧩) ganha **✏️** →
+  `clusterVarModal` (`openClusterVarEdit`): renomeia a variável, renomeia os clusters e
+  **move públicos** (matriz valor × cluster com checkbox por dimensão) + excluir.
+  `saveClusterVarEdit` re-materializa e propaga referências por **todas as abas**
+  (`applyRefTransformAllCanvases` + os dois `rename*Refs`). **Mover públicos reflete
+  sozinho** (a coluna muda e as linhas re-roteiam pelas mesmas portas por rótulo); só o
+  rename de rótulo/coluna precisa da propagação.
+- **Documentação**: `buildGlossary` (worker) anexa `cluster` (via `describeClusterRules`)
+  às variáveis de cluster referenciadas; `renderDocMarkdown`/`renderDocHTML` imprimem a
+  seção **"Regras dos Clusters"** (grupos × faixas por dimensão; valores redigidos sem o
+  toggle de domínios — Contrato de Privacidade N2).
+
+### Teste
+`tests/clusterVar.test.js` — materialização (1D exata, 2D first-match/overlap, trim, fora
+dos grupos, dim ausente), sugestões únicas, redação de regras, edições, propagação de refs
+(coluna/rótulo → losango/porta/Cineminha/lens), round-trip de persistência e a integração
+`computeClusterSegments` real → def → coluna (volumes por cluster batem com o modelo).
+
 ## Biblioteca de Cineminha (`cinemaLibrary`)
 
 - Estado local (array) persistido em `localStorage` implicitamente (futuro)
@@ -1658,7 +1728,7 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"2.5", kind:"credito-project", generatedAt,
+  Monta o snapshot `{schemaVersion:"2.6", kind:"credito-project", generatedAt,
   activeTab, viewport, panelCollapsed, canvases, activeCanvasId, csvStore,
   analyticsLayout, analyticsGroupings, analyticsPageFilters,
   cinemaLibrary, policyLibrary, businessWidget, preferences}`.
@@ -1729,7 +1799,8 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"2.5"`** (bumped na remoção da Tabela de Inferência de Referência).
+   Versão atual: **`"2.6"`** (bumped na Variável de Cluster — novo campo
+   `csvStore[csvId].clusterDefs`, já coberto pelo contêiner `csvStore`).
 4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
    adicionar serialize/deserialize dedicados (padrão de
    `serializeCsvStore`/`deserializeCsvStore`) e cobrir o round-trip em teste.
@@ -1739,7 +1810,7 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
 **Checklist do que hoje é salvo** (mantê-lo em dia): canvas e todos os shapes/conns
 de **todas** as abas (losangos, Cineminhas, Decision Lens e suas `rules`, frames,
 terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados completas
-(`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`) · Dashboard
+(`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `clusterDefs`) · Dashboard
 (`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`, H4/H6) ·
@@ -1945,6 +2016,10 @@ wizard intocada):**
    colunas (métrica ↔ dimensão) coluna a coluna, **sem `materializeRows`** (que
    copiava a base inteira como `string[][]`); colunas de tipo inalterado são
    compartilhadas por referência.
+6. **`deriveClusterColumn(csv, def)`** — coluna dict de uma **Variável de Cluster**:
+   first-match-wins por listas de valor por dimensão (bounding box), máscara `Uint8Array`
+   por (grupo, dim) sobre o dicionário (O(distintos)) + loop O(linhas × grupos × dims) com
+   early-break. Ver seção "Variável de Cluster".
 Domínios da reconciliação de Cineminha no confirm saem de `distinctColValues`
 (O(distintos)) em vez de varrer linhas. Nenhuma mudança de matemática nem de UX (3
 passos, preview, progresso e validações idênticos). GATE:

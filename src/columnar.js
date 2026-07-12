@@ -485,6 +485,90 @@ export function deriveMappedDictColumn(srcCol, n, mapFn) {
   return { kind: 'dict', dict, codes: packCodes(tmp, n, dict.length) };
 }
 
+// ── Coluna derivada de Variável de Cluster (interpretação da clusterização) ──────
+// Materializa uma coluna dict a partir de uma DEFINIÇÃO de cluster: cada grupo é um
+// conjunto de listas de valores por dimensão (bounding box), e a linha recebe o
+// rótulo do PRIMEIRO grupo cujas listas contêm o valor da linha em TODAS as dimensões
+// (first-match-wins — os grupos vêm ordenados por volume desc). Linha que não casa
+// nenhum grupo recebe `unmatchedLabel`. Semântica de valor idêntica à agregação da
+// clusterização (`cluDimValue`): valor TRIMADO; dimensão ausente/sem lista = curinga.
+// Exato para 1 dimensão; aproximação editável por faixas para 2+ (mesma técnica do
+// "Ver no Dashboard"). Precompila, por dimensão dict, uma máscara Uint8Array por
+// grupo sobre o dicionário (O(distintos)); no loop de linhas resta ler `codes[r]`.
+//
+// def = { dims:[col...], unmatchedLabel, groups:[{label, members:{[col]:[val...]}}...] }
+export function deriveClusterColumn(csv, def) {
+  const n = rowCount(csv);
+  const dims = (def && def.dims) || [];
+  const groups = (def && def.groups) || [];
+  const unmatchedLabel = (def && def.unmatchedLabel != null) ? def.unmatchedLabel : '';
+  const columnar = isColumnar(csv);
+
+  // Leitor por dimensão: dict → {codes, trimmed[]}; senão → {rowIdx} (trim por linha);
+  // dimensão ausente na base → null (curinga em todos os grupos).
+  const readers = dims.map((dc) => {
+    const ci = csv.headers.indexOf(dc);
+    if (ci < 0) return null;
+    if (columnar) {
+      const col = csv.columns[dc];
+      if (col && col.kind === 'dict') {
+        return { kind: 'dict', codes: col.codes, trimmed: col.dict.map(v => (v ?? '').toString().trim()) };
+      }
+    }
+    return { kind: 'row', ci };
+  });
+
+  // Por grupo × dimensão: máscara/set de membros trimados (ou curinga).
+  const masks = groups.map(g => dims.map((dc, di) => {
+    const rdr = readers[di];
+    const members = g && g.members ? g.members[dc] : null;
+    if (rdr == null || members == null) return { wildcard: true };
+    const set = new Set(members.map(v => (v ?? '').toString().trim()));
+    if (rdr.kind === 'dict') {
+      const mask = new Uint8Array(rdr.trimmed.length);
+      for (let c = 0; c < rdr.trimmed.length; c++) mask[c] = set.has(rdr.trimmed[c]) ? 1 : 0;
+      return { mask };
+    }
+    return { set };
+  }));
+
+  const G = groups.length;
+  const grpOfRow = new Int32Array(n).fill(-1);
+  for (let r = 0; r < n; r++) {
+    for (let gi = 0; gi < G; gi++) {
+      const mg = masks[gi];
+      let ok = true;
+      for (let di = 0; di < dims.length; di++) {
+        const m = mg[di];
+        if (m.wildcard) continue;
+        const rdr = readers[di];
+        if (m.mask) { if (m.mask[rdr.codes[r]] !== 1) { ok = false; break; } }
+        else { const v = (cellStr(csv, r, rdr.ci) ?? '').toString().trim(); if (!m.set.has(v)) { ok = false; break; } }
+      }
+      if (ok) { grpOfRow[r] = gi; break; }
+    }
+  }
+
+  // Dicionário na ordem dos grupos que ocorrem, depois o rótulo "fora" se houver.
+  let anyUnmatched = false;
+  const occurs = new Uint8Array(G);
+  for (let r = 0; r < n; r++) { const gi = grpOfRow[r]; if (gi < 0) anyUnmatched = true; else occurs[gi] = 1; }
+  const dict = []; const labelCode = new Map();
+  const codeForLabel = (label) => {
+    let c = labelCode.get(label);
+    if (c === undefined) { c = dict.length; dict.push(label); labelCode.set(label, c); }
+    return c;
+  };
+  const groupCode = new Int32Array(G).fill(-1);
+  for (let gi = 0; gi < G; gi++) if (occurs[gi]) groupCode[gi] = codeForLabel(groups[gi].label ?? '');
+  const unmatchedCode = anyUnmatched ? codeForLabel(unmatchedLabel) : -1;
+  if (dict.length === 0) dict.push(unmatchedLabel); // base vazia → dict não-degenerado
+
+  const tmp = new Int32Array(n);
+  for (let r = 0; r < n; r++) { const gi = grpOfRow[r]; tmp[r] = gi < 0 ? unmatchedCode : groupCode[gi]; }
+  return { kind: 'dict', dict, codes: packCodes(tmp, n, dict.length) };
+}
+
 // Modo de edição do wizard: reclassificar uma coluna (métrica ↔ dimensão) sem
 // materializar a base. Se o tipo não mudou, devolve a própria coluna (as colunas
 // nunca são mutadas, então compartilhar a referência com a entrada anterior do
