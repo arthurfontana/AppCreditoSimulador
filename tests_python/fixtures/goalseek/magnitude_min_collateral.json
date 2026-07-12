@@ -1,0 +1,26 @@
+{
+  "name": "magnitude_min_collateral",
+  "description": "Magnitude DECLARADA (DEC-GS-006): reduzir inadReal em 0.01 (baseline 0.05 => alvo <= 0.04) com o MENOR impacto colateral em aprovação. Direção decrease (pool = candidatos que SAEM do aprovado, toApproved=false). h1 remove 100 aprovados => IR 20/QA 900 = 0.0222 (<=0.04, colateral 100). h2 remove 300 => IR 30/QA 700 = 0.0428 (>0.04, não atinge sozinho). O alvo vira RESTRIÇÃO e o objetivo minimiza o colateral (approval) => ótimo = SÓ h1. Verificável à mão.",
+  "params": {
+    "catalog": {
+      "baselineRaw": {
+        "approvedQty": 1000, "decidedQty": 2000, "totalQty": 2000,
+        "qtdAltasSum": 1000, "qtdAltasInferSum": 1000, "inadRealSum": 50, "inadInferidaSum": 50
+      },
+      "candidates": [
+        {"id": "h1", "type": "cinema_cell", "toApproved": false, "qty": 100, "qtdAltas": 100, "qtdAltasInfer": 100, "inadRRaw": 30, "inadIRaw": 30, "requires": []},
+        {"id": "h2", "type": "cinema_cell", "toApproved": false, "qty": 300, "qtdAltas": 300, "qtdAltasInfer": 300, "inadRRaw": 20, "inadIRaw": 20, "requires": []}
+      ]
+    },
+    "goal": {"target": "inadReal", "direction": "decrease", "magnitude": 0.01, "minimize": "approval"},
+    "constraints": {"maxInadReal": null, "maxInadInf": null},
+    "frontierPoints": 5
+  },
+  "expect": {
+    "status": "optimal",
+    "solutionIds": ["h1"],
+    "predicted": {
+      "approvedQty": 900.0, "decidedQty": 2000.0, "inadReal": 0.022222222222222223
+    }
+  }
+}

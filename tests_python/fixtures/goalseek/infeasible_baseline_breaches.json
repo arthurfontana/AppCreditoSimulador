@@ -1,0 +1,23 @@
+{
+  "name": "infeasible_baseline_breaches",
+  "description": "Infactível: o baseline JÁ viola o teto (inadReal baseline 0.05 = 50/1000 > maxInadReal 0.03) e nenhum candidato consegue reduzir IR nem aumentar QA (qtdAltas=0), então a solução vazia e qualquer solução violam o teto. O solver reporta status 'infeasible' (solution null, frontier vazia). O worker deriva o bindingConstraint na re-simulação; o sidecar só declara a infactibilidade.",
+  "params": {
+    "catalog": {
+      "baselineRaw": {
+        "approvedQty": 500, "decidedQty": 1000, "totalQty": 1000,
+        "qtdAltasSum": 1000, "qtdAltasInferSum": 0, "inadRealSum": 50, "inadInferidaSum": 0
+      },
+      "candidates": [
+        {"id": "P", "type": "cinema_cell", "toApproved": true, "qty": 100, "qtdAltas": 0, "qtdAltasInfer": 0, "inadRRaw": 1, "inadIRaw": 0, "requires": []}
+      ]
+    },
+    "goal": {"target": "approvalRate", "direction": "increase", "magnitude": null, "minimize": "inadInferida"},
+    "constraints": {"maxInadReal": 0.03, "maxInadInf": null},
+    "frontierPoints": 5
+  },
+  "expect": {
+    "status": "infeasible",
+    "solutionNull": true,
+    "frontierEmpty": true
+  }
+}
