@@ -6,6 +6,8 @@ import {
   runSimulation,
   computeLensPopulations,
   computeGoalSeekContext,
+  wilsonCI,
+  GOAL_SEEK_MIN_SAMPLE,
 } from '../src/simulation.worker.js';
 import { applyGoalSeekMoves } from '../src/goalSeek.js';
 
@@ -481,5 +483,110 @@ describe('Goal Seek · minimize generalizado (GS2, DEC-GS-003)', () => {
     expect(missing).toEqual(known);
     expect(bogus).toEqual(known);
     expect(missing.goal.minimize).toBe('inadInferida');
+  });
+});
+
+// ── GATE — Sessão GS3 (Selos estatísticos por movimento, DEC-GS-004) ─────────────
+// docs/wiki/Hibrido-GoalSeek-Profundo.md pede:
+//   1. wilsonCI contra valores de referência calculados à mão;
+//   2. stats.fragile liga exatamente em n < GOAL_SEEK_MIN_SAMPLE (=30);
+//   3. stats presente em todo move (inclusive quando minimize não tem taxa associada,
+//      degradando para campos null em vez de omitir o objeto);
+//   4. nenhum número da busca (score/ordem/agregados) muda — os asserts do GS2/Sessão 4
+//      continuam de pé (arquivo inteiro segue passando).
+describe('Goal Seek · wilsonCI (GS3, DEC-GS-004)', () => {
+  it('bate com valores de referência calculados à mão', () => {
+    // k=8,n=30 — mesmo exemplo normativo da DEC-GS-004 (≈[0.142, 0.448]).
+    const [lo1, hi1] = wilsonCI(8, 30);
+    expect(lo1).toBeCloseTo(0.1418, 3);
+    expect(hi1).toBeCloseTo(0.4445, 3);
+    const [lo2, hi2] = wilsonCI(15, 50);
+    expect(lo2).toBeCloseTo(0.1910, 3);
+    expect(hi2).toBeCloseTo(0.4375, 3);
+    const [lo3, hi3] = wilsonCI(0, 20);
+    expect(lo3).toBeCloseTo(0, 6);
+    expect(hi3).toBeCloseTo(0.1611, 3);
+  });
+
+  it('n=0/ausente ⇒ null (sem intervalo)', () => {
+    expect(wilsonCI(0, 0)).toBeNull();
+    expect(wilsonCI(5, null)).toBeNull();
+  });
+});
+
+describe('Goal Seek · stats por movimento (GS3, DEC-GS-004)', () => {
+  const csvStore = {
+    base: {
+      name: 'base',
+      // A: qtdAltas=30 (piso exato — NÃO frágil), inadReal(raw)=8 ⇒ mesmo par k=8,n=30 do
+      // exemplo normativo. B: qtdAltas=10 (< 30 — frágil).
+      headers: ['COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+      rows: [
+        ['A', '50', '30', '25', '8', '5'],
+        ['B', '20', '10', '8',  '3', '2'],
+      ],
+      columnTypes: { COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+      varTypes: {},
+      asIsConfig: null,
+    },
+  };
+  const shapes = [
+    { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
+    { id: 'pA', type: 'port', label: 'A' },
+    { id: 'pB', type: 'port', label: 'B' },
+    { id: 'AP', type: 'approved' },
+    { id: 'RJ', type: 'rejected' },
+  ];
+  const conns = [
+    { id: 'cA', from: 'D', to: 'pA', label: 'A' },
+    { id: 'cB', from: 'D', to: 'pB', label: 'B' },
+    { id: 'cpA', from: 'pA', to: 'RJ' },
+    { id: 'cpB', from: 'pB', to: 'RJ' },
+  ];
+  const goal = { target: 'approvalRate', direction: 'increase', magnitude: null, minimize: 'inadReal' };
+  const runIt = () => computeGoalSeek(shapes, conns, csvStore, goal, {}, [], pops(shapes, csvStore));
+
+  it('n/rate/ci95/pValue batem com o par (qtdAltas, inadReal) do candidato; fragile só sob o piso', () => {
+    const s = runIt();
+    expect(s.moves).toHaveLength(2);
+    const mvA = s.moves.find(m => m.id === 'decision:D:A');
+    const mvB = s.moves.find(m => m.id === 'decision:D:B');
+
+    expect(mvA.stats.n).toBe(30);
+    expect(mvA.stats.rate).toBeCloseTo(8 / 30, 9);
+    expect(mvA.stats.ci95[0]).toBeCloseTo(0.1418, 3);
+    expect(mvA.stats.ci95[1]).toBeCloseTo(0.4445, 3);
+    expect(mvA.stats.fragile).toBe(false); // n=30, piso é "< 30", não "<= 30"
+
+    expect(mvB.stats.n).toBe(10);
+    expect(mvB.stats.rate).toBeCloseTo(3 / 10, 9);
+    expect(mvB.stats.fragile).toBe(true);
+    expect(mvB.stats.n).toBeLessThan(GOAL_SEEK_MIN_SAMPLE);
+
+    // p-value é o desvio de CADA candidato vs. a média do pool (não vs. si mesmo) —
+    // por isso não é necessariamente 1 mesmo quando o candidato bate na própria taxa.
+    expect(typeof mvA.stats.pValue).toBe('number');
+    expect(typeof mvB.stats.pValue).toBe('number');
+  });
+
+  it('stats presente em todo move mesmo quando minimize não tem taxa associada (approval/salesVolume)', () => {
+    for (const minimize of ['approval', 'salesVolume']) {
+      const s = computeGoalSeek(shapes, conns, csvStore, { ...goal, minimize }, {}, [], pops(shapes, csvStore));
+      for (const mv of s.moves) {
+        expect(mv.stats).toBeTruthy();
+        expect(mv.stats.n).toBeNull();
+        expect(mv.stats.rate).toBeNull();
+        expect(mv.stats.ci95).toBeNull();
+        expect(mv.stats.pValue).toBeNull();
+        expect(mv.stats.fragile).toBe(false);
+      }
+    }
+  });
+
+  it('não muda ordenação/matemática da busca (score e delta de aprovação inalterados) nem determinismo', () => {
+    const a = runIt(), b = runIt();
+    expect(a.moves.map(m => m.id)).toEqual(b.moves.map(m => m.id));
+    expect(a.moves.map(m => m.deltaApprovalRate)).toEqual(b.moves.map(m => m.deltaApprovalRate));
+    expect(a).toEqual(b);
   });
 });
