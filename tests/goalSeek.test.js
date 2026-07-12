@@ -404,3 +404,82 @@ describe('Goal Seek · computeGoalSeekContext (GS1, DEC-GS-002)', () => {
     expect(ctx.baseline.approvedQty).toBe(100);
   });
 });
+
+// ── GS2 (DEC-GS-003) — "Minimizar colateralmente" generalizado ──────────────────────
+// Score generalizado (collQty + collPoolAvg·K)/(tgtQty + tgtPoolAvg·K), 4 opções de
+// minimize. Fixture construída para que a escolha do minimize mude qual segmento sai do
+// aprovado (mesmo alvo, mesma magnitude): dois candidatos A e B com o MESMO ganho no alvo
+// (inadRRaw=30, qtdAltas=100 ⇒ ambos reduzem inadReal identicamente e um só já atinge o
+// alvo), mas anti-correlacionados em qty / qtdAltasInfer / inadIRaw.
+describe('Goal Seek · minimize generalizado (GS2, DEC-GS-003)', () => {
+  const csvStore = {
+    base: {
+      name: 'base',
+      headers: ['COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+      rows: [
+        ['A', '10',  '100', '10',  '30', '80'],  // qty baixo, qtdAltasInfer baixo, inadIRaw ALTO
+        ['B', '100', '100', '100', '30', '10'],  // qty alto,  qtdAltasInfer alto,  inadIRaw BAIXO
+        ['C', '100', '100', '100', '5',  '5'],   // inad baixa (âncora do denominador, nunca escolhida)
+      ],
+      columnTypes: { COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+      varTypes: {},
+      asIsConfig: null,
+    },
+  };
+  const shapes = [
+    { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
+    { id: 'pA', type: 'port', label: 'A' },
+    { id: 'pB', type: 'port', label: 'B' },
+    { id: 'pC', type: 'port', label: 'C' },
+    { id: 'AP', type: 'approved' },
+    { id: 'RJ', type: 'rejected' },
+  ];
+  const conns = [
+    { id: 'cA', from: 'D', to: 'pA', label: 'A' },
+    { id: 'cB', from: 'D', to: 'pB', label: 'B' },
+    { id: 'cC', from: 'D', to: 'pC', label: 'C' },
+    { id: 'cpA', from: 'pA', to: 'AP' },
+    { id: 'cpB', from: 'pB', to: 'AP' },
+    { id: 'cpC', from: 'pC', to: 'AP' },
+  ];
+  // Reduzir inadReal em 0,04 (baseline 65/300≈0,2167 → 35/200=0,175 após remover A OU B).
+  const goalBase = { target: 'inadReal', direction: 'decrease', magnitude: 0.04 };
+  const run = (minimize) => computeGoalSeek(shapes, conns, csvStore, { ...goalBase, minimize }, {}, [], pops(shapes, csvStore));
+  const sumQty   = s => s.moves.reduce((a, m) => a + m.qty, 0);
+  const sumInfer = s => s.moves.reduce((a, m) => a + m.qtdAltasInfer, 0);
+
+  it('caso 1: minimize=approval move MENOS volume de propostas que minimize=inadInferida (mesmo alvo)', () => {
+    const byApproval = run('approval');
+    const byInadInf  = run('inadInferida');
+    // Ambos atingem o alvo em 1 movimento — mas escolhem candidatos diferentes.
+    expect(byApproval.moves.map(m => m.id)).toEqual(['decision:D:A']); // menor qty
+    expect(byInadInf.moves.map(m => m.id)).toEqual(['decision:D:B']);  // menor inadIRaw
+    expect(sumQty(byApproval)).toBeLessThan(sumQty(byInadInf));
+    expect(sumQty(byApproval)).toBe(10);
+    expect(sumQty(byInadInf)).toBe(100);
+  });
+
+  it('caso 2: minimize=salesVolume move MENOS qtdAltasInfer que minimize=inadInferida', () => {
+    const bySales   = run('salesVolume');
+    const byInadInf = run('inadInferida');
+    expect(bySales.moves.map(m => m.id)).toEqual(['decision:D:A']);   // menor qtdAltasInfer
+    expect(sumInfer(bySales)).toBeLessThan(sumInfer(byInadInf));
+    expect(sumInfer(bySales)).toBe(10);
+    expect(sumInfer(byInadInf)).toBe(100);
+  });
+
+  it('caso 3: determinismo — mesma entrada ⇒ mesma proposta (por opção de minimize)', () => {
+    for (const minimize of ['approval', 'salesVolume', 'inadReal', 'inadInferida']) {
+      expect(run(minimize)).toEqual(run(minimize));
+    }
+  });
+
+  it('retrocompat: minimize ausente/desconhecido ≡ inadInferida', () => {
+    const known   = run('inadInferida');
+    const missing = run(undefined);
+    const bogus   = run('naoExiste');
+    expect(missing).toEqual(known);
+    expect(bogus).toEqual(known);
+    expect(missing.goal.minimize).toBe('inadInferida');
+  });
+});
