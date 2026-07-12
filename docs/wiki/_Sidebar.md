@@ -23,6 +23,7 @@
 - [[Arquitetura]]
 - [[Arquitetura-Execucao-Hibrida|Execução Híbrida (Browser + Python opcional)]]
   - [[Hibrido-Prompts-Sessoes|Prompts das Sessões]]
+  - [[Hibrido-GoalSeek-Profundo|Goal Seek Profundo + UX (Épico GS)]]
 - [[Ribbon-Prompts-Sessoes|Ribbon UI — Prompts das Sessões]]
 - [[Decisoes|Decisões (ADRs)]]
 - [[Otimizacao-Memoria|Otimização de Memória (datasets grandes)]]
