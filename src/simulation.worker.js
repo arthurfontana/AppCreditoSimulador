@@ -8,6 +8,7 @@
 import { cellStr, cellNum, rowCount, isColumnar, buildCsvStoreMessage } from './columnar.js';
 import { applyGoalSeekMoves } from './goalSeek.js';
 import { applySimplifyCandidates } from './policySimplify.js';
+import { describeClusterRules } from './clusterVar.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -5845,11 +5846,17 @@ function buildGlossary(ir, csvStore, includeDomains) {
       const col = csvStore[csvId].columns[v.col];
       if (col && col.kind === 'dict') values = col.dict.filter(x => x !== '' && x != null);
     }
+    // Variável de Cluster: anexa a descrição das REGRAS (grupos × valores por dimensão).
+    // Os valores concretos (N2) só entram com includeDomains — o mapeamento em si é o
+    // domínio; sem o toggle mantemos rótulos dos clusters + contagens (N0/N1).
+    const clusterDef = (csvId && csvStore[csvId] && csvStore[csvId].clusterDefs)
+      ? csvStore[csvId].clusterDefs[v.col] : null;
+    const cluster = clusterDef ? describeClusterRules(clusterDef, includeDomains) : null;
     return {
       col: v.col, csvId, csvName, role: v.kind,
       colType: colMeta?.colType ?? null, varType: colMeta?.varType ?? null,
       domainSize: colMeta?.domainSize ?? null,
-      values,
+      values, cluster,
     };
   }).sort((a, b) => a.col.localeCompare(b.col) || (a.csvId || '').localeCompare(b.csvId || ''));
 }
