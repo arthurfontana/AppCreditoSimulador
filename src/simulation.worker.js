@@ -2475,6 +2475,30 @@ function goalSeekTgtQty(c, target) {
   }
 }
 
+// DEC-GS-004 — piso amostral dos selos estatísticos por movimento (mesmo piso de
+// `computeReliability`: segmentos com menos de 30 altas são "amostra frágil").
+const GOAL_SEEK_MIN_SAMPLE = 30;
+// Denominador da taxa do movimento na métrica `minimize` — só definido para os dois
+// valores "inad*" (os únicos com uma taxa crua associada); `approval`/`salesVolume`
+// são quantidades absolutas, sem taxa a testar ⇒ `null` (stats degradam para nulos).
+function goalSeekStatN(c, minimizeField) {
+  if (minimizeField === 'inadReal') return c.qtdAltas || 0;
+  if (minimizeField === 'inadInferida') return (c.qtdAltasInfer || c.qty || 0);
+  return null;
+}
+// Intervalo de Wilson 95% (DEC-GS-004) — sem dependência nova, mesma família de
+// aproximação normal de `segBinomTwoSided`. `k`/`n` podem vir não-inteiros (somas
+// reais, como em `segBinomTwoSided`) — a fórmula usa só a razão p̂=k/n.
+function wilsonCI(k, n, z = 1.96) {
+  if (!n || n <= 0) return null;
+  const phat = Math.min(1, Math.max(0, k / n));
+  const z2 = z * z;
+  const den = 1 + z2 / n;
+  const centro = (phat + z2 / (2 * n)) / den;
+  const delta = (z * Math.sqrt((phat * (1 - phat)) / n + z2 / (4 * n * n))) / den;
+  return [centro - delta, centro + delta];
+}
+
 // COMPUTE_GOAL_SEEK — busca gulosa com precedência sobre o catálogo de movimentos.
 // goal: {target, direction:'increase'|'decrease', magnitude:number|null, minimize?}
 // constraints: {maxInadReal?:number, maxInadInf?:number} (tetos, ratio 0–1; null/ausente = sem teto)
@@ -2521,6 +2545,18 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
   const score = (c) =>
     (goalSeekCollQty(c, minimizeField) + collPoolAvg * SHRINK_K) /
     (goalSeekTgtQty(c, target) + tgtPoolAvg * SHRINK_K);
+
+  // DEC-GS-004 — média do pool na métrica de taxa (p0 de referência do teste binomial dos
+  // selos por movimento). Só definida quando `minimizeField` é inad* (única quantidade com
+  // taxa/denominador associados — ver `goalSeekStatN`); informativa, NUNCA usada na busca.
+  let poolStatNumSum = 0, poolStatDenSum = 0;
+  for (const c of pool) {
+    const n = goalSeekStatN(c, minimizeField);
+    if (n == null) continue;
+    poolStatDenSum += n;
+    poolStatNumSum += goalSeekCollQty(c, minimizeField);
+  }
+  const poolAvgRate = poolStatDenSum > 0 ? poolStatNumSum / poolStatDenSum : null;
 
   const remaining = {}, dependents = {};
   for (const c of pool) { remaining[c.id] = 0; dependents[c.id] = []; }
@@ -2592,12 +2628,26 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
     running = nextRaw;
     liberated.delete(cand.id);
     for (const depId of dependents[cand.id]) { remaining[depId]--; if (remaining[depId] === 0) liberated.add(depId); }
+    // DEC-GS-004 — selo estatístico do movimento: Wilson 95% + binomial vs. média do pool +
+    // piso de amostra. Puramente informativo (tooltip/badge do card) — não influencia `score`
+    // nem a ordem de escolha acima (já decidida antes deste ponto).
+    const statN = goalSeekStatN(cand, minimizeField);
+    const statK = statN != null ? goalSeekCollQty(cand, minimizeField) : null;
+    const rate = (statN != null && statN > 0) ? statK / statN : null;
+    const stats = {
+      n: statN,
+      rate,
+      ci95: rate !== null ? wilsonCI(statK, statN) : null,
+      pValue: (rate !== null && poolAvgRate !== null) ? segBinomTwoSided(statK, statN, poolAvgRate) : null,
+      fragile: statN != null && statN < GOAL_SEEK_MIN_SAMPLE,
+    };
     moves.push({
       id: cand.id, type: cand.type, shapeId: cand.shapeId, label: cand.label,
       qty: cand.qty, qtdAltas: cand.qtdAltas, qtdAltasInfer: cand.qtdAltasInfer,
       inadRRaw: cand.inadRRaw, inadIRaw: cand.inadIRaw,
       deltaApprovalRate: goalSeekRatios(running).approvalRate - prevRatios.approvalRate,
       apply: cand.apply,
+      stats,
     });
     frontier.push({ ...goalSeekRatios(running), approvedQty: running.approvedQty, totalQty: running.totalQty, move: cand.id });
   }
@@ -6380,6 +6430,8 @@ export {
   computeGoalSeekBaseline,
   computeGoalSeekContext,
   computeNewLensThreshold,
+  wilsonCI,
+  GOAL_SEEK_MIN_SAMPLE,
   resolveDirectTerminalConn,
   computeSimplify,
   detectSimplifyCandidates,

@@ -14492,6 +14492,18 @@ export default function App() {
                                 <span style={{width:20,height:20,borderRadius:6,background:"#fef3c7",color:"#92400e",
                                   display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,flexShrink:0}}>{i+1}</span>
                                 <span style={{flex:1,color:"#334155"}}>{mv.label}</span>
+                                {/* DEC-GS-004 (GS3) — selo estatístico: informa, nunca reordena/filtra a busca. */}
+                                {mv.stats && (mv.stats.fragile || mv.stats.ci95) && (
+                                  <span
+                                    title={`n=${mv.stats.n ?? '—'}${mv.stats.pValue!=null ? ` · p=${mv.stats.pValue.toFixed(3)}` : ''}`}
+                                    style={{fontSize:9.5,fontWeight:700,padding:"2px 6px",borderRadius:6,flexShrink:0,cursor:"help",
+                                      background: mv.stats.fragile ? "#fef3c7" : "#f1f5f9",
+                                      color: mv.stats.fragile ? "#92400e" : "#64748b"}}>
+                                    {mv.stats.fragile
+                                      ? "⚠ amostra frágil"
+                                      : `IC95 ${(mv.stats.ci95[0]*100).toFixed(1)}–${(mv.stats.ci95[1]*100).toFixed(1)}%`}
+                                  </span>
+                                )}
                                 <span style={{color: mv.deltaApprovalRate>=0 ? "#16a34a" : "#dc2626",fontWeight:600,flexShrink:0}}>
                                   {mv.deltaApprovalRate>=0?'+':''}{mv.deltaApprovalRate.toFixed(2)}pp aprov.
                                 </span>
