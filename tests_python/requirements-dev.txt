@@ -4,3 +4,7 @@ pytest>=7.0
 # release/python/motor_segmentos.py é tier full (numpy). Sem numpy os testes de
 # paridade são PULADOS (importorskip) — o CI instala para o GATE rodar de verdade.
 numpy>=1.24
+# GATE do Goal Seek Profundo (GS5, DEC-GS-009): o solver
+# release/python/motor_goalseek.py usa scipy.optimize.milp (scipy >= 1.9 — HiGHS).
+# Sem scipy o GATE é PULADO (skip do módulo); o CI instala para provar o solver.
+scipy>=1.9

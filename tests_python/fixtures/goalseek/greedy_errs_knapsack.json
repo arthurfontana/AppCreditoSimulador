@@ -1,0 +1,34 @@
+{
+  "name": "greedy_errs_knapsack",
+  "description": "Knapsack com precedência onde o greedy (razão peso/valor) erra: o movimento CARO A (peso 10, valor 1) destrava dois BARATOS B e C (peso 5, valor 20 cada) via requires. O greedy enche a capacidade (30) com os decoys D1/D2/D3 (bom ratio isolado) e não sobra orçamento para A, então nunca destrava B/C — fica com valor 37. O MILP acha A+B+C+D1 = valor 54 (peso 30, exatamente no teto). Alvo = maximizar approvedAltasInfer (QI, LINEAR = knapsack puro); teto maxInadReal = 0.03 vira a capacidade (candidatos com qtdAltas=0 mantêm QA=1000, IR<=30). Ótimo verificável à mão. O teto fica EXATAMENTE na borda no ótimo (IR=30, QA=1000).",
+  "params": {
+    "catalog": {
+      "baselineRaw": {
+        "approvedQty": 1000, "decidedQty": 2000, "totalQty": 2000,
+        "qtdAltasSum": 1000, "qtdAltasInferSum": 0, "inadRealSum": 0, "inadInferidaSum": 0
+      },
+      "candidates": [
+        {"id": "A",  "type": "cinema_cell", "toApproved": true, "qty": 1,  "qtdAltas": 0, "qtdAltasInfer": 1,  "inadRRaw": 10, "inadIRaw": 0, "requires": []},
+        {"id": "B",  "type": "cinema_cell", "toApproved": true, "qty": 20, "qtdAltas": 0, "qtdAltasInfer": 20, "inadRRaw": 5,  "inadIRaw": 0, "requires": ["A"]},
+        {"id": "C",  "type": "cinema_cell", "toApproved": true, "qty": 20, "qtdAltas": 0, "qtdAltasInfer": 20, "inadRRaw": 5,  "inadIRaw": 0, "requires": ["A"]},
+        {"id": "D1", "type": "cinema_cell", "toApproved": true, "qty": 13, "qtdAltas": 0, "qtdAltasInfer": 13, "inadRRaw": 10, "inadIRaw": 0, "requires": []},
+        {"id": "D2", "type": "cinema_cell", "toApproved": true, "qty": 12, "qtdAltas": 0, "qtdAltasInfer": 12, "inadRRaw": 10, "inadIRaw": 0, "requires": []},
+        {"id": "D3", "type": "cinema_cell", "toApproved": true, "qty": 12, "qtdAltas": 0, "qtdAltasInfer": 12, "inadRRaw": 10, "inadIRaw": 0, "requires": []}
+      ]
+    },
+    "goal": {"target": "approvedAltasInfer", "direction": "increase", "magnitude": null, "minimize": "inadReal"},
+    "constraints": {"maxInadReal": 0.03, "maxInadInf": null},
+    "frontierPoints": 7
+  },
+  "expect": {
+    "status": "optimal",
+    "solutionIds": ["A", "B", "C", "D1"],
+    "predicted": {
+      "approvedQty": 1054.0, "decidedQty": 2000.0,
+      "approvalRate": 52.7, "inadReal": 0.03, "inadInferida": 0.0
+    },
+    "targetValue": 54.0,
+    "greedyValue": 37.0,
+    "milpBeatsGreedy": true
+  }
+}

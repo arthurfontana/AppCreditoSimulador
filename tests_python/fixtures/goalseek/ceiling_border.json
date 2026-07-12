@@ -1,0 +1,27 @@
+{
+  "name": "ceiling_border",
+  "description": "Teto linearizado (maxInadReal=0.03) respeitado EXATAMENTE na borda. Baseline inadReal=0.02 (IR0=20, QA0=1000). X move qtdAltas=1000/inadRRaw=40 => IR=60, QA=2000, inadReal=60/2000=0.03 (na borda, factível). Y (qtdAltas=0, inadRRaw=1) sozinho ok, mas X+Y => IR=61/QA=2000=0.0305 > 0.03 (infactível). Alvo = max approvalRate; X dá +200 aprovados (0.35) contra Y +100 (0.30), então o ótimo é SÓ X, com inadReal exatamente 0.03. Verificável à mão.",
+  "params": {
+    "catalog": {
+      "baselineRaw": {
+        "approvedQty": 500, "decidedQty": 2000, "totalQty": 2000,
+        "qtdAltasSum": 1000, "qtdAltasInferSum": 0, "inadRealSum": 20, "inadInferidaSum": 0
+      },
+      "candidates": [
+        {"id": "X", "type": "cinema_cell", "toApproved": true, "qty": 200, "qtdAltas": 1000, "qtdAltasInfer": 0, "inadRRaw": 40, "inadIRaw": 0, "requires": []},
+        {"id": "Y", "type": "cinema_cell", "toApproved": true, "qty": 100, "qtdAltas": 0,    "qtdAltasInfer": 0, "inadRRaw": 1,  "inadIRaw": 0, "requires": []}
+      ]
+    },
+    "goal": {"target": "approvalRate", "direction": "increase", "magnitude": null, "minimize": "inadInferida"},
+    "constraints": {"maxInadReal": 0.03, "maxInadInf": null},
+    "frontierPoints": 5
+  },
+  "expect": {
+    "status": "optimal",
+    "solutionIds": ["X"],
+    "predicted": {
+      "approvedQty": 700.0, "decidedQty": 2000.0,
+      "approvalRate": 35.0, "inadReal": 0.03
+    }
+  }
+}

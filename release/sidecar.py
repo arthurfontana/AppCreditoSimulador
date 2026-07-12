@@ -85,8 +85,15 @@ WARMUP_PACKAGES = [
 # geradas por tests/clusterSegmentsGolden.test.js) — sem GATE verde a task não é
 # embarcada/ofertada. sklearn é EXTRA da task (silhueta p/ k automático, hierárquico),
 # nunca gate do tier (DEC-HX-004).
+# `goal_seek_deep` (Goal Seek Profundo, Sessão GS5 — solver MILP em
+# release/python/motor_goalseek.py) tem um gate EXTRA além do tier full: exige
+# `scipy.optimize.milp` importável (scipy < 1.9 não tem `milp` — DEC-GS-010). Por isso
+# NÃO entra em FULL_TIER_TASKS (gate = numpy+scipy só); é ofertada por available_tasks()
+# apenas quando o warm-up confirma o `milp`. GATE dourado só-Python (sem gêmeo JS —
+# DEC-GS-001): tests_python/test_goal_seek.py com fixtures de catálogo commitadas.
 KNOWN_TASKS = ("echo_stats",)
 FULL_TIER_TASKS = ("segment_discovery", "cluster_segments")
+GOAL_SEEK_TASK = "goal_seek_deep"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado global (protegido por locks; RAM apenas)
@@ -97,6 +104,11 @@ _TOKEN = secrets.token_urlsafe(32)
 _pkg_lock = threading.Lock()
 # módulo -> 'loading' | versão(str) | None(ausente/falhou)
 _pkg_status = {mod: "loading" for (_pip, mod) in WARMUP_PACKAGES}
+# Gate EXTRA do goal_seek_deep (DEC-GS-010): `scipy.optimize.milp` importável.
+# 'loading' até o warm-up terminar; True/False depois. `scipy.optimize` NÃO é importado
+# por `import scipy` (é submódulo), então isto é sondado no warm-up (nunca inline num
+# request — mesma regra da detecção de tier, DEC-HX-004).
+_scipy_milp = "loading"
 _warmup_started = False
 
 _config_lock = threading.Lock()
@@ -143,6 +155,17 @@ def _warmup():
             ok = False
         with _pkg_lock:
             _pkg_status[mod] = version if ok else None
+    # Gate extra do goal_seek_deep: sonda `scipy.optimize.milp` (submódulo — não vem
+    # de `import scipy`). Feito ao fim do warm-up para não pesar o boot.
+    global _scipy_milp
+    milp_ok = False
+    try:
+        from scipy.optimize import milp  # noqa: F401
+        milp_ok = True
+    except Exception:
+        milp_ok = False
+    with _pkg_lock:
+        _scipy_milp = milp_ok
 
 
 def start_warmup():
@@ -166,14 +189,23 @@ def _present(pkgs, name):
     return bool(v) and v != "loading"
 
 
+def _has_milp():
+    with _pkg_lock:
+        return _scipy_milp is True
+
+
 def available_tasks():
     """Tasks ofertadas AGORA: as de base sempre; as de tier full só com numpy+scipy
-    presentes (warm-up concluído) — capacidades declaradas, nunca presumidas."""
+    presentes (warm-up concluído) — capacidades declaradas, nunca presumidas.
+    `goal_seek_deep` exige, ALÉM do tier full, `scipy.optimize.milp` importável
+    (DEC-GS-010) — gate à parte de FULL_TIER_TASKS."""
     pkgs = _package_snapshot()
     tier_full = _present(pkgs, "numpy") and _present(pkgs, "scipy")
     tasks = list(KNOWN_TASKS)
     if tier_full:
         tasks.extend(FULL_TIER_TASKS)
+        if _has_milp():
+            tasks.append(GOAL_SEEK_TASK)
     return tasks
 
 
@@ -226,6 +258,7 @@ def math_fsum(seq):
 
 _seg_engine = None
 _cluster_engine = None
+_goalseek_engine = None
 
 
 def _load_engine_module(filename):
@@ -257,6 +290,14 @@ def _load_cluster_engine():
     if _cluster_engine is None:
         _cluster_engine = _load_engine_module("motor_clusters.py")
     return _cluster_engine
+
+
+def _load_goalseek_engine():
+    """Solver do Goal Seek Profundo (GS5) — só no primeiro job que o usa."""
+    global _goalseek_engine
+    if _goalseek_engine is None:
+        _goalseek_engine = _load_engine_module("motor_goalseek.py")
+    return _goalseek_engine
 
 
 def run_task(task, store, params, progress_cb=None):
@@ -295,6 +336,16 @@ def run_task(task, store, params, progress_cb=None):
         if progress_cb:
             progress_cb(1.0)
         return {"clusterModel": model}
+    if task == "goal_seek_deep":
+        # Goal Seek Profundo (GS5, DEC-GS-005/006) — solver MILP self-contained: o
+        # catálogo agregado vem em `params` (o dataset NUNCA sobe; `store` é ignorado).
+        # O `result` são só ids + previsões lineares; o worker JS materializa e
+        # re-simula (DEC-GS-007) — nenhum número final tem origem aqui.
+        engine = _load_goalseek_engine()
+        result = engine.solve_goal_seek(params or {}, progress_cb)
+        if progress_cb:
+            progress_cb(1.0)
+        return result
     raise ValueError("unknown task: %r" % (task,))
 
 

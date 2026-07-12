@@ -1,0 +1,27 @@
+{
+  "name": "dinkelbach_lens",
+  "description": "Dinkelbach com DENOMINADOR VARIÁVEL: alvo = max approvalRate = A/D, onde o candidato de LENS (L, type lens_threshold) move A E D juntos (admite população ao escopo decidido), enquanto o candidato comum N move só A. Baseline 100/1000=0.10. Combos: {N}=0.20, {L}=500/1400=0.35714..., {N,L}=600/1400=0.42857... O máximo é {N,L}; a iteração de Dinkelbach converge para a razão exata 0.428571... (verificável à mão / por enumeração dos 4 combos no teste).",
+  "params": {
+    "catalog": {
+      "baselineRaw": {
+        "approvedQty": 100, "decidedQty": 1000, "totalQty": 1000,
+        "qtdAltasSum": 0, "qtdAltasInferSum": 0, "inadRealSum": 0, "inadInferidaSum": 0
+      },
+      "candidates": [
+        {"id": "N", "type": "cinema_cell",    "toApproved": true, "qty": 100, "qtdAltas": 0, "qtdAltasInfer": 0, "inadRRaw": 0, "inadIRaw": 0, "requires": []},
+        {"id": "L", "type": "lens_threshold", "toApproved": true, "qty": 400, "qtdAltas": 0, "qtdAltasInfer": 0, "inadRRaw": 0, "inadIRaw": 0, "requires": []}
+      ]
+    },
+    "goal": {"target": "approvalRate", "direction": "increase", "magnitude": null, "minimize": "inadInferida"},
+    "constraints": {"maxInadReal": null, "maxInadInf": null},
+    "frontierPoints": 5
+  },
+  "expect": {
+    "status": "optimal",
+    "solutionIds": ["L", "N"],
+    "predicted": {
+      "approvedQty": 600.0, "decidedQty": 1400.0,
+      "approvalRate": 42.857142857142854
+    }
+  }
+}
