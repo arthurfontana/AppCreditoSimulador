@@ -366,7 +366,7 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_GOAL_SEEK` | `{shapes, conns, goal, constraints, locks}` | Copiloto Sessão 4 — roda `computeGoalSeek` (catálogo de movimentos + busca gulosa com precedência/shrinkage/restrições + validação por re-simulação); responde com `GOAL_SEEK_RESULT` |
 | `COMPUTE_SIMPLIFY` | `{shapes, conns}` | Copiloto Sessão 5 — roda `computeSimplify` (detecção de candidatos + aceitação incremental validada por `computeSimplifyEquivalence` + prova de equivalência linha a linha); responde com `SIMPLIFY_RESULT` |
 | `COMPUTE_POLICY_DOC` | `{shapes, conns, ir, canvases, options}` | Copiloto Sessão 6 — `ir` chega PRONTO (`buildPolicyIR` só existe em `App.jsx`); `canvases: [{id, nome, shapes, conns}]` para a comparação de cenários (mesmo formato de `COMPUTE_ANALYTICS_DATASET`); `options: {includeDomains, activeCanvasId?, activeCanvasName?, compare?:{shapes,conns}}`. Roda `computePolicyDoc`; responde com `POLICY_DOC_RESULT` |
-| `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10/12 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?}`. Roda `computeSegmentDiscovery` (achados + recomendações validadas + asis_divergence/anomaly + estabilidade); responde com `SEGMENT_DISCOVERY_RESULT` |
+| `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10/12 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?, excludedCols?}`. `excludedCols` = seletor de variáveis do modal (nomes de coluna Filtro fora da busca; heurística `segVarDefaultReason` em `App.jsx` pré-desmarca colunas temporais/vintage e de score). Roda `computeSegmentDiscovery` (achados + recomendações validadas + asis_divergence/anomaly + estabilidade); responde com `SEGMENT_DISCOVERY_RESULT` |
 | `COMPUTE_SEGMENT_COMBINED` | `{shapes, conns, applies}` | Copiloto Sessão 12 — aplicação combinada de N recomendações. `applies: [{moves}]`. Aplica os patches EM SEQUÊNCIA sobre UM clone e valida por UMA re-simulação real (`computeSegmentCombined`) — nunca a soma dos deltas; responde com `SEGMENT_COMBINED_RESULT` |
 | `POOL_JOB` | `{jobId, shapes, conns, moves}` | **Execução Híbrida H3** — shard do pool de workers aninhados. Chega SÓ nos pool-workers (o worker principal não posta a si mesmo): roda `segValidateMoves` (aplica moves + `runSimulation` + snapshot) sobre o `workerCsvStore` já semeado e responde com `POOL_JOB_RESULT`. Ver "Pool de Workers (Execução Híbrida H3)" |
 | `segment_discovery` | `{shapes, conns, scope, params}` | **Execução Híbrida H7** — alias de FALLBACK da Descoberta profunda (Classe B): mesmo payload de `COMPUTE_SEGMENT_DISCOVERY`, mas com os params CLAMPADOS aos tetos browser (`clampSegmentParamsForBrowser`: maxDepth ≤ 2, beamWidth ≤ 8). É o que o ComputeRouter posta quando o job do sidecar cai/está indisponível (paridade total, P4); responde com o MESMO `SEGMENT_DISCOVERY_RESULT` |
@@ -1128,6 +1128,22 @@ materializáveis (patch + re-simulação real), aplicação combinada, achados `
 ```
 Segmento = **conjunção de `LensRule`** sobre colunas Filtro (DEC-SD-001) — imediatamente
 interpretável e materializável (vira losango/Cineminha/movimento de Goal Seek na Sessão 12).
+
+### Seletor de variáveis (checklist do modal, `params.excludedCols`)
+Colunas Filtro de cohort/vintage (mês/safra de referência) e de score custam mais do que
+ajudam como candidatas ao beam search: a primeira reflete quando a proposta entrou, não
+quem ela é (achado "mês X é mais arriscado" não é acionável e pode ser leakage de safra
+imatura), a segunda costuma já ser o próprio risco (circular) ou já estar em uso em outro
+nó da política. `openSegmentDiscoveryModal` (`App.jsx`) lista a união das colunas
+`'decision'` de todas as bases carregadas e pré-desmarca as que batem com
+`segVarDefaultReason(colName)` (heurística por tokens do nome — `mes/mês/ano/safra/
+vintage/periodo/competencia/data` ⇒ `'temporal'`; `score/rating/bureau` ⇒ `'score'`);
+demais nascem marcadas. O checklist ("Variáveis incluídas na busca", com badge 🕐/🎯 na
+razão do default) é só o estado INICIAL — o usuário marca/desmarca livremente antes de
+buscar. `runSegmentDiscovery` envia `params.excludedCols` (nomes de coluna) só quando não
+vazio; `discoverSegments` (worker, `simulation.worker.js`) filtra `candCols` por ele antes
+do beam search — mesmo filtro replicado em `release/python/motor_segmentos.py`
+(`excluded_cols`) para o caminho profundo (H7, Classe B) não divergir do browser.
 
 ### Pipeline (três estágios desacoplados, testáveis)
 - **`discoverSegments`** — beam search 1D→`maxDepth` (default 2) sobre os **dicionários** das
