@@ -2096,7 +2096,7 @@ function computeNewLensThreshold(operator, distinct, idx, kind) {
 
 // Catálogo de candidatos a movimento (ver comentário de topo). `lockedIds` = union de
 // `shape.locked` persistido + a lista `locks` da mensagem COMPUTE_GOAL_SEEK.
-function buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, lockedIds) {
+function buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, lockedIds, maxLensSteps = 1) {
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const { out } = buildFlowGraph(shapes, conns);
   const connFromMap = {};
@@ -2222,7 +2222,18 @@ function buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, locke
     }
   }
 
-  // ── Lens threshold candidates (1 passo de relax + 1 de tighten por lens elegível) ──
+  // ── Lens threshold candidates — escadas relax/tighten (DEC-GS-008) ──
+  // maxLensSteps=1 (default de TODOS os call sites atuais): 1 relax + 1 tighten, ids SEM
+  // sufixo numérico (`lens:{id}:relax`) — comportamento, ids e agregados IDÊNTICOS ao
+  // anterior (retrocompat total; o GATE atual não muda). maxLensSteps=N (só via
+  // COMPUTE_GOAL_SEEK_CATALOG, N=12): até N degraus encadeados por `requires` (o degrau k
+  // exige o k−1 → abrir o degrau 3 exige 1 e 2 por transitividade), cada degrau admitindo
+  // (relax) / removendo (tighten) o PRÓXIMO valor distinto rumo ao extremo. O agregado de
+  // cada degrau é MARGINAL (só o volume daquele valor, saído do mesmo lensColArrivals); o
+  // `apply.newValue` é o limiar CUMULATIVO (aplicá-lo sozinho já admite/remove os valores
+  // dos degraus 1..k) — por isso a validação materializa apenas o degrau MAIS PROFUNDO
+  // escolhido por lens (ver computeGoalSeekValidate / selectDeepestLensSteps).
+  const nLensSteps = Math.max(1, Math.floor(maxLensSteps) || 1);
   for (const [lensId, colName] of Object.entries(lensColByShape)) {
     const shape = shapesMap[lensId];
     const rule = (shape.rules || [])[0];
@@ -2235,32 +2246,36 @@ function buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, locke
     if (distinct.length === 0) continue;
     const isUpperPass = rule.operator === 'gte' || rule.operator === 'gt';
     const passFlags = distinct.map(o => matchLensRule(String(o.n), rule.operator, rule.value));
-    let relaxIdx = -1, tightenIdx = -1;
+    // Ordem dos degraus, do mais próximo da fronteira para o mais distante:
+    //   relax admite valores que HOJE falham; tighten remove valores que HOJE passam.
+    const relaxOrder = [], tightenOrder = [];
     if (isUpperPass) {
-      for (let k = distinct.length - 1; k >= 0; k--) if (!passFlags[k]) { relaxIdx = k; break; }
-      for (let k = 0; k < distinct.length; k++) if (passFlags[k]) { tightenIdx = k; break; }
+      for (let k = distinct.length - 1; k >= 0; k--) if (!passFlags[k]) relaxOrder.push(k);
+      for (let k = 0; k < distinct.length; k++)       if (passFlags[k])  tightenOrder.push(k);
     } else {
-      for (let k = 0; k < distinct.length; k++) if (!passFlags[k]) { relaxIdx = k; break; }
-      for (let k = distinct.length - 1; k >= 0; k--) if (passFlags[k]) { tightenIdx = k; break; }
+      for (let k = 0; k < distinct.length; k++)       if (!passFlags[k]) relaxOrder.push(k);
+      for (let k = distinct.length - 1; k >= 0; k--)  if (passFlags[k])  tightenOrder.push(k);
     }
-    const mk = (kind, idx) => {
-      if (idx < 0) return null;
-      const m = arr[distinct[idx].raw];
-      if (!m || m.qty === 0) return null;
-      const newRuleValue = computeNewLensThreshold(rule.operator, distinct, idx, kind);
-      return {
-        id: `lens:${lensId}:${kind}`, type: 'lens_threshold', shapeId: lensId, kind,
-        label: `${kind === 'relax' ? 'Relaxar' : 'Apertar'} regra de "${shape.label || 'Decision Lens'}" (${colName} ${rule.operator} ${newRuleValue})`,
-        toApproved: kind === 'relax',
-        qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer, inadRRaw: m.inadRRaw, inadIRaw: m.inadIRaw,
-        requires: [],
-        apply: { type: 'lens_threshold', shapeId: lensId, ruleIndex: 0, newValue: String(newRuleValue) },
-      };
+    const mkSteps = (kind, order) => {
+      const steps = Math.min(nLensSteps, order.length);
+      for (let step = 1; step <= steps; step++) {
+        const idx = order[step - 1];
+        const m = arr[distinct[idx].raw];
+        if (!m || m.qty === 0) break; // não pode existir (distinct filtra qty>0); corta a cadeia
+        const newRuleValue = computeNewLensThreshold(rule.operator, distinct, idx, kind);
+        const id = nLensSteps === 1 ? `lens:${lensId}:${kind}` : `lens:${lensId}:${kind}:${step}`;
+        candidates.push({
+          id, type: 'lens_threshold', shapeId: lensId, kind, step,
+          label: `${kind === 'relax' ? 'Relaxar' : 'Apertar'} regra de "${shape.label || 'Decision Lens'}" (${colName} ${rule.operator} ${newRuleValue})`,
+          toApproved: kind === 'relax',
+          qty: m.qty, qtdAltas: m.qtdAltas, qtdAltasInfer: m.qtdAltasInfer, inadRRaw: m.inadRRaw, inadIRaw: m.inadIRaw,
+          requires: step > 1 ? [`lens:${lensId}:${kind}:${step - 1}`] : [],
+          apply: { type: 'lens_threshold', shapeId: lensId, ruleIndex: 0, newValue: String(newRuleValue) },
+        });
+      }
     };
-    const relaxCand = mk('relax', relaxIdx);
-    const tightenCand = mk('tighten', tightenIdx);
-    if (relaxCand) candidates.push(relaxCand);
-    if (tightenCand) candidates.push(tightenCand);
+    mkSteps('relax', relaxOrder);
+    mkSteps('tighten', tightenOrder);
   }
 
   return candidates;
@@ -2478,6 +2493,12 @@ function goalSeekTgtQty(c, target) {
 // DEC-GS-004 — piso amostral dos selos estatísticos por movimento (mesmo piso de
 // `computeReliability`: segmentos com menos de 30 altas são "amostra frágil").
 const GOAL_SEEK_MIN_SAMPLE = 30;
+// DEC-GS-008 — profundidade das escadas de lens no catálogo profundo (COMPUTE_GOAL_SEEK_CATALOG).
+// Os call sites do modo greedy/browser NÃO passam maxLensSteps ⇒ default 1 (retrocompat total).
+const GOAL_SEEK_DEEP_LENS_STEPS = 12;
+// DEC-GS-007 — tolerância (pp) da divergência predição-linear × re-simulação real nos pontos
+// extremos da fronteira; acima disso a solução é tratada como violação de invariante.
+const GOAL_SEEK_FRONTIER_TOL = 0.1;
 // Denominador da taxa do movimento na métrica `minimize` — só definido para os dois
 // valores "inad*" (os únicos com uma taxa crua associada); `approval`/`salesVolume`
 // são quantidades absolutas, sem taxa a testar ⇒ `null` (stats degradam para nulos).
@@ -2674,6 +2695,302 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
     bindingConstraint,
     result: {
       approvalRate: validatedDecided > 0 ? (validated.approvedQty / validatedDecided) * 100 : 0,
+      inadReal: validated.inadReal,
+      inadInferida: validated.inadInferida,
+      approvedQty: validated.approvedQty,
+      totalQty: validated.totalQty,
+      approvedAltasInfer: running.qtdAltasInferSum,
+    },
+  };
+}
+
+// ── Goal Seek Profundo (Sessão GS4, DEC-GS-005/007/008) ─────────────────────────
+// Ponto arquitetural (DEC-GS-005): o CATÁLOGO nasce aqui (walk M8 sobre a base); o sidecar
+// só OTIMIZA sobre os agregados (centenas de números, nunca a base). A VALIDAÇÃO é
+// single-sourced no worker (DEC-GS-007): materializa `applyGoalSeekMoves` + re-simula
+// `runSimulation` de verdade — nenhum número exibido tem origem no sidecar. Os handlers
+// COMPUTE_GOAL_SEEK_CATALOG/COMPUTE_GOAL_SEEK_VALIDATE são finos; a lógica pura vive aqui
+// (exportada para o GATE da DEC-GS-009, que testa as funções, não o protocolo de mensagens).
+
+// Token opaco de staleness (DEC-GS-007): FNV-1a 32-bit (reusa clusterFnv1a32) sobre a string
+// canônica de {shapes, conns, locks, maxLensSteps, csvStoreVersion}. A main guarda o token do
+// CATALOG e o ecoa no VALIDATE; se o canvas/base mudou no meio tempo, o token não bate ⇒ a
+// main reinicia o fluxo (nunca materializa um `apply` obsoleto).
+function goalSeekCatalogToken(shapes, conns, lockedIds, maxLensSteps) {
+  const canon = JSON.stringify({
+    shapes, conns,
+    locks: [...(lockedIds || [])].sort(),
+    maxLensSteps,
+    csvStoreVersion,
+  });
+  return clusterFnv1a32(canon).toString(16);
+}
+
+// Critério de ordenação da GS2 (DEC-GS-003) fatorado para reuso — MESMA fórmula do greedy
+// (custo colateral por unidade de ganho no alvo, com shrinkage bayesiano). O caminho greedy
+// (computeGoalSeek) mantém seu bloco inline INTOCADO (regra transversal: nenhuma mudança nos
+// caminhos existentes); esta cópia serve só à ordenação de EXIBIÇÃO do modo profundo.
+function makeGoalSeekScorer(pool, target, minimizeField) {
+  let collSum = 0, tgtSum = 0, poolQty = 0;
+  for (const c of pool) {
+    collSum += goalSeekCollQty(c, minimizeField);
+    tgtSum  += goalSeekTgtQty(c, target);
+    poolQty += c.qty;
+  }
+  const poolN = Math.max(1, pool.length);
+  const collPoolAvg = collSum / poolN;
+  const tgtPoolAvg  = tgtSum / poolN;
+  const SHRINK_K = Math.max(1, (poolQty / poolN) * 0.1);
+  return (c) =>
+    (goalSeekCollQty(c, minimizeField) + collPoolAvg * SHRINK_K) /
+    (goalSeekTgtQty(c, target) + tgtPoolAvg * SHRINK_K);
+}
+
+// Ordena os movimentos escolhidos para EXIBIÇÃO (ordem do greedy-score, DEC-GS-007), anexando
+// `deltaApprovalRate` (derivado dos agregados, na mesma ordem) e `stats` (selos da GS3/DEC-GS-004).
+// `pool` = pool direcional completo (mesmas médias do greedy). Devolve `{moves, running}` — o
+// `running` acumula os agregados MARGINAIS (inclui todos os degraus de escada de lens) e alimenta
+// `result.approvedAltasInfer`.
+function buildGoalSeekDisplayMoves(pool, selected, baselineRaw, target, direction, minimizeField) {
+  const wantsApproved = direction === 'increase';
+  const sign = wantsApproved ? 1 : -1;
+  const score = makeGoalSeekScorer(pool, target, minimizeField);
+  // Média do pool na métrica de taxa (p0 do binomial dos selos) — idêntica ao greedy.
+  let poolStatNumSum = 0, poolStatDenSum = 0;
+  for (const c of pool) {
+    const n = goalSeekStatN(c, minimizeField);
+    if (n == null) continue;
+    poolStatDenSum += n;
+    poolStatNumSum += goalSeekCollQty(c, minimizeField);
+  }
+  const poolAvgRate = poolStatDenSum > 0 ? poolStatNumSum / poolStatDenSum : null;
+
+  const ordered = [...selected].sort((a, b) => {
+    const sa = score(a), sb = score(b);
+    if (sa !== sb) return sa - sb;
+    if (b.qty !== a.qty) return b.qty - a.qty;
+    return segStrCmp(a.id, b.id);
+  });
+
+  let running = { ...baselineRaw };
+  const moves = [];
+  for (const cand of ordered) {
+    const prevRatios = goalSeekRatios(running);
+    running = {
+      totalQty: running.totalQty,
+      // Mesma regra do delta O(1) do greedy: só lens_threshold mexe no denominador de decididos
+      // (admite/remove linhas do escopo); cinema/decision só trocam de terminal dentro do escopo.
+      decidedQty: running.decidedQty + (cand.type === 'lens_threshold' ? sign * cand.qty : 0),
+      approvedQty: running.approvedQty + sign * cand.qty,
+      qtdAltasSum: running.qtdAltasSum + sign * cand.qtdAltas,
+      qtdAltasInferSum: running.qtdAltasInferSum + sign * cand.qtdAltasInfer,
+      inadRealSum: running.inadRealSum + sign * cand.inadRRaw,
+      inadInferidaSum: running.inadInferidaSum + sign * cand.inadIRaw,
+    };
+    const statN = goalSeekStatN(cand, minimizeField);
+    const statK = statN != null ? goalSeekCollQty(cand, minimizeField) : null;
+    const rate = (statN != null && statN > 0) ? statK / statN : null;
+    const stats = {
+      n: statN,
+      rate,
+      ci95: rate !== null ? wilsonCI(statK, statN) : null,
+      pValue: (rate !== null && poolAvgRate !== null) ? segBinomTwoSided(statK, statN, poolAvgRate) : null,
+      fragile: statN != null && statN < GOAL_SEEK_MIN_SAMPLE,
+    };
+    moves.push({
+      id: cand.id, type: cand.type, shapeId: cand.shapeId, label: cand.label,
+      qty: cand.qty, qtdAltas: cand.qtdAltas, qtdAltasInfer: cand.qtdAltasInfer,
+      inadRRaw: cand.inadRRaw, inadIRaw: cand.inadIRaw,
+      deltaApprovalRate: goalSeekRatios(running).approvalRate - prevRatios.approvalRate,
+      apply: cand.apply,
+      stats,
+    });
+  }
+  return { moves, running };
+}
+
+// DEC-GS-008 — dos movimentos de escada de UM mesmo lens, materializa SÓ o degrau mais profundo
+// (o `apply.newValue` de cada degrau é o limiar cumulativo). Aplicar todos seria redundante e,
+// pior, o applier (goalSeek.js) sobrescreve o value da regra — o último aplicado venceria, não o
+// mais profundo. Movimentos não-lens passam intactos. Agrupa por (shapeId, kind).
+function selectDeepestLensSteps(cands) {
+  const deepest = new Map();
+  const out = [];
+  for (const c of cands) {
+    if (c.type === 'lens_threshold') {
+      const key = `${c.shapeId}|${c.kind || ''}`;
+      const prev = deepest.get(key);
+      if (!prev || (c.step || 1) > (prev.step || 1)) deepest.set(key, c);
+    } else {
+      out.push(c);
+    }
+  }
+  for (const c of deepest.values()) out.push(c);
+  return out;
+}
+
+// COMPUTE_GOAL_SEEK_CATALOG (DEC-GS-005) — catálogo agregado + baselineRaw + token. Os candidatos
+// transmitidos carregam SÓ os campos do contrato do sidecar (o solver não precisa de kind/step);
+// o VALIDATE regenera o catálogo internamente (buildGoalSeekCandidates) para ter os `apply`
+// canônicos e os campos kind/step da dedup de escada.
+function buildGoalSeekCatalog(shapes, conns, csvStore, lensPopulations, lockedIds, maxLensSteps = GOAL_SEEK_DEEP_LENS_STEPS) {
+  const baselineRaw = computeGoalSeekBaseline(shapes, conns, csvStore);
+  const candidates = buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, lockedIds, maxLensSteps)
+    .map(c => ({
+      id: c.id, type: c.type, shapeId: c.shapeId, label: c.label, toApproved: c.toApproved,
+      qty: c.qty, qtdAltas: c.qtdAltas, qtdAltasInfer: c.qtdAltasInfer,
+      inadRRaw: c.inadRRaw, inadIRaw: c.inadIRaw,
+      requires: c.requires, apply: c.apply,
+    }));
+  return {
+    catalogToken: goalSeekCatalogToken(shapes, conns, lockedIds, maxLensSteps),
+    baselineRaw, candidates,
+  };
+}
+
+// COMPUTE_GOAL_SEEK_VALIDATE (DEC-GS-007) — recebe a solução do solver (moveIds + frontier) e,
+// single-sourced no worker: regenera o catálogo (token de staleness), aplica as invariantes da
+// DEC-GS-001 (existência/precedência/travas/tetos), materializa (dedup de escada = degrau mais
+// profundo) + re-simula de VERDADE, e monta o GOAL_SEEK_RESULT no formato de hoje (⇒ a UI de
+// resultado é reusada tal e qual). Assíncrona: valida os extremos da fronteira via pool H3
+// (runValidationJobsVia; pool null ⇒ inline sequencial, determinístico — igual ao single-worker).
+async function computeGoalSeekValidate(shapes, conns, csvStore, lensPopulations, req, pool = null) {
+  const r = req || {};
+  const maxLensSteps = (typeof r.maxLensSteps === 'number') ? r.maxLensSteps : GOAL_SEEK_DEEP_LENS_STEPS;
+  const locks = Array.isArray(r.locks) ? r.locks : [];
+
+  // 1) Token (staleness) — a main passa o token do CATALOG; regeneramos e comparamos.
+  const token = goalSeekCatalogToken(shapes, conns, locks, maxLensSteps);
+  if (r.catalogToken != null && r.catalogToken !== token) return { error: 'stale' };
+
+  // Catálogo canônico (objetos completos, com kind/step) — buildGoalSeekCandidates JÁ exclui nós
+  // travados, então um movimento de nó travado simplesmente não existe aqui (invariante `c`).
+  const allCandidates = buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, locks, maxLensSteps);
+  const candById = Object.fromEntries(allCandidates.map(c => [c.id, c]));
+
+  const g = r.goal || {};
+  const target = GOAL_SEEK_TARGETS.has(g.target) ? g.target : 'approvalRate';
+  const direction = g.direction === 'decrease' ? 'decrease' : 'increase';
+  const magnitude = (typeof g.magnitude === 'number' && isFinite(g.magnitude)) ? g.magnitude : null;
+  const minimizeField = GOAL_SEEK_MINIMIZE_FIELDS.has(g.minimize) ? g.minimize : 'inadInferida';
+  const wantsApproved = direction === 'increase';
+
+  const cons = r.constraints || {};
+  const maxInadReal = (typeof cons.maxInadReal === 'number') ? cons.maxInadReal : null;
+  const maxInadInf  = (typeof cons.maxInadInf  === 'number') ? cons.maxInadInf  : null;
+
+  // 2) Invariantes DEC-GS-001 sobre a solução.
+  const moveIds = Array.isArray(r.moveIds) ? r.moveIds : [];
+  const selectedIds = new Set(moveIds);
+  const selected = [];
+  for (const id of moveIds) {
+    const c = candById[id];
+    if (!c) return { error: 'invalid_solution', detail: `unknown_move:${id}` };   // (a) existência (+ (c) travas)
+    if (c.toApproved !== wantsApproved) return { error: 'invalid_solution', detail: `direction:${id}` };
+    selected.push(c);
+  }
+  for (const c of selected) {                                                       // (b) precedência
+    for (const reqId of (c.requires || [])) {
+      if (candById[reqId] && !selectedIds.has(reqId)) {
+        return { error: 'invalid_solution', detail: `precedence:${c.id}->${reqId}` };
+      }
+    }
+  }
+
+  // 3) Materialização (degrau mais profundo por lens) + re-simulação real.
+  const materialized = selectDeepestLensSteps(selected);
+  const { shapes: ps, conns: pc } = applyGoalSeekMoves(shapes, conns, materialized.map(c => c.apply));
+  const validated = runSimulation(ps, pc, csvStore);
+
+  // (d) tetos respeitados na re-simulação REAL (não só na predição linear).
+  if (maxInadReal != null && validated.inadReal != null && validated.inadReal > maxInadReal + 1e-9)
+    return { error: 'invalid_solution', detail: 'maxInadReal' };
+  if (maxInadInf != null && validated.inadInferida != null && validated.inadInferida > maxInadInf + 1e-9)
+    return { error: 'invalid_solution', detail: 'maxInadInf' };
+
+  // 4) Fronteira: pontos preditos do sidecar (formato do frontier atual + predicted:true).
+  const fpoints = Array.isArray(r.frontier) ? r.frontier : [];
+  const outFrontier = fpoints.map(pt => {
+    const p = (pt && typeof pt.predicted === 'object' && pt.predicted) ? pt.predicted : (pt || {});
+    return {
+      approvalRate: typeof p.approvalRate === 'number' ? p.approvalRate : null,
+      inadReal: p.inadReal ?? null,
+      inadInferida: p.inadInferida ?? null,
+      approvedQty: p.approvedQty ?? null,
+      totalQty: p.decidedQty ?? p.totalQty ?? null,
+      level: pt?.level ?? null,
+      predicted: true,
+    };
+  });
+
+  // Validação por re-simulação dos EXTREMOS (primeiro/último) — pega divergência grosseira
+  // predição-linear × real (DEC-GS-007). Só para pontos com `ids` materializáveis.
+  const extremeJobs = [];
+  if (fpoints.length > 0) {
+    const idxs = fpoints.length === 1 ? [0] : [0, fpoints.length - 1];
+    for (const i of idxs) {
+      const pt = fpoints[i];
+      const ids = Array.isArray(pt && pt.ids) ? pt.ids : null;
+      if (!ids) continue;
+      const cands = ids.map(id => candById[id]).filter(Boolean);
+      if (cands.length !== ids.length) return { error: 'invalid_solution', detail: `frontier_unknown_move:${i}` };
+      extremeJobs.push({ id: `__gs_frontier_${i}`, moves: selectDeepestLensSteps(cands).map(c => c.apply), _pi: i });
+    }
+  }
+  if (extremeJobs.length > 0) {
+    const snapById = await runValidationJobsVia(pool, shapes, conns, csvStore, extremeJobs.map(j => ({ id: j.id, moves: j.moves })));
+    for (const j of extremeJobs) {
+      const res = snapById.get(j.id);
+      const predAR = fpoints[j._pi] && fpoints[j._pi].predicted ? fpoints[j._pi].predicted.approvalRate : undefined;
+      if (res && res.snapshot && typeof predAR === 'number' && typeof res.snapshot.approvalRateDecided === 'number') {
+        if (Math.abs(res.snapshot.approvalRateDecided - predAR) > GOAL_SEEK_FRONTIER_TOL) {
+          return { error: 'invalid_solution', detail: 'frontier_divergence' };
+        }
+      }
+    }
+  }
+
+  // 5) Montagem do GOAL_SEEK_RESULT (formato de hoje) — moves na ordem do greedy-score.
+  const baselineRaw = computeGoalSeekBaseline(shapes, conns, csvStore);
+  const baseline = goalSeekRatios(baselineRaw);
+  const pool_ = allCandidates.filter(c => c.toApproved === wantsApproved);
+  const { moves, running } = buildGoalSeekDisplayMoves(pool_, selected, baselineRaw, target, direction, minimizeField);
+
+  const validatedDecided = validated.approvedQty + validated.rejectedQty + validated.asIsQty;
+  const scopedApprovalRate = validatedDecided > 0 ? (validated.approvedQty / validatedDecided) * 100 : 0;
+  const resultRatios = {
+    approvalRate: scopedApprovalRate, inadReal: validated.inadReal,
+    inadInferida: validated.inadInferida, approvedAltasInfer: running.qtdAltasInferSum,
+  };
+
+  let goalReached;
+  if (magnitude === null) {
+    goalReached = selected.length > 0;
+  } else {
+    const initial = baseline[target];
+    const cur = resultRatios[target];
+    if (cur == null || initial == null) goalReached = false;
+    else {
+      const goalAbs = direction === 'increase' ? initial + magnitude : initial - magnitude;
+      goalReached = direction === 'increase' ? cur >= goalAbs - 1e-9 : cur <= goalAbs + 1e-9;
+    }
+  }
+  let bindingConstraint = null;
+  if (!goalReached) {
+    if (maxInadReal != null && validated.inadReal != null && validated.inadReal >= maxInadReal - 1e-6) bindingConstraint = 'maxInadReal';
+    else if (maxInadInf != null && validated.inadInferida != null && validated.inadInferida >= maxInadInf - 1e-6) bindingConstraint = 'maxInadInf';
+    else bindingConstraint = 'no_more_moves';
+  }
+
+  return {
+    goal: { target, direction, magnitude, minimize: minimizeField },
+    baseline,
+    frontier: outFrontier,
+    moves,
+    goalReached,
+    bindingConstraint,
+    result: {
+      approvalRate: scopedApprovalRate,
       inadReal: validated.inadReal,
       inadInferida: validated.inadInferida,
       approvedQty: validated.approvedQty,
@@ -6296,6 +6613,28 @@ function handleMessage(e) {
     return;
   }
 
+  // Goal Seek Profundo (GS4, DEC-GS-005) — catálogo agregado para o solver do sidecar. O
+  // dataset NUNCA sobe: o job leva só o catálogo (KBs). maxLensSteps=12 gera as escadas de lens.
+  if (type === 'COMPUTE_GOAL_SEEK_CATALOG') {
+    const { shapes, conns = [], locks = [], maxLensSteps = GOAL_SEEK_DEEP_LENS_STEPS } = e.data;
+    const { populations } = getLensPopulations(shapes, workerCsvStore);
+    const catalog = buildGoalSeekCatalog(shapes, conns, workerCsvStore, populations, locks, maxLensSteps);
+    self.postMessage({ type: 'GOAL_SEEK_CATALOG_RESULT', ...catalog });
+    return;
+  }
+
+  // Goal Seek Profundo (GS4, DEC-GS-007) — validação single-sourced da solução do solver:
+  // token de staleness + invariantes (DEC-GS-001) + materialização/re-simulação real + extremos
+  // da fronteira via pool H3. Assíncrono; queda/erro ⇒ {error} (a main cai no greedy + aviso).
+  if (type === 'COMPUTE_GOAL_SEEK_VALIDATE') {
+    const { shapes, conns = [] } = e.data;
+    const { populations } = getLensPopulations(shapes, workerCsvStore);
+    computeGoalSeekValidate(shapes, conns, workerCsvStore, populations, e.data, getSimPool())
+      .then((res) => self.postMessage({ type: 'GOAL_SEEK_RESULT', ...res }))
+      .catch((err) => self.postMessage({ type: 'GOAL_SEEK_RESULT', error: 'invalid_solution', detail: String((err && err.message) || err) }));
+    return;
+  }
+
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a seleção
   // atual (porta solta), não entra no cache do tick.
   if (type === 'COMPUTE_VARIABLE_RANKING') {
@@ -6426,6 +6765,11 @@ export {
   buildFlowGraph,
   computeGoalSeek,
   buildGoalSeekCandidates,
+  buildGoalSeekCatalog,
+  computeGoalSeekValidate,
+  goalSeekCatalogToken,
+  selectDeepestLensSteps,
+  GOAL_SEEK_DEEP_LENS_STEPS,
   computeGoalSeekArrivals,
   computeGoalSeekBaseline,
   computeGoalSeekContext,
