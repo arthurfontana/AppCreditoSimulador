@@ -880,7 +880,8 @@ def discover_segments(shapes, conns, store, scope, spec, params):
     metric_rows = winner["metricRows"]
     row_ctx = winner["rowCtx"]
 
-    cand_cols = [c for c, t in csv.column_types.items() if t == "decision"]
+    excluded_cols = set(params.get("excludedCols") or [])
+    cand_cols = [c for c, t in csv.column_types.items() if t == "decision" and c not in excluded_cols]
     cand_views = []
     for col in cand_cols:
         idx = csv.headers.index(col) if col in csv.headers else -1

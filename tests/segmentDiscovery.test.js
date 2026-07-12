@@ -104,6 +104,42 @@ describe('segmentDiscovery · plantar e achar (interação 2D) + agregados exato
   });
 });
 
+// Seletor de variáveis do modal (checklist): params.excludedCols tira colunas do beam
+// search inteiro — usado pra excluir cohort/vintage (mês de referência) e score do
+// candidato, que não são drivers de risco acionáveis (ver CLAUDE.md § Seletor de variáveis).
+describe('segmentDiscovery · seletor de variáveis (params.excludedCols)', () => {
+  const csv = csvOf([
+    ['R08', 'Digital', '1000', '1000', '20'],   // 2%
+    ['R08', 'Fisico', '1000', '1000', '380'],   // 38%
+    ['R05', 'Digital', '1000', '1000', '380'],  // 38%
+    ['R05', 'Fisico', '1000', '1000', '20'],    // 2%
+  ]);
+  const store = { seg: csv };
+
+  const findingCols = (f) => new Set([
+    ...(f.segment.conditions || []).map(c => c.col),
+    ...(f.code === 'heterogeneous_block' ? (f.explanation.contributions || []).map(c => c.col) : []),
+  ]);
+
+  it('sem excludedCols, o achado plantado usa SCORE (controle positivo)', () => {
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, store, null, { minQty: 1 });
+    expect(m.findings.some(f => findingCols(f).has('SCORE'))).toBe(true);
+  });
+
+  it('excludedCols:["SCORE"] tira a coluna do beam — menos candidatos testados e nenhum achado a referencia', () => {
+    const full = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, store, null, { minQty: 1 });
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, store, null, { minQty: 1, excludedCols: ['SCORE'] });
+    expect(m.diagnostics.candidatesTested).toBeLessThan(full.diagnostics.candidatesTested);
+    for (const f of m.findings) expect(findingCols(f).has('SCORE')).toBe(false);
+  });
+
+  it('excludedCols com todas as colunas ⇒ nenhum candidato testado', () => {
+    const m = computeSegmentDiscovery(rejectAll.shapes, rejectAll.conns, store, null, { minQty: 1, excludedCols: ['SCORE', 'CANAL'] });
+    expect(m.findings.length).toBe(0);
+    expect(m.diagnostics.candidatesTested).toBe(0);
+  });
+});
+
 describe('segmentDiscovery · fixture homogênea ⇒ zero achados (controle negativo)', () => {
   const csv = csvOf([
     ['R08', 'Digital', '1000', '1000', '200'],

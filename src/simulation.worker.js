@@ -3489,9 +3489,12 @@ function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {
 
   const { csv, csvId, idxs, scopeAgg, scopeRows, rowInfo } = winner;
 
-  // Colunas candidatas = colunas Filtro do winner csv. Coders O(distintos).
+  // Colunas candidatas = colunas Filtro do winner csv, menos as excluídas pelo usuário
+  // no seletor de variáveis do modal (params.excludedCols — ex.: mês de referência,
+  // score já usado em outro lugar da política). Coders O(distintos).
   const types = csv.columnTypes || {};
-  const candCols = Object.entries(types).filter(([, t]) => t === 'decision').map(([c]) => c);
+  const excludedCols = new Set(params.excludedCols || []);
+  const candCols = Object.entries(types).filter(([c, t]) => t === 'decision' && !excludedCols.has(c)).map(([c]) => c);
   const candCoders = candCols.map(col => candidateCoder(csv, csv.headers.indexOf(col)));
 
   // Bins de nível 1: uma passada sobre as linhas do escopo, agregando por (col, valor) e

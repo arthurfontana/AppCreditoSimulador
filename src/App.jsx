@@ -549,6 +549,22 @@ function suggestMetricColumns(headers) {
   return result;
 }
 
+// Heurística do seletor de variáveis da Descoberta de Segmentos (Copiloto Sessão 10):
+// colunas de cohort/vintage (mês/safra de referência) e de score já vêm DESMARCADAS por
+// padrão no `segmentDiscoveryModal` — a primeira é um artefato temporal/de coleta (não um
+// driver de risco acionável, e pode vazar maturação de inadimplência entre safras), a
+// segunda costuma já SER o risco (circular) ou já estar em uso em outro nó da política.
+// Só define o estado INICIAL do checklist — o usuário marca/desmarca qualquer coluna.
+const SEG_TEMPORAL_NAME_TOKENS = new Set(['mes','meses','month','ano','anos','year','safra','vintage','periodo','competencia','data','date','dt']);
+const SEG_SCORE_NAME_TOKENS = new Set(['score','rating','bureau']);
+function segVarDefaultReason(colName) {
+  const norm = (colName || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const tokens = norm.split(/[^a-z0-9]+/).filter(Boolean);
+  if (tokens.some(t => SEG_TEMPORAL_NAME_TOKENS.has(t))) return 'temporal';
+  if (tokens.some(t => SEG_SCORE_NAME_TOKENS.has(t))) return 'score';
+  return null;
+}
+
 // ── CSV helpers ──────────────────────────────────────────────────────────────
 // Extrai as linhas [start, end) do texto por índice, sem materializar o array
 // de todas as linhas do arquivo (equivalente a text.split(/\r?\n/).slice(start,
@@ -8884,10 +8900,26 @@ export default function App() {
   // (padrão goalSeekModal). Nesta sessão `recommendation` é sempre null no worker — só
   // descoberta/explicação/priorização + navegação (Dashboard/fluxo), sem patch/aplicação.
   const openSegmentDiscoveryModal = (scope) => {
+    // Filtro vars = união das colunas 'decision' de todas as bases carregadas (dedup por
+    // nome) — lista fixa do checklist "Variáveis incluídas na busca". reason (heurística
+    // segVarDefaultReason) decide o estado INICIAL desmarcado (temporal/score); o resto
+    // nasce marcado.
+    const seen = new Set();
+    const filtroVars = [];
+    for (const csv of Object.values(csvStoreR.current)) {
+      for (const [col, t] of Object.entries(csv.columnTypes || {})) {
+        if (t !== 'decision' || seen.has(col)) continue;
+        seen.add(col);
+        filtroVars.push({ col, reason: segVarDefaultReason(col) });
+      }
+    }
+    filtroVars.sort((a, b) => a.col.localeCompare(b.col, 'pt-BR'));
+    const excludedCols = filtroVars.filter(v => v.reason).map(v => v.col);
     setSegmentDiscoveryModal({
       step: 'form',
       scope: scope || null,
-      params: { riskMetric: 'inadReal', minQty: null, maxDepth: 2, beamWidth: null },
+      params: { riskMetric: 'inadReal', minQty: null, maxDepth: 2, beamWidth: null, excludedCols },
+      filtroVars,
       varFilter: null,
       focusedId: null,
       selectedIds: [],
@@ -8910,11 +8942,12 @@ export default function App() {
   const runSegmentDiscovery = () => {
     const cur = segmentDiscoveryModalR.current;
     if (!cur) return;
-    const { riskMetric, minQty, maxDepth, beamWidth } = cur.params;
+    const { riskMetric, minQty, maxDepth, beamWidth, excludedCols } = cur.params;
     const params = {
       riskMetric, maxDepth,
       ...(beamWidth != null ? { beamWidth } : {}),
       ...(minQty != null ? { minQty } : {}),
+      ...(excludedCols && excludedCols.length ? { excludedCols } : {}),
     };
     const payload = {
       shapes: shapesR.current,
@@ -14422,7 +14455,7 @@ export default function App() {
 
       {/* ═══════════════ SEGMENT DISCOVERY MODAL — Descoberta de Segmentos (Copiloto Sessão 10/11) ═══════════════ */}
       {segmentDiscoveryModal&&(()=>{
-        const { step, scope, params, segmentModel, varFilter, focusedId, selectedIds = [], combined, deepRun, fallbackNotice } = segmentDiscoveryModal;
+        const { step, scope, params, segmentModel, varFilter, focusedId, selectedIds = [], combined, deepRun, fallbackNotice, filtroVars = [] } = segmentDiscoveryModal;
         const updParams = (patch) => setSegmentDiscoveryModal(m => ({ ...m, params: { ...m.params, ...patch } }));
         // H7 — Descoberta profunda (Classe B): depth 3–4 / beam ampliado só quando o
         // sidecar está pareado E declara a task `segment_discovery` em capabilities
@@ -14520,15 +14553,64 @@ export default function App() {
                         </select>
                       </label>
                     </div>
+                    {filtroVars.length > 0 && (()=>{
+                      const excludedCols = params.excludedCols || [];
+                      const excludedSet = new Set(excludedCols);
+                      const includedCount = filtroVars.length - excludedCols.length;
+                      const toggleVar = (col) => updParams({ excludedCols: excludedSet.has(col)
+                        ? excludedCols.filter(c=>c!==col)
+                        : [...excludedCols, col] });
+                      return (
+                        <div style={{border:"1.5px solid #e2e8f0",borderRadius:10,padding:"10px 12px"}}>
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                            <span style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                              Variáveis incluídas na busca ({includedCount}/{filtroVars.length})
+                            </span>
+                            <div style={{display:"flex",gap:10}}>
+                              <button type="button" onClick={()=>updParams({excludedCols:[]})}
+                                style={{fontSize:10.5,color:"#4f46e5",background:"none",border:"none",padding:0,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                                Marcar tudo
+                              </button>
+                              <button type="button" onClick={()=>updParams({excludedCols: filtroVars.map(v=>v.col)})}
+                                style={{fontSize:10.5,color:"#64748b",background:"none",border:"none",padding:0,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                                Desmarcar tudo
+                              </button>
+                            </div>
+                          </div>
+                          <div style={{maxHeight:150,overflowY:"auto",display:"flex",flexDirection:"column",gap:5}}>
+                            {filtroVars.map(v => (
+                              <label key={v.col} style={{display:"flex",alignItems:"center",gap:7,fontSize:12,color:"#334155",cursor:"pointer"}}>
+                                <input type="checkbox" checked={!excludedSet.has(v.col)} onChange={()=>toggleVar(v.col)}/>
+                                <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.col}</span>
+                                {v.reason==='temporal' && (
+                                  <span title="Provável variável de cohort/vintage (mês/safra de referência) — não costuma ser um driver de risco acionável; desmarcada por padrão."
+                                    style={{fontSize:10,color:"#94a3b8",flexShrink:0}}>🕐 temporal</span>
+                                )}
+                                {v.reason==='score' && (
+                                  <span title="Provável variável de score/rating — geralmente já é o próprio risco ou já está em uso em outro nó da política; desmarcada por padrão."
+                                    style={{fontSize:10,color:"#94a3b8",flexShrink:0}}>🎯 score</span>
+                                )}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <ComputeCeilingNotice
                       ceilingText="Sem o Motor Python, a Descoberta respeita os tetos do navegador: profundidade ≤ 2 variáveis e beam 8 (paridade total — nada deixa de funcionar, só os tetos)."
                       unlockedText={`Motor Python detectado (tier ${computeSidecarStatus.tier || '—'}) — profundidade 3–4 e beam ampliado liberados; a varredura profunda roda vetorizada no sidecar.`}
                       status={deepOk ? computeSidecarStatus : { available: false }}
                       onOpenPrefs={()=>setSidecarPrefsOpen(true)}
                     />
+                    {filtroVars.length > 0 && filtroVars.length === (params.excludedCols||[]).length && (
+                      <p style={{fontSize:11,color:"#dc2626",margin:0}}>Marque ao menos uma variável para buscar.</p>
+                    )}
                     <button onClick={runSegmentDiscovery}
+                      disabled={filtroVars.length > 0 && filtroVars.length === (params.excludedCols||[]).length}
                       style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
-                        background:"#4f46e5",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                        background: (filtroVars.length > 0 && filtroVars.length === (params.excludedCols||[]).length) ? "#c7d2fe" : "#4f46e5",
+                        color:"#fff",cursor: (filtroVars.length > 0 && filtroVars.length === (params.excludedCols||[]).length) ? "not-allowed" : "pointer",
+                        fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
                       🔎 Buscar
                     </button>
                   </div>
