@@ -2,6 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   computeGoalSeek,
   buildGoalSeekCandidates,
+  buildGoalSeekCatalog,
+  computeGoalSeekValidate,
+  goalSeekCatalogToken,
+  selectDeepestLensSteps,
+  GOAL_SEEK_DEEP_LENS_STEPS,
   computeNewLensThreshold,
   runSimulation,
   computeLensPopulations,
@@ -587,6 +592,324 @@ describe('Goal Seek · stats por movimento (GS3, DEC-GS-004)', () => {
     const a = runIt(), b = runIt();
     expect(a.moves.map(m => m.id)).toEqual(b.moves.map(m => m.id));
     expect(a.moves.map(m => m.deltaApprovalRate)).toEqual(b.moves.map(m => m.deltaApprovalRate));
+    expect(a).toEqual(b);
+  });
+});
+
+// ── GATE — Sessão GS4 (Catálogo profundo + validação no worker, DEC-GS-005/007/008) ──
+// docs/wiki/Hibrido-GoalSeek-Profundo.md (DEC-GS-009, bloco JS) pede:
+//   1. escadas de lens: agregado do degrau k ≡ re-simulação do limiar cumulativo; `requires`
+//      encadeado; retrocompat total no default maxLensSteps=1 (ids sem sufixo);
+//   2. invariantes do VALIDATE: solução com precedência violada / nó travado / teto estourado
+//      ⇒ {error} e NUNCA um resultado;
+//   3. token stale ⇒ {error:'stale'};
+//   4. dominância: dado um "sidecar mock" que devolve uma solução válida (melhor que o greedy),
+//      o resultado exibido bate com a re-simulação real dela.
+
+describe('Goal Seek Profundo · escadas de lens (GS4, DEC-GS-008)', () => {
+  const csvStore = {
+    base: {
+      name: 'base',
+      headers: ['SCORE', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+      rows: [
+        ['300', '10', '4',  '3',  '1',   '0.9'],   // falha (< 600)
+        ['400', '20', '8',  '7',  '1.5', '1.4'],   // falha
+        ['500', '30', '12', '11', '2',   '1.9'],   // falha — mais próximo da fronteira
+        ['600', '40', '16', '15', '2.5', '2.4'],   // passa (>= 600)
+        ['700', '50', '20', '19', '3',   '2.9'],   // passa
+      ],
+      columnTypes: { SCORE: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+      varTypes: {},
+      asIsConfig: null,
+    },
+  };
+  const shapes = [
+    { id: 'L', type: 'decision_lens', rules: [{ col: 'SCORE', operator: 'gte', value: '600', logic: null }] },
+    { id: 'AP', type: 'approved' },
+  ];
+  const conns = [{ id: 'c1', from: 'L', to: 'AP' }];
+
+  it('maxLensSteps=1 (default) preserva 1 relax + 1 tighten, ids SEM sufixo (retrocompat)', () => {
+    const cands = buildGoalSeekCandidates(shapes, conns, csvStore, {}, []).filter(c => c.type === 'lens_threshold');
+    expect(cands.map(c => c.id).sort()).toEqual(['lens:L:relax', 'lens:L:tighten']);
+    expect(cands.every(c => c.requires.length === 0)).toBe(true);
+  });
+
+  it('maxLensSteps=3 gera 3 degraus relax encadeados por requires + degraus tighten', () => {
+    const cands = buildGoalSeekCandidates(shapes, conns, csvStore, {}, [], 3);
+    const relax = cands.filter(c => c.type === 'lens_threshold' && c.kind === 'relax')
+      .sort((a, b) => a.step - b.step);
+    expect(relax.map(c => c.id)).toEqual(['lens:L:relax:1', 'lens:L:relax:2', 'lens:L:relax:3']);
+    // Cada degrau admite o próximo valor distinto rumo ao extremo (500 → 400 → 300):
+    expect(relax.map(c => c.apply.newValue)).toEqual(['500', '400', '300']);
+    // requires encadeado (o degrau k exige o k−1):
+    expect(relax[0].requires).toEqual([]);
+    expect(relax[1].requires).toEqual(['lens:L:relax:1']);
+    expect(relax[2].requires).toEqual(['lens:L:relax:2']);
+    // Só há 2 valores que passam hoje ⇒ no máximo 2 degraus tighten:
+    const tighten = cands.filter(c => c.type === 'lens_threshold' && c.kind === 'tighten');
+    expect(tighten.length).toBe(2);
+  });
+
+  it('agregado MARGINAL de cada degrau ≡ re-simulação do limiar CUMULATIVO daquele degrau', () => {
+    const relax = buildGoalSeekCandidates(shapes, conns, csvStore, {}, [], 12)
+      .filter(c => c.type === 'lens_threshold' && c.kind === 'relax')
+      .sort((a, b) => a.step - b.step);
+    const baseApproved = runSimulation(shapes, conns, csvStore).approvedQty; // 600+700 = 90
+    expect(baseApproved).toBe(90);
+
+    // Cada degrau é MARGINAL: qty = volume só daquele valor (500→30, 400→20, 300→10).
+    expect(relax.map(c => c.qty)).toEqual([30, 20, 10]);
+
+    // Aplicar SÓ o degrau k (limiar cumulativo) admite os valores dos degraus 1..k:
+    let cum = 0;
+    for (const step of relax) {
+      cum += step.qty;
+      const { shapes: s2, conns: c2 } = applyGoalSeekMoves(shapes, conns, [step.apply]);
+      const after = runSimulation(s2, c2, csvStore).approvedQty;
+      expect(after - baseApproved).toBe(cum); // Σ marginais 1..k
+    }
+  });
+});
+
+describe('Goal Seek Profundo · buildGoalSeekCatalog + token (GS4, DEC-GS-005/007)', () => {
+  const csvStore = {
+    base: {
+      name: 'base',
+      headers: ['COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+      rows: [
+        ['A', '100', '40', '38', '4', '3.5'],
+        ['B', '50', '20', '18', '2', '1.8'],
+        ['C', '30', '12', '11', '1', '0.9'],
+      ],
+      columnTypes: { COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+      varTypes: {},
+      asIsConfig: null,
+    },
+  };
+  const shapes = [
+    { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
+    { id: 'pA', type: 'port', label: 'A' },
+    { id: 'pB', type: 'port', label: 'B' },
+    { id: 'pC', type: 'port', label: 'C' },
+    { id: 'AP', type: 'approved' },
+    { id: 'RJ', type: 'rejected' },
+  ];
+  const conns = [
+    { id: 'cA', from: 'D', to: 'pA', label: 'A' },
+    { id: 'cB', from: 'D', to: 'pB', label: 'B' },
+    { id: 'cC', from: 'D', to: 'pC', label: 'C' },
+    { id: 'cpA', from: 'pA', to: 'RJ' },
+    { id: 'cpB', from: 'pB', to: 'RJ' },
+    { id: 'cpC', from: 'pC', to: 'RJ' },
+  ];
+
+  it('devolve baselineRaw + candidatos do contrato + token determinístico', () => {
+    const cat = buildGoalSeekCatalog(shapes, conns, csvStore, {}, []);
+    expect(cat.baselineRaw.approvedQty).toBe(0);      // todos reprovados no baseline
+    expect(cat.baselineRaw.decidedQty).toBe(180);
+    expect(cat.candidates.length).toBe(3);
+    // Só os campos do contrato do sidecar (sem kind/step/value):
+    for (const c of cat.candidates) {
+      expect(Object.keys(c).sort()).toEqual(
+        ['apply', 'id', 'inadIRaw', 'inadRRaw', 'label', 'qtdAltas', 'qtdAltasInfer', 'qty', 'requires', 'shapeId', 'toApproved', 'type'].sort(),
+      );
+    }
+    expect(cat.catalogToken).toBe(goalSeekCatalogToken(shapes, conns, [], GOAL_SEEK_DEEP_LENS_STEPS));
+    // Token muda com locks / com o canvas:
+    expect(goalSeekCatalogToken(shapes, conns, ['D'], GOAL_SEEK_DEEP_LENS_STEPS)).not.toBe(cat.catalogToken);
+  });
+});
+
+describe('Goal Seek Profundo · computeGoalSeekValidate (GS4, DEC-GS-001/007)', () => {
+  const csvStore = {
+    base: {
+      name: 'base',
+      headers: ['COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+      rows: [
+        ['A', '100', '50', '48', '2',  '1.9'],   // barato
+        ['B', '80',  '40', '38', '3',  '2.8'],
+        ['E', '60',  '30', '28', '24', '23'],     // caro (inad real 0.8)
+      ],
+      columnTypes: { COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+      varTypes: {},
+      asIsConfig: null,
+    },
+  };
+  const shapes = [
+    { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
+    { id: 'pA', type: 'port', label: 'A' },
+    { id: 'pB', type: 'port', label: 'B' },
+    { id: 'pE', type: 'port', label: 'E' },
+    { id: 'AP', type: 'approved' },
+    { id: 'RJ', type: 'rejected' },
+  ];
+  const conns = [
+    { id: 'cA', from: 'D', to: 'pA', label: 'A' },
+    { id: 'cB', from: 'D', to: 'pB', label: 'B' },
+    { id: 'cE', from: 'D', to: 'pE', label: 'E' },
+    { id: 'cpA', from: 'pA', to: 'RJ' },
+    { id: 'cpB', from: 'pB', to: 'RJ' },
+    { id: 'cpE', from: 'pE', to: 'RJ' },
+  ];
+  const goal = { target: 'approvalRate', direction: 'increase', magnitude: null };
+  const token = () => goalSeekCatalogToken(shapes, conns, [], GOAL_SEEK_DEEP_LENS_STEPS);
+
+  it('dominância: uma solução válida (todos os 3 valores → Aprovado) tem result ≡ re-simulação real', async () => {
+    const moveIds = ['decision:D:A', 'decision:D:B', 'decision:D:E'];
+    const res = await computeGoalSeekValidate(shapes, conns, csvStore, {}, { goal, moveIds, catalogToken: token() });
+    expect(res.error).toBeUndefined();
+    expect(res.moves.map(m => m.id).sort()).toEqual(moveIds.slice().sort());
+
+    // Re-simulação manual dos MESMOS moves (via apply do catálogo):
+    const applies = res.moves.map(m => m.apply);
+    const { shapes: s2, conns: c2 } = applyGoalSeekMoves(shapes, conns, applies);
+    const sim = runSimulation(s2, c2, csvStore);
+    const decided = sim.approvedQty + sim.rejectedQty + sim.asIsQty;
+    const scoped = decided > 0 ? (sim.approvedQty / decided) * 100 : 0;
+    expect(res.result.approvalRate).toBeCloseTo(scoped, 9);
+    expect(res.result.inadReal).toBeCloseTo(sim.inadReal, 9);
+    expect(res.result.inadInferida).toBeCloseTo(sim.inadInferida, 9);
+    expect(res.result.approvedQty).toBe(sim.approvedQty);
+    expect(res.result.approvalRate).toBeCloseTo(100, 9); // aprova tudo
+
+    // O greedy sob teto apertado escolhe MENOS (só o barato) — a solução profunda domina:
+    const greedy = computeGoalSeek(shapes, conns, csvStore, { ...goal, minimize: 'inadReal' }, { maxInadReal: 0.1 }, [], pops(shapes, csvStore));
+    expect(greedy.moves.length).toBeLessThan(res.moves.length);
+  });
+
+  it('token stale ⇒ {error:"stale"} (nunca um resultado)', async () => {
+    const res = await computeGoalSeekValidate(shapes, conns, csvStore, {}, {
+      goal, moveIds: ['decision:D:A'], catalogToken: 'deadbeef',
+    });
+    expect(res.error).toBe('stale');
+    expect(res.result).toBeUndefined();
+  });
+
+  it('invariante: movimento inexistente ⇒ {error:"invalid_solution"}', async () => {
+    const res = await computeGoalSeekValidate(shapes, conns, csvStore, {}, {
+      goal, moveIds: ['decision:D:NAO_EXISTE'], catalogToken: token(),
+    });
+    expect(res.error).toBe('invalid_solution');
+    expect(res.moves).toBeUndefined();
+  });
+
+  it('invariante: nó travado não tem candidato ⇒ {error} (a solução referencia um id ausente)', async () => {
+    const res = await computeGoalSeekValidate(shapes, conns, csvStore, {}, {
+      goal, locks: ['D'], moveIds: ['decision:D:A'], catalogToken: goalSeekCatalogToken(shapes, conns, ['D'], GOAL_SEEK_DEEP_LENS_STEPS),
+    });
+    expect(res.error).toBe('invalid_solution');
+  });
+
+  it('invariante: teto de inad real estourado na re-simulação real ⇒ {error:"invalid_solution"}', async () => {
+    const res = await computeGoalSeekValidate(shapes, conns, csvStore, {}, {
+      goal, constraints: { maxInadReal: 0.1 },
+      moveIds: ['decision:D:A', 'decision:D:E'], catalogToken: token(),   // E estoura o teto
+    });
+    expect(res.error).toBe('invalid_solution');
+    expect(res.detail).toBe('maxInadReal');
+  });
+
+  it('invariante: precedência violada (ordinal, R2 sem R1) ⇒ {error:"invalid_solution"}', async () => {
+    const ordCsv = {
+      base: {
+        name: 'base',
+        headers: ['RATING', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+        rows: [
+          ['R1', '100', '40', '38', '20', '19'],
+          ['R2', '100', '40', '38', '10', '9'],
+          ['R3', '100', '40', '38', '1',  '0.9'],
+        ],
+        columnTypes: { RATING: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+        varTypes: { RATING: 'ordinal' },
+        asIsConfig: null,
+      },
+    };
+    const ordShapes = [
+      { id: 'D', type: 'decision', variableCol: 'RATING', csvId: 'base' },
+      { id: 'p1', type: 'port', label: 'R1' }, { id: 'p2', type: 'port', label: 'R2' }, { id: 'p3', type: 'port', label: 'R3' },
+      { id: 'AP', type: 'approved' }, { id: 'RJ', type: 'rejected' },
+    ];
+    const ordConns = [
+      { id: 'c1', from: 'D', to: 'p1', label: 'R1' }, { id: 'c2', from: 'D', to: 'p2', label: 'R2' }, { id: 'c3', from: 'D', to: 'p3', label: 'R3' },
+      { id: 'c4', from: 'p1', to: 'RJ' }, { id: 'c5', from: 'p2', to: 'RJ' }, { id: 'c6', from: 'p3', to: 'RJ' },
+    ];
+    const res = await computeGoalSeekValidate(ordShapes, ordConns, ordCsv, {}, {
+      goal, moveIds: ['decision:D:R2'], // exige decision:D:R1, ausente
+      catalogToken: goalSeekCatalogToken(ordShapes, ordConns, [], GOAL_SEEK_DEEP_LENS_STEPS),
+    });
+    expect(res.error).toBe('invalid_solution');
+    expect(res.detail).toContain('precedence');
+  });
+
+  it('escada de lens: valida só o degrau MAIS PROFUNDO por lens (dedup) ⇒ result ≡ re-sim do cumulativo', async () => {
+    const lensCsv = {
+      base: {
+        name: 'base',
+        headers: ['SCORE', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+        rows: [
+          ['300', '10', '4',  '3',  '1',   '0.9'],
+          ['400', '20', '8',  '7',  '1.5', '1.4'],
+          ['500', '30', '12', '11', '2',   '1.9'],
+          ['600', '40', '16', '15', '2.5', '2.4'],
+          ['700', '50', '20', '19', '3',   '2.9'],
+        ],
+        columnTypes: { SCORE: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+        varTypes: {}, asIsConfig: null,
+      },
+    };
+    const lensShapes = [
+      { id: 'L', type: 'decision_lens', rules: [{ col: 'SCORE', operator: 'gte', value: '600', logic: null }] },
+      { id: 'AP', type: 'approved' },
+    ];
+    const lensConns = [{ id: 'c1', from: 'L', to: 'AP' }];
+    const moveIds = ['lens:L:relax:1', 'lens:L:relax:2', 'lens:L:relax:3'];
+    const res = await computeGoalSeekValidate(lensShapes, lensConns, lensCsv, {}, {
+      goal, moveIds, catalogToken: goalSeekCatalogToken(lensShapes, lensConns, [], GOAL_SEEK_DEEP_LENS_STEPS),
+    });
+    expect(res.error).toBeUndefined();
+
+    // Materialização = só o degrau mais profundo (relax:3 → limiar cumulativo '300').
+    const cands = buildGoalSeekCandidates(lensShapes, lensConns, lensCsv, {}, [], GOAL_SEEK_DEEP_LENS_STEPS);
+    const byId = Object.fromEntries(cands.map(c => [c.id, c]));
+    const materialized = selectDeepestLensSteps(moveIds.map(id => byId[id]));
+    expect(materialized.map(c => c.id)).toEqual(['lens:L:relax:3']);
+
+    const { shapes: s2, conns: c2 } = applyGoalSeekMoves(lensShapes, lensConns, materialized.map(c => c.apply));
+    const sim = runSimulation(s2, c2, lensCsv);
+    expect(res.result.approvedQty).toBe(sim.approvedQty);
+    expect(res.result.approvedQty).toBe(150); // todos passam com gte 300
+  });
+
+  it('fronteira: divergência grosseira predição×re-simulação nos extremos ⇒ {error}', async () => {
+    const frontier = [
+      { level: 1, ids: ['decision:D:A', 'decision:D:B', 'decision:D:E'], predicted: { approvalRate: 0 } }, // prediz 0, real 100
+    ];
+    const res = await computeGoalSeekValidate(shapes, conns, csvStore, {}, {
+      goal, moveIds: ['decision:D:A', 'decision:D:B', 'decision:D:E'], catalogToken: token(), frontier,
+    });
+    expect(res.error).toBe('invalid_solution');
+    expect(res.detail).toBe('frontier_divergence');
+  });
+
+  it('fronteira sem ids é ecoada como predicted:true (sem validação de extremo)', async () => {
+    const frontier = [
+      { level: 0, predicted: { approvalRate: 0, inadReal: null, inadInferida: null, approvedQty: 0, decidedQty: 180 } },
+      { level: 1, predicted: { approvalRate: 100, inadReal: 0.1, inadInferida: 0.09, approvedQty: 180, decidedQty: 180 } },
+    ];
+    const res = await computeGoalSeekValidate(shapes, conns, csvStore, {}, {
+      goal, moveIds: ['decision:D:A'], catalogToken: token(), frontier,
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.frontier).toHaveLength(2);
+    expect(res.frontier.every(p => p.predicted === true)).toBe(true);
+    expect(res.frontier[1].approvalRate).toBe(100);
+  });
+
+  it('determinismo: mesma entrada ⇒ mesmo resultado', async () => {
+    const req = { goal, moveIds: ['decision:D:A', 'decision:D:B'], catalogToken: token() };
+    const a = await computeGoalSeekValidate(shapes, conns, csvStore, {}, req);
+    const b = await computeGoalSeekValidate(shapes, conns, csvStore, {}, req);
     expect(a).toEqual(b);
   });
 });
