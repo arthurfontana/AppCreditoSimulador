@@ -2336,6 +2336,14 @@ function computeGoalSeekBaseline(shapes, conns, csvStore) {
 
   let totalQty = 0, approvedQty = 0, decidedQty = 0;
   let inadRealSum = 0, qtdAltasSum = 0, inadInferidaSum = 0, qtdAltasInferSum = 0;
+  // Agregados AS IS (DEC-GS-002) — acumulados NO MESMO walk, sobre a MESMA população
+  // decidida (res != null), lendo __DECISAO_ORIGINAL em vez da decisão simulada. Mesma
+  // população/escopo que os acumuladores acima ⇒ comparável por construção (cards
+  // "Ponto de partida"). `hasAsIsCol` sinaliza se algum csv contribuinte tem a coluna
+  // (dataset sem AS IS configurado ⇒ asis:null no contexto, nunca 0 forjado).
+  let hasAsIsCol = false;
+  let asIsApprovedQty = 0, asIsDecidedQty = 0;
+  let asIsInadRealSum = 0, asIsQtdAltasSum = 0, asIsInadInferidaSum = 0, asIsQtdAltasInferSum = 0;
 
   for (const [csvId, csv] of Object.entries(csvStore)) {
     const types = csv.columnTypes || {};
@@ -2354,6 +2362,7 @@ function computeGoalSeekBaseline(shapes, conns, csvStore) {
     });
     if (csvRoots.length === 0) continue;
     const rootId = csvRoots[0].id;
+    if (dOrigIdx >= 0) hasAsIsCol = true;
     const compiled = compileNodesForCsv(shapes, csv, routes);
     const nRows = rowCount(csv);
     for (let r = 0; r < nRows; r++) {
@@ -2378,10 +2387,53 @@ function computeGoalSeekBaseline(shapes, conns, csvStore) {
         inadRealSum      += inadRIdx    >= 0 ? (cellNum(csv, r, inadRIdx)    || 0) : 0;
         inadInferidaSum  += inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
       }
+      // AS IS (DEC-GS-002): só sobre linhas decididas (mesmo escopo), lendo a decisão
+      // histórica em vez da simulada. APROVADO soma numerador+denominador+métricas;
+      // REPROVADO só o denominador (decidedQty do AS IS); vazio fica fora (nem sequer
+      // denominador — a linha não tem AS IS conhecido).
+      if (res != null && dOrigIdx >= 0) {
+        const origAsIs = String(cellStr(csv, r, dOrigIdx) ?? '').toUpperCase();
+        if (origAsIs === 'APROVADO') {
+          asIsApprovedQty += qty; asIsDecidedQty += qty;
+          asIsQtdAltasSum      += altasIdx    >= 0 ? (cellNum(csv, r, altasIdx)    || 0) : 0;
+          asIsQtdAltasInferSum += altasInfIdx >= 0 ? (cellNum(csv, r, altasInfIdx) || 0) : 0;
+          asIsInadRealSum      += inadRIdx    >= 0 ? (cellNum(csv, r, inadRIdx)    || 0) : 0;
+          asIsInadInferidaSum  += inadIIdx    >= 0 ? (cellNum(csv, r, inadIIdx)    || 0) : 0;
+        } else if (origAsIs === 'REPROVADO') {
+          asIsDecidedQty += qty;
+        }
+      }
     }
   }
 
-  return { totalQty, approvedQty, decidedQty, qtdAltasSum, qtdAltasInferSum, inadRealSum, inadInferidaSum };
+  return {
+    totalQty, approvedQty, decidedQty, qtdAltasSum, qtdAltasInferSum, inadRealSum, inadInferidaSum,
+    hasAsIsCol,
+    asIsApprovedQty, asIsDecidedQty,
+    asIsQtdAltasSum, asIsQtdAltasInferSum, asIsInadRealSum, asIsInadInferidaSum,
+  };
+}
+
+// Formata os agregados AS IS de computeGoalSeekBaseline no mesmo formato de goalSeekRatios
+// (reaproveita a função existente sobre um objeto "raw" equivalente) — DEC-GS-002.
+function goalSeekAsIsRatios(raw) {
+  return goalSeekRatios({
+    decidedQty: raw.asIsDecidedQty, approvedQty: raw.asIsApprovedQty,
+    qtdAltasSum: raw.asIsQtdAltasSum, qtdAltasInferSum: raw.asIsQtdAltasInferSum,
+    inadRealSum: raw.asIsInadRealSum, inadInferidaSum: raw.asIsInadInferidaSum,
+  });
+}
+
+// COMPUTE_GOAL_SEEK_CONTEXT (DEC-GS-002) — "Ponto de partida": política atual no canvas
+// vs. AS IS, ambos escopados a decidedQty (mesmo escopo de goalSeekRatios). `asis: null`
+// quando nenhum csv contribuinte tem __DECISAO_ORIGINAL (AS IS não configurado).
+function computeGoalSeekContext(shapes, conns, csvStore) {
+  const raw = computeGoalSeekBaseline(shapes, conns, csvStore);
+  const baseline = { ...goalSeekRatios(raw), approvedQty: raw.approvedQty, decidedQty: raw.decidedQty };
+  const asis = raw.hasAsIsCol
+    ? { ...goalSeekAsIsRatios(raw), approvedQty: raw.asIsApprovedQty, decidedQty: raw.asIsDecidedQty }
+    : null;
+  return { baseline, asis };
 }
 
 function goalSeekRatios(raw) {
@@ -6154,6 +6206,15 @@ function handleMessage(e) {
     return;
   }
 
+  // "Ponto de partida" (GS1, DEC-GS-002) — disparada ao abrir o goalSeekModal, antes de
+  // qualquer objetivo declarado. Não entra no cache do tick (mesmo padrão de COMPUTE_GOAL_SEEK).
+  if (type === 'COMPUTE_GOAL_SEEK_CONTEXT') {
+    const { shapes, conns = [] } = e.data;
+    const result = computeGoalSeekContext(shapes, conns, workerCsvStore);
+    self.postMessage({ type: 'GOAL_SEEK_CONTEXT_RESULT', ...result });
+    return;
+  }
+
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a seleção
   // atual (porta solta), não entra no cache do tick.
   if (type === 'COMPUTE_VARIABLE_RANKING') {
@@ -6286,6 +6347,7 @@ export {
   buildGoalSeekCandidates,
   computeGoalSeekArrivals,
   computeGoalSeekBaseline,
+  computeGoalSeekContext,
   computeNewLensThreshold,
   resolveDirectTerminalConn,
   computeSimplify,
