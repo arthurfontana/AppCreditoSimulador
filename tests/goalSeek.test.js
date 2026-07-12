@@ -5,6 +5,7 @@ import {
   computeNewLensThreshold,
   runSimulation,
   computeLensPopulations,
+  computeGoalSeekContext,
 } from '../src/simulation.worker.js';
 import { applyGoalSeekMoves } from '../src/goalSeek.js';
 
@@ -328,5 +329,78 @@ describe('Goal Seek · lens_threshold (relaxar/apertar regra numérica gte)', ()
     const rjConns = [{ id: 'c1', from: 'L', to: 'RJ' }];
     const candidates = buildGoalSeekCandidates(rjShapes, rjConns, csvStore, {}, []);
     expect(candidates.filter(c => c.type === 'lens_threshold')).toEqual([]);
+  });
+});
+
+// ── GS1 (DEC-GS-002) — computeGoalSeekContext: "Ponto de partida" ───────────────────
+describe('Goal Seek · computeGoalSeekContext (GS1, DEC-GS-002)', () => {
+  const shapes = [
+    { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
+    { id: 'pA', type: 'port', label: 'A' },
+    { id: 'pB', type: 'port', label: 'B' },
+    { id: 'AP', type: 'approved' },
+    { id: 'RJ', type: 'rejected' },
+  ];
+  const conns = [
+    { id: 'c1', from: 'D', to: 'pA', label: 'A' },
+    { id: 'c2', from: 'D', to: 'pB', label: 'B' },
+    { id: 'c3', from: 'pA', to: 'AP' },
+    { id: 'c4', from: 'pB', to: 'RJ' },
+  ];
+
+  it('agregados AS IS do contexto ≡ agregação manual via __DECISAO_ORIGINAL sobre as linhas decididas', () => {
+    // Política atual (canvas): A → Aprovado, B → Reprovado.
+    // AS IS histórico: A e B são AMBOS 'APROVADO' — diverge deliberadamente da política,
+    // para o delta do card não ser um empate acidental.
+    const csvStore = {
+      base: {
+        name: 'base',
+        headers: ['COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida', '__DECISAO_ORIGINAL'],
+        rows: [
+          ['A', '100', '40', '38', '4', '3.5', 'APROVADO'],
+          ['B', '50', '20', '18', '2', '1.8', 'APROVADO'],
+        ],
+        columnTypes: { COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+        varTypes: {},
+        asIsConfig: { col: 'ORIG', mapping: { X: 'APROVADO' } },
+      },
+    };
+
+    const ctx = computeGoalSeekContext(shapes, conns, csvStore);
+
+    // baseline = política atual, mesmo escopo/matemática de computeGoalSeek's baseline
+    expect(ctx.baseline.decidedQty).toBe(150);
+    expect(ctx.baseline.approvedQty).toBe(100);
+    expect(ctx.baseline.approvalRate).toBeCloseTo((100 / 150) * 100, 9);
+    expect(ctx.baseline.inadReal).toBeCloseTo(4 / 40, 9);
+    expect(ctx.baseline.inadInferida).toBeCloseTo(3.5 / 38, 9);
+
+    // asis: agregação manual sobre __DECISAO_ORIGINAL das linhas decididas (as duas, aqui)
+    expect(ctx.asis).not.toBeNull();
+    expect(ctx.asis.decidedQty).toBe(150);
+    expect(ctx.asis.approvedQty).toBe(150); // A e B, ambos APROVADO no AS IS
+    expect(ctx.asis.approvalRate).toBeCloseTo(100, 9);
+    expect(ctx.asis.inadReal).toBeCloseTo((4 + 2) / (40 + 20), 9);
+    expect(ctx.asis.inadInferida).toBeCloseTo((3.5 + 1.8) / (38 + 18), 9);
+  });
+
+  it('dataset decidido sem __DECISAO_ORIGINAL ⇒ asis:null (nunca 0 forjado)', () => {
+    const csvStore = {
+      base: {
+        name: 'base',
+        headers: ['COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+        rows: [
+          ['A', '100', '40', '38', '4', '3.5'],
+          ['B', '50', '20', '18', '2', '1.8'],
+        ],
+        columnTypes: { COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+        varTypes: {},
+        asIsConfig: null,
+      },
+    };
+    const ctx = computeGoalSeekContext(shapes, conns, csvStore);
+    expect(ctx.asis).toBeNull();
+    expect(ctx.baseline.decidedQty).toBe(150);
+    expect(ctx.baseline.approvedQty).toBe(100);
   });
 });

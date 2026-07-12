@@ -272,6 +272,7 @@ const PERF_REQUEST_TO_RESULT = {
   COMPUTE_JOHNNY:            'JOHNNY_RESULT',
   COMPUTE_ANALYTICS_DATASET: 'ANALYTICS_RESULT',
   COMPUTE_GOAL_SEEK:         'GOAL_SEEK_RESULT',
+  COMPUTE_GOAL_SEEK_CONTEXT: 'GOAL_SEEK_CONTEXT_RESULT',
   COMPUTE_SIMPLIFY:          'SIMPLIFY_RESULT',
   COMPUTE_POLICY_DOC:        'POLICY_DOC_RESULT',
   COMPUTE_SEGMENT_DISCOVERY: 'SEGMENT_DISCOVERY_RESULT',
@@ -1484,6 +1485,13 @@ const GOAL_SEEK_TARGET_META = {
   approvedAltasInfer:{ label: "Vol. Vendas Inferidas", scale: "qty",   fmt: v => fmtQty(v) },
 };
 const GOAL_SEEK_TARGET_LABELS = Object.fromEntries(Object.entries(GOAL_SEEK_TARGET_META).map(([k, v]) => [k, v.label]));
+// GS1 (DEC-GS-002) — os 3 cards fixos de "Ponto de partida" (mock da wiki: sempre estas
+// 3 métricas, nesta ordem, independente do alvo/direção declarados no form).
+const GOAL_SEEK_CONTEXT_CARDS = [
+  { k: 'approvalRate', label: 'Taxa de Aprovação' },
+  { k: 'inadInferida', label: 'Inad. Inferida' },
+  { k: 'inadReal',     label: 'Inad. Real' },
+];
 
 // Copiloto — lint estrutural (Sessão 1, DEC-IA-006). Estilo por severidade do achado
 // (findings vêm de COMPUTE_POLICY_INSIGHTS, sempre {severity, code, nodeId, msg, fix?}).
@@ -4681,7 +4689,7 @@ export default function App() {
   // Johnny multi-cineminha optimizer modal
   const [johnnyModal, setJohnnyModal] = useState(null);   // null | johnny obj
   // Goal Seek — Copiloto Sessão 4 (DEC-IA-005/006): busca de política inteira por objetivo
-  const [goalSeekModal, setGoalSeekModal] = useState(null); // null | {step:'form'|'loading'|'result', goal, constraints, ...GOAL_SEEK_RESULT}
+  const [goalSeekModal, setGoalSeekModal] = useState(null); // null | {step:'form'|'loading'|'result', goal, constraints, context:null|{baseline,asis}, ...GOAL_SEEK_RESULT}
   // Simplificação com prova de equivalência — Copiloto Sessão 5 (DEC-IA-005/006)
   const [simplifyModal, setSimplifyModal] = useState(null); // null | {step:'loading'|'result', proposal, equivalence}
   // Documentação Automática — Copiloto Sessão 6 (DEC-IA-006): composição efêmera (mesmo
@@ -4966,6 +4974,9 @@ export default function App() {
       } else if (msgType === 'GOAL_SEEK_RESULT') {
         const { goal, baseline, frontier, moves, goalReached, bindingConstraint, result } = e.data;
         setGoalSeekModal(m => (m ? { ...m, step: 'result', goal, baseline, frontier, moves, goalReached, bindingConstraint, result } : m));
+      } else if (msgType === 'GOAL_SEEK_CONTEXT_RESULT') {
+        const { baseline, asis } = e.data;
+        setGoalSeekModal(m => (m ? { ...m, context: { baseline, asis } } : m));
       } else if (msgType === 'SIMPLIFY_RESULT') {
         const { proposal, equivalence } = e.data;
         setSimplifyModal(m => (m ? { ...m, step: 'result', proposal, equivalence } : m));
@@ -8846,6 +8857,12 @@ export default function App() {
       step: 'form',
       goal: { target: 'approvalRate', direction: 'increase', magnitude: 2, minimize: 'inadInferida' },
       constraints: { maxInadReal: null, maxInadInf: null },
+      context: null, // "Ponto de partida" (GS1, DEC-GS-002) — skeleton até GOAL_SEEK_CONTEXT_RESULT
+    });
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_GOAL_SEEK_CONTEXT',
+      shapes: shapesR.current,
+      conns: connsR.current,
     });
   };
 
@@ -14240,7 +14257,7 @@ export default function App() {
 
       {/* ═══════════════ GOAL SEEK MODAL — objetivo estruturado (Copiloto Sessão 4) ═══════════════ */}
       {goalSeekModal&&(()=>{
-        const { step, goal, constraints, baseline, frontier, moves, goalReached, bindingConstraint, result } = goalSeekModal;
+        const { step, goal, constraints, context, baseline, frontier, moves, goalReached, bindingConstraint, result } = goalSeekModal;
         const updGoal = (patch) => setGoalSeekModal(m => ({ ...m, goal: { ...m.goal, ...patch } }));
         const updCons = (patch) => setGoalSeekModal(m => ({ ...m, constraints: { ...m.constraints, ...patch } }));
         const targetMeta = GOAL_SEEK_TARGET_META[goal?.target] || GOAL_SEEK_TARGET_META.approvalRate;
@@ -14278,6 +14295,54 @@ export default function App() {
               <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
                 {step==='form' && (
                   <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    {/* 📍 Ponto de partida (GS1, DEC-GS-002) — política atual no canvas vs. AS
+                        IS, ambos escopados à população decidida (decidedQty), não à base inteira. */}
+                    <div style={{border:"1px solid #e2e8f0",borderRadius:12,padding:"12px 14px",background:"#f8fafc"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}>
+                        <span style={{fontSize:11,color:"#475569",fontWeight:700,textTransform:"uppercase",letterSpacing:.4}}>
+                          📍 Ponto de partida
+                        </span>
+                        <span style={{fontSize:10.5,color:"#94a3b8",fontWeight:500}}>(população decidida pela política)</span>
+                        <span
+                          title="Medido sobre a população que a política decide (chega a um terminal), não sobre a base inteira — por isso pode diferir do painel de simulação."
+                          style={{fontSize:10,color:"#94a3b8",cursor:"help",border:"1px solid #cbd5e1",borderRadius:"50%",
+                            width:14,height:14,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,lineHeight:1}}>
+                          ⓘ
+                        </span>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                        {GOAL_SEEK_CONTEXT_CARDS.map(({k,label})=>{
+                          const meta = GOAL_SEEK_TARGET_META[k];
+                          const curVal = context?.baseline?.[k] ?? null;
+                          const asVal  = context?.asis?.[k] ?? null;
+                          let deltaLine;
+                          if (!context) {
+                            deltaLine = <div style={{height:11,width:"72%",borderRadius:4,background:"#e2e8f0"}} />;
+                          } else if (!context.asis) {
+                            deltaLine = <div style={{fontSize:10.5,color:"#94a3b8"}}>AS IS não configurado</div>;
+                          } else {
+                            const deltaRaw = curVal - asVal;
+                            const deltaPp = k === 'approvalRate' ? deltaRaw : deltaRaw * 100;
+                            const good = GOOD_WHEN_LOWER.has(k) ? deltaPp < 0 : deltaPp > 0;
+                            const color = Math.abs(deltaPp) < 0.005 ? "#94a3b8" : (good ? "#16a34a" : "#dc2626");
+                            deltaLine = (
+                              <div style={{fontSize:10.5,color:"#94a3b8"}}>
+                                AS IS {meta.fmt(asVal)} · <span style={{color,fontWeight:600}}>Δ{deltaPp>=0?'+':''}{deltaPp.toFixed(2)}pp</span>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={k} style={{padding:"9px 10px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff"}}>
+                              <div style={{fontSize:10,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",marginBottom:3}}>{label}</div>
+                              {context
+                                ? <div style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:2}}>{meta.fmt(curVal)}</div>
+                                : <div style={{height:16,width:"55%",borderRadius:4,background:"#e2e8f0",marginBottom:5}} />}
+                              {deltaLine}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
                     <p style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
                       Declare o objetivo e as restrições. O motor busca uma sequência de movimentos
                       concretos (abrir/fechar célula, trocar terminal de um segmento, relaxar/apertar
