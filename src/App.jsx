@@ -1492,6 +1492,25 @@ const GOAL_SEEK_CONTEXT_CARDS = [
   { k: 'inadInferida', label: 'Inad. Inferida' },
   { k: 'inadReal',     label: 'Inad. Real' },
 ];
+// GS2 (DEC-GS-003) — opções de "Minimizar colateralmente". `collidesWith` é o alvo cujo
+// campo é o mesmo do minimize (minimizar a própria coisa que se quer mexer não faz sentido);
+// a opção colidente é escondida do select e resetada ao trocar o alvo.
+const GOAL_SEEK_MINIMIZE_OPTS = [
+  { value: 'inadInferida', label: 'Inad. Inferida',           collidesWith: 'inadInferida' },
+  { value: 'inadReal',     label: 'Inad. Real',               collidesWith: 'inadReal' },
+  { value: 'approval',     label: 'Impacto em Aprovação',     collidesWith: 'approvalRate' },
+  { value: 'salesVolume',  label: 'Vol. de Vendas impactado', collidesWith: 'approvedAltasInfer' },
+];
+// Reset da DEC-GS-003: se o minimize atual colide com o novo alvo, volta para 'inadInferida'
+// — ou 'approval' quando o alvo é uma inadimplência (senão colidiria de novo).
+function goalSeekResolveMinimize(target, minimize) {
+  const cur = minimize || 'inadInferida';
+  const opt = GOAL_SEEK_MINIMIZE_OPTS.find(o => o.value === cur);
+  if (opt && opt.collidesWith === target) {
+    return (target === 'inadReal' || target === 'inadInferida') ? 'approval' : 'inadInferida';
+  }
+  return cur;
+}
 
 // Copiloto — lint estrutural (Sessão 1, DEC-IA-006). Estilo por severidade do achado
 // (findings vêm de COMPUTE_POLICY_INSIGHTS, sempre {severity, code, nodeId, msg, fix?}).
@@ -14258,7 +14277,12 @@ export default function App() {
       {/* ═══════════════ GOAL SEEK MODAL — objetivo estruturado (Copiloto Sessão 4) ═══════════════ */}
       {goalSeekModal&&(()=>{
         const { step, goal, constraints, context, baseline, frontier, moves, goalReached, bindingConstraint, result } = goalSeekModal;
-        const updGoal = (patch) => setGoalSeekModal(m => ({ ...m, goal: { ...m.goal, ...patch } }));
+        const updGoal = (patch) => setGoalSeekModal(m => {
+          const goal = { ...m.goal, ...patch };
+          // GS2 (DEC-GS-003): trocar o alvo pode fazer o minimize atual colidir — reseta.
+          if ('target' in patch) goal.minimize = goalSeekResolveMinimize(goal.target, goal.minimize);
+          return { ...m, goal };
+        });
         const updCons = (patch) => setGoalSeekModal(m => ({ ...m, constraints: { ...m.constraints, ...patch } }));
         const targetMeta = GOAL_SEEK_TARGET_META[goal?.target] || GOAL_SEEK_TARGET_META.approvalRate;
         const BINDING_LABEL = {
@@ -14378,8 +14402,9 @@ export default function App() {
                         Minimizar colateralmente
                         <select value={goal.minimize||'inadInferida'} onChange={e=>updGoal({minimize:e.target.value})}
                           style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
-                          <option value="inadInferida">Inad. Inferida</option>
-                          <option value="inadReal">Inad. Real</option>
+                          {GOAL_SEEK_MINIMIZE_OPTS.filter(o=>o.collidesWith!==goal.target).map(o=>(
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
                         </select>
                       </label>
                     </div>

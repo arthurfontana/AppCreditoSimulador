@@ -2454,6 +2454,27 @@ function goalSeekRatios(raw) {
 
 const GOAL_SEEK_TARGETS = new Set(['approvalRate', 'inadReal', 'inadInferida', 'approvedAltasInfer']);
 
+// DEC-GS-003 — valores aceitos de `goal.minimize` e a quantidade colateral por candidato
+// que cada um representa (`collQty(c)`). Os dois primeiros são retrocompatíveis.
+const GOAL_SEEK_MINIMIZE_FIELDS = new Set(['inadInferida', 'inadReal', 'approval', 'salesVolume']);
+function goalSeekCollQty(c, minimizeField) {
+  switch (minimizeField) {
+    case 'inadReal':    return c.inadRRaw || 0;
+    case 'approval':    return c.qty || 0;
+    case 'salesVolume': return c.qtdAltasInfer || 0;
+    default:            return c.inadIRaw || 0; // inadInferida
+  }
+}
+// DEC-GS-003 — quantidade de GANHO no alvo por candidato (`tgtQty(c)`), derivada de goal.target.
+function goalSeekTgtQty(c, target) {
+  switch (target) {
+    case 'inadReal':           return c.inadRRaw || 0;
+    case 'inadInferida':       return c.inadIRaw || 0;
+    case 'approvedAltasInfer': return c.qtdAltasInfer || 0;
+    default:                   return c.qty || 0; // approvalRate
+  }
+}
+
 // COMPUTE_GOAL_SEEK — busca gulosa com precedência sobre o catálogo de movimentos.
 // goal: {target, direction:'increase'|'decrease', magnitude:number|null, minimize?}
 // constraints: {maxInadReal?:number, maxInadInf?:number} (tetos, ratio 0–1; null/ausente = sem teto)
@@ -2463,7 +2484,9 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
   const target = GOAL_SEEK_TARGETS.has(g.target) ? g.target : 'approvalRate';
   const direction = g.direction === 'decrease' ? 'decrease' : 'increase';
   const magnitude = (typeof g.magnitude === 'number' && isFinite(g.magnitude)) ? g.magnitude : null;
-  const minimizeField = g.minimize === 'inadReal' ? 'inadReal' : 'inadInferida';
+  // DEC-GS-003: "Minimizar colateralmente" generalizado — 4 valores (2 antigos preservados,
+  // retrocompat de payload). Qualquer valor desconhecido/ausente cai em 'inadInferida'.
+  const minimizeField = GOAL_SEEK_MINIMIZE_FIELDS.has(g.minimize) ? g.minimize : 'inadInferida';
   const cons = constraints || {};
   const maxInadReal = (typeof cons.maxInadReal === 'number') ? cons.maxInadReal : null;
   const maxInadInf  = (typeof cons.maxInadInf  === 'number') ? cons.maxInadInf  : null;
@@ -2476,19 +2499,28 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
   const pool = allCandidates.filter(c => c.toApproved === wantsApproved);
   const candById = Object.fromEntries(pool.map(c => [c.id, c]));
 
-  // Suavização bayesiana (padrão Johnny/SHRINK_K): evita que um movimento de baixo
-  // volume (ruído amostral) fure a fila por inadimplência aparentemente extrema.
-  let poolRaw = 0, poolDen = 0, poolQty = 0;
+  // Critério de ordenação generalizado (DEC-GS-003): custo colateral por unidade de ganho
+  // no alvo, com shrinkage bayesiano (padrão Johnny/SHRINK_K) — evita que um movimento de
+  // baixo volume (ruído amostral) fure a fila. Reduz-se ao `smoothed()` anterior quando
+  // alvo=aprovação e minimize=inad (mudança de matemática deliberada, coberta por GATE GS2):
+  //   score(c) = (collQty(c) + collPoolAvg·K) / (tgtQty(c) + tgtPoolAvg·K)
+  // `collPoolAvg`/`tgtPoolAvg` = média POR CANDIDATO da respectiva quantidade sobre o pool.
+  // Ordena por `score` CRESCENTE (menor custo colateral por unidade de ganho primeiro) — a
+  // direção já está embutida no filtro do pool (`toApproved === wantsApproved`), então não há
+  // flip por direção (DEC-GS-003: "decrease: nada muda estruturalmente").
+  let collSum = 0, tgtSum = 0, poolQty = 0;
   for (const c of pool) {
+    collSum += goalSeekCollQty(c, minimizeField);
+    tgtSum  += goalSeekTgtQty(c, target);
     poolQty += c.qty;
-    if (minimizeField === 'inadReal') { poolRaw += c.inadRRaw; poolDen += c.qtdAltas; }
-    else { poolRaw += c.inadIRaw; poolDen += (c.qtdAltasInfer > 0 ? c.qtdAltasInfer : c.qty); }
   }
-  const poolAvg = poolDen > 0 ? poolRaw / poolDen : 0;
-  const SHRINK_K = Math.max(1, (poolQty / Math.max(1, pool.length)) * 0.1);
-  const smoothed = (c) => minimizeField === 'inadReal'
-    ? ((c.inadRRaw || 0) + poolAvg * SHRINK_K) / ((c.qtdAltas || 0) + SHRINK_K)
-    : ((c.inadIRaw || 0) + poolAvg * SHRINK_K) / ((c.qtdAltasInfer > 0 ? c.qtdAltasInfer : c.qty || 0) + SHRINK_K);
+  const poolN = Math.max(1, pool.length);
+  const collPoolAvg = collSum / poolN;
+  const tgtPoolAvg  = tgtSum / poolN;
+  const SHRINK_K = Math.max(1, (poolQty / poolN) * 0.1);
+  const score = (c) =>
+    (goalSeekCollQty(c, minimizeField) + collPoolAvg * SHRINK_K) /
+    (goalSeekTgtQty(c, target) + tgtPoolAvg * SHRINK_K);
 
   const remaining = {}, dependents = {};
   for (const c of pool) { remaining[c.id] = 0; dependents[c.id] = []; }
@@ -2533,11 +2565,10 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
 
   while (!isReached()) {
     const ordered = [...liberated].map(id => candById[id]).sort((a, b) => {
-      const sa = smoothed(a), sb = smoothed(b);
-      const diff = wantsApproved ? sa - sb : sb - sa;
-      if (diff !== 0) return diff;
-      if (b.qty !== a.qty) return b.qty - a.qty;
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      const sa = score(a), sb = score(b);
+      if (sa !== sb) return sa - sb;                 // menor custo colateral por unidade de ganho
+      if (b.qty !== a.qty) return b.qty - a.qty;      // desempate: maior volume primeiro
+      return segStrCmp(a.id, b.id);                   // desempate final: id asc (code unit UTF-16)
     });
     let chosen = null, rejectedReason = null;
     for (const c of ordered) {
