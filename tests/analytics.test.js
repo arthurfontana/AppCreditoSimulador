@@ -8,6 +8,7 @@ import {
   applyGroupingsToDataset,
   autoBuckets,
   distinctDimValues,
+  describeFilterCards,
 } from '../src/App.jsx';
 import {
   computeAnalyticsDataset,
@@ -488,5 +489,48 @@ describe('Agrupamentos · applyGroupingsToDataset', () => {
     const piv = pivotWidget(ds, { xDimension: 'Faixa (agrup.)', metric: 'qty', serieBy: '__none__' });
     expect(piv.state).toBe('ok');
     expect(piv.data.map(d => d.x)).toEqual(['Baixo', 'Alto', 'Outros']);
+  });
+});
+
+// ── describeFilterCards — detalhamento de filtros no export de PDF do Dashboard ──
+describe('Filtros · describeFilterCards', () => {
+  const ds = columnarDataset([
+    { score: 'R01', qty: 10, d: 'APROVADO' }, { score: 'R02', qty: 10, d: 'APROVADO' },
+    { score: 'R03', qty: 10, d: 'APROVADO' },
+  ], {
+    dimensions: ['score'],
+    scenarios: [{ id: 'as_is', nome: 'AS IS', decisionCol: 'd' }],
+    metrics: [{ id: 'qty', label: 'Vol', unit: 'qty' }],
+  });
+
+  it('omite cartões inativos (sem dimensão, sem seleção, sem regra)', () => {
+    expect(describeFilterCards([], ds)).toEqual([]);
+    expect(describeFilterCards([{ dim: null, mode: 'basic', selected: null }], ds)).toEqual([]);
+    expect(describeFilterCards([{ dim: 'score', mode: 'basic', selected: null }], ds)).toEqual([]);
+    expect(describeFilterCards([{ dim: 'score', mode: 'advanced', rules: [{ operator: 'gte', value: '', logic: 'AND' }] }], ds)).toEqual([]);
+  });
+
+  it('descreve um cartão básico com valores marcados e a contagem N de M', () => {
+    const out = describeFilterCards([{ dim: 'score', mode: 'basic', selected: ['R01', 'R02'] }], ds);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ dim: 'score', mode: 'basic', text: 'R01, R02', values: ['R01', 'R02'], total: 3 });
+  });
+
+  it('descreve um cartão avançado usando os rótulos de operador e o conector E/OU', () => {
+    const out = describeFilterCards([{
+      dim: 'score', mode: 'advanced',
+      rules: [
+        { operator: 'gte', value: '700', logic: 'AND' },
+        { operator: 'lt', value: '900', logic: 'AND' },
+      ],
+    }], ds);
+    expect(out).toHaveLength(1);
+    expect(out[0].mode).toBe('advanced');
+    expect(out[0].text).toBe('Maior ou igual a 700 E Menor que 900');
+  });
+
+  it('sem dataset, o cartão básico omite o total (mas ainda descreve os valores)', () => {
+    const out = describeFilterCards([{ dim: 'score', mode: 'basic', selected: ['R01'] }], null);
+    expect(out[0]).toMatchObject({ dim: 'score', text: 'R01', total: null });
   });
 });
