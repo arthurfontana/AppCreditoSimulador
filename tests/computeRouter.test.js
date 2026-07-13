@@ -427,3 +427,56 @@ describe('H6 — fallbackNoticeText (aviso "concluído no modo browser")', () =>
     expect(t).toMatch(/modo browser/i);
   });
 });
+
+// ── GATE Goal Seek Profundo — Sessão GS6 (docs/wiki/Hibrido-GoalSeek-Profundo.md) ────
+// `goal_seek_deep` é Classe B como segment_discovery/cluster_segments, mas — diferente
+// delas — não tem gêmeo no worker (DEC-GS-001/005): o job é self-contained (catálogo
+// agregado, nunca a base) e não passa por `registerDataset`. Provado: (1) classificação
+// Classe B; (2) roteia pro sidecar SEM nenhuma chamada de dataset mesmo com um
+// `dataset` configurado no router (o caller de goal_seek_deep nunca passa `opts.dataset`
+// — App.jsx fala com o provider do sidecar direto, não via `router.run`, exatamente por
+// não haver worker twin); (3) contrato genérico de fallback do router (queda ⇒ worker)
+// continua válido para quem testa só o módulo (mesmo padrão do echo_stats) — a proteção
+// contra o "hang" de produção vive em App.jsx (bypassa `router.run` para este job).
+describe('GS6 — goal_seek_deep (Classe B, job self-contained, sem dataset)', () => {
+  it('é Classe B e o catálogo/validação (Classe A) mapeiam pra *_RESULT corretos', () => {
+    expect(classOf('goal_seek_deep')).toBe('B');
+    expect(resultTypeFor('COMPUTE_GOAL_SEEK_CATALOG')).toBe('GOAL_SEEK_CATALOG_RESULT');
+    expect(resultTypeFor('COMPUTE_GOAL_SEEK_VALIDATE')).toBe('GOAL_SEEK_RESULT');
+  });
+
+  it('roteia pro sidecar sem registrar dataset (caller não passa `opts.dataset`/`dataset` no router — mesma configuração de App.jsx)', async () => {
+    const fake = makeFakeSidecar();
+    const spy = makeSpyWorker();
+    // Mesma configuração do `computeRouterRef` de App.jsx: SEM `dataset` default — o job
+    // é self-contained (catálogo agregado no `params`, nunca a base).
+    const router = createComputeRouter({
+      worker: spy.provider,
+      sidecar: fake.sidecar(),
+      getPreference: () => ({ enabled: true }),
+    });
+    await router.detect();
+    expect(router.canRouteToSidecar('goal_seek_deep')).toBe(true);
+
+    const out = await router.run('goal_seek_deep', { catalog: { baselineRaw: {}, candidates: [] }, goal: {}, constraints: {} });
+
+    expect(out.via).toBe('sidecar');
+    expect(fake.calls.some((c) => c.includes('/datasets'))).toBe(false); // SEM registerDataset
+    expect(spy.runs).toHaveLength(0);
+  });
+
+  it('queda no meio do job ⇒ contrato genérico de fallback do router (worker, fellBack)', async () => {
+    const fake = makeFakeSidecar({ dropOnPoll: 1 });
+    const spy = makeSpyWorker();
+    const router = createComputeRouter({
+      worker: spy.provider,
+      sidecar: fake.sidecar(),
+      getPreference: () => ({ enabled: true }),
+    });
+    await router.detect();
+    const out = await router.run('goal_seek_deep', { catalog: { baselineRaw: {}, candidates: [] } });
+    expect(out.via).toBe('worker');
+    expect(out.fellBack).toBe(true);
+    expect(spy.runs).toHaveLength(1);
+  });
+});
