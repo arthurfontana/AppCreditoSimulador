@@ -4736,11 +4736,16 @@ export default function App() {
   const [showEdgeVol,       setShowEdgeVol]        = useState(true);
   const [showEdgeInadReal,  setShowEdgeInadReal]   = useState(true);
   const [showEdgeInadInf,   setShowEdgeInadInf]    = useState(true);
-  // Execução Híbrida H4/H6 — preferência do Motor Python (sidecar opt-in). Default OFF:
-  // com desligado o ComputeRouter nem tenta detectar; tudo roda no worker (DEC-HX-001).
-  // `url`/`token` só têm efeito no modo dev (release é same-origin, sem config — ver
-  // IS_DEV_BUILD). Persistida no contêiner `preferences` do Projeto (sem bump de schema).
-  const [computeSidecar,    setComputeSidecar]     = useState({ enabled: false, url: '', token: '' });
+  // Execução Híbrida H4/H6 — preferência do Motor Python (sidecar opt-in). Default ON:
+  // o boot tenta detectar o sidecar automaticamente (release já sobe app+sidecar juntos
+  // via serve.py — DEC-HX-003); se a 1ª detecção automática não achar nada, o próprio
+  // boot desliga o toggle sozinho (ver effect de detecção abaixo) e o app segue 100% no
+  // worker (DEC-HX-001 continua valendo: ausência é estado normal e silencioso). Esse
+  // default só vale pra sessão nova/projeto sem a preferência salva — `loadProject`
+  // sobrescreve com o que o usuário salvou explicitamente. `url`/`token` só têm efeito no
+  // modo dev (release é same-origin, sem config — ver IS_DEV_BUILD). Persistida no
+  // contêiner `preferences` do Projeto (sem bump de schema).
+  const [computeSidecar,    setComputeSidecar]     = useState({ enabled: true, url: '', token: '' });
   // Status detectado do sidecar (efêmero — nunca persistido, é sempre re-derivado por
   // `detect()`). `reason` espelha o vocabulário do router: not_detected|disabled|
   // no_sidecar|unreachable|protocol_mismatch|ok.
@@ -5117,11 +5122,12 @@ export default function App() {
   // já é NUNCA lança e é silencioso quando a preferência está desligada — chamamos
   // incondicionalmente e deixamos o router decidir (evita duplicar a regra aqui).
   const detectSidecar = useCallback(async () => {
-    if (!computeRouterRef.current) return;
+    if (!computeRouterRef.current) return null;
     setComputeSidecarChecking(true);
     try {
       const status = await computeRouterRef.current.detect();
       setComputeSidecarStatus(status);
+      return status;
     } finally {
       setComputeSidecarChecking(false);
     }
@@ -5132,16 +5138,30 @@ export default function App() {
   // Sidecar provider é recriado quando URL/token mudam (o proxy acima garante que o
   // router não precisa saber disso). Re-detecta em seguida — debounced (400ms) pra não
   // disparar um round-trip HTTP a cada tecla digitada no campo de token/URL do modo dev.
+  // `bootSidecarCheckDoneRef` marca a 1ª detecção automática do boot: só ELA pode
+  // auto-desligar o toggle quando o sidecar não responde (tenta primeiro, desliga
+  // sozinho se não achar — ver default `enabled:true` acima). Checagens manuais
+  // subsequentes (botão "Verificar conexão", digitar URL/token em dev) nunca
+  // auto-desligam — senão atrapalharia quem está configurando o sidecar em dev.
+  const bootSidecarCheckDoneRef = useRef(false);
   useEffect(() => {
     sidecarProviderRef.current = createSidecarProvider({
       url: computeSidecar.url || (IS_DEV_BUILD ? 'http://127.0.0.1:8090' : ''),
       token: computeSidecar.token || '',
     });
     if (!computeSidecar.enabled) {
+      bootSidecarCheckDoneRef.current = true;
       setComputeSidecarStatus({ available: false, tier: null, capabilities: null, reason: 'disabled' });
       return;
     }
-    const t = setTimeout(() => { detectSidecar(); }, 400);
+    const isBootCheck = !bootSidecarCheckDoneRef.current;
+    const t = setTimeout(async () => {
+      const status = await detectSidecar();
+      bootSidecarCheckDoneRef.current = true;
+      if (isBootCheck && status && !status.available) {
+        setComputeSidecar(prev => ({ ...prev, enabled: false }));
+      }
+    }, 400);
     return () => clearTimeout(t);
   }, [computeSidecar.enabled, computeSidecar.url, computeSidecar.token, detectSidecar]);
 
