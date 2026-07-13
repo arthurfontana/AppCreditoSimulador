@@ -491,6 +491,69 @@ describe('Goal Seek · minimize generalizado (GS2, DEC-GS-003)', () => {
   });
 });
 
+// ── GATE (bugfix) — `goal.magnitude` em "pp" para alvos de razão 0–1 ────────────────
+// docs/wiki/Copiloto-SugestoesMelhoria.md (exemplo "Corte de risco"): "reduza inad real em
+// 0,5pp ... → −0,52pp inad, −0,9pp aprovação" e o rótulo do formulário (App.jsx,
+// GOAL_SEEK_TARGET_META) dizem que `magnitude` para inadReal/inadInferida é lido na MESMA
+// escala 0–100 da exibição (fmtPct). `goalSeekRatios`, porém, devolve esses dois campos como
+// razão crua 0–1 (só approvalRate já vem ×100) — sem converter magnitude/100 antes de comparar,
+// pedir "0,5pp" virava a exigência de subtrair 0,5 (50pp) de uma razão ~0,1–0,4, um alvo
+// inatingível que esgotava o catálogo inteiro (fechando toda a base) e reportava aprovação
+// zerada como "objetivo não atingido" — reproduzido a partir de um caso real do usuário.
+describe('Goal Seek · magnitude em pp para alvo de razão (bugfix unidade)', () => {
+  const csvStore = {
+    base: {
+      name: 'base',
+      // A = grande volume, risco baixo (rate 0,10) · B = pequeno volume, risco MUITO alto (rate 1,0)
+      headers: ['COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+      rows: [
+        ['A', '900', '900', '900', '90',  '90'],
+        ['B', '100', '100', '100', '100', '100'],
+      ],
+      columnTypes: { COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+      varTypes: {},
+      asIsConfig: null,
+    },
+  };
+  const shapes = [
+    { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
+    { id: 'pA', type: 'port', label: 'A' },
+    { id: 'pB', type: 'port', label: 'B' },
+    { id: 'AP', type: 'approved' },
+    { id: 'RJ', type: 'rejected' },
+  ];
+  const conns = [
+    { id: 'cA', from: 'D', to: 'pA', label: 'A' },
+    { id: 'cB', from: 'D', to: 'pB', label: 'B' },
+    { id: 'cpA', from: 'pA', to: 'AP' },
+    { id: 'cpB', from: 'pB', to: 'AP' },
+  ];
+  // baseline inadInferida = (90+100)/(900+100) = 0,19 (19%). Pedir "1pp" deve mirar 18% —
+  // alcançável fechando só B (rate 1,0, o pior) — nunca os -81% que a conta sem conversão exigiria.
+
+  it('magnitude=1 (1pp) em alvo inadInferida converge fechando só o segmento caro, sem zerar aprovação', () => {
+    const seek = computeGoalSeek(shapes, conns, csvStore, { target: 'inadInferida', direction: 'decrease', magnitude: 1, minimize: 'approval' }, {}, [], pops(shapes, csvStore));
+    expect(seek.goalReached).toBe(true);
+    expect(seek.bindingConstraint).toBeNull();
+    expect(seek.moves.length).toBe(1);
+    expect(seek.moves[0].id).toBe('decision:D:B');
+    // pediu 1pp (0,01 de razão) — o motor não deveria precisar fechar tudo para atingir isso.
+    expect(seek.result.approvalRate).toBeGreaterThan(80); // só B (10% do volume) foi sacrificado
+    expect(seek.result.inadInferida).toBeLessThanOrEqual(seek.baseline.inadInferida - 0.01 + 1e-9);
+
+    const { shapes: s2, conns: c2 } = applyGoalSeekMoves(shapes, conns, seek.moves.map(m => m.apply));
+    const manual = runSimulation(s2, c2, csvStore);
+    expect(seek.result.inadInferida).toBeCloseTo(manual.inadInferida, 9);
+  });
+
+  it('sem a conversão, o mesmo pedido exigiria −81pp (inatingível) e esgotaria o catálogo — regressão', () => {
+    // Simula a fórmula ANTIGA (sem /100) só pra documentar o tamanho do bug corrigido:
+    // alvo = 0,19 − 1 = −0,81, impossível para uma razão ⩾ 0.
+    const buggyGoalAbs = 0.19 - 1;
+    expect(buggyGoalAbs).toBeLessThan(0);
+  });
+});
+
 // ── GATE — Sessão GS3 (Selos estatísticos por movimento, DEC-GS-004) ─────────────
 // docs/wiki/Hibrido-GoalSeek-Profundo.md pede:
 //   1. wilsonCI contra valores de referência calculados à mão;

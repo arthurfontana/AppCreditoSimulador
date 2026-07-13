@@ -2493,6 +2493,19 @@ function goalSeekTgtQty(c, target) {
 // DEC-GS-004 — piso amostral dos selos estatísticos por movimento (mesmo piso de
 // `computeReliability`: segmentos com menos de 30 altas são "amostra frágil").
 const GOAL_SEEK_MIN_SAMPLE = 30;
+// Bugfix — `goal.magnitude` chega do formulário em "pp" (pontos percentuais, a mesma escala
+// 0–100 da EXIBIÇÃO — ver GOAL_SEEK_TARGET_META.scale em App.jsx: approvalRate='pp100',
+// inadReal/inadInferida='ratio', approvedAltasInfer='qty'). `goalSeekRatios` só devolve
+// approvalRate já ×100 — inadReal/inadInferida são razão crua 0–1. Sem esta conversão,
+// magnitude=0.5 ("0,5pp") era comparada direto contra uma razão 0–1: um alvo praticamente
+// inatingível (equivalia a exigir ±50pp de inadimplência), que esgotava o catálogo inteiro
+// (todas as células/segmentos direcionáveis) sem nunca satisfazer `isReached()` — daí o
+// colapso de aprovação reportado como "objetivo não atingido". approvedAltasInfer é
+// quantidade absoluta (qty), sem conversão.
+function goalSeekMagnitudeToRatio(target, magnitude) {
+  if (magnitude == null) return magnitude;
+  return (target === 'inadReal' || target === 'inadInferida') ? magnitude / 100 : magnitude;
+}
 // DEC-GS-008 — profundidade das escadas de lens no catálogo profundo (COMPUTE_GOAL_SEEK_CATALOG).
 // Os call sites do modo greedy/browser NÃO passam maxLensSteps ⇒ default 1 (retrocompat total).
 const GOAL_SEEK_DEEP_LENS_STEPS = 12;
@@ -2596,11 +2609,12 @@ function computeGoalSeek(shapes, conns, csvStore, goal, constraints, locks, lens
   let bindingConstraint = null;
 
   const initialTargetVal = goalSeekRatios(running)[target];
+  const magnitudeRatio = goalSeekMagnitudeToRatio(target, magnitude);
   const isReached = () => {
-    if (magnitude === null) return false;
+    if (magnitudeRatio === null) return false;
     const cur = goalSeekRatios(running)[target];
     if (cur === null || initialTargetVal === null) return false;
-    const goalAbs = direction === 'increase' ? initialTargetVal + magnitude : initialTargetVal - magnitude;
+    const goalAbs = direction === 'increase' ? initialTargetVal + magnitudeRatio : initialTargetVal - magnitudeRatio;
     return direction === 'increase' ? cur >= goalAbs : cur <= goalAbs;
   };
 
@@ -2963,15 +2977,16 @@ async function computeGoalSeekValidate(shapes, conns, csvStore, lensPopulations,
     inadInferida: validated.inadInferida, approvedAltasInfer: running.qtdAltasInferSum,
   };
 
+  const magnitudeRatio = goalSeekMagnitudeToRatio(target, magnitude);
   let goalReached;
-  if (magnitude === null) {
+  if (magnitudeRatio === null) {
     goalReached = selected.length > 0;
   } else {
     const initial = baseline[target];
     const cur = resultRatios[target];
     if (cur == null || initial == null) goalReached = false;
     else {
-      const goalAbs = direction === 'increase' ? initial + magnitude : initial - magnitude;
+      const goalAbs = direction === 'increase' ? initial + magnitudeRatio : initial - magnitudeRatio;
       goalReached = direction === 'increase' ? cur >= goalAbs - 1e-9 : cur <= goalAbs + 1e-9;
     }
   }
