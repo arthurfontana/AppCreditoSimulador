@@ -29,3 +29,4 @@
 - [[Otimizacao-Memoria|Otimização de Memória (datasets grandes)]]
 - [[PERFORMANCE-ANALISE|Análise de Performance e Memória (backlog técnico)]]
 - [[SECURITY-AND-ENTERPRISE-READINESS|Segurança & Enterprise Readiness (auditoria SaaS)]]
+- [[Contexto-Claude|Consumo de Contexto do Claude Code (diagnóstico + plano)]]
