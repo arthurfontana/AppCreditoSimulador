@@ -367,6 +367,9 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `COMPUTE_JOHNNY` | `{shapes, cinemaIds, conns, riskLevels?, hierarchyMode?, inadMetric?}` | Roda `computeCinemaArrivals` + `computeJohnnyData` com greedy+precedência; responde com `JOHNNY_RESULT` |
 | `COMPUTE_ANALYTICS_DATASET` | `{canvases}` | `canvases: [{id, nome, shapes, conns}]` — abas marcadas (cenários, 5B). Populações de lens derivadas no worker (M10). Roda `computeAnalyticsDataset`; responde com `ANALYTICS_RESULT` |
 | `COMPUTE_GOAL_SEEK` | `{shapes, conns, goal, constraints, locks}` | Copiloto Sessão 4 — roda `computeGoalSeek` (catálogo de movimentos + busca gulosa com precedência/shrinkage/restrições + validação por re-simulação); responde com `GOAL_SEEK_RESULT` |
+| `COMPUTE_GOAL_SEEK_CONTEXT` | `{shapes, conns}` | **GS1 (DEC-GS-002)** — "Ponto de partida": roda `computeGoalSeekContext` (baseline escopado a `decidedQty` + AS IS no mesmo escopo); responde com `GOAL_SEEK_CONTEXT_RESULT`. Disparado ao abrir o `goalSeekModal`, antes do formulário |
+| `COMPUTE_GOAL_SEEK_CATALOG` | `{shapes, conns, locks?, maxLensSteps?}` | **GS4 (DEC-GS-005/008)** — gera o catálogo agregado via `buildGoalSeekCatalog` (escadas de lens com até `maxLensSteps=12` passos via `selectDeepestLensSteps`; dataset **nunca** sobe para o sidecar); responde com `GOAL_SEEK_CATALOG_RESULT`. Classe A — sempre no worker |
+| `COMPUTE_GOAL_SEEK_VALIDATE` | `{shapes, conns, goal, constraints, locks?, moveIds?, frontierIds?, maxLensSteps?}` | **GS4/GS6 (DEC-GS-007)** — recebe a solução do sidecar Python, materializa os movimentos (`selectDeepestLensSteps` + `applyGoalSeekMoves`), verifica invariantes e re-simula (`runSimulation`; pool H3 para extremos da fronteira); responde com `GOAL_SEEK_RESULT` (reutiliza o tipo existente). Classe A — sempre no worker |
 | `COMPUTE_SIMPLIFY` | `{shapes, conns}` | Copiloto Sessão 5 — roda `computeSimplify` (detecção de candidatos + aceitação incremental validada por `computeSimplifyEquivalence` + prova de equivalência linha a linha); responde com `SIMPLIFY_RESULT` |
 | `COMPUTE_POLICY_DOC` | `{shapes, conns, ir, canvases, options}` | Copiloto Sessão 6 — `ir` chega PRONTO (`buildPolicyIR` só existe em `App.jsx`); `canvases: [{id, nome, shapes, conns}]` para a comparação de cenários (mesmo formato de `COMPUTE_ANALYTICS_DATASET`); `options: {includeDomains, activeCanvasId?, activeCanvasName?, compare?:{shapes,conns}}`. Roda `computePolicyDoc`; responde com `POLICY_DOC_RESULT` |
 | `COMPUTE_SEGMENT_DISCOVERY` | `{shapes, conns, scope, params}` | Copiloto Sessão 10/12 — descoberta de segmentos. `scope`: `null` (base inteira) ou `{nodeId}` (população que chega ao nó). `params: {riskMetric:'inadReal'\|'inadInferida', minQty?, maxDepth?, beamWidth?, alpha?, maxFindings?, excludedCols?}`. `excludedCols` = seletor de variáveis do modal (nomes de coluna Filtro fora da busca; heurística `segVarDefaultReason` em `App.jsx` pré-desmarca colunas temporais/vintage e de score). Roda `computeSegmentDiscovery` (achados + recomendações validadas + asis_divergence/anomaly + estabilidade); responde com `SEGMENT_DISCOVERY_RESULT` |
@@ -386,7 +389,9 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 | `OPTIM_RESULT` | `{shapeId, cellMetrics, frontier, scenarios, maxInadReal, maxInadInf}` |
 | `JOHNNY_RESULT` | `{pooledMetrics, frontier, scenarios, mixCats, shapeMetas, baselineApprovalRate, maxInadReal, maxInadInf}` ou `{error: 'no_data'}` |
 | `ANALYTICS_RESULT` | `{dataset: AnalyticsDataset \| null}` — formato largo **colunar** (DEC-AW-003 + Otimização de Memória Fase 4): `{rowCount, columns:{[nome]:ColDef}, dimensions, temporalColumns, metrics, scenarios}`. `ColDef` = `{kind:'dict', dict, codes:Int32Array}` \| `{kind:'num', data:Float64Array}`. Os `ArrayBuffer`s das colunas são **transferidos** (zero-cópia) no `postMessage` |
-| `GOAL_SEEK_RESULT` | `{goal, baseline, frontier, moves, goalReached, bindingConstraint, result}` — ver seção "Motor de Goal Seek" |
+| `GOAL_SEEK_RESULT` | `{goal, baseline, frontier, moves, goalReached, bindingConstraint, result}` — ver seção "Motor de Goal Seek". Também emitido por `COMPUTE_GOAL_SEEK_VALIDATE` (GS4/GS6); quando vindo do caminho profundo, carrega `curves` (família de curvas por teto de inad.inf) e `via:'sidecar'` |
+| `GOAL_SEEK_CONTEXT_RESULT` | `{baseline, asis}` — baseline escopado a `decidedQty` + AS IS no mesmo escopo (`null` sem `__DECISAO_ORIGINAL`); alimenta os 3 cards "📍 Ponto de partida" (GS1, DEC-GS-002). Só exibido no `step:'form'` do `goalSeekModal` |
+| `GOAL_SEEK_CATALOG_RESULT` | `{baselineRaw, candidates, token}` — catálogo de movimentos com agregados O(1) prontos para o solver Python (`goal_seek_deep`), baseline bruto e token de staleness para `COMPUTE_GOAL_SEEK_VALIDATE` (DEC-GS-005/007) |
 | `SIMPLIFY_RESULT` | `{proposal, equivalence}` — ver seção "Simplificação com Prova de Equivalência" |
 | `POLICY_DOC_RESULT` | `{docModel}` — ver seção "Documentação Automática" |
 | `SEGMENT_DISCOVERY_RESULT` | `{segmentModel}` — ver seção "Descoberta de Segmentos" |
@@ -413,6 +418,11 @@ O arquivo `src/simulation.worker.js` recebe mensagens via `postMessage` e respon
 - `buildGoalSeekCandidates(shapes, conns, csvStore, lensPopulations, lockedIds)`: catálogo de candidatos a movimento (`cinema_cell`, `decision_terminal`, `lens_threshold`) com precedência entre eles
 - `computeGoalSeekArrivals(shapes, conns, csvStore, lensPopulations, lensColByShape)`: walk compilado (M8) que agrega métricas por segmento `(nó de decisão, valor)` e, para lens elegíveis a `lens_threshold`, por valor bruto da coluna da regra
 - `computeGoalSeekBaseline(shapes, conns, csvStore)`: agregador paralelo a `runSimulation` que também expõe os somatórios brutos (`qtdAltasSum`, `inadRealSum`, etc.) — necessários para os deltas O(1) da busca
+- `computeGoalSeekContext(shapes, conns, csvStore)`: **GS1 (DEC-GS-002)** — computa o baseline escopado a `decidedQty` + AS IS no mesmo escopo para os 3 cards "Ponto de partida" do formulário; reutiliza `computeGoalSeekBaseline` internamente
+- `buildGoalSeekCatalog(shapes, conns, csvStore, lensPopulations, lockedIds, maxLensSteps=GOAL_SEEK_DEEP_LENS_STEPS)`: **GS4 (DEC-GS-005/008)** — versão ampliada de `buildGoalSeekCandidates` que adiciona as **escadas de lens** (passos acumulados sobre um mesmo Decision Lens de regra `gte`/`gt`/`lte`/`lt`, via `selectDeepestLensSteps`); devolve `{baselineRaw, candidates, token}` para o `GOAL_SEEK_CATALOG_RESULT`
+- `selectDeepestLensSteps(cands)`: **GS4 (DEC-GS-008)** — filtra o catálogo de candidatos `lens_threshold`, mantendo para cada lens SÓ os `maxLensSteps` passos mais extremos (maior impacto de qtd, mesma direção); elimina candidatos intermediários que o solver nunca escolheria
+- `computeGoalSeekValidate(shapes, conns, csvStore, lensPopulations, req, pool=null)`: **async, GS4/GS6 (DEC-GS-007)** — recebe a proposta de movimentos do sidecar Python, verifica invariantes (DEC-GS-001: `moves` estão no catálogo, precedência respeitada, tetos não violados), materializa via `applyGoalSeekMoves` e valida por `runSimulation` real (pool H3 para os extremos da fronteira `frontierIds`); único lugar onde o GATE de paridade de contrato é checado. Responde com `GOAL_SEEK_RESULT`
+- `wilsonCI(k, n, z=1.96)`: **GS3 (DEC-GS-003)** — intervalo de confiança de Wilson para proporção (`k` sucessos em `n` observações, `z=1.96` → IC 95%); retorna `{lower, upper}` ou `null` para `n=0`; usado por `stats.ci95` em cada movimento do catálogo
 - `computeSimplify(shapes, conns, csvStore, nodeArrivals)`: ponto de entrada da Simplificação (Copiloto Sessão 5) — detecta candidatos, aceita-os incrementalmente (só os que preservam `diff=0`) e devolve `{proposal, equivalence}` — ver seção "Simplificação com Prova de Equivalência"
 - `detectSimplifyCandidates(shapes, conns, nodeArrivals, lensStats)`: catálogo de candidatos (`collapsible_node`, `zero_arrival_node`, `redundant_variable`; `lens_no_effect` reusa o `apply` de `collapsible_node`) — cada um com um patch `apply` materializável por `applySimplifyCandidates` (`src/policySimplify.js`)
 - `computeLensStats(shapes, conns, csvStore)`: walk dedicado (padrão `computeNodeArrivals`, generalizado a Decision Lens) — `{[lensId]: {arrived, passed}}`, base dos candidatos `zero_arrival_node`/`lens_no_effect` sobre lens (`nodeArrivals` não cobre lens)
@@ -790,13 +800,13 @@ excluem candidatos do nó inteiro **antes** da busca. Restrições de teto
 estouraria o teto nunca entra na proposta; se nenhum candidato liberado cabe, a busca para
 e reporta `bindingConstraint` (`'maxInadReal'`\|`'maxInadInf'`\|`'no_more_moves'`).
 
-### Estado `goal`/`constraints` (payload de `COMPUTE_GOAL_SEEK`)
+### Estado `goal`/`constraints` (payload de `COMPUTE_GOAL_SEEK` e `COMPUTE_GOAL_SEEK_VALIDATE`)
 ```js
 goal = {
   target: 'approvalRate'|'inadReal'|'inadInferida'|'approvedAltasInfer',
   direction: 'increase'|'decrease',
   magnitude: number|null,  // null = "mínimo"/"máximo" possível dentro das restrições
-  minimize: 'inadReal'|'inadInferida', // objetivo colateral que orienta a ordem dos candidatos
+  minimize: 'inadReal'|'inadInferida'|'approval'|'salesVolume', // GS2 (DEC-GS-003) — objetivo colateral; orienta o scoring no greedy clássico e no MILP do sidecar
 }
 constraints = { maxInadReal: number|null, maxInadInf: number|null } // tetos, ratio 0–1
 ```
@@ -835,11 +845,16 @@ painel e ~73% escopada no Goal Seek. Alinhar o SimPanel a esse escopo é um foll
 {
   step: 'form'|'loading'|'result',
   goal, constraints,                 // objetivo em edição
+  context: null | {baseline, asis},  // GS1 (DEC-GS-002) — cards "Ponto de partida", populado por GOAL_SEEK_CONTEXT_RESULT ao abrir o formulário
   baseline, frontier, moves,         // devolvidos por GOAL_SEEK_RESULT (step==='result')
   goalReached, bindingConstraint, result,
+  via: null|'worker'|'sidecar',      // GS6 (DEC-GS-001) — qual executor resolveu; 'worker' = greedy clássico
+  curves: null | [{ceiling, frontier}], // GS6 (DEC-GS-006) — família de curvas Pareto por teto de inad.inf; null = modo clássico sem curvas
+  deepRun: null | {catalogToken, moveIds, frontierIds}, // GS6 — detalhes da rodada profunda para debug
+  fallbackNotice: null | string,     // GS6 — aviso "concluído no modo browser" quando o sidecar cai
 }
 ```
-`moves[i]`: `{id, type, shapeId, label, qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, deltaApprovalRate, apply}` — `apply` é o patch mínimo que `applyGoalSeekMoves` materializa (`{type:'cinema_cell', shapeId, cellKey, newValue}` \| `{type:'decision_terminal', connId, newTo}` \| `{type:'lens_threshold', shapeId, ruleIndex, newValue}`).
+`moves[i]`: `{id, type, shapeId, label, qty, qtdAltas, qtdAltasInfer, inadRRaw, inadIRaw, deltaApprovalRate, apply, stats}` — `apply` é o patch mínimo que `applyGoalSeekMoves` materializa (`{type:'cinema_cell', shapeId, cellKey, newValue}` \| `{type:'decision_terminal', connId, newTo}` \| `{type:'lens_threshold', shapeId, ruleIndex, newValue}`). `stats` (GS3, DEC-GS-003): `{n, rate, ci95:{lower,upper}|null, pValue, fragile}` — `n` = volume de altas (denominador de inad.), `ci95` via `wilsonCI`, `fragile` = `n < GOAL_SEEK_MIN_SAMPLE` (30).
 
 ### Travas (`shape.locked`)
 Novo campo booleano em qualquer shape de fluxo (`decision`/`cineminha`/`decision_lens`),
@@ -849,18 +864,67 @@ respeitado pelos otimizadores futuros que quiserem checar `shape.locked`.
 
 ### Ativação e aplicação
 Botão **🎯 Atingir Objetivo** na seção Fluxo do painel direito (`openGoalSeekModal`) abre
-o formulário; **🔎 Buscar** dispara `COMPUTE_GOAL_SEEK` (`runGoalSeek`); **✓ Aplicar como
-novo cenário** (`applyGoalSeekResult`) materializa os movimentos numa aba de canvas **nova**
-(`cloneCanvasWithNewIds` + `applyGoalSeekMoves`, mesmo padrão não-destrutivo do
-`duplicateCanvas` da Sub-sessão 5A) — a política de origem fica intocada, comparável
+o formulário e dispara `COMPUTE_GOAL_SEEK_CONTEXT` (populando os 3 cards "Ponto de partida"
+assincronamente — GS1). **🔎 Buscar** (`runGoalSeek`) detecta automaticamente (`goalSeekDeepOk()`)
+se o sidecar Python está disponível e anuncia `goal_seek_deep` em capabilities (DEC-GS-010):
+- **Modo clássico** (sem sidecar, ou sidecar sem `goal_seek_deep`): dispara `COMPUTE_GOAL_SEEK` direto
+  ao worker — comportamento original do Copiloto Sessão 4; `via:'worker'`.
+- **Modo profundo** (GS1–GS6, sidecar disponível): fluxo em 3 passos: ① `COMPUTE_GOAL_SEEK_CATALOG`
+  (worker, Classe A) → ② `goal_seek_deep` chamado **diretamente** em `sidecarProxyRef` (SEM
+  `ComputeRouter`, pois o task não tem gêmeo no worker — DEC-GS-001) → ③
+  `COMPUTE_GOAL_SEEK_VALIDATE` (worker, Classe A) que produz `GOAL_SEEK_RESULT`. Queda do
+  sidecar em qualquer etapa ⇒ fallback para `runClassicGoalSeek()` + `fallbackNotice`.
+
+**✓ Aplicar como novo cenário** (`applyGoalSeekResult`) materializa os movimentos numa aba
+de canvas **nova** (`cloneCanvasWithNewIds` + `applyGoalSeekMoves`, mesmo padrão não-destrutivo
+do `duplicateCanvas` da Sub-sessão 5A) — a política de origem fica intocada, comparável
 imediatamente no Dashboard/KPI A vs B.
+
+### Goal Seek Deep (GS1–GS6)
+
+Épico documentado em `docs/wiki/Hibrido-GoalSeek-Profundo.md` (DEC-GS-001..010). Estende
+o Goal Seek clássico com otimização MILP via sidecar Python. Sumário das sessões:
+
+- **GS1 (DEC-GS-002)** — Cards "Ponto de partida": ao abrir o modal, `COMPUTE_GOAL_SEEK_CONTEXT`
+  busca o baseline escopado (`decidedQty`) + AS IS e exibe 3 cards com as taxas no formulário
+  — elimina a ambiguidade de objetivo (o usuário vê de onde parte antes de declarar a meta).
+
+- **GS2 (DEC-GS-003)** — `goal.minimize` ampliado de 2 para 4 opções: `'inadInferida'|'inadReal'|
+  'approval'|'salesVolume'`. Score de candidato `= (collQty + collPoolAvg·K) / (tgtQty + tgtPoolAvg·K)`:
+  para `minimize='inadReal'`, `collQty = qtdAltas` e `tgtQty = inadRealSum`; para `'salesVolume'`,
+  `tgtQty = qtdAltasSum` (quem move mais altas vai primeiro). Usada tanto pelo greedy clássico
+  quanto pelo MILP do sidecar como função-objetivo colateral.
+
+- **GS3 (DEC-GS-004)** — Selos estatísticos nos movimentos: cada candidato do catálogo recebe
+  `stats: {n, rate, ci95, pValue, fragile}` via `wilsonCI` + `segBinomTwoSided`. `GOAL_SEEK_MIN_SAMPLE=30`
+  define o limiar de `fragile`; o IC 95% de Wilson é exibido no card do movimento.
+
+- **GS4 (DEC-GS-005/008)** — Catálogo ampliado para o sidecar: `buildGoalSeekCatalog` adiciona
+  **escadas de lens** (múltiplos passos acumulados num mesmo Decision Lens de regra monotônica),
+  filtradas a `GOAL_SEEK_DEEP_LENS_STEPS=12` pelos mais impactantes (`selectDeepestLensSteps`).
+  O dataset **nunca** sai do browser — só o catálogo de KBs vai ao sidecar (DEC-GS-005).
+  `computeGoalSeekValidate` (async, usa pool H3) valida e materializa a proposta do sidecar.
+
+- **GS5 (DEC-GS-006/009)** — Task `goal_seek_deep` no sidecar Python (`release/sidecar.py`):
+  recebe o catálogo (`GOAL_SEEK_CATALOG_RESULT`) + goal + constraints e resolve via
+  `scipy.optimize.milp` (solver HiGHS, variáveis binárias por candidato, restrições de precedência
+  + tetos linearizados). Otimização lexicográfica em 2 etapas: 1ª maximiza/minimiza o `target`,
+  2ª minimiza o `minimize` colateral. Gera a **família de curvas** (`curves` = Pareto por teto
+  de inad.inf). Sem GATE dourado cross-runtime (paridade de contrato, não numérica — DEC-GS-001).
+
+- **GS6 (DEC-GS-001/010)** — UX e roteamento automático: `goalSeekDeepOk()` detecta a
+  disponibilidade de `goal_seek_deep` em `capabilities.tasks`; o formulário exibe a família de
+  curvas (`GoalSeekFrontierChart`, Recharts) quando `curves` está presente; `fallbackNotice`
+  avisa o usuário quando houve queda para o modo clássico. Nenhum toggle manual — o modo
+  profundo é transparente.
 
 ### Teste
 `tests/goalSeek.test.js` — GATE: delta O(1) por movimento (dos três tipos do catálogo) ≡
 re-simulação completa via `runSimulation`; monotonicidade ordinal preservada mesmo quando
 o segmento mais barato não é o primeiro do domínio; nenhum ponto da fronteira viola
 teto/trava; objetivo inatingível reporta o melhor parcial + a restrição-gargalo;
-determinismo (mesma entrada ⇒ mesma proposta).
+determinismo (mesma entrada ⇒ mesma proposta). Os testes do catálogo ampliado e de
+`wilsonCI` estão incorporados na mesma suíte.
 
 ## Simplificação com Prova de Equivalência (`simplifyModal`, Copiloto Sessão 5)
 

@@ -3,7 +3,8 @@
 > Parte do épico [[Epicos-CopilotoIA|Copiloto de Política de Crédito]] (ler primeiro:
 > arquitetura em camadas, PolicyIR, DEC-IA-001..006, contrato anti-alucinação).
 >
-> **Status:** Sessão 4 (Goal Seek) ✅ ENTREGUE — Sessão 5 (Simplificação) ✅ ENTREGUE.
+> **Status:** Sessão 4 (Goal Seek) ✅ ENTREGUE — Sessão 5 (Simplificação) ✅ ENTREGUE —
+> GS1–GS6 (Goal Seek Profundo: MILP via sidecar Python) ✅ ENTREGUE.
 
 ## Sessão 5 — como foi entregue
 
@@ -55,6 +56,126 @@ nenhuma decisão; regra de lens sem efeito e variável re-testada ⇒ detectados
 sem perda; prova de equivalência **lossy** (par de canvases deliberadamente diferente,
 testando a primitiva direto) ⇒ diffCount e delta batem com o cálculo manual via
 `runSimulation` antes/depois; determinismo (mesma entrada ⇒ mesma proposta).
+
+## Sessões GS1–GS6 — Goal Seek Profundo (MILP via sidecar Python) — como foi entregue
+
+Épico completo documentado em [[Hibrido-GoalSeek-Profundo]] (DEC-GS-001..010). Estende o
+Goal Seek clássico (Sessão 4) com otimização MILP via sidecar Python (`scipy.optimize.milp`,
+solver HiGHS), mantendo **paridade de contrato** (não numérica — DEC-GS-001): greedy e MILP
+são escolhas distintas, sem GATE dourado cross-runtime. O modo profundo é transparente ao
+usuário (ativado automaticamente quando `goal_seek_deep` aparece nas capabilities do sidecar)
+e com fallback silencioso ao modo clássico em caso de queda.
+
+### Fluxo de 3 passos (modo profundo)
+
+```
+COMPUTE_GOAL_SEEK_CATALOG         — worker, Classe A
+      ↓ GOAL_SEEK_CATALOG_RESULT
+  goal_seek_deep                  — sidecar Python (via sidecarProxyRef DIRETAMENTE,
+      ↓ job result                  sem ComputeRouter — DEC-GS-001)
+COMPUTE_GOAL_SEEK_VALIDATE        — worker, Classe A (valida + re-simula)
+      ↓ GOAL_SEEK_RESULT          — mesmo tipo do modo clássico; carrega `via:'sidecar'`
+                                    e `curves` (família de curvas)
+```
+
+O dataset **nunca** sai do browser (DEC-GS-005): só o catálogo de agregados (KBs) vai ao
+sidecar. `goal_seek_deep` é chamado via `sidecarProxyRef.current.runJob()` diretamente —
+não passa pelo `ComputeRouter` porque a task não tem gêmeo no worker (DEC-GS-001); o
+fallback é explícito em código (`catch` → `runClassicGoalSeek()`).
+
+### GS1 — Cards "Ponto de partida" (DEC-GS-002)
+
+Ao abrir o `goalSeekModal`, `openGoalSeekModal` dispara `COMPUTE_GOAL_SEEK_CONTEXT`
+assincronamente. O worker roda `computeGoalSeekContext` (reutiliza `computeGoalSeekBaseline`)
+e responde com `GOAL_SEEK_CONTEXT_RESULT {baseline, asis}` — baseline escopado a
+`decidedQty` + AS IS no mesmo escopo (`null` sem `__DECISAO_ORIGINAL`). A main armazena
+em `goalSeekModal.context` e exibe 3 cards "📍 Ponto de partida" no formulário (só em
+`step:'form'`). Elimina a ambiguidade de objetivos em políticas parciais (ex.: 72,8%
+escopado vs. 3,35% na base inteira — ver seção "Taxa de aprovação escopada" no CLAUDE.md).
+
+### GS2 — `goal.minimize` ampliado (DEC-GS-003)
+
+`GOAL_SEEK_MINIMIZE_FIELDS` passa de 2 para 4 opções: `'inadInferida'|'inadReal'|'approval'|
+'salesVolume'`. Fórmula de score do candidato:
+
+```
+score(c) = (collQty(c) + collPoolAvg · K) / (tgtQty(c) + tgtPoolAvg · K)
+```
+
+onde `collQty` é a quantidade colateral (ex.: `qtdAltas` para `minimize='inadReal'`) e
+`tgtQty` é a quantidade alvo (ex.: `inadRealSum` para inad real, `qtdAltasSum` para
+`salesVolume`). Usada tanto pelo greedy clássico quanto como função-objetivo colateral no
+MILP do sidecar.
+
+### GS3 — Selos estatísticos nos movimentos (DEC-GS-004)
+
+Cada candidato do catálogo recebe:
+
+```js
+stats: {
+  n: number,          // volume de altas (denominador da inad)
+  rate: number,       // taxa observada
+  ci95: {lower, upper} | null,  // IC 95% de Wilson via wilsonCI(k, n, z=1.96)
+  pValue: number,     // teste binomial bilateral (segBinomTwoSided, padrão Descoberta)
+  fragile: boolean,   // n < GOAL_SEEK_MIN_SAMPLE (30)
+}
+```
+
+Exibido no card do movimento no `goalSeekModal`. `wilsonCI` (adicionada em
+`simulation.worker.js`) retorna `null` para `n=0`.
+
+### GS4 — Catálogo ampliado + escadas de lens + validação async (DEC-GS-005/007/008)
+
+`buildGoalSeekCatalog` (substitui `buildGoalSeekCandidates` no caminho profundo) adiciona
+**escadas de lens**: para cada Decision Lens de uma regra (`gte`/`gt`/`lte`/`lt`) elegível,
+gera MÚLTIPLOS passos acumulados (até `GOAL_SEEK_DEEP_LENS_STEPS = 12` passos distintos
+de maior impacto de qtd, via `selectDeepestLensSteps`). Isso permite ao solver MILP explorar
+recortes de limiar que o greedy clássico não alcançaria em uma única busca.
+
+`computeGoalSeekValidate` (async) recebe a proposta do sidecar e:
+1. Verifica invariantes (DEC-GS-001): moves no catálogo, precedência, tetos não violados
+2. Materializa via `selectDeepestLensSteps` + `applyGoalSeekMoves`
+3. Re-simula com `runSimulation` (extremos da fronteira via pool H3 — mesmo padrão H3)
+4. Responde com `GOAL_SEEK_RESULT` (reutiliza o tipo existente)
+
+### GS5 — Task `goal_seek_deep` no sidecar Python (DEC-GS-006/009)
+
+`release/sidecar.py` recebe o catálogo + goal + constraints e resolve via
+`scipy.optimize.milp` (solver HiGHS):
+
+- **Variáveis binárias**: uma por candidato (`x_i ∈ {0,1}`)
+- **Restrições de precedência**: `x_i ≤ x_j` para `(i, j)` no grafo de precedência
+- **Tetos linearizados**: `Σ inadIRaw_i · x_i ≤ maxInadInf · Σ (qtdAltasInfer_i · x_i)` (linearizado via big-M)
+- **Objetivo lexicográfico em 2 etapas**: 1ª maximiza/minimiza o `target`; 2ª minimiza o `minimize` colateral
+- **Família de curvas**: varre múltiplos valores de `maxInadInf` e devolve `curves: [{ceiling, frontier}]`
+
+A task `goal_seek_deep` só aparece em `capabilities.tasks` no tier `full` (numpy+scipy
+presentes); sem scipy o sidecar retorna 400 e o router cai no fallback. Sem GATE dourado
+cross-runtime (paridade de contrato, não numérica — DEC-GS-001).
+
+### GS6 — UX e roteamento automático (DEC-GS-001/010)
+
+`goalSeekDeepOk()` (em `App.jsx`) retorna `true` quando:
+- `computeSidecar.enabled`
+- `computeSidecarStatus.available`
+- `computeSidecarStatus.tasks.includes('goal_seek_deep')`
+
+Sem toggle manual — o formulário apresenta o modo profundo de forma transparente. Quando
+`GOAL_SEEK_RESULT` chega com `curves` preenchido, o `goalSeekModal` exibe o
+`GoalSeekFrontierChart` (Recharts) como **família de curvas** por teto de inad.inf, em vez
+da curva única do modo clássico. `fallbackNotice` (string) avisa discretamente quando houve
+queda para o greedy. O campo `via:'sidecar'|'worker'` indica quem resolveu.
+
+### O que NÃO mudou
+
+- O modo clássico (Sessão 4 original) segue **inalterado**: `COMPUTE_GOAL_SEEK` →
+  `computeGoalSeek` → `GOAL_SEEK_RESULT`. Sem sidecar disponível ou com `goal_seek_deep`
+  ausente nas capabilities, o comportamento é exatamente o anterior.
+- `applyGoalSeekResult` (aplicar como novo cenário) é o mesmo — `cloneCanvasWithNewIds` +
+  `applyGoalSeekMoves` — independente do modo que gerou os moves.
+- `tests/goalSeek.test.js` cobre o catálogo ampliado e `wilsonCI` sem exigir sidecar.
+
+---
 
 ## Sessão 4 — como foi entregue
 

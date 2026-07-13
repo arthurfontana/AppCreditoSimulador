@@ -15,8 +15,8 @@ Funcionalidades planejadas, ainda não implementadas. Organizadas por área.
 - Margem de contribuição
 - Rentabilidade por segmento
 
-### Fronteira Pareto multi-dimensional
-- Atualmente otimiza inadInferida como proxy; futuro: incluir inadReal e volume de altas como dimensões independentes
+### Fronteira Pareto multi-dimensional ✅ ENTREGUE (GS5/GS6)
+- O sidecar Python (`goal_seek_deep`, GS5) gera `curves: [{ceiling, frontier}]` — uma curva Pareto por teto de inad.inf (família de curvas). `GoalSeekFrontierChart` exibe as curvas sobrepostas. O modo browser (greedy clássico, Sessão 4) continua com curva única.
 
 ---
 
@@ -95,7 +95,7 @@ independente do híbrido; a sonda de ambiente (Sessão HP) pode rodar desde já.
 
 ## Exportação
 
-- Exportar política de crédito como JSON estruturado
+- ~~Exportar política de crédito como JSON estruturado~~ ✅ ENTREGUE (PolicyIR — Copiloto Sessão 0; opção "JSON Canônico da Política" no modal Exportar Fluxo)
 - Exportar resultado da simulação como CSV
 - Exportar canvas como imagem (PNG/SVG)
 
@@ -104,4 +104,4 @@ independente do híbrido; a sonda de ambiente (Sessão HP) pode rodar desde já.
 ## Persistência
 
 - Salvar estado do canvas no localStorage (autosave)
-- Exportar/importar sessão completa como arquivo `.credito.json`
+- ~~Exportar/importar sessão completa como arquivo `.credito.json`~~ ✅ ENTREGUE (Salvar/Abrir Projeto — schema 2.6; auto-persistência em `sessionStorage`)
