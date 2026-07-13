@@ -1511,6 +1511,10 @@ function goalSeekResolveMinimize(target, minimize) {
   }
   return cur;
 }
+// GS6 (DEC-GS-005/006) — busca ótima MILP no sidecar. Nº de níveis da fronteira 2D
+// pedido ao solver (mesmo default documentado na wiki); `timeLimitSec` por subproblema.
+const GOAL_SEEK_FRONTIER_POINTS = 13;
+const GOAL_SEEK_TIME_LIMIT_SEC = 20;
 
 // Copiloto — lint estrutural (Sessão 1, DEC-IA-006). Estilo por severidade do achado
 // (findings vêm de COMPUTE_POLICY_INSIGHTS, sempre {severity, code, nodeId, msg, fix?}).
@@ -2829,6 +2833,56 @@ function ClusterQuadrant({ clusters, focusedId, onPick }) {
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── Goal Seek Profundo — fronteira (Recharts, Execução Híbrida GS6, DEC-GS-006) ──────
+// Eixo X = Inad. Real, eixo Y = Taxa de Aprovação — SÉRIE ÚNICA quando o usuário declara
+// um teto de Inad. Inferida (ou no modo guloso clássico); FAMÍLIA DE CURVAS (uma por teto
+// de Inad. Inferida) quando ele NÃO declara teto e o solver do sidecar devolve `curves`.
+// Decisão explícita da wiki: nunca gráfico 3D (Recharts não suporta; um scatter 3D não
+// seria legível) — a "fronteira 3D" vira séries num plano 2D, reusando a mesma paleta
+// categórica de `ClusterQuadrant` (CLUSTER_COLORS). Cada ponto pode vir "achatado" (a
+// fronteira já validada de GOAL_SEEK_RESULT, `predicted` boolean/ausente) ou "aninhado"
+// (as curvas cruas do sidecar, `{level, ids, predicted:{...}}`) — `ptVal` normaliza os dois.
+function GoalSeekFrontierChart({ frontier, curves }) {
+  const ptVal = (p) => (p && typeof p.predicted === 'object' && p.predicted) ? p.predicted : (p || {});
+  const toPts = (pts) => (pts || [])
+    .map(p => ptVal(p))
+    .filter(v => v.inadReal != null && v.approvalRate != null)
+    .map(v => ({ inadReal: v.inadReal * 100, approvalRate: v.approvalRate }))
+    .sort((a, b) => a.inadReal - b.inadReal);
+  const series = (Array.isArray(curves) && curves.length > 0)
+    ? curves.map((c, i) => ({
+        key: `c${i}`, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length],
+        name: c.maxInadInf != null ? `teto inad.inf. ${fmtPct(c.maxInadInf)}` : 'sem teto',
+        data: toPts(c.frontier),
+      }))
+    : [{ key: 'main', color: '#f59e0b', name: 'Fronteira', data: toPts(frontier) }];
+  const usable = series.filter(s => s.data.length >= 2);
+  if (usable.length === 0) return null;
+  const isPredicted = Array.isArray(frontier) && frontier.some(p => p.predicted === true);
+  return (
+    <div>
+      <p style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>
+        Fronteira (Aprovação × Inad. Real){isPredicted ? ' — prevista' : ''}
+      </p>
+      <ResponsiveContainer width="100%" height={usable.length > 1 ? 220 : 150}>
+        <LineChart margin={{top:8,right:16,bottom:8,left:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+          <XAxis type="number" dataKey="inadReal" name="Inad. Real" domain={['dataMin','dataMax']}
+            tickFormatter={v=>`${v.toFixed(1)}%`} tick={{fontSize:10,fill:'#94a3b8'}}/>
+          <YAxis type="number" dataKey="approvalRate" name="Aprovação"
+            tickFormatter={v=>`${v.toFixed(0)}%`} tick={{fontSize:10,fill:'#94a3b8'}}/>
+          <Tooltip formatter={(v)=>`${Number(v).toFixed(2)}%`}/>
+          {usable.length > 1 && <Legend wrapperStyle={{fontSize:10}}/>}
+          {usable.map(s => (
+            <Line key={s.key} data={s.data} dataKey="approvalRate" name={s.name}
+              stroke={s.color} strokeWidth={2} dot={{r:2.5}} isAnimationActive={false}/>
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }
@@ -4991,8 +5045,13 @@ export default function App() {
       } else if (msgType === 'POLICY_INSIGHTS_RESULT') {
         setCopilotFindings(e.data.findings || []);
       } else if (msgType === 'GOAL_SEEK_RESULT') {
+        // GS6 (DEC-GS-001/007): COMPUTE_GOAL_SEEK_VALIDATE pode responder {error:'stale'|
+        // 'invalid_solution', detail} na MESMA `*_RESULT` — nunca produzido pelo caminho
+        // clássico (COMPUTE_GOAL_SEEK). `runDeepGoalSeek` trata o erro (fallback ao
+        // guloso); aqui só evitamos sobrescrever o modal com campos undefined.
+        if (e.data.error) return;
         const { goal, baseline, frontier, moves, goalReached, bindingConstraint, result } = e.data;
-        setGoalSeekModal(m => (m ? { ...m, step: 'result', goal, baseline, frontier, moves, goalReached, bindingConstraint, result } : m));
+        setGoalSeekModal(m => (m ? { ...m, step: 'result', deepRun: null, goal, baseline, frontier, moves, goalReached, bindingConstraint, result } : m));
       } else if (msgType === 'GOAL_SEEK_CONTEXT_RESULT') {
         const { baseline, asis } = e.data;
         setGoalSeekModal(m => (m ? { ...m, context: { baseline, asis } } : m));
@@ -8877,6 +8936,10 @@ export default function App() {
       goal: { target: 'approvalRate', direction: 'increase', magnitude: 2, minimize: 'inadInferida' },
       constraints: { maxInadReal: null, maxInadInf: null },
       context: null, // "Ponto de partida" (GS1, DEC-GS-002) — skeleton até GOAL_SEEK_CONTEXT_RESULT
+      via: null,             // GS6 — 'sidecar' (ótimo MILP) | 'greedy' (guloso navegador)
+      curves: null,          // GS6 — família de curvas por teto de inad. inferida (sem teto declarado)
+      deepRun: null,         // GS6 — job Classe B em andamento ({phase, progress, via})
+      fallbackNotice: null,  // GS6 — "concluído no modo guloso" quando o sidecar caiu/não achou solução
     });
     workerRef.current?.postMessage({
       type: 'COMPUTE_GOAL_SEEK_CONTEXT',
@@ -8885,10 +8948,30 @@ export default function App() {
     });
   };
 
+  // Execução Híbrida GS6 (docs/wiki/Hibrido-GoalSeek-Profundo.md, DEC-GS-005/010) —
+  // modo profundo AUTOMÁTICO (sem toggle manual): quando o sidecar está pareado e
+  // declara `goal_seek_deep` em capabilities, a busca vira MILP exata (sem teto) via o
+  // fluxo de 3 passos CATALOG → job sidecar → VALIDATE; senão segue 100% no guloso
+  // clássico de sempre (COMPUTE_GOAL_SEEK, intocado).
+  const goalSeekDeepOk = () => {
+    const tasks = computeSidecarStatusR.current?.capabilities?.tasks;
+    return !!computeSidecarR.current?.enabled && !!computeSidecarStatusR.current?.available &&
+      Array.isArray(tasks) && tasks.includes('goal_seek_deep');
+  };
+
   const runGoalSeek = () => {
+    if (!goalSeekModalR.current) return;
+    if (goalSeekDeepOk() && computeRouterRef.current) {
+      runDeepGoalSeek();
+    } else {
+      runClassicGoalSeek();
+    }
+  };
+
+  const runClassicGoalSeek = () => {
     const cur = goalSeekModalR.current;
     if (!cur) return;
-    setGoalSeekModal(m => ({ ...m, step: 'loading' }));
+    setGoalSeekModal(m => (m ? { ...m, step: 'loading', deepRun: null, via: 'greedy' } : m));
     workerRef.current?.postMessage({
       type: 'COMPUTE_GOAL_SEEK',
       shapes: shapesR.current,
@@ -8897,6 +8980,88 @@ export default function App() {
       constraints: cur.constraints,
       locks: [],
     });
+  };
+
+  // GS6 (DEC-GS-005) — fluxo de 3 passos: COMPUTE_GOAL_SEEK_CATALOG (worker, Classe A —
+  // catálogo agregado + baselineRaw + token) → `goal_seek_deep` (SÓ sidecar, self-
+  // contained, SEM registerDataset — leva o catálogo, nunca a base) → COMPUTE_GOAL_SEEK_VALIDATE
+  // (worker, Classe A — invariantes DEC-GS-001 + materialização + re-simulação real).
+  // O passo do meio fala com `sidecarProxyRef` DIRETO (não via `computeRouterRef.run`):
+  // `goal_seek_deep` não tem gêmeo no worker (DEC-GS-001), então o fallback GENÉRICO do
+  // ComputeRouter (postar a mesma task pro worker quando o sidecar cai) travaria
+  // esperando uma resposta que nunca chega — mesmo raciocínio do `echo_stats`/
+  // `SidecarTestPanel` acima. O fallback real (ao guloso) é feito aqui, explicitamente,
+  // em qualquer queda: job/infeasible/solução inválida/token obsoleto. Abort do usuário
+  // NÃO dispara fallback (mesmo contrato de H7/H8).
+  const goalSeekAbortRef = useRef(null);
+
+  const runDeepGoalSeek = async () => {
+    const cur = goalSeekModalR.current;
+    if (!cur) return;
+    const ctrl = new AbortController();
+    goalSeekAbortRef.current = ctrl;
+    setGoalSeekModal(m => (m ? { ...m, step: 'loading', fallbackNotice: null, curves: null,
+      deepRun: { phase: 'catalog', progress: null, via: 'worker' } } : m));
+    try {
+      const catalogRes = await computeRouterRef.current.run('COMPUTE_GOAL_SEEK_CATALOG', {
+        shapes: shapesR.current, conns: connsR.current, locks: [],
+      });
+      if (ctrl.signal.aborted) return;
+      const { catalogToken, baselineRaw, candidates } = catalogRes.result || {};
+
+      setGoalSeekModal(m => (m ? { ...m, deepRun: { phase: 'optimizing', progress: null, via: 'sidecar' } } : m));
+      let jobRes = null;
+      try {
+        jobRes = await sidecarProxyRef.current.runJob('goal_seek_deep', {
+          catalog: { baselineRaw, candidates },
+          goal: cur.goal, constraints: cur.constraints,
+          frontierPoints: GOAL_SEEK_FRONTIER_POINTS, timeLimitSec: GOAL_SEEK_TIME_LIMIT_SEC,
+        }, { signal: ctrl.signal, onProgress: (p) => setGoalSeekModal(m => (
+          m && m.deepRun ? { ...m, deepRun: { ...m.deepRun, progress: p } } : m)) });
+      } catch (err) {
+        if (ctrl.signal.aborted) return;
+        jobRes = null; // queda/indisponível ⇒ cai no guloso abaixo
+      }
+      if (ctrl.signal.aborted) return;
+
+      if (jobRes && jobRes.status !== 'infeasible' && jobRes.solution) {
+        setGoalSeekModal(m => (m ? { ...m, deepRun: { phase: 'validating', progress: null, via: 'worker' } } : m));
+        const valRes = await computeRouterRef.current.run('COMPUTE_GOAL_SEEK_VALIDATE', {
+          shapes: shapesR.current, conns: connsR.current,
+          goal: cur.goal, constraints: cur.constraints, locks: [],
+          moveIds: jobRes.solution.ids || [],
+          catalogToken,
+          frontier: jobRes.frontier || [],
+        });
+        if (ctrl.signal.aborted) return;
+        const r = valRes.result;
+        if (r && !r.error) {
+          setGoalSeekModal(m => (m ? { ...m, step: 'result', deepRun: null, via: 'sidecar',
+            curves: jobRes.curves || null,
+            goal: r.goal, baseline: r.baseline, frontier: r.frontier, moves: r.moves,
+            goalReached: r.goalReached, bindingConstraint: r.bindingConstraint, result: r.result,
+            fallbackNotice: jobRes.status === 'time_limit'
+              ? 'Motor Python: tempo esgotado — melhor solução encontrada (ótimo não provado).' : null,
+          } : m));
+          return;
+        }
+        // solução inválida/token obsoleto (DEC-GS-001) ⇒ cai no guloso abaixo, com aviso
+      }
+      const notice = 'Motor Python indisponível ou sem solução ótima — a busca rodou no modo guloso (navegador).';
+      setGoalSeekModal(m => (m ? { ...m, fallbackNotice: notice } : m));
+      runClassicGoalSeek();
+    } catch {
+      if (!ctrl.signal.aborted) {
+        setGoalSeekModal(m => (m ? { ...m, fallbackNotice:
+          'Motor Python indisponível — a busca rodou no modo guloso (navegador).' } : m));
+        runClassicGoalSeek();
+      }
+    }
+  };
+
+  const cancelDeepGoalSeek = () => {
+    goalSeekAbortRef.current?.abort();
+    setGoalSeekModal(m => (m ? { ...m, step: 'form', deepRun: null } : m));
   };
 
   // Materializa os movimentos aceitos numa aba de canvas NOVA (padrão duplicateCanvas/
@@ -14276,7 +14441,8 @@ export default function App() {
 
       {/* ═══════════════ GOAL SEEK MODAL — objetivo estruturado (Copiloto Sessão 4) ═══════════════ */}
       {goalSeekModal&&(()=>{
-        const { step, goal, constraints, context, baseline, frontier, moves, goalReached, bindingConstraint, result } = goalSeekModal;
+        const { step, goal, constraints, context, baseline, frontier, moves, goalReached, bindingConstraint,
+                result, via, curves, deepRun, fallbackNotice } = goalSeekModal;
         const updGoal = (patch) => setGoalSeekModal(m => {
           const goal = { ...m.goal, ...patch };
           // GS2 (DEC-GS-003): trocar o alvo pode fazer o minimize atual colidir — reseta.
@@ -14291,6 +14457,11 @@ export default function App() {
           no_more_moves: 'Catálogo de movimentos esgotado',
         };
         const lockedCount = shapes.filter(s => s.locked).length;
+        // GS6 (DEC-GS-010) — modo profundo automático quando o sidecar está pareado E
+        // declara `goal_seek_deep` em capabilities (tier full + scipy com `milp`).
+        const sidecarTasks = computeSidecarStatus?.capabilities?.tasks;
+        const deepOk = computeSidecar.enabled && !!computeSidecarStatus?.available &&
+          Array.isArray(sidecarTasks) && sidecarTasks.includes('goal_seek_deep');
 
         return (
           <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
@@ -14310,7 +14481,7 @@ export default function App() {
                     <p style={{fontSize:11,color:"#92400e"}}>Goal Seek da política inteira · {lockedCount>0?`${lockedCount} nó(s) travado(s) 🔒`:"sem nós travados"}</p>
                   </div>
                 </div>
-                <button onClick={()=>setGoalSeekModal(null)}
+                <button onClick={()=>{ goalSeekAbortRef.current?.abort(); setGoalSeekModal(null); }}
                   style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
                     cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
                     justifyContent:"center",fontFamily:"inherit"}}>✕</button>
@@ -14427,6 +14598,22 @@ export default function App() {
                         </label>
                       </div>
                     </div>
+                    {/* GS6 (DEC-GS-010) — modo AUTOMÁTICO: busca ótima (MILP, sem teto) quando
+                        o sidecar declara `goal_seek_deep`; senão degradação declarada (H6). */}
+                    {deepOk ? (
+                      <div style={{display:"flex",alignItems:"center",gap:7,padding:"7px 10px",borderRadius:8,
+                        background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:11,color:"#15803d",fontWeight:600}}>
+                        <span style={{fontSize:13}}>⚡</span>
+                        Busca ótima (Motor Python) — MILP sobre o catálogo agregado, sem teto artificial.
+                      </div>
+                    ) : (
+                      <ComputeCeilingNotice
+                        ceilingText="Busca gulosa no navegador (padrão) — ligue o Motor Python para a busca ÓTIMA (MILP, sem teto artificial) e a fronteira completa."
+                        unlockedText="Motor Python detectado — a busca roda ótima (MILP)."
+                        status={{ available: false }}
+                        onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                      />
+                    )}
                     <button onClick={runGoalSeek}
                       style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
                         background:"#f59e0b",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
@@ -14435,27 +14622,51 @@ export default function App() {
                   </div>
                 )}
 
-                {step==='loading' && (
+                {step==='loading' && (deepRun ? (
+                  <ComputeJobProgress
+                    label={
+                      deepRun.phase === 'catalog' ? 'Montando catálogo de movimentos…' :
+                      deepRun.phase === 'optimizing' ? 'Busca ótima (MILP) no Motor Python…' :
+                      'Validando a solução por re-simulação (modo browser)…'
+                    }
+                    progress={deepRun.progress}
+                    via={deepRun.via}
+                    onCancel={deepRun.phase === 'optimizing' ? cancelDeepGoalSeek : null}
+                  />
+                ) : (
                   <div style={{padding:"40px 0",textAlign:"center",color:"#92400e",fontSize:13}}>
                     Buscando movimentos que atingem o objetivo…
                   </div>
-                )}
+                ))}
 
                 {step==='result' && (()=>{
                   const baseVal = baseline?.[goal.target] ?? null;
                   const resVal = result?.[goal.target] ?? null;
                   return (
                     <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                      {/* GS6 — degradação declarada (P4): aviso quando o modo profundo caiu no
+                          meio do fluxo (sidecar indisponível/infeasible/solução inválida/tempo
+                          esgotado) e a busca terminou no guloso do navegador mesmo assim. */}
+                      {fallbackNotice && (
+                        <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",borderRadius:8,
+                          background:"#f8fafc",border:"1px solid #e2e8f0",fontSize:10.5,color:"#94a3b8",lineHeight:1.5}}>
+                          <span>🌐</span><span>{fallbackNotice}</span>
+                        </div>
+                      )}
                       <div style={{display:"flex",gap:10,alignItems:"center",padding:"10px 14px",borderRadius:10,
                         background: goalReached ? "#f0fdf4" : "#fffbeb",
                         border: `1px solid ${goalReached ? "#bbf7d0" : "#fde68a"}`}}>
                         <span style={{fontSize:18}}>{goalReached ? "✅" : "⚠"}</span>
-                        <div style={{fontSize:12,color: goalReached ? "#15803d" : "#92400e",lineHeight:1.5}}>
+                        <div style={{fontSize:12,color: goalReached ? "#15803d" : "#92400e",lineHeight:1.5,flex:1}}>
                           {goalReached
                             ? <b>Objetivo atingido.</b>
                             : <><b>Objetivo não totalmente atingido</b> — melhor ponto alcançado abaixo.</>}
                           {bindingConstraint && <> Restrição-gargalo: <b>{BINDING_LABEL[bindingConstraint] || bindingConstraint}</b>.</>}
                         </div>
+                        {/* Rodapé de executor (DEC-GS-010): quem de fato produziu este resultado. */}
+                        <span style={{fontSize:10,color:"#94a3b8",fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+                          {via === 'sidecar' ? '⚡ ótimo (Motor Python)' : '⚙ guloso (navegador)'}
+                        </span>
                       </div>
 
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
@@ -14513,28 +14724,10 @@ export default function App() {
                         )}
                       </div>
 
-                      {frontier?.length>1 && (()=>{
-                        const CW=440,CH=120,PL=8,PR=8,PT=8,PB=8;
-                        const plotW=CW-PL-PR, plotH=CH-PT-PB;
-                        const minR = Math.min(...frontier.map(p=>p.approvalRate));
-                        const maxR = Math.max(...frontier.map(p=>p.approvalRate));
-                        const span = Math.max(1e-6, maxR-minR);
-                        const cx=(i)=>PL+(i/Math.max(1,frontier.length-1))*plotW;
-                        const cy=(r)=>PT+(1-(r-minR)/span)*plotH;
-                        const pts = frontier.map((p,i)=>`${cx(i)},${cy(p.approvalRate)}`).join(' ');
-                        return (
-                          <div>
-                            <p style={{fontSize:11,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>Trajetória (Taxa de Aprovação)</p>
-                            <svg width={CW} height={CH} style={{display:"block"}}>
-                              <polyline points={pts} fill="none" stroke="#f59e0b" strokeWidth={2}/>
-                              {frontier.map((p,i)=>(
-                                <circle key={i} cx={cx(i)} cy={cy(p.approvalRate)} r={i===frontier.length-1?4:2.5}
-                                  fill={i===frontier.length-1?"#f59e0b":"#fde68a"}/>
-                              ))}
-                            </svg>
-                          </div>
-                        );
-                      })()}
+                      {/* GS6 (DEC-GS-006) — fronteira Recharts: série única (greedy/deep com teto
+                          declarado) ou família de curvas por teto de inad. inferida (deep sem
+                          teto declarado, `curves` vindo do sidecar) — nunca gráfico 3D. */}
+                      <GoalSeekFrontierChart frontier={frontier} curves={curves}/>
 
                       <div style={{display:"flex",gap:8,justifyContent:"flex-end",borderTop:"1px solid #f1f5f9",paddingTop:12}}>
                         <button onClick={()=>setGoalSeekModal(m=>({...m,step:'form'}))}

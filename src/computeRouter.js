@@ -65,6 +65,19 @@ export const TASK_CLASS = {
   // acima dos tetos (mais dims/k, autoK/hierárquico via sklearn) roteia esta task ao
   // sidecar (motor_clusters.py, tier full) com fallback transparente ao worker CLAMPADO.
   cluster_segments: 'B',
+  // GS4–GS6 — Goal Seek Profundo (busca ótima MILP, docs/wiki/Hibrido-GoalSeek-Profundo.md
+  // DEC-GS-005). DIFERENTE de segment_discovery/cluster_segments: este job é
+  // self-contained (leva o catálogo agregado do worker — centenas de números — NUNCA a
+  // base; SEM registerDataset) e NÃO tem gêmeo no worker (DEC-GS-001: "não existe gêmeo
+  // JS do solver MILP"). Por isso o fallback GENÉRICO de `run()` (chamar
+  // `worker.runJob('goal_seek_deep', …)` quando o sidecar cai) NÃO se aplica — o worker
+  // não tem esse `case` e a promessa ficaria pendente para sempre. Callers usam
+  // `canRouteToSidecar('goal_seek_deep')` só para GATING (badge/ceiling notice do form) e
+  // falam com o provider do sidecar DIRETO (mesmo padrão do `echo_stats`/
+  // `SidecarTestPanel` em App.jsx — task só-sidecar, sem worker twin); o fallback ao modo
+  // guloso é feito pelo PRÓPRIO `runGoalSeek` (`COMPUTE_GOAL_SEEK` clássico), nunca pelo
+  // mecanismo genérico deste módulo.
+  goal_seek_deep: 'B',
 };
 
 // Default DEFENSIVO: tarefa desconhecida vira Classe A (worker — o caminho completo).
@@ -92,6 +105,11 @@ export const RESULT_TYPE = {
   segment_discovery: 'SEGMENT_DISCOVERY_RESULT', // H7 — fallback do worker responde igual
   COMPUTE_CLUSTER_SEGMENTS: 'CLUSTER_SEGMENTS_RESULT',
   cluster_segments: 'CLUSTER_SEGMENTS_RESULT',   // H8 — fallback do worker responde igual
+  // GS6 — usadas por App.jsx via `router.run(...)` (Classe A: sempre worker, mas reusa o
+  // mesmo mecanismo de correlação por Promise do WorkerProvider) nos dois passos que
+  // CERCAM o job só-sidecar `goal_seek_deep` (catálogo antes, validação depois).
+  COMPUTE_GOAL_SEEK_CATALOG: 'GOAL_SEEK_CATALOG_RESULT',
+  COMPUTE_GOAL_SEEK_VALIDATE: 'GOAL_SEEK_RESULT',
 };
 
 export function resultTypeFor(task) {
