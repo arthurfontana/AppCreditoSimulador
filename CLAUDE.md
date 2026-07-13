@@ -1387,11 +1387,15 @@ chegam por callback (`buildChunks`), então o router não conhece `columnar.js`.
   **sempre** no formato `*_RESULT`. `canRouteToSidecar(task)` = Classe B ∧ preferência ligada ∧
   `status.available`.
 - **Preferência `computeSidecar {enabled, url, token}`** (estado `computeSidecar` em `App.jsx`,
-  default **off**): persistida dentro do contêiner `preferences` do Projeto
-  (`buildProjectPayload`/`loadProject`, **sem bump de schema**). Com desligado o router nem
-  detecta e nada muda — o app se comporta exatamente como antes. `url`/`token` só têm efeito no
-  modo dev (release é same-origin); o wiring vivo do router + a UX (badge, preferências,
-  degradação declarada) foram entregues na H6 — ver seção "UX do Motor Python".
+  default **on** para sessão nova/projeto sem a preferência salva — o boot tenta detectar o
+  sidecar automaticamente e, se a 1ª detecção não achar nada, desliga o toggle sozinho; ver
+  "UX do Motor Python" abaixo): persistida dentro do contêiner `preferences` do Projeto
+  (`buildProjectPayload`/`loadProject`, **sem bump de schema**) — `loadProject` sempre
+  sobrescreve com o que o usuário salvou explicitamente. Com desligado o router nem detecta e
+  nada muda — o app se comporta exatamente como antes (DEC-HX-001 continua valendo). `url`/
+  `token` só têm efeito no modo dev (release é same-origin); o wiring vivo do router + a UX
+  (badge, preferências, degradação declarada) foram entregues na H6 — ver seção "UX do Motor
+  Python".
 - **`hashChunks(chunks)`**: hash de conteúdo FNV-1a 32-bit hex dos chunks do dataset — papel do
   `csvStoreVersion` (DEC-HX-006), computável na main; determinístico e sensível à fronteira dos
   chunks (o sidecar reusa o dataset por HEAD 200).
@@ -1455,9 +1459,21 @@ navegador (DEC-HX-001).
 
 ## UX do Motor Python (Execução Híbrida H6 — badge, preferências, degradação declarada)
 
-Fecha a Fase 1 (fundação híbrida) ligando o `ComputeRouter` (H4) e o sidecar (H5) na UI —
-com o motor desligado (default), nada muda de comportamento (DEC-HX-001). Ver
+Fecha a Fase 1 (fundação híbrida) ligando o `ComputeRouter` (H4) e o sidecar (H5) na UI. Ver
 `docs/wiki/Arquitetura-Execucao-Hibrida.md` (DEC-HX-001/007/009, §9, §13).
+
+- **Boot tenta primeiro, desliga sozinho se não achar**: `computeSidecar` nasce com
+  `enabled:true` (sessão nova/projeto sem a preferência salva). 400ms após o boot,
+  `detectSidecar()` roda automaticamente; se essa 1ª detecção devolver `available:false`
+  (sem servidor rodando, versão de protocolo incompatível, etc.), o próprio effect desliga o
+  toggle (`setComputeSidecar(prev => ({...prev, enabled:false}))`) e o app segue 100% no
+  worker — sem nenhum aviso incômodo, coerente com DEC-HX-001 (ausência é normal e
+  silenciosa). O flag `bootSidecarCheckDoneRef` garante que só essa checagem automática do
+  boot pode auto-desligar — re-checagens manuais (botão "Verificar conexão", editar URL/token
+  em dev) nunca desligam o toggle sozinhas, para não atrapalhar quem está configurando o
+  sidecar. Em release, como `serve.py` já sobe o sidecar junto (DEC-HX-003), a detecção
+  automática normalmente encontra o servidor (ao menos tier `stdlib`); só quem abre
+  `index.html` sem servidor (ou desligou o processo) cai no fallback silencioso.
 
 - **`src/computeRouter.js`** ganha funções PURAS de apresentação (testáveis sem React —
   `tests/computeRouter.test.js`): `describeComputeBadge(prefEnabled, status)` (ícone/tom
