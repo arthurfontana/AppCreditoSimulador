@@ -284,6 +284,7 @@ AppCreditoSimulador/
 - `pivotWidget(ds, config)`: pivot client-side genérico → `{state, data, series, metricDef, xCol, truncated}`; usado pelos gráficos do Analytics Workspace
 - `resolveKpiScenarios(scenarios, kpiA, kpiB)`: resolve os cenários Baseline (A) e Comparação (B) do KPI a partir dos ids salvos no `WidgetConfig`, com fallback retrocompatível (A=AS IS, B=1º canvas; DEC-AW-008)
 - `buildAnalyticsCSV(ds)` / `exportAnalyticsDatasetCSV(ds)`: serializa/baixa o dataset analítico largo como CSV (dimensões + métricas intrínsecas + uma coluna de decisão por cenário, incl. AS IS), com BOM e escape RFC 4180 — abrível no Excel (5C)
+- `describeFilterCards(cards, dataset)`: helper global exportado (puro) — descreve, em texto legível, cada `FilterCard` **ativo** de uma lista (filtro de página ou de visual). Retorna `[{dim, mode:'basic'|'advanced', text, values?, total?}]` (cartões inativos omitidos): modo básico lista os valores marcados + `N de M` distintos (via `distinctDimValues`); modo avançado usa os rótulos de `LENS_OPERATORS` + conector E/OU. Base do detalhamento de filtros no **Exportar PDF** do Dashboard. Testado em `tests/analytics.test.js`
 - `computeWidgetMetric(ds, indices, metricId, decisionCol)`: agrega 1 métrica sobre um conjunto de linhas do dataset largo **colunar** (`indices`: `Int32Array|number[]|null`, null = todas as linhas ativas), replicando a semântica do motor (numeradores acumulados só sobre `APROVADO`). Suporta `approvedAltasInfer` (∑ qtdAltasInfer sobre aprovados = Vol. Vendas Inferidas)
 
 ### Padrão de refs
@@ -528,6 +529,19 @@ Segunda aba da aplicação (`activeTab: "analysis"`, label exibido: "Dashboard")
 - **Redimensionamento livre**: `startWidgetInteract` (resize) **não tem teto** de largura/
   altura — o usuário aumenta qualquer widget o quanto quiser; só há um piso por tipo
   (gráfico `340×340`, texto `160×100`) para o card não colapsar.
+- **Exportar PDF** (`exportDashboardPDF` em `AnalysisTab`, botão **📄 Exportar PDF** no
+  header ao lado do CSV): monta um HTML self-contained numa nova janela e chama
+  `window.print()` (→ PDF pelo diálogo nativo do navegador — mesmo padrão de
+  `printDocHTML`). Exporta **todos os componentes** do Dashboard na **visão dos filtros
+  aplicados**: (1) uma seção de topo com o **filtro da página como um todo** (aplicado a
+  todos os componentes) e (2) por componente, o **detalhamento dos filtros efetivos** —
+  os filtros da página (aplicados a todos) + os filtros exclusivos daquele visual —
+  ambos via `describeFilterCards`. Gráficos são capturados do **DOM vivo** (o `outerHTML`
+  do `.recharts-wrapper` — SVG + legenda HTML — localizado por `data-aw-widget-id={w.id}`
+  no wrapper de cada widget); KPIs são **recomputados** (`applyFiltersToDataset` +
+  `computeWidgetMetric` + `resolveKpiScenarios`, para não capturar os `<select>` do
+  card); caixas de texto vêm da `config.text`. Componentes na ordem de layout (Y depois
+  X). Botão desabilitado com layout vazio.
 
 ### Agrupamentos (dimensões derivadas)
 

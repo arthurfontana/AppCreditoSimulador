@@ -1964,6 +1964,33 @@ export function applyFiltersToDataset(ds, pageFilters, widgetFilters) {
   return { ...ds, activeRows: applyAnalyticsFilters(ds, cards) };
 }
 
+// Descreve, em texto legível, cada cartão de filtro ATIVO de uma lista (filtro de
+// página ou de um visual). Base do detalhamento de filtros no export de PDF do
+// Dashboard. Cartões inativos (sem dimensão / sem seleção / sem regra) são omitidos.
+// Retorna [{ dim, mode:'basic'|'advanced', text, values?, total? }].
+export function describeFilterCards(cards, dataset) {
+  const out = [];
+  for (const card of (cards || [])) {
+    if (!filterCardActive(card)) continue;
+    if (card.mode === "advanced") {
+      const parts = (card.rules || [])
+        .filter(r => String(r.value ?? "").trim())
+        .map((r, i) => {
+          const opLabel = LENS_OP_LABEL[r.operator] || r.operator;
+          const connector = i === 0 ? "" : (r.logic === "OR" ? "OU " : "E ");
+          return `${connector}${opLabel} ${String(r.value).trim()}`;
+        });
+      out.push({ dim: card.dim, mode: "advanced", text: parts.join(" ") });
+    } else {
+      const values = Array.isArray(card.selected) ? card.selected : [];
+      const total = dataset ? distinctDimValues(dataset, card.dim).length : null;
+      const text = values.length ? values.join(", ") : "(nenhum valor selecionado)";
+      out.push({ dim: card.dim, mode: "basic", values, total, text });
+    }
+  }
+  return out;
+}
+
 // ── Agrupamentos (dimensões derivadas) ───────────────────────────────────────
 // Um agrupamento colapsa os valores de uma dimensão-base (ex.: FAIXA_SCORE R01–R20)
 // em poucos buckets reutilizáveis. Vira uma dimensão derivada usável em qualquer
@@ -3637,6 +3664,142 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
   const changeConfig = (id, patch) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, config: { ...w.config, ...patch } } : w));
   const changeType = (id, type) => setAnalyticsLayout(prev => prev.map(w => w.id === id ? { ...w, type } : w));
 
+  // ── Exportar Dashboard como PDF ─────────────────────────────────────────────
+  // Monta um documento HTML self-contained (padrão do printDocHTML da Doc. Automática)
+  // com TODOS os componentes do Dashboard na visão dos filtros aplicados:
+  //  · uma seção de topo com o FILTRO DA PÁGINA como um todo (aplicado a tudo);
+  //  · por componente, o detalhamento dos filtros efetivos (página + filtros do visual).
+  // Gráficos são capturados do DOM vivo (SVG + legenda do Recharts); KPIs são
+  // recomputados (o DOM tem <select>, que não queremos no papel); texto vem da config.
+  const exportDashboardPDF = () => {
+    const ds = analyticsDataset;
+    if (!ds || analyticsLayout.length === 0) return;
+    const metricLabel = (id) => (ds.metrics || []).find(m => m.id === id)?.label || id || "—";
+    const scenName = (id) => (ds.scenarios || []).find(s => s.id === id)?.nome || id || "—";
+
+    const filtersBlockHTML = (descs, emptyText) => {
+      if (!descs.length) return `<p class="nofilter">${escHtml(emptyText)}</p>`;
+      return `<ul class="filters">${descs.map(d => {
+        if (d.mode === "basic") {
+          const countTxt = d.total != null ? ` <span class="muted">(${d.values.length} de ${d.total})</span>` : "";
+          return `<li><span class="fdim">${escHtml(d.dim)}</span>: ${escHtml(d.text)}${countTxt}</li>`;
+        }
+        return `<li><span class="fdim">${escHtml(d.dim)}</span> ${escHtml(d.text)}</li>`;
+      }).join("")}</ul>`;
+    };
+
+    const kpiHTML = (w) => {
+      const cfg = w.config || {};
+      const fds = applyFiltersToDataset(ds, pageFilters, cfg.filters);
+      const md = (fds.metrics || []).find(m => m.id === cfg.metric) || (fds.metrics || [])[0];
+      if (!md) return `<p class="muted">(métrica indisponível)</p>`;
+      const { a, b } = resolveKpiScenarios(fds.scenarios, cfg.kpiA, cfg.kpiB);
+      const aVal = a ? computeWidgetMetric(fds, null, md.id, a.decisionCol) : null;
+      const bVal = b ? computeWidgetMetric(fds, null, md.id, b.decisionCol) : null;
+      let deltaTxt = "";
+      if (aVal != null && bVal != null) {
+        const delta = bVal - aVal, sign = delta > 0 ? "+" : delta < 0 ? "−" : "";
+        deltaTxt = md.unit === "qty" ? `${sign}${fmtQty(Math.abs(delta))}` : `${sign}${Math.abs(delta).toFixed(2)} pp`;
+      }
+      return `<div class="kpi">
+        <div class="kpi-metric">${escHtml(md.label)}</div>
+        <div class="kpi-big">${escHtml(fmtMetricVal(bVal, md.unit))}</div>
+        <div class="kpi-scen">${escHtml(b?.nome ?? "—")}</div>
+        <div class="kpi-base">${escHtml(a?.nome ?? "—")}: <strong>${escHtml(fmtMetricVal(aVal, md.unit))}</strong>${deltaTxt ? ` · Δ ${escHtml(deltaTxt)}` : ""}</div>
+      </div>`;
+    };
+
+    const widgetVisualHTML = (w) => {
+      if (w.type === "text") {
+        const txt = (w.config?.text || "").trim();
+        return `<div class="textbox">${txt ? escHtml(txt).replace(/\n/g, "<br>") : '<span class="muted">(vazio)</span>'}</div>`;
+      }
+      if (w.type === "kpi") return kpiHTML(w);
+      const node = typeof document !== "undefined" ? document.querySelector(`[data-aw-widget-id="${w.id}"] .recharts-wrapper`) : null;
+      if (node) return `<div class="chart">${node.outerHTML}</div>`;
+      return `<p class="muted">(gráfico sem dados para exibir)</p>`;
+    };
+
+    const widgetMetaHTML = (w) => {
+      const cfg = w.config || {};
+      if (w.type === "text") return "";
+      if (w.type === "kpi")
+        return `<div class="meta">Indicador · Métrica: <strong>${escHtml(metricLabel(cfg.metric))}</strong> · ${escHtml(scenName(cfg.kpiA))} vs ${escHtml(scenName(cfg.kpiB))}</div>`;
+      const typeLabel = { line: "Gráfico de linha", bar: "Gráfico de barras", bar100: "Barras 100% empilhadas" }[w.type] || w.type;
+      const serie = cfg.serieBy === SERIE_CENARIO ? "Cenário" : cfg.serieBy === SERIE_NONE ? "—" : (cfg.serieBy || "—");
+      const xdim = cfg.xDimension === XDIM_CENARIO ? "Cenários (abas)" : (cfg.xDimension || "—");
+      return `<div class="meta">${escHtml(typeLabel)} · Métrica: <strong>${escHtml(metricLabel(cfg.metric))}</strong> · Eixo X: ${escHtml(xdim)} · Série: ${escHtml(serie)}</div>`;
+    };
+
+    const pageDescs = describeFilterCards(pageFilters, ds);
+    const orderedWidgets = [...analyticsLayout].sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0));
+
+    const cards = orderedWidgets.map((w) => {
+      const cfg = w.config || {};
+      const title = cfg.title || (w.type === "text" ? "Anotação" : "Componente");
+      const widgetDescs = w.type === "text" ? [] : describeFilterCards(cfg.filters, ds);
+      const filtersSection = w.type === "text" ? "" : `
+        <div class="wfilters">
+          <div class="wfilters-title">Filtros aplicados neste componente</div>
+          ${pageDescs.length ? `<div class="wfilters-sub">↳ Filtros da página (aplicados a todos):</div>${filtersBlockHTML(pageDescs, "")}` : `<p class="nofilter">Sem filtros de página.</p>`}
+          ${widgetDescs.length ? `<div class="wfilters-sub">↳ Filtros exclusivos deste visual:</div>${filtersBlockHTML(widgetDescs, "")}` : `<p class="nofilter">Nenhum filtro exclusivo deste visual.</p>`}
+        </div>`;
+      return `<section class="card ${w.type === "text" ? "card-text" : ""}">
+        <h3>${escHtml(title)}</h3>
+        ${widgetMetaHTML(w)}
+        <div class="visual">${widgetVisualHTML(w)}</div>
+        ${filtersSection}
+      </section>`;
+    }).join("");
+
+    const style = `<style>
+      *{box-sizing:border-box;}
+      body{font-family:system-ui,-apple-system,sans-serif;color:#1e293b;margin:0;padding:28px 32px;background:#fff;}
+      h1{font-size:22px;margin:0 0 4px;}
+      h3{font-size:15px;margin:0 0 6px;color:#0f172a;}
+      .sub{color:#94a3b8;font-size:12px;margin:0 0 20px;}
+      .pagefilters{border:1px solid #cbd5e1;border-radius:12px;padding:14px 18px;margin:0 0 24px;background:#f8fafc;}
+      .pagefilters h2{font-size:14px;margin:0 0 8px;color:#334155;text-transform:uppercase;letter-spacing:.5px;}
+      .meta{font-size:11.5px;color:#64748b;margin:0 0 10px;}
+      ul.filters{margin:4px 0 0;padding-left:18px;font-size:12.5px;color:#334155;line-height:1.6;}
+      ul.filters .fdim{font-weight:700;color:#0f172a;}
+      .muted{color:#94a3b8;}
+      .nofilter{color:#94a3b8;font-size:12px;font-style:italic;margin:4px 0 0;}
+      .card{border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px 14px;margin:0 0 18px;page-break-inside:avoid;break-inside:avoid;}
+      .card-text{background:#fffef7;border-color:#fde68a;}
+      .visual{margin:6px 0 12px;}
+      .chart{width:100%;overflow:hidden;}
+      .textbox{font-size:13px;line-height:1.6;color:#334155;white-space:pre-wrap;}
+      .kpi{text-align:center;padding:16px 0;}
+      .kpi-metric{font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.6px;}
+      .kpi-big{font-size:44px;font-weight:700;color:#0f172a;line-height:1.1;margin:8px 0 4px;}
+      .kpi-scen{font-size:12px;color:#94a3b8;}
+      .kpi-base{font-size:12.5px;color:#475569;margin-top:8px;}
+      .wfilters{border-top:1px dashed #e2e8f0;padding-top:10px;}
+      .wfilters-title{font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;}
+      .wfilters-sub{font-size:11.5px;font-weight:600;color:#64748b;margin-top:6px;}
+      @media print{body{padding:0;} .card,.pagefilters{box-shadow:none;}}
+    </style>`;
+
+    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Dashboard — Exportação</title>${style}</head><body>
+      <h1>Dashboard de Simulação de Crédito</h1>
+      <p class="sub">Exportado em ${escHtml(new Date().toLocaleString("pt-BR"))} · ${orderedWidgets.length} componente(s)</p>
+      <div class="pagefilters">
+        <h2>🔎 Filtro da página (visão geral — aplicado a todos os componentes)</h2>
+        ${filtersBlockHTML(pageDescs, "Nenhum filtro de página aplicado — todos os componentes usam a base completa.")}
+      </div>
+      ${cards}
+    </body></html>`;
+
+    const win = typeof window !== "undefined" ? window.open("", "_blank") : null;
+    if (!win) return;
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { try { win.print(); } catch {} }, 400);
+  };
+
   // ── Agrupamentos (dimensões derivadas) ──────────────────────────────────────
   const [editingGrouping, setEditingGrouping] = useState(null); // null | draft
   const newGrouping = () => setEditingGrouping({ id: null, name: "", source: "", buckets: [], unmatched: "other", otherLabel: GROUPING_OTHER_DEFAULT });
@@ -3727,6 +3890,13 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
                   border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
                 <span style={{ fontSize: 14, lineHeight: 1 }}>⬇</span> Exportar CSV
               </button>
+              <button onClick={exportDashboardPDF} disabled={analyticsLayout.length === 0}
+                title="Exporta todos os componentes do Dashboard como PDF (via impressão do navegador), detalhando o filtro da página e os filtros de cada componente"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #cbd5e1", background: "#fff", color: analyticsLayout.length === 0 ? "#cbd5e1" : "#475569",
+                  cursor: analyticsLayout.length === 0 ? "not-allowed" : "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 14, lineHeight: 1 }}>📄</span> Exportar PDF
+              </button>
               <button onClick={addTextWidget}
                 title="Adiciona uma caixa de texto livre para explicar análises e conclusões"
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
@@ -3753,7 +3923,7 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
           ) : (
             <div style={{ position: "relative", minHeight: canvasH, minWidth: canvasW }}>
               {analyticsLayout.map(w => (
-                <div key={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 560, height: w.h ?? 500 }}>
+                <div key={w.id} data-aw-widget-id={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 560, height: w.h ?? 500 }}>
                   {w.type === "text" ? (
                     <TextWidget widget={w}
                       onConfigChange={changeConfig} onDelete={removeWidget} onDuplicate={duplicateWidget}
