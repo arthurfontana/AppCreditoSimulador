@@ -204,3 +204,24 @@ tem ganho marginal — o valor real exige tier `full`, instalado em camadas conf
 premissa P1 (`pip` do índice primeiro, wheels offline do release como fallback, com
 uma **sonda de ambiente** — Sessão HP — validando o que instala de fato antes da
 Fase 1). Plano de sessões executáveis em [[Hibrido-Prompts-Sessoes]].
+
+---
+
+## ADR-GS (DEC-GS-001..010): Goal Seek Profundo — MILP via sidecar Python
+
+**Decisões** do épico Goal Seek Profundo (GS1–GS6), documentado em
+[[Hibrido-GoalSeek-Profundo]]. Cada DEC está expandido naquele documento;
+aqui apenas o sumário de uma linha por decisão.
+
+| DEC | Decisão (uma linha) |
+|-----|---------------------|
+| **DEC-GS-001** | Paridade de **contrato**, não numérica — greedy ≠ MILP por design; sem GATE dourado cross-runtime para Goal Seek; fallback ao greedy clássico é o path completo. |
+| **DEC-GS-002** | Cards "📍 Ponto de partida" no formulário: `COMPUTE_GOAL_SEEK_CONTEXT` → `GOAL_SEEK_CONTEXT_RESULT` exibe baseline escopado a `decidedQty` + AS IS antes de o usuário declarar o objetivo. |
+| **DEC-GS-003** | `goal.minimize` ampliado para 4 opções (`inadInferida`/`inadReal`/`approval`/`salesVolume`); fórmula de score `(collQty + poolAvg·K) / (tgtQty + poolAvg·K)` unifica greedy e MILP. |
+| **DEC-GS-004** | Selos estatísticos nos movimentos: IC 95% de Wilson (`wilsonCI`, `z=1.96`) + p-value binomial (`segBinomTwoSided`) + flag `fragile` (`n < 30`) em `moves[i].stats`. |
+| **DEC-GS-005** | Dataset **nunca** sai do browser para o Goal Seek — só o catálogo de agregados (KBs) vai ao sidecar via `GOAL_SEEK_CATALOG_RESULT`; `COMPUTE_GOAL_SEEK_CATALOG` é Classe A. |
+| **DEC-GS-006** | Família de curvas Pareto multi-dimensional: o sidecar devolve `curves: [{ceiling, frontier}]` por teto de inad.inf; `GoalSeekFrontierChart` (Recharts) exibe todas as curvas sobrepostas. |
+| **DEC-GS-007** | Validação single-sourced no worker: `computeGoalSeekValidate` (async) verifica invariantes + materializa + re-simula; usa pool H3 para extremos da fronteira; responde com `GOAL_SEEK_RESULT`. |
+| **DEC-GS-008** | Escadas de lens: `buildGoalSeekCatalog` gera até `GOAL_SEEK_DEEP_LENS_STEPS=12` passos acumulados por Decision Lens monotônico; `selectDeepestLensSteps` filtra os mais impactantes. |
+| **DEC-GS-009** | Solver MILP `scipy.optimize.milp` (HiGHS): variáveis binárias + precedência + tetos linearizados (big-M); objetivo lexicográfico 2-etapas (target → minimize colateral). |
+| **DEC-GS-010** | Roteamento automático (sem toggle manual): `goalSeekDeepOk()` detecta `goal_seek_deep` em `capabilities.tasks`; `goal_seek_deep` chamado via `sidecarProxyRef` diretamente (sem ComputeRouter — DEC-GS-001). |
