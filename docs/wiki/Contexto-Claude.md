@@ -219,7 +219,14 @@ sessões; tarefas desses domínios passam a carregar um arquivo de 20–40KB em 
 pescar num de 968KB. O ADR-001 continua válido para o que é de fato acoplado ao
 estado do componente.
 
-**Prompt** (repetir por lote, começando pelo lote 1):
+**Status dos lotes**:
+- ✅ **Lote 1 — Analytics** (`src/analytics.js`) — executado (PR #195,
+  `0a6e4e8`).
+- ⬜ Lote 2 — PolicyIR (`src/policyIR.js`)
+- ⬜ Lote 3 — Renderers de documentação (`src/policyDocRender.js`)
+- ⬜ Lote 4 — autoLayout (`src/autoLayout.js`)
+
+**Prompt do lote 1 (já executado, mantido como referência)**:
 ```
 Sessão C4 (lote 1 — Analytics) do plano docs/wiki/Contexto-Claude.md. Extraia de
 src/App.jsx para um novo src/analytics.js os helpers globais puros do Analytics
@@ -236,12 +243,140 @@ em especial tests/analytics.test.js. Atualize o mapa de arquivos do CLAUDE.md
 (1 linha) e docs/claude/Mapa-App.md.
 ```
 
-### Sessão C5 — Contrato de manutenção da documentação 🏷️ [SONNET] (opcional)
+**Prompt do lote 2 — PolicyIR**:
+```
+Sessão C4 (lote 2 — PolicyIR) do plano docs/wiki/Contexto-Claude.md. Extraia de
+src/App.jsx para um novo src/policyIR.js os helpers globais puros do PolicyIR:
+buildPolicyIR, applyPolicyPatch, extractPolicyRequiredVars, applyPolicyVarMapping,
+diffPolicyIR, e quaisquer helpers internos usados só por eles (ex.: achatamento de
+rotas/ports, geração de idMap). Leia docs/claude/Copiloto-PolicyIR.md antes de
+mexer — ele documenta o contrato do formato IR e as regras de "sem perda de
+roteamento" que o GATE trava. Regras: (1) movimentação literal — zero mudança de
+lógica; (2) App.jsx importa do módulo novo e re-exporta o que os testes importam
+de App.jsx hoje, OU os testes passam a importar do módulo novo — escolha o menor
+diff; (3) nenhuma função com dependência de closure em estado/refs do componente
+pode ser movida — se achar um candidato assim, deixe-o e reporte; (4) npm test
+passa inalterado, em especial tests/policyIR.test.js e tests/policyTemplates.test.js.
+Atualize o mapa de arquivos do CLAUDE.md (1 linha) e docs/claude/Mapa-App.md.
+```
 
-Uma regra nova no CLAUDE.md enxuto, para o problema não voltar: *"Nova feature
-documenta no arquivo de domínio (`docs/claude/` ou `docs/wiki/`); no CLAUDE.md
-entra no máximo 1 linha no mapa de ponteiros. O CLAUDE.md não pode passar de
-~450 linhas — se passar, a sessão que estourou move conteúdo para o domínio."*
+**Prompt do lote 3 — Renderers de documentação**:
+```
+Sessão C4 (lote 3 — Renderers de documentação) do plano
+docs/wiki/Contexto-Claude.md. Extraia de src/App.jsx para um novo
+src/policyDocRender.js os helpers globais puros de renderização do docModel:
+renderDocMarkdown, renderDocHTML, e helpers internos usados só por eles (formatação
+de KPIs/funil, tabelas, changelog via diffPolicyIR). Leia
+docs/claude/Copiloto-Documentacao.md antes de mexer. Note que estas funções
+consomem o docModel/PolicyIR já montado (não recalculam o motor) — só a camada de
+apresentação deve mover; se alguma função também calcular o docModel a partir do
+motor, deixe-a em App.jsx e reporte. Regras: (1) movimentação literal — zero
+mudança de lógica; (2) App.jsx importa do módulo novo e re-exporta o que os testes
+importam hoje, OU os testes passam a importar do módulo novo — escolha o menor
+diff; (3) nenhuma função com dependência de closure em estado/refs do componente
+pode ser movida; (4) npm test passa inalterado, em especial
+tests/policyDoc.test.js. Atualize o mapa de arquivos do CLAUDE.md (1 linha) e
+docs/claude/Mapa-App.md.
+```
+
+**Prompt do lote 4 — autoLayout**:
+```
+Sessão C4 (lote 4 — autoLayout) do plano docs/wiki/Contexto-Claude.md. Extraia de
+src/App.jsx para um novo src/autoLayout.js a função de reorganização automática do
+canvas (autoLayout) e helpers internos usados só por ela. Leia
+docs/claude/Auto-Layout.md antes de mexer. Este lote NÃO tem GATE numérico
+dedicado — a validação é visual: depois de mover, rode `npm run dev`, abra um
+projeto com Cineminhas/losangos conectados e confirme visualmente que "Auto Layout"
+produz o mesmo resultado de antes (posições e ordem inalteradas). Regras: (1)
+movimentação literal — zero mudança de lógica; (2) App.jsx importa do módulo novo;
+(3) se autoLayout ler estado/refs do componente diretamente (em vez de receber
+shapes/conns por parâmetro), isso é uma dependência de closure — extraia só depois
+de parametrizar a chamada, ou deixe e reporte; (4) npm test passa inalterado.
+Atualize o mapa de arquivos do CLAUDE.md (1 linha) e docs/claude/Mapa-App.md.
+```
+
+### Sessão C5 — Contrato de manutenção da documentação 🏷️ [SONNET] (opcional,
+mas recomendada — é a única sessão do lote que evita a regressão voltar)
+
+**Por que não é dispensável na prática**: C1–C4 emagrecem o CLAUDE.md uma vez, mas
+nada impede que ele volte a crescer ~linearmente como descrito em §4 — cada
+sessão H/GS/Copiloto futura tende a colar mais uma seção de detalhe direto no
+índice, do jeito mais rápido. C5 não é uma refatoração; é a trava de processo que
+faz o ganho de C1 durar. Sem ela, o diagnóstico deste documento se repete em
+6–12 meses.
+
+**O que vai entregar**:
+- Uma regra nova, curta, na própria estrutura do CLAUDE.md (perto do topo, junto
+  com a explicação de "Documentação em camadas"): *"Nova feature documenta no
+  arquivo de domínio (`docs/claude/` ou `docs/wiki/`); no CLAUDE.md entra no
+  máximo 1 linha no mapa de ponteiros. O CLAUDE.md não pode passar de ~450
+  linhas."*
+- **O fallback para quando o limite é atingido** (o ponto em aberto: o que
+  acontece quando uma sessão precisa adicionar 1 linha e o CLAUDE.md já está em
+  450): a regra não pode ser "trava a sessão" nem "deixa passar do limite
+  silenciosamente" — as duas perdem informação (a primeira bloqueia trabalho
+  real; a segunda deixa o arquivo crescer sem controle de novo). O contrato é:
+  1. **Nunca apagar para caber** — o teto de linhas rege o que fica no índice,
+     não o que existe. Informação só sai do CLAUDE.md quando já tem um lar em
+     `docs/claude/` ou `docs/wiki/` com o ponteiro correspondente.
+  2. Se adicionar a linha nova estouraria 450, a sessão que estourou faz uma
+     **poda antes de escrever**: varre o CLAUDE.md atual procurando qualquer
+     trecho que já regrediu de "ponteiro" para "detalhe" (parágrafo duplicando
+     conteúdo que já vive em `docs/claude/`, ou uma seção que cresceu além de
+     1–3 linhas), move esse trecho para o arquivo de domínio (criando-o se não
+     existir) e deixa o ponteiro de 1 linha no lugar — exatamente o padrão de
+     C1. Só então adiciona a linha nova.
+  3. Se a poda não abrir espaço suficiente (índice já está genuinamente enxuto,
+     sem gordura para tirar), a sessão cria/atualiza um arquivo
+     `docs/claude/Onde-Vive-O-Que.md` só com a tabela de ponteiros e resume, no
+     CLAUDE.md, a seção "Onde vive o quê" para um link único a esse arquivo —
+     spillover controlado, não silencioso, e ainda documentado no próprio
+     CLAUDE.md (1 linha: "mapa completo de ponteiros → ver
+     docs/claude/Onde-Vive-O-Que.md").
+  4. Toda poda/spillover é uma alteração **só de documentação**: nunca é
+     motivo para pular o `npm test` de checagem nem para mexer em código.
+- Um **guard mecânico**, não só disciplina: um passo no workflow de CI existente
+  (`.github/workflows/`) — ou um script `npm run check:claude-md` chamado a partir
+  de um `pre-commit`/CI — que roda `wc -l CLAUDE.md` e falha (ou avisa, conforme
+  preferência do time) se passar de 450 linhas. Isso pega o estouro mesmo se uma
+  sessão futura esquecer a regra escrita — não depende só do modelo lembrar.
+
+**Prompt**:
+```
+Sessão C5 do plano docs/wiki/Contexto-Claude.md (contrato de manutenção da
+documentação). Objetivo: garantir que o CLAUDE.md não volte a crescer sem
+controle depois do emagrecimento das Sessões C1–C4.
+
+1. No CLAUDE.md, logo após a seção "Documentação em camadas — como usar este
+   repositório", adicione uma regra curta e explícita: "Nova feature documenta
+   no arquivo de domínio (docs/claude/ ou docs/wiki/); no CLAUDE.md entra no
+   máximo 1 linha no mapa de ponteiros ('Onde vive o quê'). O CLAUDE.md não pode
+   passar de ~450 linhas."
+
+2. Documente também o fallback para quando uma sessão precisar adicionar
+   conteúdo e o CLAUDE.md já estiver no teto (ou passaria dele): (a) NUNCA
+   apagar informação para caber — só mover, e só depois de ela já ter um lar em
+   docs/claude/ ou docs/wiki/ com ponteiro correspondente; (b) antes de escrever
+   a linha nova, a sessão faz uma poda: procura no CLAUDE.md qualquer trecho que
+   regrediu de "ponteiro" (1–3 linhas) para "detalhe" (parágrafo duplicando
+   conteúdo já normativo em outro arquivo), move esse trecho para o arquivo de
+   domínio certo (criando-o se preciso) e deixa o ponteiro no lugar — mesmo
+   padrão da Sessão C1; (c) se a poda não abrir espaço suficiente, crie/atualize
+   docs/claude/Onde-Vive-O-Que.md com a tabela completa de ponteiros e resuma a
+   seção "Onde vive o quê" do CLAUDE.md para um link a esse arquivo (spillover
+   controlado e documentado, nunca silencioso); (d) poda/spillover é sempre uma
+   mudança só de documentação — não pula npm test, não mexe em código.
+
+3. Crie um guard mecânico: um script simples (ex. package.json script
+   "check:claude-md" rodando `wc -l CLAUDE.md` ou equivalente em Node) que falha
+   (exit code != 0) se CLAUDE.md passar de 450 linhas, e plugue esse script em
+   um step do CI existente em .github/workflows/ (ou documente explicitamente,
+   se não houver hook de pre-commit no projeto, que a checagem roda via CI). O
+   objetivo é o estouro ser pego mecanicamente, não só por disciplina de prompt.
+
+4. npm test passa inalterado — esta sessão não toca em código de produto, só em
+   CLAUDE.md, docs/ e o guard de CI/scripts.
+```
 
 ---
 
