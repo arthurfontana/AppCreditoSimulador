@@ -45,6 +45,7 @@ AppCreditoSimulador/
 │   ├── clusterVar.js             # Variável de Cluster (compartilhado main/worker/teste)
 │   ├── computeRouter.js          # ComputeRouter — worker default / sidecar Python opt-in
 │   ├── analytics.js              # Helpers puros do Analytics Workspace (pivot, filtros, agrupamentos, métricas, export CSV, KPI) + constantes da aba Dashboard
+│   ├── dashboardComponents.jsx   # Componentes React da aba Dashboard e dos cards do Copiloto (AnalysisTab, AnalyticsWidget, KpiCard, FieldPanel, Filtros, Segment*/Cluster*, GoalSeekFrontierChart); importados/re-exportados por App.jsx
 │   ├── policyDocRender.js        # Renderers puros da Documentação Automática — renderDocMarkdown/renderDocHTML sobre o docModel/PolicyIR já montado (re-exportados por App.jsx)
 │   ├── autoLayout.js             # computeAutoLayout — cálculo puro da Reorganização Automática do canvas (camadas Sugiyama + portas + parking); App.jsx anima o resultado por RAF
 │   └── main.jsx                  # Entry point React
