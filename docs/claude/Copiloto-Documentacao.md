@@ -14,7 +14,8 @@ templates, não geração criativa). Ver `docs/wiki/Copiloto-DocumentacaoAutomat
 ## Separação dados/apresentação
 `COMPUTE_POLICY_DOC` (worker) devolve um **docModel** — árvore de seções com dados
 NUMÉRICOS CRUS, nunca prosa pronta. A apresentação (`renderDocMarkdown`/`renderDocHTML`,
-`src/App.jsx`) é feita por funções PURAS na main que só leem o docModel — separação que
+`src/policyDocRender.js` — importados/re-exportados por `src/App.jsx`) é feita por funções
+PURAS na main que só leem o docModel — separação que
 torna o Nível 2 (reescrita em prosa por IA) trivial (a IA recebe o docModel, não HTML) e o
 GATE mais robusto (determinismo/privacidade verificáveis só inspecionando string de saída).
 `buildPolicyIR` só existe em `App.jsx` (Sessão 0) — a main monta o IR ANTES de disparar
