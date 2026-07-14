@@ -14,6 +14,7 @@ import { suggestClusterVarName, suggestClusterLabels, buildClusterDefFromModel, 
 // + funções puras de UX do motor (badge, degradação declarada, aviso de fallback).
 import { createComputeRouter, createWorkerProvider, createSidecarProvider, describeComputeBadge, describeCapabilitiesDetail, ceilingNotice, fallbackNoticeText, hashChunks } from "./computeRouter.js";
 
+// ═══ REGIÃO: Constantes e Helpers Globais ═══
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
 const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
 const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   : new Date().toISOString();
@@ -2088,6 +2089,7 @@ export function applyGroupingsToDataset(ds, groupings) {
   return { ...ds, columns: newColumns, dimensions, dimensionOrders, groupedDimensions };
 }
 
+// ═══ REGIÃO: AnalysisTab e Widgets do Dashboard ═══
 // Calcula cor de texto com contraste WCAG sobre um fundo hex.
 function getContrastColor(hex) {
   if (!hex || hex.length < 7) return "#ffffff";
@@ -3959,6 +3961,7 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
 // ── Multi-canvas store helpers (DEC-AW-007) ─────────────────────────────────
 const CANVAS_STORAGE_KEY = 'aw_canvases_v1';
 
+// ═══ REGIÃO: Canvases Múltiplos (init/clone) ═══
 // Cached init — parsed once, shared by canvases / activeCanvasId / shapes / conns initializers
 let _canvasInitCache = null;
 function _initCanvasStore() {
@@ -4024,6 +4027,7 @@ export function cloneCanvasWithNewIds(shapes, conns) {
 // elegível/não elegível (isCellEligible), capturado em `blockedCells`.
 const POLICY_TERMINAL_LABELS = { approved: 'Aprovado', rejected: 'Reprovado', as_is: 'AS IS' };
 
+// ═══ REGIÃO: PolicyIR ═══
 export function buildPolicyIR(shapes, conns, csvStore, opts = {}) {
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const out = {};
@@ -4846,6 +4850,7 @@ export function renderDocHTML(docModel) {
   return S.join('\n');
 }
 
+// ═══ REGIÃO: Estado Principal do Componente ═══
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [shapes, setShapes] = useState(() => {
@@ -5560,6 +5565,7 @@ export default function App() {
   // Computed in the worker alongside COMPUTE_OVERLAY to avoid re-scanning rows.
   const [incrementalResult, setIncrementalResult] = useState(null);
 
+  // ═══ REGIÃO: Handlers de Canvas (mouse/touch) ═══
   // ── Business Widget drag/resize ───────────────────────────────
   const startBwDrag = (e, type, dir) => {
     if (e.button !== 0) return;
@@ -6956,6 +6962,7 @@ export default function App() {
     e.target.value = "";
   };
 
+  // ═══ REGIÃO: Persistência (Projeto / sessionStorage) ═══
   // ── Salvar / Abrir Projeto completo ───────────────────────────
   // Snapshot integral do estudo: todos os canvas (abas), todas as bases,
   // a Tabela de Inferência, os gráficos do Dashboard, a biblioteca de
@@ -7736,6 +7743,7 @@ export default function App() {
     setSel(decId);
   };
 
+  // ═══ REGIÃO: Cineminha, Decision Lens e Handlers de Nó (helpers) ═══
   // ── toggleCinemaCell ──────────────────────────────────────────
   const toggleCinemaCell = useCallback((shapeId, cellKey) => {
     pushHistory();
@@ -8099,6 +8107,7 @@ export default function App() {
     return {mn, mx};
   }, [simResult]);
 
+  // ═══ REGIÃO: Render de Shapes (inclui Cineminha) ═══
   // ── Render: connection (adaptive routing) ─────────────────────
   const renderConn = (conn, byId = shapesById) => {
     if (hiddenPortIds.has(conn.from) || hiddenPortIds.has(conn.to)) return null; // port escondido em "Configurar nó"
@@ -9943,6 +9952,7 @@ export default function App() {
   // Dispara o ranking on-demand para a porta selecionada (não entra no tick de
   // edição/cache). `pendingRankingPortIdRef` descarta respostas obsoletas caso a
   // seleção mude antes da resposta chegar (mesmo padrão do optimModal).
+  // ═══ REGIÃO: Ranking de Variáveis (Copiloto de Porta) ═══
   const openVariableRanking = useCallback((portId) => {
     pendingRankingPortIdRef.current = portId;
     setVariableRankingModal({ portId, loading: true });
@@ -10028,6 +10038,7 @@ export default function App() {
     setVariableRankingModal(null);
   }, []); // eslint-disable-line
 
+  // ═══ REGIÃO: Cena e Overlay de Arraste ═══
   // M12: memoiza a CENA (frames + conexões + shapes) por seus insumos reativos, EXCLUINDO
   // o viewport `vp`. Como o `transform` de pan/zoom mora no `<g>` raiz (fora deste memo) e as
   // funções de render não leem `vp` (o tooltip usa vpR.current), pan e zoom reusam o MESMO
@@ -10071,6 +10082,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragIds, dragDelta, shapes, conns, shapesById, hiddenPortIds, simResult, sel, multiSel, fromId, tool, flowErrors, csvStore, nodeArrivals, lensCounts, edgeColorScale, edgeQtyScale, enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf, activeCell, incrementalResult]);
 
+  // ═══ REGIÃO: JSX — Shell da Aplicação (toolbar, abas, canvas) ═══
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
   // ────────────────────────────────────────────────────────────────────────────
@@ -11396,6 +11408,7 @@ export default function App() {
       {/* ═══════════════ AXIS SELECTION MODAL (Cineminha) ═══════════ */}
       {/* ═══════════════ DECISION LENS MODAL ═══════════════ */}
       {domainModal&&(()=>{
+        // ═══ REGIÃO: Modais de Configuração de Nó ═══
         const shape = shapes.find(s => s.id === domainModal.shapeId);
         if (!shape) return null;
         const draft = domainModal.draft;
@@ -12884,6 +12897,7 @@ export default function App() {
 
       {/* ═══════════════ IMPORT WIZARD MODAL ═══════════════ */}
       {wizard && (
+        // ═══ REGIÃO: Wizard de Importação ═══
         <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.4)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div style={{background:"#fff",borderRadius:18,width:"100%",maxWidth:wizard.step===2?820:600,maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,.2)",transition:"max-width .2s"}}>
 
@@ -13280,6 +13294,7 @@ export default function App() {
 
       {/* ═══════════════ OPTIMIZATION MODAL ═══════════════ */}
       {optimModal&&(()=>{
+        // ═══ REGIÃO: Cineminha — Otimizadores (single + Johnny) ═══
         const { shapeId, cellMetrics, frontier, scenarios, activeCard,
                 proposedCells, sliderApprovalIdx, sliderInadReal, sliderInadInf,
                 maxInadReal, maxInadInf, matrixZoom, matrixPanX, matrixPanY } = optimModal;
@@ -14369,6 +14384,7 @@ export default function App() {
 
       {/* ═══════════════ CINEMA LIBRARY MODAL ═══════════════ */}
       {cinemaLibraryModal&&(()=>{
+        // ═══ REGIÃO: Bibliotecas — Cineminha ═══
         const { mode, shapeId, search, filterType, saveMeta, overwriteId } = cinemaLibraryModal;
         const upd = (patch) => setCinemaLibraryModal(prev => ({ ...prev, ...patch }));
         const updMeta = (patch) => setCinemaLibraryModal(prev => ({ ...prev, saveMeta: { ...prev.saveMeta, ...patch } }));
@@ -14631,6 +14647,7 @@ export default function App() {
 
       {/* ═══════════════ GOAL SEEK MODAL — objetivo estruturado (Copiloto Sessão 4) ═══════════════ */}
       {goalSeekModal&&(()=>{
+        // ═══ REGIÃO: Modais do Copiloto (Goal Seek, Simplificação, Documentação, Segmentos, Clusterização) ═══
         const { step, goal, constraints, context, baseline, frontier, moves, goalReached, bindingConstraint,
                 result, via, curves, deepRun, fallbackNotice } = goalSeekModal;
         const updGoal = (patch) => setGoalSeekModal(m => {
@@ -15910,6 +15927,7 @@ export default function App() {
 
       {/* ═══════════════ POLICY LIBRARY MODAL — templates de PolicyIR (Copiloto Sessão 2) ═══════════════ */}
       {policyLibraryModal&&(()=>{
+        // ═══ REGIÃO: Bibliotecas — Políticas ═══
         const { mode, search, saveMeta, overwriteId } = policyLibraryModal;
         const upd = (patch) => setPolicyLibraryModal(prev => ({ ...prev, ...patch }));
         const updMeta = (patch) => setPolicyLibraryModal(prev => ({ ...prev, saveMeta: { ...prev.saveMeta, ...patch } }));
