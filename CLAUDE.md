@@ -34,6 +34,7 @@ AppCreditoSimulador/
 │   ├── columnar.js               # Armazenamento colunar do csvStore + import vetorizado
 │   ├── goalSeek.js               # applyGoalSeekMoves (compartilhado worker/main)
 │   ├── policySimplify.js         # applySimplifyCandidates (compartilhado worker/main)
+│   ├── policyIR.js               # PolicyIR — buildPolicyIR/applyPolicyPatch/extractPolicyRequiredVars/applyPolicyVarMapping/diffPolicyIR (helpers puros, re-exportados por App.jsx)
 │   ├── clusterVar.js             # Variável de Cluster (compartilhado main/worker/teste)
 │   ├── computeRouter.js          # ComputeRouter — worker default / sidecar Python opt-in
 │   ├── analytics.js              # Helpers puros do Analytics Workspace (pivot, filtros, agrupamentos, métricas, export CSV, KPI) + constantes da aba Dashboard
