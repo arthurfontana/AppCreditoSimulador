@@ -24,6 +24,13 @@ resolvem isso a um custo muito menor. `release/` é artefato de build (~1,4MB): 
 leia/varra, exceto `serve.py`/`sidecar.py`/`release/python/` quando a tarefa for do
 sidecar Python.
 
+**Regra de tamanho (contrato de manutenção, C5)**: nova feature documenta no arquivo
+de domínio (`docs/claude/` ou `docs/wiki/`); no CLAUDE.md entra no máximo 1 linha no
+mapa de ponteiros ("Onde vive o quê"). O CLAUDE.md não pode passar de **~450 linhas**
+— guard mecânico via `npm run check:claude-md`, rodado no CI (`build-release.yml`).
+Se a linha nova estourar o teto, poda antes de escrever — nunca apagar informação
+para caber. Contrato completo (poda, spillover): `docs/claude/Manutencao-CLAUDE-md.md`.
+
 ## Estrutura de arquivos (resumida)
 
 ```
@@ -173,6 +180,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Widget de negócio, `BuildBadge`, CI/CD, suporte a touch/mobile | `docs/claude/UI-Complementar-CI.md` |
 | Epics/decisões/roadmap de produto (histórico completo) | `docs/wiki/Decisoes.md`, `docs/wiki/Roadmap.md`, `docs/wiki/Epicos-*.md` |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
+| Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
 
 ## Decisões arquiteturais (resumo dos ADRs)
 

@@ -27,6 +27,9 @@ jobs:
       - name: Instalar dependências
         run: npm ci
 
+      - name: Checar tamanho do CLAUDE.md (guard C5 — ver docs/claude/Manutencao-CLAUDE-md.md)
+        run: npm run check:claude-md
+
       - name: Build
         run: npm run build
 
