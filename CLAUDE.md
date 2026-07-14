@@ -1,11 +1,11 @@
 # AppCreditoSimulador
 
 ## Stack
-- React + Vite, arquivo único: `src/App.jsx` (~11150 linhas)
+- React + Vite, arquivo único: `src/App.jsx` (~14600 linhas)
 - Sem CSS externo — tudo inline styles
 - SVG puro para o canvas; matrizes interativas via `foreignObject` (sem biblioteca de diagramas)
 - **Recharts** para gráficos na aba Dashboard (exceção pontual ao ADR-003 — ver `DEC-AW-001`)
-- Web Worker (`src/simulation.worker.js`, ~2430 linhas) para cálculos pesados fora da thread principal
+- Web Worker (`src/simulation.worker.js`, ~6800 linhas) para cálculos pesados fora da thread principal
 - **`src/columnar.js`**: módulo de armazenamento colunar do `csvStore` (otimização de memória) + pipeline de importação vetorizado (parse direto para colunar, sem `string[][]`)
 - **Vitest** para testes (`tests/*.test.js`, jsdom) — `npm test`
 
@@ -36,8 +36,8 @@ para caber. Contrato completo (poda, spillover): `docs/claude/Manutencao-CLAUDE-
 ```
 AppCreditoSimulador/
 ├── src/
-│   ├── App.jsx                   # Componente único — ~11150 linhas
-│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny, Goal Seek (~2430 linhas)
+│   ├── App.jsx                   # Componente único — ~14600 linhas
+│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny, Goal Seek (~6800 linhas)
 │   ├── columnar.js               # Armazenamento colunar do csvStore + import vetorizado
 │   ├── goalSeek.js               # applyGoalSeekMoves (compartilhado worker/main)
 │   ├── policySimplify.js         # applySimplifyCandidates (compartilhado worker/main)
