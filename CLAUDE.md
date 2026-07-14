@@ -36,6 +36,7 @@ AppCreditoSimulador/
 │   ├── policySimplify.js         # applySimplifyCandidates (compartilhado worker/main)
 │   ├── clusterVar.js             # Variável de Cluster (compartilhado main/worker/teste)
 │   ├── computeRouter.js          # ComputeRouter — worker default / sidecar Python opt-in
+│   ├── analytics.js              # Helpers puros do Analytics Workspace (pivot, filtros, agrupamentos, métricas, export CSV, KPI) + constantes da aba Dashboard
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom) — ver tabela de GATEs abaixo
 │   └── fixtures/, fixtures/golden/  # fixtures de teste + fixtures douradas cross-runtime
