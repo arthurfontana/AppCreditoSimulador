@@ -8,8 +8,8 @@
 ```
 AppCreditoSimulador/
 ├── src/
-│   ├── App.jsx                   # Componente único — ~11150 linhas
-│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny, Goal Seek (~2430 linhas)
+│   ├── App.jsx                   # Componente único — ~14600 linhas
+│   ├── simulation.worker.js      # Web Worker: simulação, overlay, Pareto, Johnny, Goal Seek (~6800 linhas)
 │   ├── columnar.js               # Armazenamento colunar do csvStore (typed arrays + dictionary encoding)
 │   ├── goalSeek.js                # applyGoalSeekMoves — materialização de movimentos do Goal Seek (compartilhado worker/main)
 │   ├── policySimplify.js          # applySimplifyCandidates — materialização de candidatos de Simplificação (compartilhado worker/main)

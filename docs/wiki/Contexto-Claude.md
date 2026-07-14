@@ -5,6 +5,10 @@
 > as Sessões" ([[Hibrido-Prompts-Sessoes]]) — sessões com 🏷️ tag de modelo e prompt
 > pronto para colar.
 >
+> **Status (14/07/2026)**: TODAS as sessões (C1–C5, incluindo os 4 lotes da C4)
+> foram executadas. O rediagnóstico pós-execução, com números novos e o veredito
+> sobre o que (pouco) ainda resta, está na **§6** deste documento.
+>
 > **TL;DR**: o sintoma ("10–15% da janela consumida antes de qualquer alteração")
 > **não é leitura do repositório** — é o **CLAUDE.md de ~195KB (~45–55 mil tokens,
 > ≈ 22–28% de uma janela de 200 mil) carregado automaticamente em TODA sessão**,
@@ -222,9 +226,11 @@ estado do componente.
 **Status dos lotes**:
 - ✅ **Lote 1 — Analytics** (`src/analytics.js`) — executado (PR #195,
   `0a6e4e8`).
-- ⬜ Lote 2 — PolicyIR (`src/policyIR.js`)
-- ⬜ Lote 3 — Renderers de documentação (`src/policyDocRender.js`)
-- ⬜ Lote 4 — autoLayout (`src/autoLayout.js`)
+- ✅ **Lote 2 — PolicyIR** (`src/policyIR.js`) — executado (PR #197, `e755dd1`).
+- ✅ **Lote 3 — Renderers de documentação** (`src/policyDocRender.js`) —
+  executado (PR #198, `3786899`).
+- ✅ **Lote 4 — autoLayout** (`src/autoLayout.js`) — executado (PR #199,
+  `ba722dd`).
 
 **Prompt do lote 1 (já executado, mantido como referência)**:
 ```
@@ -297,6 +303,9 @@ Atualize o mapa de arquivos do CLAUDE.md (1 linha) e docs/claude/Mapa-App.md.
 
 ### Sessão C5 — Contrato de manutenção da documentação 🏷️ [SONNET] (opcional,
 mas recomendada — é a única sessão do lote que evita a regressão voltar)
+
+> ✅ **Executada** (PR #200, `6a1499f`) — regra no CLAUDE.md + guard
+> `npm run check:claude-md` plugado no CI (`build-release.yml`).
 
 **Por que não é dispensável na prática**: C1–C4 emagrecem o CLAUDE.md uma vez, mas
 nada impede que ele volte a crescer ~linearmente como descrito em §4 — cada
@@ -462,3 +471,82 @@ As três skills da Sessão C3 (§2) cobrem os três domínios onde erro é mais 
 persistência, protocolo do worker e GATEs. Uma quarta candidata futura:
 `sidecar-python` (como adicionar task no `sidecar.py` + paridade DEC-HX-005),
 carregada só em sessões H.
+
+---
+
+## 6. Rediagnóstico (14/07/2026) — pós-execução de C1–C5
+
+### 6.1 Números medidos após todas as sessões
+
+| Artefato | Antes (13/07) | Depois (14/07) | Situação |
+|---|---|---|---|
+| `CLAUDE.md` | 194.882 bytes / 2.244 linhas (~50 mil tokens) | **16.676 bytes / 206 linhas (~4 mil tokens)** | ✅ **custo fixo de boot caiu ~92%** — abaixo até da meta de C1 (≤30KB/400 linhas); guard mecânico ativo (207/450) |
+| `src/App.jsx` | 967.829 bytes / 16.202 linhas | 891.126 bytes / 14.578 linhas | ⚠️ ainda >100% da janela, mas navegável via âncoras + `Mapa-App.md` |
+| Módulos puros extraídos | 5 (`columnar`, `goalSeek`, `policySimplify`, `clusterVar`, `computeRouter`) | **9** (+ `analytics`, `policyIR`, `policyDocRender`, `autoLayout`) | ✅ padrão consolidado |
+| `.claude/skills/` | inexistente | 3 skills (`persistencia-projeto`, `worker-protocolo`, `gates-testes`) | ✅ targeted inclusion funcionando |
+| Suíte de testes | — | **342 testes / 21 arquivos, todos verdes** | ✅ nenhuma matemática mudou |
+
+A causa dominante do sintoma original (custo fixo do CLAUDE.md em toda sessão)
+está **resolvida**. O que resta é só custo *variável* (tarefas de UI no App.jsx),
+já mitigado pelas âncoras de região (C2).
+
+### 6.2 Os 4 lotes da C4 cobriram todos os blocos elegíveis do App.jsx?
+
+**Quase — sobraram dois blocos elegíveis** pelo critério do próprio plano (código
+que já vive **fora** do componente `App()`, sem closure sobre estado/refs). O
+componente começa na linha ~3.481; tudo acima (~3.400 linhas / ~193KB) é global:
+
+| Bloco global remanescente | Linhas (aprox.) | Tamanho | GATE |
+|---|---|---|---|
+| **Componentes React do Dashboard/Copiloto** — `AnalysisTab`, `AnalyticsWidget`, `KpiCard`, `GroupingModal`, `FieldPanel`, `FilterCard*`, cards de Segmentos/Clusters/Goal Seek, quadrantes, labels de gráfico | ~1.860 | ~115KB | lógica já em `analytics.js` (GATE `analytics.test.js`); render sem GATE (validação visual) |
+| **Helpers puros diversos** — parse de CSV do wizard (`parseCSV`, `detectDelimiter`, `detectDecimalSep`, `parseTemporalKey`, `suggestVarType`...), grafo de fluxo (`buildFlowGraph`, `validateFlow`, `exportDiagnosticCSV`), células AS IS (`computeAsIsCells` & cia.), `buildProjectJSONChunks`, matching do Lens | ~750 | ~35KB | `asIsPreview.test.js`, `projectSave.test.js` (parciais) |
+| Componentes de infra (`BuildBadge`, `ComputeEngineBadge`, `SidecarTestPanel`, `PerfDebugPanel`, `SimIndicators`) | ~730 | ~40KB | nenhum |
+
+Todo o resto do App.jsx (~11.100 linhas, da linha ~3.481 em diante) é estado,
+handlers e JSX **acoplados por closure** ao componente — inelegível sem
+refatoração real (parametrização), que o plano descarta por risco × ganho. Ou
+seja: **o piso do App.jsx na arquitetura atual é ~11 mil linhas.**
+
+### 6.3 Veredito: vale rodar mais algum lote?
+
+**Um, sim — depois disso, ponto ótimo.**
+
+- **Lote 5 (recomendado)** — extrair os componentes React do Dashboard/Copiloto
+  (~1.860 linhas) para um `src/dashboardComponents.jsx`. É o maior bloco coeso
+  restante, todo prop-driven (zero closure); tarefas da aba Dashboard passariam a
+  carregar ~115KB em vez de pescar em 891KB. Movimentação literal; validação =
+  `npm test` + conferência visual da aba Dashboard.
+- **Lote 6 (opcional, ganho pequeno)** — os helpers puros diversos (~750 linhas).
+  Só vale se embutido de carona numa sessão que já toque esses domínios; como
+  sessão dedicada, o ganho (~35KB) não paga o risco de churn.
+- **Não vale**: extrair os componentes de infra (~730 linhas, uso raro) ou
+  qualquer coisa de dentro do `App()` — aí é refatoração arquitetural, alto risco
+  contra 16 GATEs, ganho de contexto marginal.
+
+**Prompt do lote 5 — Componentes do Dashboard**:
+```
+Sessão C4 (lote 5 — Componentes React do Dashboard) do plano
+docs/wiki/Contexto-Claude.md. Extraia de src/App.jsx para um novo
+src/dashboardComponents.jsx os componentes React globais da aba Dashboard e dos
+cards do Copiloto (região "AnalysisTab e Widgets do Dashboard", linhas ~1572–3434):
+AnalysisTab, AnalyticsWidget, TextWidget, KpiCard, GroupingModal, FieldPanel,
+FieldWell, FilterCardRow, FilterCardsEditor, AWEmptyState, SeriesStylePanel,
+ChartBarLabel, ChartLineLabel, SegmentSparkline, SegmentFindingCard,
+SegmentInfoCard, SegmentOpportunityCard, DiagnosticsStrip, SegmentQuadrant,
+ClusterQuadrant, ClusterCard, GoalSeekFrontierChart, e helpers/constantes usados
+só por eles (AW_DRAG_MIME, CLUSTER_COLORS, clusterColor, fmtPP, getContrastColor,
+newFilterCard etc.). Leia docs/claude/Analytics-Workspace.md e
+docs/claude/Mapa-App.md antes. Regras: (1) movimentação literal — zero mudança de
+lógica/JSX; (2) App.jsx importa do módulo novo e re-exporta o que for preciso;
+(3) nenhum componente com closure sobre estado/refs do App() pode ser movido — se
+achar um, deixe e reporte; (4) npm test passa inalterado; (5) validação visual:
+npm run dev, abrir a aba Dashboard e conferir widgets/filtros/cards. Atualize o
+mapa de arquivos do CLAUDE.md (1 linha) e docs/claude/Mapa-App.md.
+```
+
+### 6.4 Deriva de documentação encontrada (corrigida neste rediagnóstico)
+
+- Contagens de linhas do CLAUDE.md (App.jsx/worker) estavam defasadas — corrigidas.
+- Status dos lotes 2–4 da C4 e da C5 neste documento estavam ⬜ — marcados ✅.
+- "Branch de desenvolvimento atual" no CLAUDE.md aponta para branch antiga; campo
+  fica obsoleto a cada PR — candidato a remoção numa poda futura.
