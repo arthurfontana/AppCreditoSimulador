@@ -1,8 +1,8 @@
-# Clusterização Contextual + Faixas de Risco — Plano de Execução (Épico FR)
+# Clusterização Contextual + Criar Faixas por Risco — Plano de Execução (Épico FR)
 
 > **Ordem de execução recomendada**: as duas cadeias são independentes e podem ser
 > intercaladas — **FR1 → FR2 → FR3** (escopo por nó da Clusterização) e
-> **FR4 → FR5 → FR6** (Faixas de Risco de variáveis contínuas). **FR7**
+> **FR4 → FR5 → FR6** (Criar Faixas por Risco de variáveis contínuas). **FR7**
 > (sincronização documental) é sempre a última.
 >
 > Referência normativa: esta página (DEC-FR-001..010 — **leia inteira antes de
@@ -24,8 +24,8 @@
 > 2. **`scope = null` (ou ausente) ⇒ comportamento byte-a-byte idêntico ao atual** em
 >    todos os caminhos tocados. As fixtures douradas H8 NÃO são regeneradas neste épico
 >    (se um GATE dourado falhar, pare e investigue — regra do CLAUDE.md).
-> 3. O tick de edição JAMAIS roteia para o sidecar (DEC-HX-007, regra de ouro). As
->    Faixas de Risco são **Classe A** (DEC-FR-004): browser/worker sempre, sidecar nunca.
+> 3. O tick de edição JAMAIS roteia para o sidecar (DEC-HX-007, regra de ouro). O
+>    Criar Faixas por Risco é **Classe A** (DEC-FR-004): browser/worker sempre, sidecar nunca.
 > 4. Todo número exibido vem de agregação exata sobre a base (nunca estimado); todo
 >    algoritmo é determinístico (mesma entrada ⇒ mesmo modelo, incl. seeds derivadas).
 > 5. Degradação/teto/aproximação sempre **declarada na UI**, nunca silenciosa (padrão P4
@@ -53,7 +53,7 @@ Clusterização (e uma delas transbordando para toda variável contínua):
    quer clusterizar **a população que efetivamente chega a um losango/Cineminha/Lens**
    — ex.: "agrupe por comportamento só as propostas que saem deste porte".
 
-2. **Faixas de Risco (FR4–FR6)** — variável contínua (ex.: faturamento presumido) hoje
+2. **Criar Faixas por Risco (FR4–FR6)** — variável contínua (ex.: faturamento presumido) hoje
    não funciona como dimensão de análise: o agrupamento é por valor exato, e bucketizar
    manualmente (Agrupamentos do Dashboard, `autoBuckets`) corta por tamanho de grupo,
    **não por risco** — "por que cortar em 200 mil e não em 300 mil?" fica sem resposta.
@@ -66,7 +66,7 @@ Clusterização (e uma delas transbordando para toda variável contínua):
 ### Filosofia (decisões de produto, 15/07/2026)
 - **Monotônico por padrão + toggle** (DEC-FR-005): faixas nascem defensáveis em comitê
   de crédito; o corte livre existe, mas é opt-in e declarado.
-- **Ferramenta própria + integrada** (DEC-FR-008): "📐 Faixas de Risco" é um botão
+- **Ferramenta própria + integrada** (DEC-FR-008): "📐 Criar Faixas por Risco" é um botão
   próprio do painel do Copiloto E um atalho dentro do form de Clusterização quando a
   dimensão escolhida é contínua. A variável derivada aparece na lista de Variáveis de
   Decisão (canvas e Dashboard) como qualquer coluna Filtro.
@@ -82,7 +82,7 @@ Clusterização (e uma delas transbordando para toda variável contínua):
 | DEC-FR-001 | Escopo por nó do cluster: `computeClusterSegments` ganha `(shapes, conns, scope)`; linhas do escopo saem de um walk compilado M8 **single-sourced no worker** (helper `resolveScopeRowMask` extraído do padrão de `discoverSegments`); `scope=null` ⇒ byte-idêntico a hoje |
 | DEC-FR-002 | UI do escopo: botão "🧩 Clusterizar aqui" nas toolbars de losango/Cineminha/Lens (mesmo padrão do "🔍 Descobrir aqui"); o modal exibe o escopo em TODOS os passos; painel lateral continua = global |
 | DEC-FR-003 | Modo profundo (sidecar H8) com escopo: a máscara de linhas (bitmask base64) viaja nos `params` do job `cluster_segments` — o walk de política NUNCA é portado ao Python; fallback ao worker clampado preserva o MESMO escopo |
-| DEC-FR-004 | Motor de Faixas de Risco: pré-bins por quantis ponderados por volume (≤ 50) + **programação dinâmica exata** maximizando IV (`computeIV` existente); métrica-alvo via `resolveRiskMetric` (DEC-SD-006); piso de volume por faixa (`minShare` 5%); k manual (2–7) ou automático por ganho marginal de IV; **Classe A — nunca roteia ao sidecar** |
+| DEC-FR-004 | Motor de Criar Faixas por Risco: pré-bins por quantis ponderados por volume (≤ 50) + **programação dinâmica exata** maximizando IV (`computeIV` existente); métrica-alvo via `resolveRiskMetric` (DEC-SD-006); piso de volume por faixa (`minShare` 5%); k manual (2–7) ou automático por ganho marginal de IV; **Classe A — nunca roteia ao sidecar** |
 | DEC-FR-005 | Monotonicidade: default = taxas monotônicas ao longo das faixas (direção detectada automaticamente, testando as duas); toggle "permitir faixas não monotônicas" libera a DP sem restrição, com selo declarado no resultado |
 | DEC-FR-006 | Valores não numéricos/vazios ⇒ banda "Sem valor" fora da otimização, sempre exibida (rótulo editável); parsing numérico com a MESMA semântica de `cellNum` do worker |
 | DEC-FR-007 | Persistência: `csvStore[csvId].rangeDefs[col]` (RangeDef — faixas semiabertas `[min, max)`) + coluna derivada dict-encoded (`columnTypes='decision'`, `varTypes='ordinal'`); `schemaVersion` 2.6 → 2.7; regra inviolável do CLAUDE.md aplicada na íntegra |
@@ -153,7 +153,7 @@ params, scopeCtx = null)`, onde `scopeCtx = {shapes, conns, scope:{nodeId}}`:
   resolvido — o usuário nunca recebe silenciosamente um cluster global quando pediu por
   nó.
 
-### DEC-FR-004 — Motor de Faixas de Risco (`computeRiskBands`, worker)
+### DEC-FR-004 — Motor de Criar Faixas por Risco (`computeRiskBands`, worker)
 
 Entrada: `{csvId, col, metric, k | autoK, monotonic, minShare, scope}`. Pipeline:
 
@@ -320,7 +320,7 @@ de escopo) · `docs/claude/Worker-Protocolo.md`.
 
 **Prompt**:
 ```
-Vamos à Sessão FR1 do épico Clusterização Contextual + Faixas de Risco, conforme
+Vamos à Sessão FR1 do épico Clusterização Contextual + Criar Faixas por Risco, conforme
 docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md (leia a página INTEIRA antes —
 DEC-FR-001 é normativa: helper, filtro pré-agregação, regra da seed e degradações
 estão decididos lá; não redecida nada). Antes de codar, leia
@@ -352,7 +352,7 @@ npm test completo. Releia o CLAUDE.md antes de propor.
 
 **Prompt**:
 ```
-Vamos à Sessão FR2 do épico Clusterização Contextual + Faixas de Risco, conforme
+Vamos à Sessão FR2 do épico Clusterização Contextual + Criar Faixas por Risco, conforme
 docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md (DEC-FR-002 é normativa — textos,
 posicionamento e declarações estão decididos lá). Pré-requisito: FR1 já entregue
 (handler aceita shapes/conns/scope). Em src/App.jsx: adicione "🧩 Clusterizar aqui"
@@ -389,7 +389,7 @@ DEC-FR-002. Nenhuma mudança de motor — npm test inalterado. Releia o CLAUDE.m
 
 **Prompt**:
 ```
-Vamos à Sessão FR3 do épico Clusterização Contextual + Faixas de Risco, conforme
+Vamos à Sessão FR3 do épico Clusterização Contextual + Criar Faixas por Risco, conforme
 docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md (DEC-FR-003 é normativa — formato
 da máscara, teto, validação e semântica de fallback estão decididos lá; o walk de
 política JAMAIS vai para o Python). Leia antes:
@@ -405,7 +405,7 @@ paridade pytest. Rode npm test e os tests_python. Releia o CLAUDE.md antes de pr
 
 ---
 
-### Sessão FR4 — Motor de Faixas de Risco (`computeRiskBands`) 🏷️ [OPUS]
+### Sessão FR4 — Motor de Criar Faixas por Risco (`computeRiskBands`) 🏷️ [OPUS]
 
 **Documentação**: esta página (DEC-FR-004/005/006/010) ·
 `docs/claude/Copiloto-Segmentos.md` (`resolveRiskMetric`, `computeIV`) ·
@@ -432,7 +432,7 @@ FR1 SE ela já existir — senão, entregue `resolveScopeRowMask` aqui e a FR1 o
 
 **Prompt**:
 ```
-Vamos à Sessão FR4 do épico Clusterização Contextual + Faixas de Risco, conforme
+Vamos à Sessão FR4 do épico Clusterização Contextual + Criar Faixas por Risco, conforme
 docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md (leia a página INTEIRA;
 DEC-FR-004, 005, 006 e 010 são normativas — pipeline, RangeModel, constantes,
 regras de erro e desempate estão decididos lá; não redecida nada). Leia antes
@@ -476,7 +476,7 @@ completo inalterado nos demais arquivos. Releia o CLAUDE.md antes de propor.
 
 **Prompt**:
 ```
-Vamos à Sessão FR5 do épico Clusterização Contextual + Faixas de Risco, conforme
+Vamos à Sessão FR5 do épico Clusterização Contextual + Criar Faixas por Risco, conforme
 docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md (DEC-FR-007 e DEC-FR-009 são
 normativas — RangeDef, semântica [min,max), ordinal, bump de schemaVersion e o reuso
 dos propagadores de refs estão decididos lá). Use os skills persistencia-projeto e
@@ -492,7 +492,7 @@ persistência) antes de propor.
 
 ---
 
-### Sessão FR6 — UI das Faixas de Risco + integração com o cluster 🏷️ [SONNET]
+### Sessão FR6 — UI de Criar Faixas por Risco + integração com o cluster 🏷️ [SONNET]
 
 **Documentação**: esta página (DEC-FR-005/008/009/010) ·
 `docs/claude/Copiloto-Clusterizacao.md` (UI do clusterModal — o padrão visual).
@@ -501,7 +501,7 @@ persistência) antes de propor.
 botão de toolbar fica de fora e entra quando FR1 chegar.)
 
 **O que vai entregar**:
-- Botão "📐 Faixas de Risco" no painel do Copiloto (ao lado de "🧩 Clusterizar
+- Botão "📐 Criar Faixas por Risco" no painel do Copiloto (ao lado de "🧩 Clusterizar
   Segmentos") + "📐 Faixas aqui" nas 3 toolbars (se FR1 entregue); `rangeModal`
   (`step:'form'|'loading'|'result'|'save'|'saved'`, ref espelho `rangeModalR`):
   - **form**: base, coluna (só as que passam em `isContinuousColumn`, com aviso
@@ -525,7 +525,7 @@ botão de toolbar fica de fora e entra quando FR1 chegar.)
 
 **Prompt**:
 ```
-Vamos à Sessão FR6 do épico Clusterização Contextual + Faixas de Risco, conforme
+Vamos à Sessão FR6 do épico Clusterização Contextual + Criar Faixas por Risco, conforme
 docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md (DEC-FR-005, 008, 009 e 010 são
 normativas — passos do modal, textos de declaração, selo de monotonia, IV vs.
 ivUniform e o fluxo returnTo do cluster estão decididos lá; não redecida nada).
@@ -564,7 +564,7 @@ skill persistencia-projeto que nada novo de topo ficou de fora. npm test inalter
 
 **Prompt**:
 ```
-Vamos à Sessão FR7 (final) do épico Clusterização Contextual + Faixas de Risco,
+Vamos à Sessão FR7 (final) do épico Clusterização Contextual + Criar Faixas por Risco,
 conforme docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md. Sincronização
 documental mecânica — NADA de código. Atualize: CLAUDE.md (checklist de persistência
 com rangeDefs, schemaVersion 2.7, tabela de GATEs com riskBands/rangeVar, ref

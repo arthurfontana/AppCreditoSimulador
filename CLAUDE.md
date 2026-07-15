@@ -171,7 +171,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Descoberta de Segmentos (Copiloto Sessão 10/11/12) | `docs/claude/Copiloto-Segmentos.md` |
 | PolicyIR — JSON canônico da política (Copiloto Sessão 0) | `docs/claude/Copiloto-PolicyIR.md` |
 | Clusterização de Segmentos + Variável de Cluster | `docs/claude/Copiloto-Clusterizacao.md` |
-| Cluster Contextual (escopo por nó) + Faixas de Risco de contínuas (Épico FR — planejado) | `docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md` |
+| Cluster Contextual (escopo por nó) + Criar Faixas por Risco de contínuas (Épico FR — planejado) | `docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md` |
 | Bibliotecas (Cineminha e Políticas) | `docs/claude/Bibliotecas.md` |
 | Domínio Exibido ("Configurar nó") | `docs/claude/Dominio-Exibido.md` |
 | Decision Lens (populações M10, fluxo no motor) | `docs/claude/Decision-Lens.md` |
