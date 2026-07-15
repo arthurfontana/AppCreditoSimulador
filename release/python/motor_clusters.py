@@ -31,6 +31,7 @@ Reusa a infraestrutura de decodificação/semântica JS do motor_segmentos.py (m
 pasta): Csv (store M3 → colunas), views trimadas com merge, seq_sum/_bincount_seq,
 chave UTF-16.
 """
+import base64
 import datetime
 import importlib.util
 import os
@@ -71,11 +72,16 @@ def _fnv1a32_utf16(s):
     return h
 
 
-def cluster_seed_of(csv_id, dims, k, feature_ids, n_rows):
-    """Seed derivada do dataset + params (§16) — espelho de clusterSeedOf (worker)."""
-    return _fnv1a32_utf16("\x1e".join([
+def cluster_seed_of(csv_id, dims, k, feature_ids, n_rows, scope_node_id=None):
+    """Seed derivada do dataset + params (§16) — espelho de clusterSeedOf (worker).
+    DEC-FR-001: o escopo por nó entra na seed APENAS quando presente (global = seed
+    atual, fixtures douradas H8 intactas)."""
+    parts = [
         str(csv_id), "\x1f".join(dims), str(k), "\x1f".join(feature_ids), str(n_rows),
-    ]))
+    ]
+    if scope_node_id is not None:
+        parts.append("scope:" + str(scope_node_id))
+    return _fnv1a32_utf16("\x1e".join(parts))
 
 
 def mulberry32(seed):
@@ -123,15 +129,22 @@ def _has_metric_col(csv, col_type):
     return False
 
 
-def _group_rows(csv, dims_idx):
+def _group_rows(csv, dims_idx, in_rows=None):
     """Grupo = tupla de valores TRIMADOS das dims, ids em ordem de 1ª aparição na
-    base (≡ Map de inserção do JS). Devolve (gid_por_linha, tuplas_por_grupo)."""
+    base (≡ Map de inserção do JS). Devolve (gid_por_linha, tuplas_por_grupo).
+
+    DEC-FR-003 — escopo por nó: `in_rows` (índices ASCENDENTES das linhas no escopo)
+    restringe a formação e a ordenação dos grupos à subpopulação. Sem ele (global), o
+    caminho é byte-idêntico ao anterior. `gid_row` fica na dimensão das linhas
+    consideradas (n global ou len(in_rows) escopado)."""
     views = [csv.view(i, trim=True) for i in dims_idx]
     gid = views[0][1].astype(np.int64, copy=True)
     for d in range(1, len(views)):
         vals_d, codes_d = views[d]
         gid = gid * max(1, len(vals_d)) + codes_d
         _u, gid = np.unique(gid, return_inverse=True)  # densifica (evita overflow)
+    if in_rows is not None:
+        gid = gid[in_rows]  # só as linhas do escopo formam grupo (ordem preservada)
     uniq, first, inv = np.unique(gid, return_index=True, return_inverse=True)
     order = np.argsort(first, kind="stable")
     rank = np.empty(len(uniq), dtype=np.int64)
@@ -140,7 +153,9 @@ def _group_rows(csv, dims_idx):
     first_rows = first[order]
     tuples = []
     for g in range(len(uniq)):
-        r0 = int(first_rows[g])
+        # `first[g]` indexa a sequência considerada (subset do escopo quando in_rows);
+        # mapeia de volta à linha real da base para ler o valor da tupla.
+        r0 = int(in_rows[int(first_rows[g])]) if in_rows is not None else int(first_rows[g])
         tuples.append([views[d][0][int(views[d][1][r0])] for d in range(len(views))])
     return gid_row, tuples
 
@@ -273,6 +288,16 @@ def compute_cluster_model(store_raw, params, progress_cb=None):
         "features": [], "clusters": [], "quality": None,
     }
 
+    # ── Escopo por nó no MODO PROFUNDO (DEC-FR-003) ────────────────────────────
+    # O walk de política JAMAIS é portado ao Python: recebemos SÓ a máscara de linhas
+    # (bitmask little-endian base64 em `params.rowMask`, resolvida no worker) + o
+    # `params.scope` para o rótulo e o componente de seed. `model.scope` é campo aditivo
+    # (só existe quando escopado — espelho do worker, fixtures douradas globais intactas).
+    scope = params.get("scope")
+    scope_node_id = scope.get("nodeId") if isinstance(scope, dict) and scope.get("nodeId") else None
+    if scope_node_id is not None:
+        model["scope"] = {"nodeId": scope_node_id, "label": scope.get("label")}
+
     store_raw = store_raw or {}
     csvs = {cid: Csv(raw or {}) for cid, raw in store_raw.items()}
     csv_id = params.get("csvId") if params.get("csvId") in csvs else None
@@ -298,10 +323,36 @@ def compute_cluster_model(store_raw, params, progress_cb=None):
         model["error"] = "no_dims"
         return model
 
+    # Máscara de escopo: valida o csvId (o walk elegeu o mesmo winner que o modal) e o
+    # rowCount contra o dataset — mismatch ⇒ ERRO de job (o router faz fallback ao worker
+    # clampado com o MESMO escopo, DEC-FR-003). `in_rows` = índices ascendentes das linhas
+    # do escopo; escopo vazio ⇒ no_rows DECLARADO (com model.scope já preenchido).
+    in_rows = None
+    rm = params.get("rowMask")
+    if rm is not None:
+        if rm.get("csvId") != csv_id:
+            raise ValueError(
+                "rowMask csvId mismatch: %r vs %r" % (rm.get("csvId"), csv_id))
+        rm_rows = rm.get("rowCount")
+        if int(rm_rows if rm_rows is not None else -1) != n_rows:
+            raise ValueError(
+                "rowMask rowCount mismatch: %r vs %d" % (rm_rows, n_rows))
+        bits = np.unpackbits(
+            np.frombuffer(base64.b64decode(rm.get("maskB64") or ""), dtype=np.uint8),
+            bitorder="little")
+        row_mask = np.zeros(n_rows, dtype=bool)
+        m = min(n_rows, len(bits))
+        row_mask[:m] = bits[:m].astype(bool)
+        in_rows = np.nonzero(row_mask)[0]
+        if len(in_rows) == 0:
+            model["error"] = "no_rows"
+            return model
+
     _progress(0.1)
 
-    # ── Agregação por grupo (ordem de 1ª aparição na base) ─────────────────────
-    gid_row, tuples = _group_rows(csv, [csv.headers.index(c) for c in dims])
+    # ── Agregação por grupo (ordem de 1ª aparição na base; escopo por nó filtra
+    # ANTES da agregação — DEC-FR-003) ─────────────────────────────────────────
+    gid_row, tuples = _group_rows(csv, [csv.headers.index(c) for c in dims], in_rows)
     n_g = len(tuples)
     qty = csv.metric_array("qty")
     altas = csv.metric_array("qtdAltas")
@@ -309,6 +360,16 @@ def compute_cluster_model(store_raw, params, progress_cb=None):
     inad_r = csv.metric_array("inadReal")
     inad_i = csv.metric_array("inadInferida")
     dec = _decision_codes(csv)
+    if in_rows is not None:
+        # Restringe todos os vetores por-linha à subpopulação (mesma ordem ascendente que
+        # o JS percorre) — daí em diante o motor é o MESMO, sobre menos linhas.
+        qty = qty[in_rows]
+        altas = altas[in_rows]
+        altas_inf = altas_inf[in_rows]
+        inad_r = inad_r[in_rows]
+        inad_i = inad_i[in_rows]
+        if dec is not None:
+            dec = dec[in_rows]
 
     g_qty = _bincount_seq(gid_row, qty, n_g)
     g_altas = _bincount_seq(gid_row, altas, n_g)
@@ -399,7 +460,7 @@ def compute_cluster_model(store_raw, params, progress_cb=None):
     def _seed_for(k_val):
         if params.get("seed") is not None:
             return int(params["seed"]) & _M32
-        return cluster_seed_of(csv_id, dims, k_val, feat_ids, n_rows)
+        return cluster_seed_of(csv_id, dims, k_val, feat_ids, n_rows, scope_node_id)
 
     if method == "hierarchical" and sk_ok:
         from sklearn.cluster import AgglomerativeClustering
@@ -502,6 +563,8 @@ def compute_cluster_model(store_raw, params, progress_cb=None):
     mix_by_cluster = None
     if mix_col is not None:
         mvals, mcodes = csv.view(csv.headers.index(mix_col), trim=True)
+        if in_rows is not None:
+            mcodes = mcodes[in_rows]  # alinha ao gid_row/qty já restritos ao escopo
         ki = gid_to_kept[gid_row]
         mask = ki >= 0
         c_row = assign[ki[mask]]

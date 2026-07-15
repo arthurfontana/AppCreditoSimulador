@@ -3941,6 +3941,43 @@ function resolveScopeRowMask(shapes, conns, csvStore, scopeNodeId) {
   return masks;
 }
 
+// DEC-FR-003 — empacota uma máscara de linhas (Uint8Array de 0/1) num bitmask
+// LITTLE-ENDIAN (bit da linha r no byte r>>3, posição r&7, LSB primeiro) em base64.
+// É o formato que viaja nos `params.rowMask` do job profundo da Clusterização: o
+// worker resolve o walk (resolveScopeRowMask) e só a MÁSCARA vai ao Python — o walk de
+// política JAMAIS é portado ao sidecar. motor_clusters.py lê com np.unpackbits(
+// bitorder='little'). Simétrico a unpackRowMaskB64 (usado pelo fallback do worker).
+function packRowMaskB64(mask) {
+  const n = mask ? mask.length : 0;
+  const bytes = new Uint8Array((n + 7) >> 3);
+  for (let r = 0; r < n; r++) if (mask[r]) bytes[r >> 3] |= (1 << (r & 7));
+  let binary = '';
+  const CHUNK = 0x8000; // evita estourar a pilha do String.fromCharCode em bases grandes
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return typeof btoa === 'function' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
+}
+
+// Inverso de packRowMaskB64 — bitmask little-endian base64 → Uint8Array de 0/1 de
+// `rowCount` linhas. Usado SÓ pelo fallback do worker (alias `cluster_segments`), que
+// reusa a MESMA máscara já resolvida para o sidecar (não re-caminha o grafo) e preserva
+// o escopo declarado (DEC-FR-003).
+function unpackRowMaskB64(maskB64, rowCount) {
+  let bytes;
+  if (typeof atob === 'function') {
+    const binary = atob(maskB64 || '');
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  } else {
+    bytes = new Uint8Array(Buffer.from(maskB64 || '', 'base64'));
+  }
+  const n = rowCount | 0;
+  const mask = new Uint8Array(n);
+  for (let r = 0; r < n; r++) mask[r] = (bytes[r >> 3] >> (r & 7)) & 1;
+  return mask;
+}
+
 // ESTÁGIO 1 — descoberta. Devolve os candidatos crus (kind 'deviation' | 'het') + o `ctx`
 // compartilhado (agregados do escopo, dispersão por linha, bins de nível 1, coders) que os
 // estágios 2/3 reusam sem reler a base. Escopo global (`scope == null`) ⇒ todas as linhas;
@@ -5126,7 +5163,15 @@ function computeClusterSegments(csvStore, params = {}, scopeCtx = null) {
   const scopeNodeId = scopeCtx && scopeCtx.scope && scopeCtx.scope.nodeId ? scopeCtx.scope.nodeId : null;
   const scopeShapes = scopeCtx && Array.isArray(scopeCtx.shapes) ? scopeCtx.shapes : [];
   const scopeConns = scopeCtx && Array.isArray(scopeCtx.conns) ? scopeCtx.conns : [];
-  const masks = scopeNodeId ? resolveScopeRowMask(scopeShapes, scopeConns, csvStore, scopeNodeId) : null;
+  // Máscara: normalmente resolvida pelo walk (FR1); no fallback do modo profundo
+  // (FR3, DEC-FR-003) o chamador injeta a máscara JÁ resolvida (`scopeCtx.masks`, por
+  // csvId) — a MESMA que foi ao sidecar — para não re-caminhar o grafo e garantir escopo
+  // byte-idêntico entre os dois executores.
+  const masks = scopeNodeId
+    ? ((scopeCtx.masks && typeof scopeCtx.masks === 'object')
+        ? scopeCtx.masks
+        : resolveScopeRowMask(scopeShapes, scopeConns, csvStore, scopeNodeId))
+    : null;
   if (scopeNodeId) {
     const scopeLabel = (scopeCtx.scope.label != null)
       ? scopeCtx.scope.label
@@ -6811,6 +6856,39 @@ function handleMessage(e) {
     return;
   }
 
+  // DEC-FR-003 — Máscara de escopo por nó para o MODO PROFUNDO (sidecar) da
+  // Clusterização. O walk de política é single-sourced no worker (resolveScopeRowMask,
+  // FR1) e JAMAIS é portado ao Python: aqui produzimos o bitmask little-endian base64
+  // que viaja nos `params.rowMask` do job `cluster_segments` — o sidecar só FILTRA
+  // linhas, nunca conhece shapes/conns (mesmo espírito da DEC-GS-005). `csvId` = o do
+  // modal (o csv do fluxo que contém o nó); ausente ⇒ maior população NO ESCOPO (mesma
+  // resolução de winner de computeClusterSegments).
+  if (type === 'COMPUTE_SCOPE_MASK') {
+    const { shapes = null, conns = [], scope = null, csvId = null } = e.data;
+    const scopeNodeId = scope && scope.nodeId ? scope.nodeId : null;
+    const masks = resolveScopeRowMask(Array.isArray(shapes) ? shapes : [], conns, workerCsvStore, scopeNodeId);
+    let cid = (csvId != null && workerCsvStore[csvId]) ? csvId : null;
+    if (!cid) {
+      let best = -1;
+      for (const id of Object.keys(workerCsvStore || {})) {
+        const m = masks[id];
+        let pop = 0;
+        if (m) {
+          const qi = segColIdxs(workerCsvStore[id]).qty;
+          const n = rowCount(workerCsvStore[id]);
+          for (let r = 0; r < n; r++) if (m[r]) pop += qi >= 0 ? (cellNum(workerCsvStore[id], r, qi) || 0) : 1;
+        }
+        if (pop > best) { best = pop; cid = id; }
+      }
+    }
+    const csv = cid ? workerCsvStore[cid] : null;
+    const rc = csv ? rowCount(csv) : 0;
+    const mask = cid ? masks[cid] : null;
+    const maskB64 = mask ? packRowMaskB64(mask) : '';
+    self.postMessage({ type: 'SCOPE_MASK_RESULT', csvId: cid, rowCount: rc, maskB64 });
+    return;
+  }
+
   // Execução Híbrida H8 — Clusterização de Segmentos (baseline browser, Classe B
   // dentro dos tetos). O handler CLAMPA os params aos tetos declarados (paridade
   // total, P4): o motor em si é livre de teto — é o mesmo algoritmo que roda sem
@@ -6831,7 +6909,18 @@ function handleMessage(e) {
   // + o aviso "concluído no modo browser" (fallbackNoticeText, H6) — padrão H7.
   if (type === 'cluster_segments') {
     const { params = {} } = e.data;
-    const clusterModel = computeClusterSegments(workerCsvStore, clampClusterParamsForBrowser(params));
+    // DEC-FR-003: o fallback do modo profundo PRESERVA o escopo. Quando o job carrega
+    // `scope` + `rowMask` (resolvidos antes via COMPUTE_SCOPE_MASK — a MESMA máscara que
+    // foi ao sidecar), decodificamos e rodamos clampado sobre a MESMA subpopulação, nunca
+    // um cluster global silencioso quando o usuário pediu por nó. Sem esses campos (job
+    // global), o caminho é byte-idêntico ao de antes.
+    let scopeCtx = null;
+    const rm = params.rowMask;
+    if (params.scope && params.scope.nodeId && rm && rm.maskB64 != null && rm.csvId != null) {
+      const mask = unpackRowMaskB64(rm.maskB64, rm.rowCount | 0);
+      scopeCtx = { scope: params.scope, masks: { [rm.csvId]: mask } };
+    }
+    const clusterModel = computeClusterSegments(workerCsvStore, clampClusterParamsForBrowser(params), scopeCtx);
     self.postMessage({ type: 'CLUSTER_SEGMENTS_RESULT', clusterModel });
     return;
   }
@@ -6915,6 +7004,8 @@ export {
   clusterSeedOf,
   clusterMulberry32,
   resolveScopeRowMask,
+  packRowMaskB64,
+  unpackRowMaskB64,
   buildSegmentRecommendations,
   buildSegmentRecommendationsPooled,
   segValidateMoves,

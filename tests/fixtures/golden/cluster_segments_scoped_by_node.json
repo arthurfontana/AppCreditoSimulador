@@ -1,0 +1,267 @@
+{
+  "name": "scoped_by_node",
+  "store": {
+    "b": {
+      "name": "b",
+      "headers": [
+        "GRP",
+        "SEG",
+        "__DECISAO_ORIGINAL",
+        "qty",
+        "qtdAltas",
+        "qtdAltasInfer",
+        "inadReal",
+        "inadInferida"
+      ],
+      "columnTypes": {
+        "GRP": "decision",
+        "SEG": "decision",
+        "qty": "qty",
+        "qtdAltas": "qtdAltas",
+        "qtdAltasInfer": "qtdAltasInfer",
+        "inadReal": "inadReal",
+        "inadInferida": "inadInferida"
+      },
+      "columns": {
+        "GRP": {
+          "kind": "dict",
+          "dict": [
+            "A",
+            "B"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAAAAAAAAAABAQEB"
+        },
+        "SEG": {
+          "kind": "dict",
+          "dict": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "b1",
+            "b2"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAABAQICAwMEBAUF"
+        },
+        "__DECISAO_ORIGINAL": {
+          "kind": "dict",
+          "dict": [
+            "APROVADO",
+            "REPROVADO"
+          ],
+          "encoding": "base64",
+          "dtype": "Uint8Array",
+          "length": 12,
+          "codes": "AAEAAQABAAEAAQAB"
+        },
+        "qty": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAAiUAAAAAAAABpQAAAAAAAoIlAAAAAAACAZkAAAAAAAMByQAAAAAAA4IVAAAAAAAAAdEAAAAAAAECFQAAAAAAAQH9AAAAAAABAf0AAAAAAAMCCQAAAAAAAAHlA"
+        },
+        "qtdAltas": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAADghUAAAAAAAAAAAAAAAAAAgIZAAAAAAAAAAAAAAAAAAIBxQAAAAAAAAAAAAAAAAADAckAAAAAAAAAAAAAAAAAAIHxAAAAAAAAAAAAAAAAAAEB/QAAAAAAAAAAA"
+        },
+        "qtdAltasInfer": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAADghUAAAAAAAAAAAAAAAAAAgIZAAAAAAAAAAAAAAAAAAIBxQAAAAAAAAAAAAAAAAADAckAAAAAAAAAAAAAAAAAAIHxAAAAAAAAAAAAAAAAAAEB/QAAAAAAAAAAA"
+        },
+        "inadReal": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAALEAAAAAAAAAAAAAAAAAAAC5AAAAAAAAAAAAAAAAAAIBhQAAAAAAAAAAAAAAAAADAYkAAAAAAAAAAAAAAAAAAgFZAAAAAAAAAAAAAAAAAAEBvQAAAAAAAAAAA"
+        },
+        "inadInferida": {
+          "kind": "num",
+          "encoding": "base64",
+          "length": 12,
+          "data": "AAAAAAAALEAAAAAAAAAAAAAAAAAAAC5AAAAAAAAAAAAAAAAAAIBhQAAAAAAAAAAAAAAAAADAYkAAAAAAAAAAAAAAAAAAgFZAAAAAAAAAAAAAAAAAAEBvQAAAAAAAAAAA"
+        }
+      },
+      "rowCount": 12
+    }
+  },
+  "params": {
+    "csvId": "b",
+    "dims": [
+      "SEG"
+    ],
+    "k": 2,
+    "scope": {
+      "nodeId": "pA",
+      "label": "Porte A"
+    },
+    "rowMask": {
+      "csvId": "b",
+      "rowCount": 12,
+      "maskB64": "/wA="
+    }
+  },
+  "expected": {
+    "version": "1.0",
+    "generatedAt": null,
+    "error": null,
+    "dataset": {
+      "csvId": "b",
+      "name": "b",
+      "rowCount": 12
+    },
+    "params": {
+      "csvId": "b",
+      "dims": [
+        "SEG"
+      ],
+      "k": 2,
+      "kRequested": 2,
+      "features": [
+        "approvalRate",
+        "inadReal",
+        "inadInferida"
+      ],
+      "seed": 1156885647,
+      "method": "kmeans",
+      "autoK": false,
+      "maxPoints": null
+    },
+    "ceilings": null,
+    "population": {
+      "qty": 4000,
+      "decidedQty": 4000,
+      "groupCount": 4,
+      "points": 4
+    },
+    "features": [
+      {
+        "id": "approvalRate",
+        "label": "Taxa de Aprovação (AS IS)",
+        "mean": 0.56,
+        "std": 0.2501999200639361,
+        "scopeRate": 0.56
+      },
+      {
+        "id": "inadReal",
+        "label": "Inad. Real",
+        "mean": 0.2602083333333333,
+        "std": 0.23979184766862557,
+        "scopeRate": 0.1595
+      },
+      {
+        "id": "inadInferida",
+        "label": "Inad. Inferida",
+        "mean": 0.2602083333333333,
+        "std": 0.23979184766862557,
+        "scopeRate": 0.1595
+      }
+    ],
+    "clusters": [
+      {
+        "id": "c1",
+        "size": 2,
+        "qty": 2000,
+        "share": 0.5,
+        "decidedQty": 2000,
+        "approvalRate": 0.31,
+        "inadReal": 0.5,
+        "inadInferida": 0.5,
+        "centroid": {
+          "approvalRate": 0.31,
+          "inadReal": 0.5,
+          "inadInferida": 0.5
+        },
+        "conditions": [
+          {
+            "col": "SEG",
+            "operator": "in",
+            "value": "s3, s4",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "SEG",
+            "values": [
+              {
+                "value": "s3",
+                "qty": 1000,
+                "share": 0.5
+              },
+              {
+                "value": "s4",
+                "qty": 1000,
+                "share": 0.5
+              }
+            ]
+          }
+        ],
+        "mix": null
+      },
+      {
+        "id": "c2",
+        "size": 2,
+        "qty": 2000,
+        "share": 0.5,
+        "decidedQty": 2000,
+        "approvalRate": 0.81,
+        "inadReal": 0.020422535211267606,
+        "inadInferida": 0.020422535211267606,
+        "centroid": {
+          "approvalRate": 0.81,
+          "inadReal": 0.020416666666666666,
+          "inadInferida": 0.020416666666666666
+        },
+        "conditions": [
+          {
+            "col": "SEG",
+            "operator": "in",
+            "value": "s1, s2",
+            "logic": "AND"
+          }
+        ],
+        "dims": [
+          {
+            "col": "SEG",
+            "values": [
+              {
+                "value": "s1",
+                "qty": 1000,
+                "share": 0.5
+              },
+              {
+                "value": "s2",
+                "qty": 1000,
+                "share": 0.5
+              }
+            ]
+          }
+        ],
+        "mix": null
+      }
+    ],
+    "quality": {
+      "method": "kmeans",
+      "inertia": 6.401853625164567,
+      "totalSS": 12000,
+      "explainedVariance": 0.999466512197903,
+      "iterations": 1,
+      "converged": true,
+      "silhouette": null
+    },
+    "scope": {
+      "nodeId": "pA",
+      "label": "Porte A"
+    }
+  }
+}
