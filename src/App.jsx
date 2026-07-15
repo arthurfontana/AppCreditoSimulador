@@ -4,12 +4,17 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 // Armazenamento colunar do csvStore (Otimização de Memória — Fase 1). O csvStore
 // guarda as bases vetorizadas (Float64Array + dictionary encoding); todo acesso a
 // célula passa pelo accessor abaixo, que também funciona sobre o legado string[][].
-import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, deriveClusterColumn, retypeColumn, codesCtorForDict, estimateColumnarRamBytes, estimateCsvStoreRamBytes, estimateCsvStoreRowCount, formatRamBytes, RAM_COMFORT_BYTES, ROW_COMFORT_COUNT } from "./columnar.js";
+import { buildColumnar, isColumnar, rowCount, cellStr, cellNum, getRow, distinctColValues, serializeCsvStore, deserializeCsvStore, buildCsvStoreMessage, METRIC_COL_TYPES, parseCSVToColumnarAsync, finalizeImportedColumns, deriveMappedDictColumn, deriveClusterColumn, deriveRangeColumn, retypeColumn, codesCtorForDict, estimateColumnarRamBytes, estimateCsvStoreRamBytes, estimateCsvStoreRowCount, formatRamBytes, RAM_COMFORT_BYTES, ROW_COMFORT_COUNT } from "./columnar.js";
 import { applyGoalSeekMoves } from "./goalSeek.js";
 import { applySimplifyCandidates } from "./policySimplify.js";
 // Variável de Cluster (interpretação da Clusterização H8 — vira coluna Filtro derivada,
 // editável, arrastável ao canvas). Módulo puro compartilhado (materialização em columnar.js).
 import { suggestClusterVarName, suggestClusterLabels, buildClusterDefFromModel, isClusterVar, renameClusterGroup, toggleValueInGroup, clusterMembershipTable, renameClusterColumnRefs, renameClusterLabelRefs } from "./clusterVar.js";
+// Variável de Faixas (interpretação do Criar Faixas por Risco — vira coluna Filtro ORDINAL
+// derivada, espelho exato da Variável de Cluster acima). Módulo puro compartilhado
+// (materialização deriveRangeColumn em columnar.js; propagação de refs REUSA
+// renameClusterColumnRefs/renameClusterLabelRefs, DEC-FR-009).
+import { suggestRangeVarName, buildRangeDefFromModel, formatBandLabel, isRangeVar, editRangeCuts, renameRangeBand } from "./rangeVar.js";
 // Execução Híbrida H4/H6 — ComputeRouter (fronteira única worker/sidecar, DEC-HX-002)
 // + funções puras de UX do motor (badge, degradação declarada, aviso de fallback).
 import { createComputeRouter, createWorkerProvider, createSidecarProvider, describeComputeBadge, describeCapabilitiesDetail, ceilingNotice, fallbackNoticeText, hashChunks } from "./computeRouter.js";
@@ -728,6 +733,85 @@ export const estConnLabelW = (s) => {
 };
 export const fmtQty = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : Number.isInteger(n) ? String(n) : n.toFixed(1);
 export const fmtPct = (v) => v === null ? "N/A" : `${(v * 100).toFixed(2)}%`;
+
+// ── Criar Faixas por Risco (DEC-FR-004/008) — aproximação em MAIN da detecção de
+// coluna contínua do worker (isContinuousColumn, mesmos tetos), só para filtrar/avisar
+// no formulário (dims do cluster, coluna do rangeModal) sem round-trip ao worker; a
+// palavra final é sempre do RangeModel (`not_numeric`), nunca escondida.
+const RANGE_MIN_DISTINCT_UI = 30, RANGE_MIN_PARSE_UI = 0.90;
+function isContinuousColumnUI(csv, col) {
+  if (!csv || col == null) return false;
+  if ((csv.columnTypes || {})[col] !== 'decision') return false;
+  const colIdx = (csv.headers || []).indexOf(col);
+  if (colIdx < 0) return false;
+  if (distinctColValues(csv, colIdx).length < RANGE_MIN_DISTINCT_UI) return false;
+  const n = rowCount(csv);
+  const qtyIdx = (csv.headers || []).findIndex(h => (csv.columnTypes || {})[h] === 'qty');
+  let totalQty = 0, okQty = 0;
+  for (let r = 0; r < n; r++) {
+    const q = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+    totalQty += q;
+    if (Number.isFinite(cellNum(csv, r, colIdx))) okQty += q;
+  }
+  return totalQty > 0 && (okQty / totalQty) >= RANGE_MIN_PARSE_UI;
+}
+
+// Cacheia a lista de colunas contínuas POR OBJETO csv (WeakMap — csvStore só troca a
+// referência quando os dados mudam de fato): evita repetir o scan O(linhas) de
+// isContinuousColumnUI por coluna a cada re-render do formulário (ex.: cada tecla do
+// piso de volume).
+const _continuousColsCache = new WeakMap();
+function continuousColumnsOf(csv) {
+  if (!csv) return [];
+  let cached = _continuousColsCache.get(csv);
+  if (!cached) {
+    cached = (csv.headers || []).filter(h => isContinuousColumnUI(csv, h));
+    _continuousColsCache.set(csv, cached);
+  }
+  return cached;
+}
+
+// Agregação O(distintos)-leve por faixa (label→{qty,rate}) sobre a def em edição, para
+// o "ao vivo" do rangeVarModal (DEC-FR-009) — mesma leveza de deriveRangeColumn, sem
+// duplicar a DP/IV do worker (isto só soma qty/num/den por rótulo já materializado).
+function computeBandLiveStats(csv, def) {
+  if (!csv || !def) return {};
+  const colData = deriveRangeColumn(csv, def);
+  const n = rowCount(csv);
+  const headers = csv.headers || [];
+  const typeIdx = (t) => headers.findIndex(h => (csv.columnTypes || {})[h] === t);
+  const qtyIdx = typeIdx('qty');
+  const metricId = def?.metric?.id === 'inadInferida' ? 'inadInferida' : 'inadReal';
+  const numIdx = typeIdx(metricId);
+  const denIdx = typeIdx(metricId === 'inadInferida' ? 'qtdAltasInfer' : 'qtdAltas');
+  const stats = {};
+  for (let r = 0; r < n; r++) {
+    const label = colData.dict[colData.codes[r]];
+    const s = stats[label] || (stats[label] = { qty: 0, num: 0, den: 0 });
+    s.qty += qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+    s.num += numIdx >= 0 ? (cellNum(csv, r, numIdx) || 0) : 0;
+    s.den += denIdx >= 0 ? (cellNum(csv, r, denIdx) || 0) : 0;
+  }
+  const totalQty = Object.values(stats).reduce((a, s) => a + s.qty, 0) || 1;
+  const out = {};
+  for (const [label, s] of Object.entries(stats)) {
+    out[label] = { qty: s.qty, share: s.qty / totalQty, rate: s.den > 0 ? s.num / s.den : null };
+  }
+  return out;
+}
+
+// Direção monotônica das taxas por faixa, em ordem (ignora nulls) — usada pelo selo
+// recalculado do rangeVarModal após edição de cortes (DEC-FR-009).
+function bandRatesMonotonicDir(rates) {
+  const vs = rates.filter(v => v != null);
+  if (vs.length < 2) return null;
+  let inc = true, dec = true;
+  for (let i = 1; i < vs.length; i++) {
+    if (vs[i] < vs[i - 1]) inc = false;
+    if (vs[i] > vs[i - 1]) dec = false;
+  }
+  return inc ? 'inc' : (dec ? 'dec' : null);
+}
 // Escapa texto para interpolação segura em HTML — usado pela exportação do Dashboard
 // (exportDashboardPDF) e pelos renderers da Documentação Automática (./policyDocRender.js,
 // que o importa daqui). Mantido em App.jsx por ser util geral compartilhado.
@@ -1721,6 +1805,17 @@ export default function App() {
   // Editor de Variável de Cluster (aberto pelo ✏️ no chip do painel) — efêmero.
   // null | {csvId, col, draft:ClusterDef, baseValuesByDim:{[dim]:string[]}, notice?, confirmDelete?}
   const [clusterVarModal, setClusterVarModal] = useState(null);
+  // Criar Faixas por Risco (Épico FR, DEC-FR-004/008/009/010) — efêmero (só a variável
+  // derivada persiste, via rangeDefs). Espelho do clusterModal.
+  // null | {step:'form'|'loading'|'result'|'save'|'saved', csvId, col, metric, k, autoK,
+  //         monotonic, minShare, model?, scope?: {nodeId,label}|null,
+  //         returnTo?: ClusterModalSnapshot|null (DEC-FR-008), compareMonotonicIv?,
+  //         save?, savedCol?, savedCsvId?}
+  const [rangeModal, setRangeModal] = useState(null);
+  // Editor de Variável de Faixas (✏️ no chip 📐 do painel) — efêmero. Espelho do
+  // clusterVarModal; `cutsDraft` guarda os textos dos cortes internos em edição.
+  // null | {csvId, col, draft:RangeDef, cutsDraft:string[], error, confirmDelete}
+  const [rangeVarModal, setRangeVarModal] = useState(null);
   // Decision Lens modal
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
@@ -1793,6 +1888,8 @@ export default function App() {
   const segmentDiscoveryModalR = useRef(segmentDiscoveryModal); useEffect(()=>{segmentDiscoveryModalR.current=segmentDiscoveryModal},[segmentDiscoveryModal]);
   const clusterModalR = useRef(clusterModal); useEffect(()=>{clusterModalR.current=clusterModal},[clusterModal]);
   const clusterVarModalR = useRef(clusterVarModal); useEffect(()=>{clusterVarModalR.current=clusterVarModal},[clusterVarModal]);
+  const rangeModalR = useRef(rangeModal); useEffect(()=>{rangeModalR.current=rangeModal},[rangeModal]);
+  const rangeVarModalR = useRef(rangeVarModal); useEffect(()=>{rangeVarModalR.current=rangeVarModal},[rangeVarModal]);
   const businessWidgetR = useRef(businessWidget); useEffect(()=>{businessWidgetR.current=businessWidget},[businessWidget]);
   const cinemaLibraryR  = useRef(cinemaLibrary);  useEffect(()=>{cinemaLibraryR.current=cinemaLibrary}, [cinemaLibrary]);
   const policyLibraryR  = useRef(policyLibrary);  useEffect(()=>{policyLibraryR.current=policyLibrary}, [policyLibrary]);
@@ -2045,6 +2142,31 @@ export default function App() {
         const { clusterModel } = e.data;
         setClusterModal(m => (m ? { ...m, step: 'result', model: clusterModel, deepRun: null,
           focusedId: clusterModel?.clusters?.[0]?.id ?? null } : m));
+      } else if (msgType === 'RISK_BANDS_RESULT') {
+        // Criar Faixas por Risco (Classe A, DEC-FR-004) — `reqTag` distingue o pedido
+        // PRINCIPAL da consulta-sombra "melhor monotônico" (DEC-FR-005, "ambos os IVs"
+        // com o toggle livre ligado).
+        const { rangeModel, reqTag } = e.data;
+        if (reqTag === 'compareMono') {
+          setRangeModal(m => (m ? { ...m, compareMonotonicIv: rangeModel?.error ? null : rangeModel.quality?.iv ?? null } : m));
+        } else {
+          setRangeModal(m => (m ? { ...m, step: 'result', model: rangeModel, compareMonotonicIv: null } : m));
+          // DEC-FR-005: toggle "permitir faixas não monotônicas" ligado ⇒ busca também a
+          // melhor solução monotônica só para comparação de IV (nunca substitui o resultado
+          // livre já exibido).
+          const cur = rangeModalR.current;
+          if (rangeModel && !rangeModel.error && cur && cur.monotonic === false) {
+            const scopeMsg = cur.scope ? { shapes: shapesR.current, conns: connsR.current, scope: { nodeId: cur.scope.nodeId } } : {};
+            workerRef.current?.postMessage({
+              type: 'COMPUTE_RISK_BANDS', reqTag: 'compareMono',
+              csvId: cur.csvId, col: cur.col, metric: cur.metric,
+              ...(cur.autoK ? { autoK: true } : { k: cur.k }),
+              monotonic: true,
+              ...(cur.minShare != null ? { minShare: cur.minShare } : {}),
+              ...scopeMsg,
+            });
+          }
+        }
       }
     };
     return () => { restoreWorkerPostMessage?.(); worker.terminate(); };
@@ -6432,6 +6554,212 @@ export default function App() {
     setClusterVarModal(null);
   };
 
+  // ── Criar Faixas por Risco (Épico FR, DEC-FR-004/005/008/009/010) ───────────────
+  // Abre o formulário (painel = global; toolbars "📐 Faixas aqui" = escopado por nó,
+  // DEC-FR-002/FR1; DEC-FR-008 do form do cluster manda `csvId/col/scope/returnTo`
+  // pré-preenchidos). Mesmo critério de csv default do clusterModal (maior nº de linhas).
+  const openRangeModal = (opts = {}) => {
+    const store = csvStoreR.current || {};
+    let csvId = opts.csvId || null, best = -1;
+    if (!csvId) {
+      for (const id of Object.keys(store)) {
+        const n = store[id]?.rowCount || 0;
+        if (n > best) { best = n; csvId = id; }
+      }
+    }
+    const rawScope = opts.scope || null;
+    const resolvedScope = (rawScope && rawScope.nodeId)
+      ? { nodeId: rawScope.nodeId, label: rawScope.label || shapesById.get(rawScope.nodeId)?.label || rawScope.nodeId }
+      : null;
+    setRangeModal({
+      step: 'form', csvId, col: opts.col || null,
+      metric: 'inadReal', k: 4, autoK: false, monotonic: true, minShare: null,
+      model: null, scope: resolvedScope, returnTo: opts.returnTo || null,
+      compareMonotonicIv: null,
+    });
+  };
+
+  // Classe A (DEC-FR-004): SEMPRE no worker, JAMAIS roteia ao sidecar — sem
+  // ComputeRouter/deep run, ao contrário da Clusterização.
+  const runRiskBands = () => {
+    const cur = rangeModalR.current;
+    if (!cur || !cur.csvId || !cur.col) return;
+    const scopeMsg = cur.scope
+      ? { shapes: shapesR.current, conns: connsR.current, scope: { nodeId: cur.scope.nodeId } }
+      : {};
+    setRangeModal(m => ({ ...m, step: 'loading', compareMonotonicIv: null }));
+    workerRef.current?.postMessage({
+      type: 'COMPUTE_RISK_BANDS', reqTag: 'primary',
+      csvId: cur.csvId, col: cur.col, metric: cur.metric,
+      ...(cur.autoK ? { autoK: true } : { k: cur.k }),
+      monotonic: cur.monotonic,
+      ...(cur.minShare != null ? { minShare: cur.minShare } : {}),
+      ...scopeMsg,
+    });
+  };
+
+  // Passo "Salvar como variável" — pré-preenche nome e rótulos por faixa (formatBandLabel),
+  // espelho de openClusterSaveStep.
+  const openRangeSaveStep = () => {
+    const cur = rangeModalR.current;
+    if (!cur || !cur.model || cur.model.error || !cur.csvId) return;
+    const headers = csvStoreR.current[cur.csvId]?.headers || [];
+    setRangeModal(m => ({
+      ...m, step: 'save',
+      save: {
+        varName: suggestRangeVarName(cur.model, headers),
+        labels: (cur.model.bands || []).map(b => b.label ?? formatBandLabel(b.min, b.max)),
+        unmatched: 'Sem valor',
+        error: null,
+      },
+    }));
+  };
+
+  // Materializa a variável (deriveRangeColumn) e insere a coluna + rangeDefs[col] no
+  // csvStore. DEC-FR-008: com `returnTo` (veio do form do cluster), volta direto ao
+  // form do cluster com a coluna derivada marcada no lugar da contínua — sem passar
+  // pelo passo `saved`.
+  const saveRangeVariable = () => {
+    const cur = rangeModalR.current;
+    if (!cur || !cur.model || !cur.csvId || !cur.save) return;
+    const { model, csvId, save } = cur;
+    const csv = csvStoreR.current[csvId];
+    if (!csv) return;
+    const varName = (save.varName || '').trim();
+    const labels = (save.labels || []).map(l => (l || '').trim());
+    const unmatched = (save.unmatched || '').trim() || 'Sem valor';
+    if (!varName) return setRangeModal(m => ({ ...m, save: { ...m.save, error: 'Dê um nome à variável.' } }));
+    if ((csv.headers || []).includes(varName))
+      return setRangeModal(m => ({ ...m, save: { ...m.save, error: `Já existe uma coluna "${varName}" nesta base.` } }));
+    if (labels.some(l => !l))
+      return setRangeModal(m => ({ ...m, save: { ...m.save, error: 'Toda faixa precisa de um rótulo.' } }));
+    if (new Set(labels).size !== labels.length)
+      return setRangeModal(m => ({ ...m, save: { ...m.save, error: 'Os rótulos das faixas devem ser distintos.' } }));
+
+    const def = buildRangeDefFromModel(model, { col: varName, csvId, labels, unmatchedLabel: unmatched, genId: uid });
+    const colData = deriveRangeColumn(csv, def);
+    setCsvStore(prev => {
+      const c = prev[csvId]; if (!c) return prev;
+      return {
+        ...prev,
+        [csvId]: {
+          ...c,
+          headers: [...c.headers, varName],
+          columns: { ...c.columns, [varName]: colData },
+          columnTypes: { ...(c.columnTypes || {}), [varName]: 'decision' },
+          varTypes: { ...(c.varTypes || {}), [varName]: 'ordinal' },
+          rangeDefs: { ...(c.rangeDefs || {}), [varName]: def },
+        },
+      };
+    });
+    if (cur.returnTo) {
+      setClusterModal({ ...cur.returnTo, dims: [...(cur.returnTo.dims || []), varName], contWarnCol: null });
+      setRangeModal(null);
+      return;
+    }
+    setRangeModal(m => ({ ...m, step: 'saved', savedCol: varName, savedCsvId: csvId }));
+  };
+
+  // ── Editor da Variável de Faixas (✏️ no chip 📐 do painel) ──────────────────────
+  const openRangeVarEdit = (csvId, col) => {
+    const csv = csvStoreR.current[csvId];
+    const def = csv?.rangeDefs?.[col];
+    if (!def) return;
+    const bands = def.bands || [];
+    const cutsDraft = bands.slice(0, -1).map(b => (b.max != null ? String(b.max) : ''));
+    setRangeVarModal({ csvId, col, draft: JSON.parse(JSON.stringify(def)), cutsDraft, error: null, confirmDelete: false });
+  };
+
+  // Aplica os cortes digitados (cutsDraft) via editRangeCuts (validação pura) — só
+  // atualiza o draft se todos os cortes forem válidos; senão mostra o erro.
+  const applyRangeCutsEdit = () => {
+    const cur = rangeVarModalR.current;
+    if (!cur) return;
+    const cuts = cur.cutsDraft.map(s => Number(String(s).replace(',', '.')));
+    const { def, error } = editRangeCuts(cur.draft, cuts);
+    if (error) return setRangeVarModal(m => ({ ...m, error }));
+    setRangeVarModal(m => ({ ...m, draft: def, error: null }));
+  };
+
+  // Salva a edição: re-materializa, renomeia coluna/rótulos e propaga referências por
+  // todas as abas — REUSA renameClusterColumnRefs/renameClusterLabelRefs (genéricas por
+  // nome de coluna/rótulo, DEC-FR-009).
+  const saveRangeVarEdit = () => {
+    const cur = rangeVarModalR.current;
+    if (!cur) return;
+    const { csvId, col: oldCol, draft } = cur;
+    const csv = csvStoreR.current[csvId];
+    if (!csv) return;
+    const origDef = csv.rangeDefs?.[oldCol];
+    const newCol = (draft.col || '').trim();
+    if (!newCol) return setRangeVarModal(m => ({ ...m, error: 'Dê um nome à variável.' }));
+    if (newCol !== oldCol && (csv.headers || []).includes(newCol))
+      return setRangeVarModal(m => ({ ...m, error: `Já existe uma coluna "${newCol}" nesta base.` }));
+    const labels = (draft.bands || []).map(b => (b.label || '').trim());
+    if (labels.some(l => !l)) return setRangeVarModal(m => ({ ...m, error: 'Toda faixa precisa de um rótulo.' }));
+    if (new Set(labels).size !== labels.length)
+      return setRangeVarModal(m => ({ ...m, error: 'Os rótulos das faixas devem ser distintos.' }));
+    const unmatchedLabel = (draft.unmatchedLabel || '').trim() || 'Sem valor';
+
+    const finalDef = {
+      ...draft, col: newCol, csvId, unmatchedLabel,
+      bands: (draft.bands || []).map((b, i) => ({ ...b, label: labels[i] })),
+    };
+    const colData = deriveRangeColumn(csv, finalDef);
+
+    // Mapa de rótulos renomeados (por id de faixa) para propagar às portas/domínios.
+    const labelMap = {};
+    for (const b of (origDef?.bands || [])) {
+      const nb = finalDef.bands.find(x => x.id === b.id);
+      if (nb && nb.label !== b.label) labelMap[b.label] = nb.label;
+    }
+    if (origDef && origDef.unmatchedLabel !== unmatchedLabel) labelMap[origDef.unmatchedLabel] = unmatchedLabel;
+
+    setCsvStore(prev => {
+      const c = prev[csvId]; if (!c) return prev;
+      const headers = c.headers.map(h => (h === oldCol ? newCol : h));
+      const columns = { ...c.columns }; if (newCol !== oldCol) delete columns[oldCol]; columns[newCol] = colData;
+      const columnTypes = { ...(c.columnTypes || {}) };
+      const varTypes = { ...(c.varTypes || {}) };
+      const rangeDefs = { ...(c.rangeDefs || {}) };
+      if (newCol !== oldCol) {
+        columnTypes[newCol] = columnTypes[oldCol] || 'decision'; delete columnTypes[oldCol];
+        varTypes[newCol] = varTypes[oldCol] || 'ordinal'; delete varTypes[oldCol];
+        delete rangeDefs[oldCol];
+      }
+      rangeDefs[newCol] = finalDef;
+      return { ...prev, [csvId]: { ...c, headers, columns, columnTypes, varTypes, rangeDefs } };
+    });
+
+    if (newCol !== oldCol || Object.keys(labelMap).length > 0) {
+      pushHistory();
+      applyRefTransformAllCanvases((shapes, conns) => {
+        let s = shapes, cn = conns;
+        if (newCol !== oldCol) { const t = renameClusterColumnRefs(s, cn, csvId, oldCol, newCol); s = t.shapes; cn = t.conns; }
+        if (Object.keys(labelMap).length > 0) { const t = renameClusterLabelRefs(s, cn, csvId, newCol, labelMap); s = t.shapes; cn = t.conns; }
+        return { shapes: s, conns: cn };
+      });
+    }
+    setRangeVarModal(null);
+  };
+
+  // Remove a variável de faixas (coluna + definição) — mesma degradação declarada de
+  // deleteClusterVariable.
+  const deleteRangeVariable = () => {
+    const cur = rangeVarModalR.current;
+    if (!cur) return;
+    const { csvId, col } = cur;
+    setCsvStore(prev => {
+      const c = prev[csvId]; if (!c) return prev;
+      const columns = { ...c.columns }; delete columns[col];
+      const columnTypes = { ...(c.columnTypes || {}) }; delete columnTypes[col];
+      const varTypes = { ...(c.varTypes || {}) }; delete varTypes[col];
+      const rangeDefs = { ...(c.rangeDefs || {}) }; delete rangeDefs[col];
+      return { ...prev, [csvId]: { ...c, headers: c.headers.filter(h => h !== col), columns, columnTypes, varTypes, rangeDefs } };
+    });
+    setRangeVarModal(null);
+  };
+
   // ── Documentação Automática — Copiloto Sessão 6 (DEC-IA-006) ─────────────────
   // "📄 Documentar política" abre o formulário de composição (toggle de domínios, cenários
   // a comparar, comparação estrutural); ao confirmar, `ir` é construído aqui (buildPolicyIR
@@ -6917,6 +7245,13 @@ export default function App() {
                   whiteSpace:"nowrap",fontWeight:600}}>
                 🧩 Clusterizar aqui
               </button>
+              <button onClick={()=>openRangeModal({scope:{nodeId:sel}})}
+                title="Criar faixas por risco na população que efetivamente chega a este Cineminha"
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #99f6e4",background:"#f0fdfa",
+                  color:"#0f766e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                📐 Faixas aqui
+              </button>
               <button onClick={()=>toggleShapeLock(sel)}
                 title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
                 style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
@@ -6972,6 +7307,13 @@ export default function App() {
                 whiteSpace:"nowrap",fontWeight:600}}>
               🧩 Clusterizar aqui
             </button>
+            <button onClick={()=>openRangeModal({scope:{nodeId:sel}})}
+              title="Criar faixas por risco na população que efetivamente chega a este losango"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #99f6e4",background:"#f0fdfa",
+                color:"#0f766e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              📐 Faixas aqui
+            </button>
             <button onClick={()=>toggleShapeLock(sel)}
               title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
               style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
@@ -7006,6 +7348,13 @@ export default function App() {
                 color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                 whiteSpace:"nowrap",fontWeight:600}}>
               🧩 Clusterizar aqui
+            </button>
+            <button onClick={()=>openRangeModal({scope:{nodeId:sel}})}
+              title="Criar faixas por risco na população que passa por este Decision Lens"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #99f6e4",background:"#f0fdfa",
+                color:"#0f766e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              📐 Faixas aqui
             </button>
             <button onClick={()=>toggleShapeLock(sel)}
               title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
@@ -7654,6 +8003,13 @@ export default function App() {
               onMouseLeave={e=>{e.currentTarget.style.background="#f5f3ff";e.currentTarget.style.borderColor="#ddd6fe";}}>
               <span style={{fontSize:16}}>🧩</span> Clusterizar Segmentos
             </button>
+            <button onClick={()=>openRangeModal()}
+              title="Descobre os cortes que maximizam a discriminação de inadimplência (binning supervisionado por IV/WoE) sobre uma coluna contínua — monotônico por padrão, materializa como variável de fluxo"
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #99f6e4",background:"#f0fdfa",color:"#0f766e",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#ccfbf1";e.currentTarget.style.borderColor="#5eead4";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="#f0fdfa";e.currentTarget.style.borderColor="#99f6e4";}}>
+              <span style={{fontSize:16}}>📐</span> Criar Faixas por Risco
+            </button>
             <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
             <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
             <input ref={libFileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onLibFileChange}/>
@@ -7730,9 +8086,13 @@ export default function App() {
               const filtered = q ? decisionVars.filter(({col})=>norm(col).includes(q)) : decisionVars;
               return filtered.length>0 ? filtered.map(({col,csvId})=>{
                 const isClu = isClusterVar(csvStore, csvId, col);
-                // Chip de cluster: tom roxo + 🧩 + ✏️ (editar regras/renomear); chip normal: âmbar.
+                const isRng = !isClu && isRangeVar(csvStore, csvId, col);
+                // Chip de cluster: tom roxo + 🧩; chip de faixas: tom teal + 📐; ambos com
+                // ✏️ (editar regras/renomear); chip normal: âmbar.
                 const base = isClu
                   ? {border:"#ddd6fe",bg:"#f5f3ff",hoverBg:"#ede9fe",hoverBorder:"#c4b5fd",color:"#6d28d9",icon:"🧩"}
+                  : isRng
+                  ? {border:"#99f6e4",bg:"#f0fdfa",hoverBg:"#ccfbf1",hoverBorder:"#5eead4",color:"#0f766e",icon:"📐"}
                   : {border:"#fde68a",bg:"#fef9c3",hoverBg:"#fef3c7",hoverBorder:"#f59e0b",color:"#92400e",icon:"◇"};
                 return (
                 <div key={`${csvId}-${col}`}
@@ -7753,6 +8113,17 @@ export default function App() {
                       onTouchStart={(e)=>{e.stopPropagation();}}
                       onClick={(e)=>{e.stopPropagation();openClusterVarEdit(csvId,col);}}
                       style={{width:20,height:20,borderRadius:6,border:"1px solid #ddd6fe",background:"#fff",color:"#7c3aed",
+                        cursor:"pointer",fontSize:11,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,padding:0,lineHeight:1}}>
+                      ✏️
+                    </button>
+                  )}
+                  {isRng && (
+                    <button
+                      title="Editar variável de faixas (renomear, mover cortes)"
+                      onMouseDown={(e)=>{e.stopPropagation();}}
+                      onTouchStart={(e)=>{e.stopPropagation();}}
+                      onClick={(e)=>{e.stopPropagation();openRangeVarEdit(csvId,col);}}
+                      style={{width:20,height:20,borderRadius:6,border:"1px solid #99f6e4",background:"#fff",color:"#0f766e",
                         cursor:"pointer",fontSize:11,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,padding:0,lineHeight:1}}>
                       ✏️
                     </button>
@@ -12046,7 +12417,7 @@ export default function App() {
 
       {/* ═══════════════ CLUSTER MODAL — Clusterização de Segmentos (Execução Híbrida H8) ═══════════════ */}
       {clusterModal&&(()=>{
-        const { step, csvId, dims, k, autoK, method, model, focusedId, deepRun, fallbackNotice, scope } = clusterModal;
+        const { step, csvId, dims, k, autoK, method, model, focusedId, deepRun, fallbackNotice, scope, contWarnCol } = clusterModal;
         const upd = (patch) => setClusterModal(m => ({ ...m, ...patch }));
         // H8 — tetos declarados (paridade total, P4): dims > 3 / k > 8 e os extras
         // sklearn (k automático por silhueta, hierárquico) só quando o sidecar está
@@ -12062,9 +12433,12 @@ export default function App() {
           ? csv.headers.filter(h => (csv.columnTypes||{})[h] === 'decision')
           : [];
         const dimsCapped = !deepOk && dims.length >= CLU_BROWSER_DIMS;
-        const toggleDim = (col) => upd({
-          dims: dims.includes(col) ? dims.filter(d => d !== col) : [...dims, col],
-        });
+        // DEC-FR-008: a Clusterização NUNCA binariza contínua silenciosamente — marcar
+        // uma dimensão contínua não a adiciona; exibe o aviso + "📐 Gerar faixas" abaixo.
+        const toggleDim = (col) => {
+          if (!dims.includes(col) && isContinuousColumnUI(csv, col)) { upd({ contWarnCol: col }); return; }
+          upd({ dims: dims.includes(col) ? dims.filter(d => d !== col) : [...dims, col], contWarnCol: null });
+        };
         return (
           <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
             zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -12122,7 +12496,7 @@ export default function App() {
                     {Object.keys(csvStore).length>1 && (
                       <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
                         Base de dados
-                        <select value={csvId} onChange={e=>upd({csvId:e.target.value,dims:[]})}
+                        <select value={csvId} onChange={e=>upd({csvId:e.target.value,dims:[],contWarnCol:null})}
                           style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
                           {Object.entries(csvStore).map(([id,c])=>(<option key={id} value={id}>{c.name||id}</option>))}
                         </select>
@@ -12150,6 +12524,20 @@ export default function App() {
                               </button>
                             );
                           })}
+                        </div>
+                      )}
+                      {contWarnCol && (
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",
+                          marginTop:8,padding:"9px 12px",borderRadius:9,background:"#fffbeb",border:"1px solid #fde68a"}}>
+                          <div style={{fontSize:11.5,color:"#92400e",lineHeight:1.5,flex:1,minWidth:180}}>
+                            <b>{contWarnCol}</b> é coluna contínua — o cluster agrupa por valor exato. Crie faixas
+                            primeiro para usá-la como dimensão.
+                          </div>
+                          <button onClick={()=>openRangeModal({csvId, col: contWarnCol, scope, returnTo: clusterModal})}
+                            style={{padding:"7px 12px",borderRadius:8,border:"none",background:"#0f766e",color:"#fff",
+                              cursor:"pointer",fontSize:11.5,fontWeight:700,fontFamily:"inherit",flexShrink:0,whiteSpace:"nowrap"}}>
+                            📐 Gerar faixas desta coluna
+                          </button>
                         </div>
                       )}
                     </div>
@@ -12504,6 +12892,455 @@ export default function App() {
                   </button>
                   <button onClick={saveClusterVarEdit}
                     style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#7c3aed",color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                    ✓ Salvar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ RANGE MODAL — Criar Faixas por Risco (Épico FR) ═══════════════ */}
+      {rangeModal&&(()=>{
+        const { step, csvId, col, metric, k, autoK, monotonic, minShare, model, scope, compareMonotonicIv } = rangeModal;
+        const upd = (patch) => setRangeModal(m => ({ ...m, ...patch }));
+        const csv = csvId ? csvStore[csvId] : null;
+        const availableCols = continuousColumnsOf(csv);
+        const maxRate = model && !model.error ? Math.max(...model.bands.map(b => b.rate || 0), model.unmatched?.rate || 0, 1e-9) : 1;
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth: step==='result' ? 780 : 520,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#99f6e4",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>📐</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Criar Faixas por Risco</h2>
+                    <p style={{fontSize:11,color:"#0f766e"}}>
+                      Cortes que maximizam a discriminação de inadimplência (binning supervisionado por IV)
+                    </p>
+                    <span style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:4,
+                      padding:"2px 9px",borderRadius:20,
+                      background:scope?"#ccfbf1":"#f1f5f9",border:`1px solid ${scope?"#5eead4":"#e2e8f0"}`,
+                      color:scope?"#0f766e":"#64748b",fontSize:10.5,fontWeight:600,whiteSpace:"nowrap"}}>
+                      📐 População: {scope ? `chegando em "${scope.label}"` : "base inteira"}
+                    </span>
+                  </div>
+                </div>
+                <button onClick={()=>setRangeModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1}}>
+                {step==='form' && (!csvId ? (
+                  <div style={{padding:"24px 0",textAlign:"center",color:"#94a3b8",fontSize:12.5,lineHeight:1.6}}>
+                    Nenhuma base carregada — importe um CSV para criar faixas por risco.
+                  </div>
+                ) : (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <p style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
+                      Escolha uma coluna contínua (≥30 valores distintos, ≥90% do volume numérico) — o motor
+                      testa cortes e escolhe os que melhor separam a inadimplência (IV/WoE), monotônicos por
+                      padrão. Sempre no navegador, sem teto de linhas (Classe A).
+                    </p>
+                    {Object.keys(csvStore).length>1 && (
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Base de dados
+                        <select value={csvId} onChange={e=>upd({csvId:e.target.value,col:null})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          {Object.entries(csvStore).map(([id,c])=>(<option key={id} value={id}>{c.name||id}</option>))}
+                        </select>
+                      </label>
+                    )}
+                    <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                      Coluna contínua
+                      {availableCols.length===0 ? (
+                        <div style={{fontSize:11.5,color:"#94a3b8",marginTop:4}}>
+                          Nenhuma coluna Filtro desta base tem ≥30 valores distintos com ≥90% do volume numérico.
+                        </div>
+                      ) : (
+                        <select value={col||''} onChange={e=>upd({col:e.target.value||null})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value="">— selecione —</option>
+                          {availableCols.map(h=>(<option key={h} value={h}>{h}</option>))}
+                        </select>
+                      )}
+                    </label>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Métrica-alvo
+                        <select value={metric} onChange={e=>upd({metric:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          <option value="inadReal">Inad. Real</option>
+                          <option value="inadInferida">Inad. Inferida</option>
+                        </select>
+                      </label>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Nº de faixas (k)
+                        <select value={autoK?'auto':k} onChange={e=>e.target.value==='auto'?upd({autoK:true}):upd({autoK:false,k:Number(e.target.value)})}
+                          style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit"}}>
+                          {[2,3,4,5,6,7].map(v=>(<option key={v} value={v}>{v}</option>))}
+                          <option value="auto">Automático (ganho marginal de IV)</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11.5,color:"#475569",fontWeight:600,cursor:"pointer"}}>
+                      <input type="checkbox" checked={monotonic} onChange={e=>upd({monotonic:e.target.checked})}/>
+                      Faixas monotônicas
+                      <span style={{fontWeight:400,color:"#94a3b8"}} title="Padrão de scorecard/governança: taxas sempre crescentes ou sempre decrescentes ao longo das faixas — defensável em comitê de crédito. Desligar libera padrões em 'U' genuínos, mas o resultado é declarado não monotônico.">
+                        (padrão de comitê de crédito — desligue para permitir padrões em U)
+                      </span>
+                    </label>
+                    <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                      Piso de volume por faixa <span style={{fontWeight:400,color:"#94a3b8"}}>(opcional — default 5%)</span>
+                      <input type="number" min={0} max={0.4} step={0.01} value={minShare??''}
+                        onChange={e=>upd({minShare:e.target.value===''?null:Number(e.target.value)})}
+                        placeholder="0.05"
+                        style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                    </label>
+                    <button onClick={runRiskBands} disabled={!col}
+                      style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
+                        background:!col?"#e2e8f0":"#0f766e",color:!col?"#94a3b8":"#fff",
+                        cursor:!col?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>
+                      📐 Gerar faixas
+                    </button>
+                  </div>
+                ))}
+
+                {step==='loading' && (
+                  <div style={{padding:"40px 0",textAlign:"center",color:"#0f766e",fontSize:13}}>
+                    Calculando os cortes que maximizam a discriminação de inadimplência…
+                  </div>
+                )}
+
+                {step==='result' && model && (model.error ? (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <div style={{padding:"14px 16px",borderRadius:10,background:"#fffbeb",border:"1px solid #fde68a",
+                      fontSize:12.5,color:"#92400e",lineHeight:1.6}}>
+                      {model.error==='no_rows' && 'A base selecionada (ou a população do escopo) não tem linhas.'}
+                      {model.error==='not_numeric' && 'Menos de 90% do volume desta coluna é numérico-parseável — não dá para cortar por risco.'}
+                      {model.error==='no_contrast' && 'A base não tem contraste de inadimplência (só bons ou só maus) — o IV não se aplica.'}
+                      {model.error==='infeasible' && 'O piso de volume por faixa (ou a monotonia exigida) não deixa solução com este k — reduza k ou o piso.'}
+                    </div>
+                    <button onClick={()=>setRangeModal(m=>({...m,step:'form'}))}
+                      style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",
+                        color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",alignSelf:"flex-start"}}>
+                      ← Ajustar parâmetros
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                      <div style={{fontSize:12,color:"#64748b"}}>
+                        <b>{model.bands.length}</b> faixa{model.bands.length!==1?'s':''} de <b>{model.col}</b>
+                        {model.params?.autoK && model.quality?.autoKReason && <> · {model.quality.autoKReason}</>}
+                      </div>
+                      <button onClick={()=>setRangeModal(m=>({...m,step:'form'}))}
+                        style={{padding:"6px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                          color:"#475569",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                        ← Ajustar parâmetros
+                      </button>
+                    </div>
+
+                    {/* Selo de monotonia (DEC-FR-005) + IV vs ivUniform (DEC-FR-010) */}
+                    <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
+                      <span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 11px",borderRadius:20,
+                        fontSize:11.5,fontWeight:700,
+                        background: model.quality.monotonic ? "#f0fdf4" : "#fffbeb",
+                        border: `1px solid ${model.quality.monotonic ? "#bbf7d0" : "#fde68a"}`,
+                        color: model.quality.monotonic ? "#15803d" : "#92400e"}}>
+                        {model.quality.monotonic==='inc' && '📈 monotônico crescente'}
+                        {model.quality.monotonic==='dec' && '📉 monotônico decrescente'}
+                        {!model.quality.monotonic && '⚠ não monotônico (permitido pelo usuário)'}
+                      </span>
+                      <span style={{fontSize:11.5,color:"#0f766e",fontWeight:600}}>
+                        IV: {model.quality.iv?.toFixed(3)} <span style={{color:"#94a3b8",fontWeight:400}}>(corte uniforme com o mesmo k: {model.quality.ivUniform?.toFixed(3)})</span>
+                      </span>
+                      {!monotonic && compareMonotonicIv!=null && (
+                        <span style={{fontSize:11.5,color:"#92400e",fontWeight:600}}>
+                          melhor monotônico: IV {compareMonotonicIv.toFixed(3)}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* CTA — transformar o resultado numa variável de fluxo arrastável */}
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",
+                      padding:"10px 14px",borderRadius:10,background:"#f0fdfa",border:"1px solid #99f6e4"}}>
+                      <div style={{fontSize:11.5,color:"#0f766e",lineHeight:1.5,flex:1,minWidth:220}}>
+                        <b>Usar no fluxo?</b> Salve estas faixas como uma variável Filtro ordinal — vira um chip
+                        arrastável ao canvas (e você renomeia/edita cortes depois).
+                      </div>
+                      <button onClick={openRangeSaveStep}
+                        style={{padding:"9px 16px",borderRadius:9,border:"none",background:"#0f766e",color:"#fff",
+                          cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit",flexShrink:0}}>
+                        ➕ Salvar como variável
+                      </button>
+                    </div>
+
+                    {/* Tabela de faixas + mini-barras SVG inline (sem Recharts — ADR-003) */}
+                    <div style={{border:"1px solid #f1f5f9",borderRadius:10,overflow:"hidden"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+                        <thead>
+                          <tr style={{background:"#f8fafc"}}>
+                            <th style={{textAlign:"left",padding:"6px 10px",color:"#94a3b8",fontWeight:600}}>Faixa</th>
+                            <th style={{textAlign:"right",padding:"6px 8px",color:"#94a3b8",fontWeight:600}}>Volume</th>
+                            <th style={{textAlign:"left",padding:"6px 8px",color:"#94a3b8",fontWeight:600,width:120}}>Share</th>
+                            <th style={{textAlign:"left",padding:"6px 8px",color:"#94a3b8",fontWeight:600,width:120}}>Taxa</th>
+                            <th style={{textAlign:"right",padding:"6px 10px",color:"#94a3b8",fontWeight:600}}>WoE</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {model.bands.map(b=>(
+                            <tr key={b.id} style={{borderTop:"1px solid #f8fafc"}}>
+                              <td style={{padding:"6px 10px",color:"#334155",fontWeight:600}}>{b.label}</td>
+                              <td style={{padding:"6px 8px",textAlign:"right",color:"#475569"}}>{fmtQty(b.qty)}</td>
+                              <td style={{padding:"6px 8px"}}>
+                                <svg width="100" height="10"><rect x={0} y={0} width={Math.max(2,100*(b.share||0))} height={10} rx={2} fill="#5eead4"/></svg>
+                              </td>
+                              <td style={{padding:"6px 8px"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                  <svg width="70" height="10"><rect x={0} y={0} width={Math.max(2,70*((b.rate||0)/maxRate))} height={10} rx={2} fill="#f97316"/></svg>
+                                  <span style={{color:"#475569"}}>{fmtPct(b.rate)}</span>
+                                </div>
+                              </td>
+                              <td style={{padding:"6px 10px",textAlign:"right",color:"#94a3b8"}}>{b.woe?.toFixed(3)}</td>
+                            </tr>
+                          ))}
+                          {model.unmatched && (
+                            <tr style={{borderTop:"1px solid #f8fafc",background:"#fffbeb"}}>
+                              <td style={{padding:"6px 10px",color:"#92400e",fontWeight:600}}>Sem valor</td>
+                              <td style={{padding:"6px 8px",textAlign:"right",color:"#92400e"}}>{fmtQty(model.unmatched.qty)}</td>
+                              <td style={{padding:"6px 8px",color:"#92400e"}}>{fmtPct(model.unmatched.share)}</td>
+                              <td style={{padding:"6px 8px",color:"#92400e"}}>{fmtPct(model.unmatched.rate)}</td>
+                              <td style={{padding:"6px 10px"}}></td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+
+                {/* ── Passo "Salvar como variável" ── */}
+                {step==='save' && model && rangeModal.save && (()=>{
+                  const save = rangeModal.save;
+                  const updSave = (patch)=>setRangeModal(m=>({...m,save:{...m.save,...patch,error:null}}));
+                  const setLabel = (i,val)=>updSave({labels:save.labels.map((l,j)=>j===i?val:l)});
+                  return (
+                    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                      <div style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
+                        A variável vira uma coluna Filtro ORDINAL na base <b>{csvStore[csvId]?.name||csvId}</b> com um
+                        valor por faixa. Você pode renomear tudo agora e editar cortes/rótulos depois pelo ✏️ no painel.
+                      </div>
+                      {scope && (
+                        <div style={{fontSize:11,color:"#0f766e",lineHeight:1.5,padding:"7px 10px",borderRadius:8,background:"#f0fdfa",border:"1px solid #99f6e4"}}>
+                          📐 As faixas foram aprendidas na população do nó "{scope.label}"; a variável classifica a
+                          base inteira por esses cortes.
+                        </div>
+                      )}
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Nome da variável
+                        <input value={save.varName} onChange={e=>updSave({varName:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"8px 10px",borderRadius:8,border:"1.5px solid #99f6e4",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </label>
+                      <div>
+                        <div style={{fontSize:11.5,color:"#475569",fontWeight:600,marginBottom:6}}>Rótulo de cada faixa</div>
+                        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                          {model.bands.map((b,i)=>(
+                            <div key={b.id} style={{display:"flex",alignItems:"center",gap:8}}>
+                              <input value={save.labels[i]??''} onChange={e=>setLabel(i,e.target.value)}
+                                style={{flex:1,padding:"6px 9px",borderRadius:7,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                              <span style={{fontSize:10.5,color:"#94a3b8",flexShrink:0,minWidth:110,textAlign:"right"}}>
+                                {fmtQty(b.qty)} · {fmtPct(b.rate)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                        Rótulo para valores não parseáveis/vazios
+                        <input value={save.unmatched} onChange={e=>updSave({unmatched:e.target.value})}
+                          style={{width:"100%",marginTop:4,padding:"7px 9px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                      </label>
+                      {save.error && (
+                        <div style={{fontSize:11.5,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"7px 10px"}}>{save.error}</div>
+                      )}
+                      <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+                        <button onClick={()=>setRangeModal(m=>({...m,step:'result',save:null}))}
+                          style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                          ← Voltar
+                        </button>
+                        <button onClick={saveRangeVariable}
+                          style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#0f766e",color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                          ✓ Criar variável
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ── Confirmação de criação ── */}
+                {step==='saved' && (
+                  <div style={{display:"flex",flexDirection:"column",gap:14,padding:"8px 0"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,padding:"14px 16px",borderRadius:12,background:"#f0fdf4",border:"1px solid #bbf7d0"}}>
+                      <span style={{fontSize:24}}>✅</span>
+                      <div style={{fontSize:12.5,color:"#166534",lineHeight:1.5}}>
+                        Variável <b>{rangeModal.savedCol}</b> criada! Ela já aparece em <b>Variáveis de Decisão</b> no
+                        painel — arraste ao canvas. Edite ou renomeie a qualquer momento pelo ✏️ no chip.
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                      <button onClick={()=>{const cid=rangeModal.savedCsvId,cc=rangeModal.savedCol;setRangeModal(null);openRangeVarEdit(cid,cc);}}
+                        style={{padding:"9px 16px",borderRadius:9,border:"1px solid #99f6e4",background:"#f0fdfa",color:"#0f766e",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                        ✏️ Editar regras
+                      </button>
+                      <button onClick={()=>setRangeModal(null)}
+                        style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#0f766e",color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
+                        Concluir
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════════ EDITOR DE VARIÁVEL DE FAIXAS (renomear + mover cortes) ═══════════════ */}
+      {rangeVarModal&&(()=>{
+        const { csvId, col, draft, cutsDraft, error, confirmDelete } = rangeVarModal;
+        const upd = (patch)=>setRangeVarModal(m=>({...m,...patch,error:null}));
+        const setDraft = (nd)=>upd({draft:nd});
+        const setLabel = (bid,val)=>setDraft(renameRangeBand(draft,bid,val));
+        const csv = csvStore[csvId];
+        const stats = csv ? computeBandLiveStats(csv, draft) : {};
+        const dir = bandRatesMonotonicDir(draft.bands.map(b=>stats[b.label]?.rate ?? null));
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:640,maxHeight:"92vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+              {/* Header */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 24px",
+                borderBottom:"1px solid #e2e8f0",flexShrink:0,background:"linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#99f6e4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>📐</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Editar Variável de Faixas</h2>
+                    <p style={{fontSize:11,color:"#0f766e"}}>Renomeie a variável, mova os cortes e edite os rótulos</p>
+                  </div>
+                </div>
+                <button onClick={()=>setRangeVarModal(null)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",cursor:"pointer",
+                    fontSize:15,color:"#64748b",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+
+              <div style={{padding:"18px 24px",overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:16}}>
+                <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                  Nome da variável
+                  <input value={draft.col} onChange={e=>setDraft({...draft,col:e.target.value})}
+                    style={{width:"100%",marginTop:4,padding:"8px 10px",borderRadius:8,border:"1.5px solid #99f6e4",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                </label>
+
+                <span style={{display:"inline-flex",alignSelf:"flex-start",alignItems:"center",gap:5,padding:"5px 11px",borderRadius:20,
+                  fontSize:11.5,fontWeight:700,
+                  background: dir ? "#f0fdf4" : "#fffbeb", border: `1px solid ${dir ? "#bbf7d0" : "#fde68a"}`,
+                  color: dir ? "#15803d" : "#92400e"}}>
+                  {dir==='inc' && '📈 monotônico crescente'}
+                  {dir==='dec' && '📉 monotônico decrescente'}
+                  {!dir && '⚠ não monotônico'}
+                </span>
+
+                <div>
+                  <div style={{fontSize:11.5,color:"#475569",fontWeight:600,marginBottom:6}}>Pontos de corte ({cutsDraft.length})</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                    {cutsDraft.map((c,i)=>(
+                      <input key={i} value={c} onChange={e=>upd({cutsDraft:cutsDraft.map((v,j)=>j===i?e.target.value:v)})}
+                        style={{width:100,padding:"6px 9px",borderRadius:7,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                    ))}
+                    <button onClick={applyRangeCutsEdit}
+                      style={{padding:"7px 12px",borderRadius:8,border:"1px solid #99f6e4",background:"#f0fdfa",color:"#0f766e",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                      Aplicar cortes
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{fontSize:11.5,color:"#475569",fontWeight:600,marginBottom:6}}>Faixas ({draft.bands.length})</div>
+                  <div style={{border:"1px solid #f1f5f9",borderRadius:10,overflow:"hidden"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+                      <thead>
+                        <tr style={{background:"#f8fafc"}}>
+                          <th style={{textAlign:"left",padding:"6px 10px",color:"#94a3b8",fontWeight:600}}>Rótulo</th>
+                          <th style={{textAlign:"left",padding:"6px 8px",color:"#94a3b8",fontWeight:600}}>Intervalo</th>
+                          <th style={{textAlign:"right",padding:"6px 8px",color:"#94a3b8",fontWeight:600}}>Volume</th>
+                          <th style={{textAlign:"right",padding:"6px 10px",color:"#94a3b8",fontWeight:600}}>Taxa</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {draft.bands.map(b=>{
+                          const s = stats[b.label];
+                          return (
+                            <tr key={b.id} style={{borderTop:"1px solid #f8fafc"}}>
+                              <td style={{padding:"5px 8px"}}>
+                                <input value={b.label} onChange={e=>setLabel(b.id,e.target.value)}
+                                  style={{width:"100%",padding:"5px 8px",borderRadius:6,border:"1.5px solid #e2e8f0",fontSize:11.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                              </td>
+                              <td style={{padding:"5px 8px",color:"#94a3b8",whiteSpace:"nowrap"}}>{formatBandLabel(b.min,b.max)}</td>
+                              <td style={{padding:"5px 8px",textAlign:"right",color:"#475569"}}>{s?fmtQty(s.qty):'—'}</td>
+                              <td style={{padding:"5px 10px",textAlign:"right",color:"#475569"}}>{s?fmtPct(s.rate):'—'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                  Rótulo para valores não parseáveis/vazios
+                  <input value={draft.unmatchedLabel} onChange={e=>setDraft({...draft,unmatchedLabel:e.target.value})}
+                    style={{width:"100%",marginTop:4,padding:"7px 9px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                </label>
+
+                {error && (
+                  <div style={{fontSize:11.5,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"7px 10px"}}>{error}</div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,padding:"12px 24px",borderTop:"1px solid #e2e8f0",flexShrink:0}}>
+                {confirmDelete ? (
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:11.5,color:"#b91c1c"}}>Excluir a variável?</span>
+                    <button onClick={deleteRangeVariable}
+                      style={{padding:"7px 12px",borderRadius:8,border:"none",background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:11.5,fontWeight:700,fontFamily:"inherit"}}>Sim, excluir</button>
+                    <button onClick={()=>upd({confirmDelete:false})}
+                      style={{padding:"7px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>Cancelar</button>
+                  </div>
+                ) : (
+                  <button onClick={()=>upd({confirmDelete:true})}
+                    style={{padding:"8px 12px",borderRadius:8,border:"1px solid #fecaca",background:"#fff1f2",color:"#e11d48",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"inherit"}}>
+                    🗑 Excluir variável
+                  </button>
+                )}
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setRangeVarModal(null)}
+                    style={{padding:"9px 16px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit"}}>
+                    Cancelar
+                  </button>
+                  <button onClick={saveRangeVarEdit}
+                    style={{padding:"9px 18px",borderRadius:9,border:"none",background:"#0f766e",color:"#fff",cursor:"pointer",fontSize:12.5,fontWeight:700,fontFamily:"inherit"}}>
                     ✓ Salvar
                   </button>
                 </div>
