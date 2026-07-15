@@ -105,6 +105,7 @@ export const RESULT_TYPE = {
   segment_discovery: 'SEGMENT_DISCOVERY_RESULT', // H7 — fallback do worker responde igual
   COMPUTE_CLUSTER_SEGMENTS: 'CLUSTER_SEGMENTS_RESULT',
   cluster_segments: 'CLUSTER_SEGMENTS_RESULT',   // H8 — fallback do worker responde igual
+  COMPUTE_SCOPE_MASK: 'SCOPE_MASK_RESULT',        // FR3 — máscara de escopo p/ o job profundo
   // GS6 — usadas por App.jsx via `router.run(...)` (Classe A: sempre worker, mas reusa o
   // mesmo mecanismo de correlação por Promise do WorkerProvider) nos dois passos que
   // CERCAM o job só-sidecar `goal_seek_deep` (catálogo antes, validação depois).

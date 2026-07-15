@@ -145,6 +145,54 @@ def test_determinismo_sem_tetos():
     assert a["params"]["k"] <= a["population"]["points"]
 
 
+# ── Escopo por nó no modo profundo (DEC-FR-003) — máscara + validação de rowCount ─
+
+def _scoped_fixture():
+    for p in _GOLDEN_FILES:
+        if "scoped_by_node.json" in p:
+            return _load(p)
+    return None
+
+
+def test_escopo_por_node_com_rowmask():
+    # A fixtura escopada carrega params.scope + params.rowMask (bitmask base64). O motor
+    # filtra as linhas ANTES da agregação e reproduz o dourado do worker número a número
+    # (o walk de política JAMAIS foi portado — o Python só recebeu a máscara). model.scope
+    # é campo aditivo, presente SÓ no escopado.
+    pytest.importorskip("numpy")
+    fx = _scoped_fixture()
+    assert fx is not None, "fixture escopada ausente — rode o Vitest do golden antes"
+    assert "rowMask" in fx["params"] and "scope" in fx["params"]
+    actual = _run_engine(fx)
+    _assert_equal(fx["expected"], actual, fx["name"])
+    assert actual["scope"] == fx["params"]["scope"]
+
+
+def test_rowmask_rowcount_mismatch_erro():
+    # rowCount da máscara ≠ dataset ⇒ ERRO de job (o router faz fallback ao worker
+    # clampado com o MESMO escopo, DEC-FR-003) — nunca um cluster silenciosamente errado.
+    pytest.importorskip("numpy")
+    fx = _scoped_fixture()
+    assert fx is not None
+    params = dict(fx["params"])
+    params["rowMask"] = dict(params["rowMask"])
+    params["rowMask"]["rowCount"] = int(params["rowMask"]["rowCount"]) + 1
+    with pytest.raises(Exception):
+        sidecar.run_task("cluster_segments", fx["store"], {"params": params})
+
+
+def test_rowmask_csvid_mismatch_erro():
+    # csvId da máscara ≠ csv eleito ⇒ ERRO de job (mesma semântica de fallback declarado).
+    pytest.importorskip("numpy")
+    fx = _scoped_fixture()
+    assert fx is not None
+    params = dict(fx["params"])
+    params["rowMask"] = dict(params["rowMask"])
+    params["rowMask"]["csvId"] = params["rowMask"]["csvId"] + "_x"
+    with pytest.raises(Exception):
+        sidecar.run_task("cluster_segments", fx["store"], {"params": params})
+
+
 # ── Extras sklearn (silhueta/k automático, hierárquico) — nunca no dourado ───────
 
 def test_autok_com_silhueta():

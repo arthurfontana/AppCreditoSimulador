@@ -6091,6 +6091,10 @@ export default function App() {
   // roteia `cluster_segments` pelo ComputeRouter: sidecar (motor_clusters.py, dataset
   // por hash — DEC-HX-006) com fallback transparente ao worker CLAMPADO + aviso.
   const CLU_BROWSER_DIMS = 3, CLU_BROWSER_K = 8;
+  // FR3 (DEC-FR-003) — teto da máscara de escopo no modo profundo: acima dele o bitmask
+  // base64 pesaria demais no POST local (10M linhas ≈ 1,7MB base64; 20M ≈ 3,4MB) e o
+  // escopo profundo cai DECLARADAMENTE no worker clampado, com o MESMO escopo.
+  const FR_MASK_MAX_ROWS = 20_000_000;
   const clusterAbortRef = useRef(null);
 
   // scope = {nodeId} (toolbar "🧩 Clusterizar aqui") ou null/ausente (painel = global,
@@ -6130,22 +6134,19 @@ export default function App() {
       : {};
     const isDeep = cur.dims.length > CLU_BROWSER_DIMS || cur.k > CLU_BROWSER_K ||
       cur.autoK || cur.method !== 'kmeans';
-    // Modo profundo (sidecar) ainda não sabe escopo por nó (chega na FR3, DEC-FR-003) —
-    // escopado sempre roda no navegador, com a degradação DECLARADA (P4), nunca silenciosa.
-    if (!isDeep || cur.scope || !computeRouterRef.current) {
-      setClusterModal(m => ({
-        ...m, step: 'loading', deepRun: null,
-        fallbackNotice: (isDeep && cur.scope)
-          ? 'Escopo por nó ainda roda só no navegador, com os tetos declarados (até 3 dimensões, k ≤ 8, k-means) — o Motor Python ganha suporte a escopo por nó numa sessão futura.'
-          : null,
-      }));
+    // Modo raso (dentro dos tetos) ou sem router: worker direto, com escopo por nó via
+    // shapes/conns/scope (FR1/FR2). Modo profundo COM router: rota profunda (sidecar),
+    // que a partir da FR3 (DEC-FR-003) também sabe escopo por nó — a máscara viaja nos
+    // params do job (o walk de política jamais vai ao Python).
+    if (!isDeep || !computeRouterRef.current) {
+      setClusterModal(m => ({ ...m, step: 'loading', deepRun: null, fallbackNotice: null }));
       workerRef.current?.postMessage({ type: 'COMPUTE_CLUSTER_SEGMENTS', params, ...scopeMsg });
       return;
     }
-    runDeepClusterSegments(params);
+    runDeepClusterSegments(params, cur.scope || null);
   };
 
-  const runDeepClusterSegments = async (params) => {
+  const runDeepClusterSegments = async (params, scope = null) => {
     const ctrl = new AbortController();
     clusterAbortRef.current = ctrl;
     setClusterModal(m => (m ? {
@@ -6153,12 +6154,46 @@ export default function App() {
       deepRun: { progress: null, via: 'sidecar' },
     } : m));
     try {
+      // FR3 (DEC-FR-003) — escopo por nó no modo profundo: a máscara de linhas é
+      // produzida pelo WORKER (resolveScopeRowMask; o walk de política JAMAIS é portado ao
+      // Python) e viaja nos `params.rowMask` do job. Acima de FR_MASK_MAX_ROWS o escopo
+      // profundo cai DECLARADAMENTE no worker clampado, preservando o MESMO escopo.
+      let jobParams = params;
+      if (scope && scope.nodeId) {
+        const maskRes = await computeRouterRef.current.run('COMPUTE_SCOPE_MASK', {
+          shapes: shapesR.current, conns: connsR.current,
+          scope: { nodeId: scope.nodeId }, csvId: params.csvId,
+        });
+        if (ctrl.signal.aborted) return;
+        const rowMask = (maskRes && maskRes.result) || {};
+        if (!rowMask.maskB64 || (rowMask.rowCount || 0) > FR_MASK_MAX_ROWS) {
+          // Teto/máscara indisponível ⇒ worker clampado COM o mesmo escopo (shapes/conns/
+          // scope). O motor no worker devolve no_rows se a subpopulação for vazia — nunca
+          // um cluster global silencioso quando o usuário pediu por nó.
+          setClusterModal(m => (m ? {
+            ...m, deepRun: null,
+            fallbackNotice: (rowMask.rowCount || 0) > FR_MASK_MAX_ROWS
+              ? `Base grande demais (${(rowMask.rowCount || 0).toLocaleString('pt-BR')} linhas) para o escopo por nó no Motor Python — acima do teto de ${FR_MASK_MAX_ROWS / 1e6} milhões de linhas da máscara, a clusterização escopada rodou no navegador com os tetos declarados (até 3 dimensões, k ≤ 8, k-means).`
+              : 'A clusterização escopada rodou no navegador com os tetos declarados (até 3 dimensões, k ≤ 8, k-means).',
+          } : m));
+          workerRef.current?.postMessage({
+            type: 'COMPUTE_CLUSTER_SEGMENTS', params,
+            shapes: shapesR.current, conns: connsR.current, scope: { nodeId: scope.nodeId },
+          });
+          return;
+        }
+        jobParams = {
+          ...params,
+          scope: { nodeId: scope.nodeId, label: scope.label },
+          rowMask: { csvId: rowMask.csvId, rowCount: rowMask.rowCount, maskB64: rowMask.maskB64 },
+        };
+      }
       // Dataset por hash (DEC-HX-006) — mesmos chunks do serializeCsvStore/M3 da H7;
       // HEAD 200 pula o upload nas execuções seguintes.
       const serialized = serializeCsvStore(csvStoreR.current);
       const buildChunks = () => [JSON.stringify(serialized)];
       const hash = hashChunks(buildChunks());
-      const res = await computeRouterRef.current.run('cluster_segments', { params }, {
+      const res = await computeRouterRef.current.run('cluster_segments', { params: jobParams }, {
         dataset: { hash, buildChunks },
         signal: ctrl.signal,
         onProgress: (p) => setClusterModal(m => (

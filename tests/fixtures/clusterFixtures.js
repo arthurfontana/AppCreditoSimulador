@@ -130,3 +130,57 @@ export const clusterGoldenFixtures = [
     params: { csvId: 'clu', dims: ['GRUPO'], k: 2 },
   },
 ];
+
+// ── Fixtura ESCOPADA (Clusterização Contextual, DEC-FR-001/003) ──────────────────
+// Diferente das globais acima, esta carrega shapes/conns/scope: o cluster é aprendido
+// SÓ na subpopulação que chega ao nó (walk compilado M8, single-sourced no worker). A
+// política D1(GRP) roteia A → pA → ❌ ; B → pB → ✅. Escopo pA ⇒ só GRP=A (4 perfis em
+// SEG: s1/s2 baixo risco, s3/s4 alto risco), k=2. GRP=B tem perfil intermediário que,
+// se vazasse, mudaria a partição — a prova de que a máscara filtra ANTES de agregar.
+//
+// O GATE dourado desta fixtura prova a costura FR3: o worker escopado (browser),
+// o caminho por máscara precomputada (fallback do worker) e o motor Python que recebe
+// SÓ a máscara (rowMask, sem shapes/conns) produzem o MESMO ClusterModel número a
+// número. O gerador (tests/clusterSegmentsGolden.test.js) resolve a máscara via
+// resolveScopeRowMask e a empacota em params.rowMask (o que o sidecar recebe).
+const scopedGrp = (grp, seg, dec, qty, altas, inadR) =>
+  [grp, seg, dec, String(qty), String(altas), String(altas), String(inadR), String(inadR)];
+const scopedRows = [
+  scopedGrp('A', 's1', 'APROVADO', 800, 700, 14), scopedGrp('A', 's1', 'REPROVADO', 200, 0, 0),
+  scopedGrp('A', 's2', 'APROVADO', 820, 720, 15), scopedGrp('A', 's2', 'REPROVADO', 180, 0, 0),
+  scopedGrp('A', 's3', 'APROVADO', 300, 280, 140), scopedGrp('A', 's3', 'REPROVADO', 700, 0, 0),
+  scopedGrp('A', 's4', 'APROVADO', 320, 300, 150), scopedGrp('A', 's4', 'REPROVADO', 680, 0, 0),
+  scopedGrp('B', 'b1', 'APROVADO', 500, 450, 90), scopedGrp('B', 'b1', 'REPROVADO', 500, 0, 0),
+  scopedGrp('B', 'b2', 'APROVADO', 600, 500, 250), scopedGrp('B', 'b2', 'REPROVADO', 400, 0, 0),
+];
+
+export const clusterScopedGoldenFixtures = [
+  {
+    name: 'scoped_by_node',
+    store: {
+      b: {
+        headers: ['GRP', 'SEG', '__DECISAO_ORIGINAL', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+        columnTypes: {
+          GRP: 'decision', SEG: 'decision', qty: 'qty', qtdAltas: 'qtdAltas',
+          qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida',
+        },
+        rows: scopedRows,
+      },
+    },
+    shapes: [
+      { id: 'D1', type: 'decision', label: 'Grupo', variableCol: 'GRP', csvId: 'b' },
+      { id: 'pA', type: 'port', label: 'Porte A' },
+      { id: 'pB', type: 'port', label: 'Porte B' },
+      { id: 'REJ', type: 'rejected', label: 'Reprovado' },
+      { id: 'AP', type: 'approved', label: 'Aprovado' },
+    ],
+    conns: [
+      { id: 'c1', from: 'D1', to: 'pA', label: 'A' },
+      { id: 'c2', from: 'pA', to: 'REJ' },
+      { id: 'c3', from: 'D1', to: 'pB', label: 'B' },
+      { id: 'c4', from: 'pB', to: 'AP' },
+    ],
+    scope: { nodeId: 'pA', label: 'Porte A' },
+    params: { csvId: 'b', dims: ['SEG'], k: 2 },
+  },
+];
