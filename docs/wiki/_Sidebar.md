@@ -14,7 +14,7 @@
   - [[Copiloto-SugestoesMelhoria|2. Sugestões de Melhoria]]
   - [[Copiloto-DocumentacaoAutomatica|3. Documentação Automática]]
   - [[Copiloto-DescobertaSegmentos|4. Descoberta de Segmentos]]
-  - [[Copiloto-ClusterContextual-FaixasRisco|5. Cluster Contextual + Faixas de Risco (Épico FR)]]
+  - [[Copiloto-ClusterContextual-FaixasRisco|5. Cluster Contextual + Criar Faixas por Risco (Épico FR)]]
   - [[Copilotos-Prompts-Sessoes|Prompts de Todas as Sessões]]
 - [[Roadmap]]
 
