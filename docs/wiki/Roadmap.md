@@ -19,10 +19,15 @@ de implementação: `docs/claude/Copiloto-Clusterizacao.md`.
   exata), monotônicos por padrão, materializados como variável derivada persistente
   (`rangeDefs`, `schemaVersion 2.7`) usável no canvas, no Dashboard e na própria
   Clusterização (`isContinuousColumn` bloqueia binarização silenciosa).
-- **Pendência residual**: a Documentação Automática já anexa a descrição das faixas ao
-  glossário (`buildGlossary`/`describeRangeRules`), mas o render (`renderDocMarkdown`/
-  `renderDocHTML`) ainda não imprime uma seção "Regras das Faixas" (só a de Clusters) —
-  ver nota em [[Decisoes]] (ADR-FR).
+- **Documentação Automática — "Regras das Faixas"** ✅ (fechamento pós-FR7) — o render
+  (`renderDocMarkdown`/`renderDocHTML`) imprime a seção "Regras das Faixas" a partir do
+  `range` anexado ao glossário (`buildGlossary`/`describeRangeRules`), com "(cortes
+  omitidos)" sob N2; coberto em `tests/policyDoc.test.js`.
+
+### Binning multivariado (épico futuro, não iniciado)
+Escopo detalhado registrado em [[Epicos-Binning-Multivariado]] — árvore de decisão rasa
+no sidecar entregando o resultado como **sugestão de Cineminha** (matriz cruzada),
+reaproveitando faixas univariadas + otimizadores existentes; sem data, aguarda demanda.
 
 ---
 

@@ -202,12 +202,15 @@ diferente do cluster que é `'categorical'`) + **definição editável** em
   (`csvId`, `col`, `scope` do cluster, `returnTo` = snapshot do form do cluster). Ao salvar
   a variável, o fluxo volta ao `clusterModal` com a coluna derivada já marcada na lista de
   dims (`returnTo.dims`).
-- **Documentação Automática — pendência conhecida**: `buildGlossary` (worker) já anexa
-  `range` (via `describeRangeRules`) às variáveis de faixas referenciadas, no MESMO ponto
-  onde anexa `cluster` — mas, diferente do cluster, `renderDocMarkdown`/`renderDocHTML`
-  (`src/policyDocRender.js`) **ainda não têm** uma seção "Regras das Faixas" que imprima
-  esse dado (só filtram `g.cluster`, não `g.range`); `tests/policyDoc.test.js` não cobre o
-  caso. O dado chega pronto ao glossário — falta só o render + o teste.
+- **Documentação Automática**: `buildGlossary` (worker) anexa `range` (via
+  `describeRangeRules`) às variáveis de faixas referenciadas, no MESMO ponto onde anexa
+  `cluster`; `renderDocMarkdown`/`renderDocHTML` (`src/policyDocRender.js`) imprimem a
+  seção **"Regras das Faixas"** (coluna de origem, métrica, rótulo + intervalo
+  `formatBandLabel` de cada faixa, `unmatchedLabel`). Sob N2 (toggle de domínios
+  desligado) os cortes concretos já chegam nulos do worker e o render imprime
+  "(cortes omitidos)" em vez de rotular errado. Coberto em `tests/policyDoc.test.js`
+  (seção presente com/sem domínios; ausente sem `rangeDefs`). _(Pendência da Sessão FR7
+  fechada.)_
 
 ### Teste
 `tests/riskBands.test.js` (motor `computeRiskBands`: cortes plantados ≡ DP exata, IV ≡

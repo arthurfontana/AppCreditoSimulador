@@ -248,8 +248,9 @@ de implementação (motor, UI, testes): `docs/claude/Copiloto-Clusterizacao.md`.
 | **DEC-FR-009** | Edição posterior: `rangeVarModal` edita pontos de corte (validação de ordenação estrita) e rótulos; re-materializa e propaga por todas as abas **reusando** `renameClusterColumnRefs`/`renameClusterLabelRefs` de `clusterVar.js` (genéricos por nome de coluna/rótulo) — sem duplicação. |
 | **DEC-FR-010** | Transparência estatística: o resultado exibe IV otimizado vs. IV de quantis uniformes com o mesmo k (`ivUniform`), WoE/volume/share/taxa por faixa e o selo de monotonia — nunca só os números de corte. |
 
-**Pendência conhecida (fora das sessões FR1–FR7)**: `buildGlossary` (worker) já anexa
-`range` (via `describeRangeRules`, DEC-FR-007) às variáveis de faixas referenciadas —
-mas `renderDocMarkdown`/`renderDocHTML` (`src/policyDocRender.js`) ainda não têm uma
-seção "Regras das Faixas" análoga à "Regras dos Clusters" (só filtram `g.cluster`); o
-dado chega pronto ao glossário, falta só o render + o teste em `tests/policyDoc.test.js`.
+**Pendência fechada (pós-FR7)**: `renderDocMarkdown`/`renderDocHTML`
+(`src/policyDocRender.js`) ganharam a seção "Regras das Faixas" análoga à "Regras dos
+Clusters" (filtro `g.range`), consumindo o `range` que `buildGlossary` já anexava via
+`describeRangeRules` (DEC-FR-007): coluna de origem, métrica, rótulo + intervalo
+(`formatBandLabel`) por faixa e `unmatchedLabel`; sob N2 imprime "(cortes omitidos)".
+Coberto em `tests/policyDoc.test.js` (com/sem domínios; ausência sem `rangeDefs`).

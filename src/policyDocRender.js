@@ -14,6 +14,7 @@
 // re-exporta para os testes que ainda importam de App.jsx (tests/policyDoc.test.js).
 import { fmtQty, fmtPct, BUILD_NUMBER, BUILD_HASH, COL_TYPES, LENS_OP_LABEL, escHtml } from "./App.jsx";
 import { POLICY_TERMINAL_LABELS } from "./policyIR.js";
+import { formatBandLabel } from "./rangeVar.js";
 
 // Hash não-criptográfico curto (FNV-1a 32-bit) — só para o carimbo de rastreabilidade
 // do documento ("hash da política"), nunca para integridade/segurança.
@@ -270,6 +271,26 @@ export function renderDocMarkdown(docModel) {
     }
   }
 
+  // Regras das Variáveis de Faixas (Épico FR) — os intervalos [min, max) de cada faixa
+  // sobre a coluna contínua de origem. O worker anexa `range` via describeRangeRules
+  // (mesmo ponto do `cluster`); sob N2 (includeDomains=false) os cortes concretos já
+  // chegam nulos — sinalizamos a omissão explicitamente em vez de rotular errado.
+  const rangeVars = (glossary || []).filter(g => g.range);
+  if (rangeVars.length) {
+    p('');
+    p('### Regras das Faixas');
+    p('');
+    for (const g of rangeVars) {
+      const metricTxt = g.range.metric?.label ? ` (métrica: ${g.range.metric.label})` : '';
+      p(`**${g.col}** — faixas de **${g.range.sourceCol || '—'}**${metricTxt}; sem valor → _${g.range.unmatchedLabel}_.`);
+      p('');
+      for (const b of (g.range.bands || [])) {
+        p(`- **${b.label}** — ${options?.includeDomains ? formatBandLabel(b.min, b.max) : '(cortes omitidos)'}`);
+      }
+      p('');
+    }
+  }
+
   return L.join('\n');
 }
 
@@ -388,6 +409,19 @@ export function renderDocHTML(docModel) {
         const dimsTxt = grp.dims.map(d => d.values ? `${d.col}: ${escHtml(d.values.join(', '))}` : `${d.col}: ${d.valueCount} valor(es)`).join(' · ');
         return `<li><strong>${escHtml(grp.label)}</strong> — ${dimsTxt || '—'}</li>`;
       }).join('');
+      S.push(`<ul>${items}</ul>`);
+    }
+  }
+
+  const rangeVarsH = (glossary || []).filter(g => g.range);
+  if (rangeVarsH.length) {
+    h(3, 'Regras das Faixas');
+    for (const g of rangeVarsH) {
+      const metricTxt = g.range.metric?.label ? ` (métrica: ${escHtml(g.range.metric.label)})` : '';
+      para(`**${g.col}** — faixas de **${escHtml(g.range.sourceCol || '—')}**${metricTxt}; sem valor → _${escHtml(g.range.unmatchedLabel)}_.`);
+      const items = (g.range.bands || []).map(b =>
+        `<li><strong>${escHtml(b.label)}</strong> — ${options?.includeDomains ? escHtml(formatBandLabel(b.min, b.max)) : '(cortes omitidos)'}</li>`
+      ).join('');
       S.push(`<ul>${items}</ul>`);
     }
   }

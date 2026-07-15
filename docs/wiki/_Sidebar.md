@@ -17,6 +17,7 @@
   - [[Copiloto-ClusterContextual-FaixasRisco|5. Cluster Contextual + Criar Faixas por Risco (Épico FR)]]
   - [[Copilotos-Prompts-Sessoes|Prompts de Todas as Sessões]]
 - [[Roadmap]]
+  - [[Epicos-Binning-Multivariado|Épico futuro: Binning Multivariado]]
 
 ---
 
