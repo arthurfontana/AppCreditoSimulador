@@ -225,3 +225,31 @@ aqui apenas o sumário de uma linha por decisão.
 | **DEC-GS-008** | Escadas de lens: `buildGoalSeekCatalog` gera até `GOAL_SEEK_DEEP_LENS_STEPS=12` passos acumulados por Decision Lens monotônico; `selectDeepestLensSteps` filtra os mais impactantes. |
 | **DEC-GS-009** | Solver MILP `scipy.optimize.milp` (HiGHS): variáveis binárias + precedência + tetos linearizados (big-M); objetivo lexicográfico 2-etapas (target → minimize colateral). |
 | **DEC-GS-010** | Roteamento automático (sem toggle manual): `goalSeekDeepOk()` detecta `goal_seek_deep` em `capabilities.tasks`; `goal_seek_deep` chamado via `sidecarProxyRef` diretamente (sem ComputeRouter — DEC-GS-001). |
+
+---
+
+## ADR-FR (DEC-FR-001..010): Clusterização Contextual + Criar Faixas por Risco
+
+**Decisões** do épico Clusterização Contextual + Criar Faixas por Risco (sessões
+FR1–FR7), documentado em [[Copiloto-ClusterContextual-FaixasRisco]]. Cada DEC está
+expandida naquele documento; aqui apenas o sumário de uma linha por decisão. Detalhe
+de implementação (motor, UI, testes): `docs/claude/Copiloto-Clusterizacao.md`.
+
+| DEC | Decisão (uma linha) |
+|-----|---------------------|
+| **DEC-FR-001** | Escopo por nó da Clusterização: `computeClusterSegments(csvStore, params, scopeCtx)` filtra as linhas via `resolveScopeRowMask` (walk compilado M8, extraído do padrão de `discoverSegments`) antes da agregação; `scope=null` byte-idêntico ao caminho global (fixtures douradas H8 intocadas). |
+| **DEC-FR-002** | UI do escopo: botão "🧩 Clusterizar aqui" nas toolbars de losango/Cineminha/Lens (mesmo padrão do "🔍 Descobrir aqui"); pílula de escopo no header do `clusterModal` em todos os passos; declarações no "👁 Ver no Dashboard" e no passo `save` quando escopado. |
+| **DEC-FR-003** | Modo profundo (sidecar H8) com escopo: par `COMPUTE_SCOPE_MASK`/`SCOPE_MASK_RESULT` produz a máscara (bitmask base64) no worker; `params.scope`/`params.rowMask` vão ao job `cluster_segments`; teto `FR_MASK_MAX_ROWS=20M` linhas com fallback declarado; `motor_clusters.py` valida `rowCount`/`csvId` da máscara — o walk de política jamais é portado ao Python. |
+| **DEC-FR-004** | Motor `computeRiskBands` (worker): pré-bins por quantis ponderados por volume (≤50) + DP exata maximizando IV (`computeIV`); métrica via `resolveRiskMetric`; piso de volume por faixa (`minShare`, default 5%); k manual (2–7) ou automático por ganho marginal de IV; Classe A — nunca roteia ao sidecar. |
+| **DEC-FR-005** | Monotonicidade: default = taxas monotônicas (direção detectada testando as duas, melhor IV); toggle "permitir faixas não monotônicas" libera a DP sem restrição, com selo declarado (📈/📉/⚠) e ambos os IVs exibidos quando ligado. |
+| **DEC-FR-006** | Valores não numéricos/vazios ⇒ banda "Sem valor" fora da otimização, sempre exibida (rótulo editável); parsing numérico com a mesma semântica de `cellNum` do worker. |
+| **DEC-FR-007** | Persistência: `csvStore[csvId].rangeDefs[col]` (RangeDef — faixas semiabertas `[min,max)`) + coluna derivada dict-encoded (`columnTypes='decision'`, `varTypes='ordinal'`); `schemaVersion` `2.6` → `2.7`; regra inviolável do CLAUDE.md aplicada na íntegra. |
+| **DEC-FR-008** | A Clusterização nunca binariza contínua silenciosamente: dimensão detectada como contínua (`isContinuousColumn`) exibe aviso + botão "📐 Gerar faixas desta coluna" (abre o `rangeModal` pré-preenchido, `returnTo` volta ao form do cluster com a derivada marcada). |
+| **DEC-FR-009** | Edição posterior: `rangeVarModal` edita pontos de corte (validação de ordenação estrita) e rótulos; re-materializa e propaga por todas as abas **reusando** `renameClusterColumnRefs`/`renameClusterLabelRefs` de `clusterVar.js` (genéricos por nome de coluna/rótulo) — sem duplicação. |
+| **DEC-FR-010** | Transparência estatística: o resultado exibe IV otimizado vs. IV de quantis uniformes com o mesmo k (`ivUniform`), WoE/volume/share/taxa por faixa e o selo de monotonia — nunca só os números de corte. |
+
+**Pendência conhecida (fora das sessões FR1–FR7)**: `buildGlossary` (worker) já anexa
+`range` (via `describeRangeRules`, DEC-FR-007) às variáveis de faixas referenciadas —
+mas `renderDocMarkdown`/`renderDocHTML` (`src/policyDocRender.js`) ainda não têm uma
+seção "Regras das Faixas" análoga à "Regras dos Clusters" (só filtram `g.cluster`); o
+dado chega pronto ao glossário, falta só o render + o teste em `tests/policyDoc.test.js`.

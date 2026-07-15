@@ -14,6 +14,7 @@ AppCreditoSimulador/
 │   ├── goalSeek.js                # applyGoalSeekMoves — materialização de movimentos do Goal Seek (compartilhado worker/main)
 │   ├── policySimplify.js          # applySimplifyCandidates — materialização de candidatos de Simplificação (compartilhado worker/main)
 │   ├── clusterVar.js              # Variável de Cluster — sugestões de nome, def a partir do ClusterModel, descrição das regras (docs) e edição (compartilhado main/worker/teste; materialização em columnar.js)
+│   ├── rangeVar.js                # Variável de Faixas (Épico FR) — espelho de clusterVar.js: sugestões de nome, def a partir do RangeModel, rótulos pt-BR canônicos, descrição das regras (docs) e edição de cortes/rótulos (compartilhado main/worker/teste; materialização deriveRangeColumn em columnar.js; propagação de refs reusa clusterVar.js)
 │   ├── computeRouter.js           # Execução Híbrida H4 — ComputeRouter + contrato ComputeProvider (worker default / sidecar Python opt-in)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
@@ -33,6 +34,8 @@ AppCreditoSimulador/
 │   ├── clusterSegments.test.js   # GATE Execução Híbrida H8 (baseline browser): clusters plantados recuperados; perfil ≡ agregação manual; determinismo; colunar ≡ legado; clamp/truncamento declarados; degradação de features; mulberry32 especificado
 │   ├── clusterSegmentsGolden.test.js  # GATE Execução Híbrida H8 (DEC-HX-005): gera/verifica as fixtures douradas do ClusterModel (determinismo; colunar ≡ legado; ≡ dourado commitado)
 │   ├── clusterVar.test.js        # GATE Variável de Cluster: materialização (1D exata / 2D first-match-overlap / trim / fora dos grupos / dim ausente); sugestões de nome únicas; redação de regras (docs); edição (rename/toggle/move); propagação de refs (coluna/rótulo → losango/porta/Cineminha/lens); round-trip de persistência; integração ClusterModel real → def → coluna
+│   ├── riskBands.test.js         # GATE Épico FR (motor computeRiskBands, FR4): cortes plantados ≡ DP exata maximizando IV; IV ≡ computeIV aplicado à mão; monotonia default/direção correta; toggle livre acha o "U" que o monotônico não pode (ambos os IVs); minShare bloqueia faixa anã ⇒ infeasible; banda "Sem valor" exata; auto-k para no ganho marginal; escopo por nó ≡ sub-base; determinismo
+│   ├── rangeVar.test.js          # GATE Variável de Faixas (Épico FR, FR5): materialização (deriveRangeColumn — fronteiras exatas [min,max), ±∞, não parseável ⇒ unmatched, ordinal); rótulos pt-BR (formatBandLabel); edição de cortes com validação de ordenação estrita; round-trip de persistência; integração computeRiskBands real → def → coluna
 │   ├── fixtures/segmentFixtures.js    # entradas do GATE dourado H7 (espelham as fixtures de segmentDiscovery.test.js)
 │   ├── fixtures/clusterFixtures.js    # entradas dos GATEs H8 (clusters plantados 1D/2D+mix, truncamento, sem AS IS)
 │   ├── fixtures/golden/               # fixtures douradas cross-runtime (entrada serializada M3 + SegmentModel/ClusterModel esperado; regenerar com UPDATE_GOLDEN=1)
