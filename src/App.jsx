@@ -3473,7 +3473,7 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.6",
+      schemaVersion: "2.7",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
