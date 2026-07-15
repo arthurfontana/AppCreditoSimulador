@@ -3820,17 +3820,12 @@ function segWoe(numV, denV, totalNum, totalDen) {
   return Math.log(distGood / distBad);
 }
 
-// ESTÁGIO 1 — descoberta. Devolve os candidatos crus (kind 'deviation' | 'het') + o `ctx`
-// compartilhado (agregados do escopo, dispersão por linha, bins de nível 1, coders) que os
-// estágios 2/3 reusam sem reler a base. Escopo global (`scope == null`) ⇒ todas as linhas;
-// escopo por nó (`scope.nodeId`) ⇒ só as linhas cujo roteamento REAL (raiz do motor, como
-// runSimulation) passa pelo nó — mesma semântica de computeCinemaArrivals/prévia AS IS.
-function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {}) {
-  const spec = metricSpec || resolveRiskMetric('inadReal');
-  const maxDepth = params.maxDepth != null ? params.maxDepth : SEG_MAX_DEPTH_DEFAULT;
-  const beamWidth = params.beamWidth != null ? params.beamWidth : SEG_BEAM_WIDTH;
-  const scopeNodeId = scope && scope.nodeId ? scope.nodeId : null;
-
+// Máquina de walk compilado M8 (raiz do motor) COMPARTILHADA entre discoverSegments
+// (escopo por nó da Descoberta) e resolveScopeRowMask (escopo por nó da Clusterização —
+// DEC-FR-001, "single-sourced no worker"). A extração é behavior-preserving: a MESMA
+// eleição de raiz por csv (`rootForCsv`) e o MESMO `routeRow` que já existiam inline em
+// discoverSegments — a equivalência número a número é provada por tests/segmentDiscovery.test.js.
+function buildScopeWalk(shapes, conns, scopeNodeId) {
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
   const { out } = buildFlowGraph(shapes, conns);
   const routes = compileRoutes(shapes, conns, out);
@@ -3903,17 +3898,67 @@ function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {
     return { terminalType: null, decidingNodeId: lastFlow, hitScope };
   }
 
-  // Constrói o escopo (agregado + dispersão por linha) de UM csv.
-  function buildCsvScope(csvId, csv) {
-    const idxs = segColIdxs(csv);
-    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+  // rootId por csv (1ª raiz elegível do csv) — MESMO critério de buildCsvScope.
+  function rootForCsv(csvId) {
     const csvRoots = rootNodes.filter(d => {
       if (d.type === 'decision') return d.csvId === csvId;
       if (d.type === 'cineminha') return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
       if (d.type === 'decision_lens') return true;
       return false;
     });
-    const rootId = csvRoots.length ? csvRoots[0].id : null;
+    return csvRoots.length ? csvRoots[0].id : null;
+  }
+
+  return { shapesMap, routes, routeRow, rootForCsv };
+}
+
+// DEC-FR-001 — máscara de pertencimento por nó, single-sourced no MESMO walk compilado
+// M8 de discoverSegments (buildScopeWalk). Devolve, por csvId, um `Uint8Array` onde 1 = a
+// linha passa pelo `scopeNodeId` no roteamento REAL da política (raiz do motor, como
+// runSimulation). `scopeNodeId` null ⇒ máscara cheia (todas as linhas pertencem). Usado
+// pela Clusterização escopada (FR1) e pelo job profundo (FR3, COMPUTE_SCOPE_MASK).
+function resolveScopeRowMask(shapes, conns, csvStore, scopeNodeId) {
+  const walk = scopeNodeId ? buildScopeWalk(shapes, conns, scopeNodeId) : null;
+  const masks = {};
+  const nShapes = Array.isArray(shapes) ? shapes.length : 0;
+  for (const [csvId, csv] of Object.entries(csvStore || {})) {
+    const n = rowCount(csv);
+    const mask = new Uint8Array(n);
+    if (!scopeNodeId) { mask.fill(1); masks[csvId] = mask; continue; }
+    const rootId = walk.rootForCsv(csvId);
+    if (rootId) {
+      const compiled = compileNodesForCsv(shapes, csv, walk.routes);
+      const lastVisit = new Int32Array(nShapes);
+      let epoch = 0;
+      for (let r = 0; r < n; r++) {
+        epoch++;
+        const { hitScope } = walk.routeRow(csv, r, rootId, compiled, lastVisit, epoch);
+        if (hitScope) mask[r] = 1;
+      }
+    }
+    masks[csvId] = mask; // sem raiz p/ este csv ⇒ nenhuma linha chega ao nó (máscara 0)
+  }
+  return masks;
+}
+
+// ESTÁGIO 1 — descoberta. Devolve os candidatos crus (kind 'deviation' | 'het') + o `ctx`
+// compartilhado (agregados do escopo, dispersão por linha, bins de nível 1, coders) que os
+// estágios 2/3 reusam sem reler a base. Escopo global (`scope == null`) ⇒ todas as linhas;
+// escopo por nó (`scope.nodeId`) ⇒ só as linhas cujo roteamento REAL (raiz do motor, como
+// runSimulation) passa pelo nó — mesma semântica de computeCinemaArrivals/prévia AS IS.
+function discoverSegments(shapes, conns, csvStore, scope, metricSpec, params = {}) {
+  const spec = metricSpec || resolveRiskMetric('inadReal');
+  const maxDepth = params.maxDepth != null ? params.maxDepth : SEG_MAX_DEPTH_DEFAULT;
+  const beamWidth = params.beamWidth != null ? params.beamWidth : SEG_BEAM_WIDTH;
+  const scopeNodeId = scope && scope.nodeId ? scope.nodeId : null;
+
+  const { shapesMap, routes, routeRow, rootForCsv } = buildScopeWalk(shapes, conns, scopeNodeId);
+
+  // Constrói o escopo (agregado + dispersão por linha) de UM csv.
+  function buildCsvScope(csvId, csv) {
+    const idxs = segColIdxs(csv);
+    const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
+    const rootId = rootForCsv(csvId);
     const compiled = rootId ? compileNodesForCsv(shapes, csv, routes) : null;
     const lastVisit = new Int32Array(shapes.length);
     let epoch = 0;
@@ -4873,10 +4918,14 @@ function clusterFnv1a32(str) {
 // Seed derivada do dataset + params (§16): csvId, dims, k, features e rowCount — tudo
 // disponível identicamente nos dois runtimes ANTES de rodar (o front não precisa
 // mandar seed; `params.seed` explícito é override de teste).
-function clusterSeedOf(csvId, dims, k, featureIds, nRows) {
-  return clusterFnv1a32([
+function clusterSeedOf(csvId, dims, k, featureIds, nRows, scopeNodeId = null) {
+  const parts = [
     String(csvId), dims.join('\x1f'), String(k), featureIds.join('\x1f'), String(nRows),
-  ].join('\x1e'));
+  ];
+  // DEC-FR-001: o escopo por nó entra na seed APENAS quando presente — global permanece
+  // com a seed atual (fixtures douradas H8 intactas).
+  if (scopeNodeId != null) parts.push('scope:' + String(scopeNodeId));
+  return clusterFnv1a32(parts.join('\x1e'));
 }
 
 // PRNG especificado (§16): mulberry32 — 32-bit, replicável em qualquer runtime.
@@ -5061,24 +5110,64 @@ function cluKmeans(X, w, kEff, seed, maxIter) {
 // Ponto de entrada — devolve o ClusterModel (padrão docModel/SegmentModel: dados
 // CRUS, nunca prosa). Não depende de shapes/conns: a clusterização é sobre a BASE
 // agregada, não sobre o grafo da política.
-function computeClusterSegments(csvStore, params = {}) {
+function computeClusterSegments(csvStore, params = {}, scopeCtx = null) {
   const model = {
     version: '1.0', generatedAt: new Date().toISOString(), error: null,
     dataset: null, params: null, ceilings: null, population: null,
     features: [], clusters: [], quality: null,
   };
 
-  // csv alvo: explícito ou o de maior nº de linhas (empate ⇒ 1º na ordem do store).
+  // ── Escopo por nó (DEC-FR-001) ─────────────────────────────────────────────────
+  // `scopeCtx = {shapes, conns, scope:{nodeId,label}}`. Ausente/`scope=null` ⇒ base
+  // inteira, byte-a-byte idêntico ao caminho atual (nenhuma máscara, nenhum campo novo,
+  // seed sem componente de escopo). Com escopo, a máscara filtra as linhas ANTES da
+  // agregação por tupla de dims — todo o resto (features, z-score, k-means, tetos) opera
+  // sobre a subpopulação sem nenhuma outra mudança.
+  const scopeNodeId = scopeCtx && scopeCtx.scope && scopeCtx.scope.nodeId ? scopeCtx.scope.nodeId : null;
+  const scopeShapes = scopeCtx && Array.isArray(scopeCtx.shapes) ? scopeCtx.shapes : [];
+  const scopeConns = scopeCtx && Array.isArray(scopeCtx.conns) ? scopeCtx.conns : [];
+  const masks = scopeNodeId ? resolveScopeRowMask(scopeShapes, scopeConns, csvStore, scopeNodeId) : null;
+  if (scopeNodeId) {
+    const scopeLabel = (scopeCtx.scope.label != null)
+      ? scopeCtx.scope.label
+      : (scopeShapes.find(s => s.id === scopeNodeId)?.label ?? scopeNodeId);
+    model.scope = { nodeId: scopeNodeId, label: scopeLabel };
+  }
+  // População (qty) do escopo de UM csv — critério de winner quando escopado (mesma
+  // resolução de discoverSegments: csv de maior população NO ESCOPO).
+  const scopedPopOf = (csv, mask) => {
+    if (!mask) return 0;
+    const qi = segColIdxs(csv).qty;
+    const n = rowCount(csv);
+    let s = 0;
+    for (let r = 0; r < n; r++) if (mask[r]) s += qi >= 0 ? (cellNum(csv, r, qi) || 0) : 1;
+    return s;
+  };
+
+  // csv alvo: explícito ou o de maior nº de linhas (empate ⇒ 1º na ordem do store);
+  // com escopo, o de maior população NO ESCOPO (o csv do fluxo que contém o nó).
   const ids = Object.keys(csvStore || {});
   let csvId = params.csvId != null && csvStore[params.csvId] ? params.csvId : null;
   if (!csvId) {
     let best = -1;
-    for (const id of ids) { const n = rowCount(csvStore[id]); if (n > best) { best = n; csvId = id; } }
+    for (const id of ids) {
+      const metric = masks ? scopedPopOf(csvStore[id], masks[id]) : rowCount(csvStore[id]);
+      if (metric > best) { best = metric; csvId = id; }
+    }
   }
   const csv = csvId ? csvStore[csvId] : null;
   const nRows = csv ? rowCount(csv) : 0;
   if (!csv || nRows === 0) { model.error = 'no_rows'; return model; }
   model.dataset = { csvId, name: csv.name || csvId, rowCount: nRows };
+
+  // Máscara do winner (null quando global). Escopo vazio (nenhuma linha chega ao nó) ⇒
+  // no_rows DECLARADO com o escopo preenchido (a UI diz "nenhuma proposta chega a este nó").
+  const mask = masks ? masks[csvId] : null;
+  if (mask) {
+    let inScope = 0;
+    for (let r = 0; r < nRows; r++) if (mask[r]) { inScope++; break; }
+    if (inScope === 0) { model.error = 'no_rows'; return model; }
+  }
 
   // Dimensões: só colunas presentes e NÃO métricas (coluna métrica como eixo de
   // agrupamento não tem semântica de segmento — e o formulário só oferece Filtro).
@@ -5096,6 +5185,9 @@ function computeClusterSegments(csvStore, params = {}) {
   const gidOfRow = new Int32Array(nRows);
   const buf = new Array(dims.length);
   for (let r = 0; r < nRows; r++) {
+    // Escopo por nó (DEC-FR-001): linha fora do escopo não forma nem alimenta grupo.
+    // Sem máscara (global) o ramo nunca dispara ⇒ caminho byte-a-byte idêntico ao atual.
+    if (mask && !mask[r]) { gidOfRow[r] = -1; continue; }
     for (let d = 0; d < dims.length; d++) buf[d] = cluDimValue(readers[d], csv, r);
     const key = buf.join('\x1f');
     let g = groupIndex.get(key);
@@ -5108,6 +5200,7 @@ function computeClusterSegments(csvStore, params = {}) {
         gAppr = new Float64Array(nG), gDec = new Float64Array(nG);
   for (let r = 0; r < nRows; r++) {
     const g = gidOfRow[r];
+    if (g < 0) continue; // fora do escopo (só quando escopado; global nunca marca -1)
     const s = segReadSums(csv, r, idxs);
     gQty[g] += s.qty; gAltas[g] += s.qtdAltas; gAltasInf[g] += s.qtdAltasInfer;
     gInadR[g] += s.inadReal; gInadI[g] += s.inadInferida;
@@ -5183,7 +5276,7 @@ function computeClusterSegments(csvStore, params = {}) {
   // ── k-means determinístico (pesos = volume; fallback peso 1 se a base não tem qty) ──
   const kReq = params.k != null ? params.k : CLUSTER_DEFAULT_K;
   const kEff = Math.max(1, Math.min(kReq, nP));
-  const seed = params.seed != null ? (params.seed >>> 0) : clusterSeedOf(csvId, dims, kReq, featIds, nRows);
+  const seed = params.seed != null ? (params.seed >>> 0) : clusterSeedOf(csvId, dims, kReq, featIds, nRows, scopeNodeId);
   let w = kQty;
   if (cluSeqSum(w) <= 0) { w = new Float64Array(nP).fill(1); }
   const km = cluKmeans(X, w, kEff, seed, params.maxIter != null ? params.maxIter : CLUSTER_MAX_ITER);
@@ -5234,7 +5327,9 @@ function computeClusterSegments(csvStore, params = {}) {
     const mixReader = cluDimReader(csv, csv.headers.indexOf(mixColName));
     mixByCluster = Array.from({ length: nC }, () => new Map());
     for (let r = 0; r < nRows; r++) {
-      const ki = gidToKept[gidOfRow[r]];
+      const g = gidOfRow[r];
+      if (g < 0) continue; // fora do escopo (só quando escopado; global nunca marca -1)
+      const ki = gidToKept[g];
       if (ki < 0) continue;
       const c = km.assign[ki];
       const v = cluDimValue(mixReader, csv, r);
@@ -6721,8 +6816,11 @@ function handleMessage(e) {
   // total, P4): o motor em si é livre de teto — é o mesmo algoritmo que roda sem
   // limites no sidecar (motor_clusters.py), sob o GATE dourado da DEC-HX-005.
   if (type === 'COMPUTE_CLUSTER_SEGMENTS') {
-    const { params = {} } = e.data;
-    const clusterModel = computeClusterSegments(workerCsvStore, clampClusterParamsForBrowser(params));
+    const { params = {}, shapes = null, conns = [], scope = null } = e.data;
+    // DEC-FR-001: escopo por nó opcional. Ausentes ⇒ global (retrocompat total: mesmo
+    // resultado byte-a-byte de antes). O walk de política é single-sourced no worker.
+    const scopeCtx = (scope && scope.nodeId && Array.isArray(shapes)) ? { shapes, conns, scope } : null;
+    const clusterModel = computeClusterSegments(workerCsvStore, clampClusterParamsForBrowser(params), scopeCtx);
     self.postMessage({ type: 'CLUSTER_SEGMENTS_RESULT', clusterModel });
     return;
   }
@@ -6816,6 +6914,7 @@ export {
   clampClusterParamsForBrowser,
   clusterSeedOf,
   clusterMulberry32,
+  resolveScopeRowMask,
   buildSegmentRecommendations,
   buildSegmentRecommendationsPooled,
   segValidateMoves,
