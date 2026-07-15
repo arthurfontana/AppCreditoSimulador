@@ -5,6 +5,7 @@ import {
   clampClusterParamsForBrowser,
   clusterSeedOf,
   clusterMulberry32,
+  resolveScopeRowMask,
 } from '../src/simulation.worker.js';
 import { clusterGoldenFixtures } from './fixtures/clusterFixtures.js';
 
@@ -212,6 +213,118 @@ describe('clusterSegments · tetos declarados do browser (paridade total, P4)', 
         expect(typeof cond.value).toBe('string');
       }
     }
+  });
+});
+
+// ── GATE FR1 — Clusterização Contextual (escopo por nó, DEC-FR-001) ──────────────
+// A máscara filtra as linhas cujo roteamento REAL passa pelo nó ANTES da agregação; o
+// resto do motor (features, z-score, k-means, tetos) é o MESMO. Casos: (1) escopo ≡
+// sub-base filtrada à mão (mesma seed ⇒ número a número), (2) scope=null byte-idêntico
+// ao atual, (3) escopo vazio ⇒ no_rows com scope, (4) determinismo escopado. O caso (5)
+// — tests/segmentDiscovery.test.js inalterado após a extração de buildScopeWalk — é
+// coberto pela própria suíte daquele arquivo.
+describe('clusterSegments · escopo por nó (DEC-FR-001)', () => {
+  // D1(GRP): A → pA → ❌ Reprovado ; B → pB → ✅ Aprovado. Escopo pA ⇒ só GRP=A.
+  // pZ é uma porta inalcançável (nenhuma linha chega) — caso de escopo vazio.
+  const shapes = [
+    { id: 'D1', type: 'decision', label: 'Grupo', variableCol: 'GRP', csvId: 'b' },
+    { id: 'pA', type: 'port', label: 'Porte A' },
+    { id: 'pB', type: 'port', label: 'Porte B' },
+    { id: 'pZ', type: 'port', label: 'Porte Z' },
+    { id: 'REJ', type: 'rejected', label: 'Reprovado' },
+    { id: 'AP', type: 'approved', label: 'Aprovado' },
+  ];
+  const conns = [
+    { id: 'c1', from: 'D1', to: 'pA', label: 'A' },
+    { id: 'c2', from: 'pA', to: 'REJ' },
+    { id: 'c3', from: 'D1', to: 'pB', label: 'B' },
+    { id: 'c4', from: 'pB', to: 'AP' },
+  ];
+  const headers = ['GRP', 'SEG', '__DECISAO_ORIGINAL', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'];
+  const columnTypes = {
+    GRP: 'decision', SEG: 'decision', qty: 'qty', qtdAltas: 'qtdAltas',
+    qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida',
+  };
+  // GRP=A: dois perfis plantados em SEG (s1/s2 baixo risco, s3/s4 alto risco).
+  // GRP=B: perfil intermediário — se vazasse pro escopo, mudaria a partição.
+  const mk = (grp, seg, dec, qty, altas, inadR) =>
+    [grp, seg, dec, String(qty), String(altas), String(altas), String(inadR), String(inadR)];
+  const rows = [
+    mk('A', 's1', 'APROVADO', 800, 700, 14), mk('A', 's1', 'REPROVADO', 200, 0, 0),
+    mk('A', 's2', 'APROVADO', 820, 720, 15), mk('A', 's2', 'REPROVADO', 180, 0, 0),
+    mk('A', 's3', 'APROVADO', 300, 280, 140), mk('A', 's3', 'REPROVADO', 700, 0, 0),
+    mk('A', 's4', 'APROVADO', 320, 300, 150), mk('A', 's4', 'REPROVADO', 680, 0, 0),
+    mk('B', 'b1', 'APROVADO', 500, 450, 90), mk('B', 'b1', 'REPROVADO', 500, 0, 0),
+    mk('B', 'b2', 'APROVADO', 600, 500, 250), mk('B', 'b2', 'REPROVADO', 400, 0, 0),
+  ];
+  const store = { b: { headers, columnTypes, rows } };
+  const params = { csvId: 'b', dims: ['SEG'], k: 2 };
+  const SEED = 12345;
+
+  it('(1) escopo por nó ≡ sub-base filtrada à mão (mesma seed ⇒ número a número)', () => {
+    const scoped = computeClusterSegments(toColumnarStore(store), { ...params, seed: SEED },
+      { shapes, conns, scope: { nodeId: 'pA' } });
+    const subRows = rows.filter(r => r[0] === 'A');
+    const sub = computeClusterSegments(
+      toColumnarStore({ b: { headers, columnTypes, rows: subRows } }), { ...params, seed: SEED });
+    expect(scoped.error).toBe(null);
+    expect(scoped.clusters).toHaveLength(2);
+    // Partição, perfis, qualidade, features e params idênticos à sub-base (mesmo seed).
+    expect(scoped.clusters).toEqual(sub.clusters);
+    expect(scoped.population).toEqual(sub.population);
+    expect(scoped.quality).toEqual(sub.quality);
+    expect(scoped.features).toEqual(sub.features);
+    expect(scoped.params).toEqual(sub.params);
+    // População do escopo = só GRP=A.
+    expect(scoped.population.qty).toBe(subRows.reduce((s, r) => s + Number(r[3]), 0));
+    // model.scope preenchido (aditivo); a sub-base global não carrega o campo.
+    expect(scoped.scope).toEqual({ nodeId: 'pA', label: 'Porte A' });
+    expect('scope' in sub).toBe(false);
+  });
+
+  it('(1b) resolveScopeRowMask marca só as linhas que chegam ao nó', () => {
+    const m = resolveScopeRowMask(shapes, conns, toColumnarStore(store), 'pA').b;
+    expect([...m].reduce((s, v) => s + v, 0)).toBe(8);       // 8 linhas GRP=A
+    expect([...m.slice(0, 8)]).toEqual([1, 1, 1, 1, 1, 1, 1, 1]);
+    expect([...m.slice(8)]).toEqual([0, 0, 0, 0]);           // 4 linhas GRP=B fora
+    // scopeNodeId null ⇒ máscara cheia (todas pertencem).
+    const full = resolveScopeRowMask(shapes, conns, toColumnarStore(store), null).b;
+    expect([...full].reduce((s, v) => s + v, 0)).toBe(12);
+  });
+
+  it('(2) scope=null ⇒ byte-idêntico ao atual (sem campo scope, seed sem escopo)', () => {
+    const plain = stripTime(computeClusterSegments(toColumnarStore(store), params));
+    const nullCtx = stripTime(computeClusterSegments(toColumnarStore(store), params, null));
+    const nullScope = stripTime(computeClusterSegments(toColumnarStore(store), params, { shapes, conns, scope: null }));
+    expect(nullCtx).toEqual(plain);
+    expect(nullScope).toEqual(plain);
+    expect('scope' in plain).toBe(false);
+    // Seed derivada = SEM componente de escopo (fórmula atual, fixtures douradas intactas).
+    expect(plain.params.seed).toBe(clusterSeedOf('b', ['SEG'], 2, plain.params.features, 12));
+  });
+
+  it('seed escopada inclui o nó (difere da global) e é registrada', () => {
+    const scoped = computeClusterSegments(toColumnarStore(store), params, { shapes, conns, scope: { nodeId: 'pA' } });
+    const global = computeClusterSegments(toColumnarStore(store), params);
+    expect(scoped.params.seed).not.toBe(global.params.seed);
+    expect(scoped.params.seed).toBe(clusterSeedOf('b', ['SEG'], 2, scoped.params.features, 12, 'pA'));
+  });
+
+  it('(3) escopo vazio (nenhuma linha chega ao nó) ⇒ no_rows com scope preenchido', () => {
+    const m = computeClusterSegments(toColumnarStore(store), params, { shapes, conns, scope: { nodeId: 'pZ' } });
+    expect(m.error).toBe('no_rows');
+    expect(m.scope).toEqual({ nodeId: 'pZ', label: 'Porte Z' });
+  });
+
+  it('(4) determinismo escopado: duas execuções ⇒ modelo idêntico e serializável', () => {
+    const ctx = { shapes, conns, scope: { nodeId: 'pA' } };
+    const a = stripTime(computeClusterSegments(toColumnarStore(store), params, ctx));
+    const b = stripTime(computeClusterSegments(toColumnarStore(store), params, ctx));
+    expect(b).toEqual(a);
+    expect(JSON.parse(JSON.stringify(a))).toEqual(a);
+    // Caminho legado string[][] produz o MESMO modelo escopado.
+    const legacy = stripTime(computeClusterSegments(store, params, ctx));
+    expect(JSON.parse(JSON.stringify(legacy))).toEqual(JSON.parse(JSON.stringify(a)));
   });
 });
 
