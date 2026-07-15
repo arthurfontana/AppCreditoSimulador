@@ -4,6 +4,21 @@ Funcionalidades planejadas, ainda não implementadas. Organizadas por área.
 
 ---
 
+## Copiloto — Clusterização Contextual + Faixas de Risco (Épico FR — planejado)
+
+Plano de execução completo (DEC-FR-001..010, sessões FR1–FR7 com prompts prontos):
+[[Copiloto-ClusterContextual-FaixasRisco]].
+
+- **Escopo por nó da Clusterização** (FR1–FR3): "🧩 Clusterizar aqui" nas toolbars de
+  losango/Cineminha/Lens — clusteriza só a população que efetivamente chega ao nó
+  (walk M8, mesmo padrão do "🔍 Descobrir aqui"), incl. modo profundo via rowMask.
+- **Faixas de Risco** (FR4–FR6): binning supervisionado de variáveis contínuas (ex.:
+  faturamento presumido) — cortes que maximizam IV/WoE de inadimplência, monotônicos
+  por padrão, materializados como variável derivada persistente (`rangeDefs`) usável
+  no canvas, no Dashboard e na própria Clusterização.
+
+---
+
 ## Cineminha — Otimização
 
 ### Restrição de monotonicidade para variáveis ordinais
