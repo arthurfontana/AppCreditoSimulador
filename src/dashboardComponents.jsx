@@ -1590,7 +1590,7 @@ function GroupingModal({ draft, baseDataset, existingNames, onSave, onClose }) {
 }
 
 // ── AnalysisTab — página da aba Análise ───────────────────────────────────────
-function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyticsLayout, groupings, setGroupings, pageFilters, setPageFilters }) {
+function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyticsLayout, groupings, setGroupings, pageFilters, setPageFilters, scopeNotice, onDismissScopeNotice }) {
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = analyticsDataset?.temporalColumns || [];
 
@@ -1844,6 +1844,17 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row", overflow: "hidden", background: "#f8fafc" }}>
       {/* Área principal */}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {/* Aviso de escopo (DEC-FR-002) — declara quando o filtro de página veio de um
+            cluster ESCOPADO (👁 Ver no Dashboard de uma Clusterização "aqui"). */}
+        {scopeNotice && (
+          <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, padding: "8px 28px",
+            background: "#f5f3ff", borderBottom: "1px solid #ddd6fe", fontSize: 11.5, color: "#5b21b6", lineHeight: 1.5 }}>
+            <span style={{ fontSize: 14, flexShrink: 0 }}>🧩</span>
+            <span style={{ flex: 1 }}>{scopeNotice}</span>
+            <button onClick={onDismissScopeNotice} title="Dispensar aviso"
+              style={{ border: "none", background: "transparent", color: "#7c3aed", cursor: "pointer", fontSize: 13, padding: "0 2px", lineHeight: 1, flexShrink: 0 }}>✕</button>
+          </div>
+        )}
         {/* Header fixo */}
         <div style={{ flexShrink: 0, padding: "20px 28px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
           <div>

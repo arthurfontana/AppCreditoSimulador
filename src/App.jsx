@@ -1633,6 +1633,10 @@ export default function App() {
   const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = sessionStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
   const [analyticsGroupings, setAnalyticsGroupings] = useState(() => { try { const s = sessionStorage.getItem('aw_groupings_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // Grouping[] — dimensões derivadas reutilizáveis
   const [analyticsPageFilters, setAnalyticsPageFilters] = useState(() => { try { const s = sessionStorage.getItem('aw_page_filters_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // FilterCard[] — filtro de página do Dashboard (aplica-se a todos os gráficos)
+  // Aviso efêmero (não persiste) no topo do Dashboard — DEC-FR-002: declara quando os
+  // FilterCard[] acima vieram de um "👁 Ver no Dashboard" de cluster ESCOPADO (o filtro
+  // de página reproduz só as dimensões/valores do cluster, não o walk de política do nó).
+  const [analyticsScopeNotice, setAnalyticsScopeNotice] = useState(null);
   // Dataset enriquecido com as dimensões derivadas (agrupamentos) — consumido pela aba Dashboard.
   const groupedDataset = useMemo(() => applyGroupingsToDataset(analyticsDataset, analyticsGroupings), [analyticsDataset, analyticsGroupings]);
   // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
@@ -1711,7 +1715,8 @@ export default function App() {
   // Clusterização de Segmentos (Execução Híbrida H8) — modal EFÊMERO (padrão
   // segmentDiscoveryModal: não persiste; ⚠️ regra do CLAUDE.md não se aplica).
   // null | {step:'form'|'loading'|'result', csvId, dims:string[], k, autoK, method,
-  //         model?, focusedId?, deepRun?, fallbackNotice?}
+  //         model?, focusedId?, deepRun?, fallbackNotice?,
+  //         scope?: {nodeId,label}|null}  // DEC-FR-002 — "🧩 Clusterizar aqui"
   const [clusterModal, setClusterModal] = useState(null);
   // Editor de Variável de Cluster (aberto pelo ✏️ no chip do painel) — efêmero.
   // null | {csvId, col, draft:ClusterDef, baseValuesByDim:{[dim]:string[]}, notice?, confirmDelete?}
@@ -6088,7 +6093,11 @@ export default function App() {
   const CLU_BROWSER_DIMS = 3, CLU_BROWSER_K = 8;
   const clusterAbortRef = useRef(null);
 
-  const openClusterModal = () => {
+  // scope = {nodeId} (toolbar "🧩 Clusterizar aqui") ou null/ausente (painel = global,
+  // DEC-FR-002). O label é resolvido AGORA (momento da abertura), mesmo fallback do
+  // resto do app (shapesById.get(...).label || nodeId) — a pílula do modal usa esse
+  // label fixo mesmo que o nó seja renomeado depois, enquanto o modal está aberto.
+  const openClusterModal = (scope) => {
     const store = csvStoreR.current || {};
     // default = base de maior nº de linhas (mesmo critério do motor)
     let csvId = null, best = -1;
@@ -6096,9 +6105,13 @@ export default function App() {
       const n = store[id]?.rowCount || 0;
       if (n > best) { best = n; csvId = id; }
     }
+    const resolvedScope = (scope && scope.nodeId)
+      ? { nodeId: scope.nodeId, label: shapesById.get(scope.nodeId)?.label || scope.nodeId }
+      : null;
     setClusterModal({
       step: 'form', csvId, dims: [], k: 4, autoK: false, method: 'kmeans',
       model: null, focusedId: null, deepRun: null, fallbackNotice: null,
+      scope: resolvedScope,
     });
   };
 
@@ -6110,11 +6123,23 @@ export default function App() {
       ...(cur.autoK ? { autoK: true } : {}),
       ...(cur.method !== 'kmeans' ? { method: cur.method } : {}),
     };
+    // DEC-FR-002: escopado ⇒ shapes/conns/scope na mensagem (ausentes ⇒ global,
+    // retrocompat total do handler COMPUTE_CLUSTER_SEGMENTS, FR1).
+    const scopeMsg = cur.scope
+      ? { shapes: shapesR.current, conns: connsR.current, scope: { nodeId: cur.scope.nodeId } }
+      : {};
     const isDeep = cur.dims.length > CLU_BROWSER_DIMS || cur.k > CLU_BROWSER_K ||
       cur.autoK || cur.method !== 'kmeans';
-    if (!isDeep || !computeRouterRef.current) {
-      setClusterModal(m => ({ ...m, step: 'loading', deepRun: null, fallbackNotice: null }));
-      workerRef.current?.postMessage({ type: 'COMPUTE_CLUSTER_SEGMENTS', params });
+    // Modo profundo (sidecar) ainda não sabe escopo por nó (chega na FR3, DEC-FR-003) —
+    // escopado sempre roda no navegador, com a degradação DECLARADA (P4), nunca silenciosa.
+    if (!isDeep || cur.scope || !computeRouterRef.current) {
+      setClusterModal(m => ({
+        ...m, step: 'loading', deepRun: null,
+        fallbackNotice: (isDeep && cur.scope)
+          ? 'Escopo por nó ainda roda só no navegador, com os tetos declarados (até 3 dimensões, k ≤ 8, k-means) — o Motor Python ganha suporte a escopo por nó numa sessão futura.'
+          : null,
+      }));
+      workerRef.current?.postMessage({ type: 'COMPUTE_CLUSTER_SEGMENTS', params, ...scopeMsg });
       return;
     }
     runDeepClusterSegments(params);
@@ -6189,6 +6214,13 @@ export default function App() {
       }));
     if (cards.length === 0) return;
     setAnalyticsPageFilters(cards);
+    // DEC-FR-002: cluster calculado numa subpopulação (escopo por nó) — o filtro de
+    // página reproduz só as dimensões/valores do cluster, NÃO o walk de política do nó;
+    // isso é declarado no Dashboard, nunca escondido.
+    const scope = clusterModalR.current?.scope;
+    setAnalyticsScopeNotice(scope
+      ? `Este filtro veio de um cluster calculado na população que chega a "${scope.label}" — o filtro de página reproduz as dimensões do cluster, não o caminho até o nó.`
+      : null);
     setActiveTab('analysis');
     setClusterModal(null);
   };
@@ -6586,7 +6618,7 @@ export default function App() {
 
 
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
-      {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} pageFilters={analyticsPageFilters} setPageFilters={setAnalyticsPageFilters} />}
+      {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} pageFilters={analyticsPageFilters} setPageFilters={setAnalyticsPageFilters} scopeNotice={analyticsScopeNotice} onDismissScopeNotice={()=>setAnalyticsScopeNotice(null)} />}
 
       {/* ═══════════════ CANVAS PANE ═══════════════ */}
       <div style={{display:activeTab==="canvas"?"flex":"none",flex:1,minHeight:0,width:"100%",overflow:"hidden",position:"relative"}}>
@@ -6843,6 +6875,13 @@ export default function App() {
                   whiteSpace:"nowrap",fontWeight:600}}>
                 🔍 Descobrir aqui
               </button>
+              <button onClick={()=>openClusterModal({nodeId:sel})}
+                title="Clusterizar segmentos na população que efetivamente chega a este Cineminha"
+                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
+                  color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                  whiteSpace:"nowrap",fontWeight:600}}>
+                🧩 Clusterizar aqui
+              </button>
               <button onClick={()=>toggleShapeLock(sel)}
                 title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
                 style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
@@ -6891,6 +6930,13 @@ export default function App() {
                 whiteSpace:"nowrap",fontWeight:600}}>
               🔍 Descobrir aqui
             </button>
+            <button onClick={()=>openClusterModal({nodeId:sel})}
+              title="Clusterizar segmentos na população que efetivamente chega a este losango"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
+                color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              🧩 Clusterizar aqui
+            </button>
             <button onClick={()=>toggleShapeLock(sel)}
               title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
               style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
@@ -6918,6 +6964,13 @@ export default function App() {
                 color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
                 whiteSpace:"nowrap",fontWeight:600}}>
               🔍 Descobrir aqui
+            </button>
+            <button onClick={()=>openClusterModal({nodeId:sel})}
+              title="Clusterizar segmentos na população que passa por este Decision Lens"
+              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
+                color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
+                whiteSpace:"nowrap",fontWeight:600}}>
+              🧩 Clusterizar aqui
             </button>
             <button onClick={()=>toggleShapeLock(sel)}
               title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
@@ -7559,7 +7612,7 @@ export default function App() {
               onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#c7d2fe";}}>
               <span style={{fontSize:16}}>🔍</span> Descobrir Segmentos
             </button>
-            <button onClick={openClusterModal}
+            <button onClick={()=>openClusterModal(null)}
               title="Agrupar segmentos parecidos por comportamento (aprovação AS IS, inadimplência) via k-means determinístico — sempre disponível; o Motor Python remove os tetos e libera k automático/hierárquico"
               style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #ddd6fe",background:"#f5f3ff",color:"#6d28d9",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
               onMouseEnter={e=>{e.currentTarget.style.background="#ede9fe";e.currentTarget.style.borderColor="#c4b5fd";}}
@@ -11958,7 +12011,7 @@ export default function App() {
 
       {/* ═══════════════ CLUSTER MODAL — Clusterização de Segmentos (Execução Híbrida H8) ═══════════════ */}
       {clusterModal&&(()=>{
-        const { step, csvId, dims, k, autoK, method, model, focusedId, deepRun, fallbackNotice } = clusterModal;
+        const { step, csvId, dims, k, autoK, method, model, focusedId, deepRun, fallbackNotice, scope } = clusterModal;
         const upd = (patch) => setClusterModal(m => ({ ...m, ...patch }));
         // H8 — tetos declarados (paridade total, P4): dims > 3 / k > 8 e os extras
         // sklearn (k automático por silhueta, hierárquico) só quando o sidecar está
@@ -11995,6 +12048,14 @@ export default function App() {
                     <p style={{fontSize:11,color:"#6d28d9"}}>
                       Agrupa segmentos parecidos por comportamento (k-means determinístico)
                     </p>
+                    {/* DEC-FR-002 — pílula de escopo, presente em TODOS os passos (form/
+                        loading/result/save/saved) por viver no header comum aos passos. */}
+                    <span style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:4,
+                      padding:"2px 9px",borderRadius:20,
+                      background:scope?"#ede9fe":"#f1f5f9",border:`1px solid ${scope?"#c4b5fd":"#e2e8f0"}`,
+                      color:scope?"#6d28d9":"#64748b",fontSize:10.5,fontWeight:600,whiteSpace:"nowrap"}}>
+                      🧩 População: {scope ? `chegando em "${scope.label}"` : "base inteira"}
+                    </span>
                   </div>
                 </div>
                 <button onClick={()=>{ clusterAbortRef.current?.abort(); setClusterModal(null); }}
@@ -12195,6 +12256,12 @@ export default function App() {
                         cluster. As regras (faixas de valor por dimensão) vêm do agrupamento; você pode
                         renomear tudo agora e editar/mover públicos depois pelo ✏️ no painel.
                       </div>
+                      {scope && (
+                        <div style={{fontSize:11,color:"#6d28d9",lineHeight:1.5,padding:"7px 10px",borderRadius:8,background:"#f5f3ff",border:"1px solid #ddd6fe"}}>
+                          🧩 Os grupos foram aprendidos na população do nó "{scope.label}"; a variável classifica a
+                          base inteira por essas regras.
+                        </div>
+                      )}
                       <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
                         Nome da variável
                         <input value={save.varName} onChange={e=>updSave({varName:e.target.value})}
