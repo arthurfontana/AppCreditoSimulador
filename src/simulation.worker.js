@@ -7304,13 +7304,17 @@ function handleMessage(e) {
   // ausentes shapes/scope ⇒ base inteira (o walk de política é single-sourced no worker).
   if (type === 'COMPUTE_RISK_BANDS') {
     const { csvId = null, col = null, metric = 'inadReal', k = null, autoK = false,
-            monotonic = true, minShare = null, shapes = null, conns = [], scope = null } = e.data;
+            monotonic = true, minShare = null, shapes = null, conns = [], scope = null,
+            reqTag = null } = e.data;
     const scopeCtx = (scope && scope.nodeId && Array.isArray(shapes)) ? { shapes, conns, scope } : null;
     const params = { csvId, col, metric, autoK, monotonic };
     if (k != null) params.k = k;
     if (minShare != null) params.minShare = minShare;
     const rangeModel = computeRiskBands(workerCsvStore, params, scopeCtx);
-    self.postMessage({ type: 'RISK_BANDS_RESULT', rangeModel });
+    // reqTag (opcional, FR6): eco do pedido — a UI usa p/ distinguir o pedido PRINCIPAL
+    // da consulta-sombra "melhor monotônico" (DEC-FR-005, "ambos os IVs" com o toggle
+    // livre ligado) sem precisar de um segundo tipo de mensagem.
+    self.postMessage({ type: 'RISK_BANDS_RESULT', rangeModel, reqTag });
     return;
   }
 
