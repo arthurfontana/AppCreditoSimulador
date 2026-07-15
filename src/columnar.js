@@ -569,6 +569,84 @@ export function deriveClusterColumn(csv, def) {
   return { kind: 'dict', dict, codes: packCodes(tmp, n, dict.length) };
 }
 
+// ── Coluna derivada de Variável de Faixas (Criar Faixas por Risco, Épico FR) ─────
+// Materializa uma coluna dict ORDINAL a partir de uma DEFINIÇÃO de faixas: cada linha
+// recebe o rótulo da faixa [min, max) que contém o valor NUMÉRICO da coluna de
+// origem (`def.sourceCol`), parseado com a MESMA semântica de `cellNum` (parseFloat).
+// Fronteiras localizadas por busca binária (as faixas são contíguas e ordenadas —
+// `def.bands[i].max` é não-decrescente); ponta null = ±infinito. Valor não parseável
+// (ou coluna ausente na base) ⇒ `unmatchedLabel`. Sobre coluna dict, resolve a faixa
+// UMA vez por valor distinto (O(distintos)); sobre coluna num, lê direto. Ordinal
+// (faixas têm ordem natural) — `columnTypes[col]='decision'`, `varTypes[col]='ordinal'`
+// no call site (App.jsx), como a materialização entra pela plumbing existente
+// (decisionVars, createDecisionNode, assignCinemaVar, Dashboard).
+//
+// def = { sourceCol, unmatchedLabel, bands: [{ label, min, max }...] } — bands já
+// ORDENADAS por min crescente (garantia de buildRangeDefFromModel/editRangeCuts em
+// src/rangeVar.js).
+export function deriveRangeColumn(csv, def) {
+  const n = rowCount(csv);
+  const bands = (def && def.bands) || [];
+  const unmatchedLabel = (def && def.unmatchedLabel != null) ? def.unmatchedLabel : '';
+  const B = bands.length;
+  const dict = bands.map(b => b.label);
+  let unmCode = dict.indexOf(unmatchedLabel);
+  const codeForUnmatched = () => {
+    if (unmCode === -1) { unmCode = dict.length; dict.push(unmatchedLabel); }
+    return unmCode;
+  };
+  if (dict.length === 0) dict.push(unmatchedLabel); // sem faixas ⇒ tudo unmatched
+
+  // Busca binária pela fronteira superior (bands[i].max, [min,max) — não-decrescente,
+  // última faixa max=null=+∞): menor i tal que x < bands[i].max (ou a última faixa).
+  const bandForX = (x) => {
+    if (B === 0 || !Number.isFinite(x)) return -1;
+    let lo = 0, hi = B - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const max = bands[mid].max;
+      if (max != null && x >= max) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  };
+
+  const srcCol = def && def.sourceCol;
+  const ci = (csv.headers || []).indexOf(srcCol);
+  const tmp = new Int32Array(n);
+  if (ci < 0) {
+    tmp.fill(codeForUnmatched());
+  } else if (isColumnar(csv)) {
+    const col = csv.columns[srcCol];
+    if (col && col.kind === 'num') {
+      for (let r = 0; r < n; r++) {
+        const bi = bandForX(col.data[r]);
+        tmp[r] = bi >= 0 ? bi : codeForUnmatched();
+      }
+    } else if (col && col.kind === 'dict') {
+      // Resolve UMA vez por distinto (cellNum-consistente: parseFloat do valor do dict).
+      const codeByDictCode = new Int32Array(col.dict.length).fill(-2); // -2 = não resolvido ainda
+      for (let r = 0; r < n; r++) {
+        const dc = col.codes[r];
+        let bc = codeByDictCode[dc];
+        if (bc === -2) {
+          const bi = bandForX(parseFloat(col.dict[dc]));
+          bc = bi >= 0 ? bi : codeForUnmatched();
+          codeByDictCode[dc] = bc;
+        }
+        tmp[r] = bc;
+      }
+    } else {
+      tmp.fill(codeForUnmatched());
+    }
+  } else {
+    for (let r = 0; r < n; r++) {
+      const bi = bandForX(cellNum(csv, r, ci));
+      tmp[r] = bi >= 0 ? bi : codeForUnmatched();
+    }
+  }
+  return { kind: 'dict', dict, codes: packCodes(tmp, n, dict.length) };
+}
+
 // Modo de edição do wizard: reclassificar uma coluna (métrica ↔ dimensão) sem
 // materializar a base. Se o tipo não mudou, devolve a própria coluna (as colunas
 // nunca são mutadas, então compartilhar a referência com a entrada anterior do

@@ -9,6 +9,7 @@ import { cellStr, cellNum, rowCount, isColumnar, buildCsvStoreMessage } from './
 import { applyGoalSeekMoves } from './goalSeek.js';
 import { applySimplifyCandidates } from './policySimplify.js';
 import { describeClusterRules } from './clusterVar.js';
+import { formatBandLabel, describeRangeRules } from './rangeVar.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -5676,22 +5677,9 @@ function computeUniformIV(units, pre, k) {
   return computeIV(bins);
 }
 
-// Rótulo compacto pt-BR de uma faixa [min, max) (null = ±∞). Rótulo PROVISÓRIO do worker —
-// o canônico (formatBandLabel, compartilhado) nasce em src/rangeVar.js (FR5).
-function riskNumberLabelPtBR(x) {
-  const abs = Math.abs(x);
-  const fmt = (v, suf) => (Math.round(v * 100) / 100).toString().replace('.', ',') + suf;
-  if (abs >= 1e9) return fmt(x / 1e9, ' bi');
-  if (abs >= 1e6) return fmt(x / 1e6, ' mi');
-  if (abs >= 1e3) return fmt(x / 1e3, ' mil');
-  return (Math.round(x * 100) / 100).toString().replace('.', ',');
-}
-function riskBandLabelPtBR(min, max) {
-  if (min == null && max == null) return 'Todos';
-  if (min == null) return `até ${riskNumberLabelPtBR(max)}`;
-  if (max == null) return `acima de ${riskNumberLabelPtBR(min)}`;
-  return `${riskNumberLabelPtBR(min)} a ${riskNumberLabelPtBR(max)}`;
-}
+// Rótulo compacto pt-BR de uma faixa [min, max) (null = ±∞) — CANÔNICO, compartilhado
+// com a materialização da variável (deriveRangeColumn/buildRangeDefFromModel,
+// src/rangeVar.js, FR5). Sem duplicação de formatação entre análise e variável.
 
 // Ponto de entrada. `params = {csvId, col, metric, k?, autoK?, monotonic?, minShare?}`;
 // `scopeCtx = {shapes, conns, scope:{nodeId,label}, masks?}` (FR1, opcional). Devolve o
@@ -5805,7 +5793,7 @@ function computeRiskBands(csvStore, params = {}, scopeCtx = null) {
     let good = Math.max(0, den - num), bad = num;
     if (good === 0 || bad === 0) { good += IV_EPS; bad += IV_EPS; }
     return {
-      id: `b${bi + 1}`, label: riskBandLabelPtBR(min, max), min, max,
+      id: `b${bi + 1}`, label: formatBandLabel(min, max), min, max,
       qty, share: totalQty > 0 ? qty / totalQty : null,
       num, den, rate: den > 0 ? num / den : null,
       woe: Math.log((good / totalGood) / (bad / totalBad)),
@@ -6836,11 +6824,17 @@ function buildGlossary(ir, csvStore, includeDomains) {
     const clusterDef = (csvId && csvStore[csvId] && csvStore[csvId].clusterDefs)
       ? csvStore[csvId].clusterDefs[v.col] : null;
     const cluster = clusterDef ? describeClusterRules(clusterDef, includeDomains) : null;
+    // Variável de Faixas (Épico FR): mesmo ponto de anexação da Variável de Cluster —
+    // a descrição CRUA das faixas (rótulos + cortes) via describeRangeRules; N2 omite
+    // os cortes concretos sem o toggle de domínios.
+    const rangeDef = (csvId && csvStore[csvId] && csvStore[csvId].rangeDefs)
+      ? csvStore[csvId].rangeDefs[v.col] : null;
+    const range = rangeDef ? describeRangeRules(rangeDef, includeDomains) : null;
     return {
       col: v.col, csvId, csvName, role: v.kind,
       colType: colMeta?.colType ?? null, varType: colMeta?.varType ?? null,
       domainSize: colMeta?.domainSize ?? null,
-      values, cluster,
+      values, cluster, range,
     };
   }).sort((a, b) => a.col.localeCompare(b.col) || (a.csvId || '').localeCompare(b.csvId || ''));
 }
