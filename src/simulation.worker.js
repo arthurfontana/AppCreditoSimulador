@@ -5444,6 +5444,385 @@ function computeClusterSegments(csvStore, params = {}, scopeCtx = null) {
   return model;
 }
 
+// ── COMPUTE_RISK_BANDS — Criar Faixas por Risco (Épico FR, DEC-FR-004/005/006/010) ──
+// Binning SUPERVISIONADO por IV/WoE (técnica padrão de scorecard) sobre UMA coluna
+// contínua: descobre os cortes que MAXIMIZAM a discriminação de inadimplência,
+// monotônicos por padrão (DEC-FR-005), materializáveis depois como variável derivada
+// persistente (FR5). Classe A — NUNCA roteia ao sidecar (DEC-FR-004). REUSA
+// `computeIV`/`resolveRiskMetric`/`segColIdxs`/`segReadSums` (nenhuma matemática nova de
+// crédito) e `resolveScopeRowMask` (escopo por nó, FR1). Fora do cache do tick.
+const RANGE_PREBINS = 50;             // teto de pré-bins (quantis ponderados por volume)
+const RANGE_MAX_K = 7;                // teto de faixas no auto-k (DEC-FR-004)
+const RANGE_AUTO_MIN_GAIN = 0.05;     // ganho relativo mínimo de IV p/ subir uma faixa
+const RANGE_MIN_PARSE = 0.90;         // < isto do VOLUME parseável ⇒ not_numeric
+const RANGE_MIN_DISTINCT = 30;        // distintos p/ isContinuousColumn considerar contínua
+const RANGE_MIN_SHARE_DEFAULT = 0.05; // piso de volume por faixa (default)
+const RANGE_IV_TIE = 1e-12;           // empate de IV ⇒ desempate lexicográfico dos cortes
+
+// Detecção de contínua (DEC-FR-004, usada pela UI/DEC-FR-008): coluna Filtro
+// (`columnTypes==='decision'`) com ≥ RANGE_MIN_DISTINCT valores distintos e ≥ 90% do
+// VOLUME (qty) numérico-parseável — parsing com a MESMA semântica de `cellNum` (parseFloat).
+function isContinuousColumn(csv, col) {
+  if (!csv || col == null) return false;
+  const types = csv.columnTypes || {};
+  if (types[col] !== 'decision') return false;
+  const colIdx = (csv.headers || []).indexOf(col);
+  if (colIdx < 0) return false;
+  const n = rowCount(csv);
+  const dcol = dictColAt(csv, colIdx);
+  // distintos (não-vazios): dict → dicionário; legado → Set
+  let distinct = 0;
+  let finiteByCode = null;
+  if (dcol) {
+    finiteByCode = new Uint8Array(dcol.dict.length);
+    for (let k = 0; k < dcol.dict.length; k++) {
+      const v = dcol.dict[k];
+      if (v !== '' && v != null) distinct++;
+      finiteByCode[k] = Number.isFinite(parseFloat(v)) ? 1 : 0;
+    }
+  } else {
+    const set = new Set();
+    for (let r = 0; r < n; r++) { const v = cellStr(csv, r, colIdx); if (v !== '' && v != null) set.add(v); }
+    distinct = set.size;
+  }
+  if (distinct < RANGE_MIN_DISTINCT) return false;
+  const qtyIdx = segColIdxs(csv).qty;
+  let totalQty = 0, okQty = 0;
+  for (let r = 0; r < n; r++) {
+    const q = qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+    totalQty += q;
+    const ok = dcol ? finiteByCode[dcol.codes[r]] : Number.isFinite(cellNum(csv, r, colIdx));
+    if (ok) okQty += q;
+  }
+  return totalQty > 0 && (okQty / totalQty) >= RANGE_MIN_PARSE;
+}
+
+// Agregação por VALOR distinto (passo 1 da DEC-FR-004): cada valor numérico distinto vira
+// {x, qty, num, den}; num/den saem da métrica resolvida (`spec.numColType`/`denColType` —
+// nada assume inad). Valores não parseáveis/vazios acumulam na banda "Sem valor"
+// (DEC-FR-006), fora dos passos 2–4. Máscara de escopo filtra ANTES de agregar (FR1).
+function aggregateRiskByValue(csv, colIdx, idxs, spec, mask) {
+  const n = rowCount(csv);
+  const dcol = dictColAt(csv, colIdx);
+  let xByCode = null;
+  if (dcol) { // parse UMA vez por distinto (O(distintos)); mesma semântica de cellNum
+    xByCode = new Float64Array(dcol.dict.length);
+    for (let k = 0; k < dcol.dict.length; k++) xByCode[k] = parseFloat(dcol.dict[k]);
+  }
+  const byX = new Map(); // x(number) → {x, qty, num, den}
+  let unmQty = 0, unmNum = 0, unmDen = 0;
+  for (let r = 0; r < n; r++) {
+    if (mask && !mask[r]) continue;
+    const s = segReadSums(csv, r, idxs);
+    const num = s[spec.numColType] || 0;
+    const den = s[spec.denColType] || 0;
+    const x = dcol ? xByCode[dcol.codes[r]] : cellNum(csv, r, colIdx);
+    if (!Number.isFinite(x)) { unmQty += s.qty; unmNum += num; unmDen += den; continue; }
+    let g = byX.get(x);
+    if (!g) { g = { x, qty: 0, num: 0, den: 0 }; byX.set(x, g); }
+    g.qty += s.qty; g.num += num; g.den += den;
+  }
+  const groups = Array.from(byX.values()).sort((a, b) => a.x - b.x);
+  return { groups, unmatched: { qty: unmQty, num: unmNum, den: unmDen } };
+}
+
+// Passo 2 — pré-bins por quantis ponderados por VOLUME (equal-frequency por qty), ≤ maxBins.
+// Cada grupo (valor distinto) é INDIVISÍVEL — um corte só cai ENTRE valores distintos, então
+// linhas de mesmo valor caem sempre na mesma faixa. < maxBins distintos ⇒ cada distinto é um
+// pré-bin (exato). Atribuição pelo ponto médio de volume ⇒ índice não-decrescente ⇒ corridas
+// contíguas de mesmo índice viram uma unidade (determinístico).
+function equalFreqUnits(groups, maxBins) {
+  const G = groups.length;
+  const mk = (g) => ({ qty: g.qty, num: g.num, den: g.den, loX: g.x, hiX: g.x });
+  if (G <= maxBins) return groups.map(mk);
+  let total = 0; for (const g of groups) total += g.qty;
+  const units = [];
+  let cur = null, curB = -1, cum = 0;
+  for (let i = 0; i < G; i++) {
+    const g = groups[i];
+    const mid = cum + g.qty / 2;
+    let b = total > 0 ? Math.floor((mid / total) * maxBins) : 0;
+    if (b >= maxBins) b = maxBins - 1; if (b < 0) b = 0;
+    if (!cur || b !== curB) { cur = mk(g); curB = b; units.push(cur); }
+    else { cur.qty += g.qty; cur.num += g.num; cur.den += g.den; cur.hiX = g.x; }
+    cum += g.qty;
+  }
+  return units;
+}
+
+// Comparação lexicográfica de duas listas de cortes (índices de fronteira, ordem crescente).
+function riskCutsLexLess(a, b) {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) { if (a[i] !== b[i]) return a[i] < b[i]; }
+  return a.length < b.length;
+}
+
+// DP EXATA (passo 3, DEC-FR-004): parte `units` em exatamente k faixas contíguas
+// maximizando o IV, sujeito a (a) share ≥ minShare por faixa e (b) taxas monotônicas na
+// direção `dir` (0=livre, 1=não-decrescente, -1=não-crescente). O estado (start, faixas
+// restantes, início da faixa anterior) determina a taxa da faixa anterior ⇒ a monotonia é
+// checada EXATAMENTE por transição, sem heurística de "melhor IV por estado". Empate de IV
+// (≤ RANGE_IV_TIE) ⇒ vence o conjunto de cortes lexicograficamente menor. O(prebins²·k).
+// Retorna {iv, cuts} (cortes = índices de fronteira das faixas após a 1ª) ou null (inviável).
+function dpRiskBands(units, pre, totalQty, totalGood, totalBad, k, minShare, dir) {
+  const M = units.length;
+  if (k < 1 || k > M) return null;
+  const minQ = minShare * totalQty - 1e-12;
+  const rateOf = (i, jExcl) => { const den = pre.d[jExcl] - pre.d[i]; return den > 0 ? (pre.n[jExcl] - pre.n[i]) / den : 0; };
+  const shareOK = (i, jExcl) => (pre.q[jExcl] - pre.q[i]) >= minQ;
+  const ivPart = (i, jExcl) => {
+    const num = pre.n[jExcl] - pre.n[i], den = pre.d[jExcl] - pre.d[i];
+    let good = Math.max(0, den - num), bad = num;
+    if (good === 0 || bad === 0) { good += IV_EPS; bad += IV_EPS; }
+    const dg = good / totalGood, db = bad / totalBad;
+    return (dg - db) * Math.log(dg / db);
+  };
+  const rateRel = (prevR, curR) => dir === 0 ? true : (dir === 1 ? curR >= prevR - 1e-12 : curR <= prevR + 1e-12);
+  const memo = new Map();
+  function solve(start, bandsLeft, prevStart) {
+    const key = start + ',' + bandsLeft + ',' + prevStart;
+    const hit = memo.get(key); if (hit !== undefined) return hit;
+    let res = null;
+    const prevR = prevStart >= 0 ? rateOf(prevStart, start) : 0;
+    if (bandsLeft === 1) {
+      if (shareOK(start, M) && (prevStart < 0 || rateRel(prevR, rateOf(start, M)))) res = { iv: ivPart(start, M), cuts: [] };
+    } else {
+      for (let e = start + 1; e <= M - (bandsLeft - 1); e++) {
+        if (!shareOK(start, e)) continue;
+        if (prevStart >= 0 && !rateRel(prevR, rateOf(start, e))) continue;
+        const sub = solve(e, bandsLeft - 1, start);
+        if (!sub) continue;
+        const iv = ivPart(start, e) + sub.iv;
+        const cuts = [e, ...sub.cuts];
+        if (res === null || iv > res.iv + RANGE_IV_TIE ||
+            (Math.abs(iv - res.iv) <= RANGE_IV_TIE && riskCutsLexLess(cuts, res.cuts))) res = { iv, cuts };
+      }
+    }
+    memo.set(key, res);
+    return res;
+  }
+  return solve(0, k, -1);
+}
+
+// Direção de monotonia das faixas de um conjunto de cortes ('inc'/'dec'/null).
+function riskMonotonicDir(units, pre, cuts) {
+  const M = units.length;
+  const starts = [0, ...cuts], ends = [...cuts, M];
+  const rates = starts.map((s, i) => { const den = pre.d[ends[i]] - pre.d[s]; return den > 0 ? (pre.n[ends[i]] - pre.n[s]) / den : 0; });
+  let inc = true, dec = true;
+  for (let i = 1; i < rates.length; i++) { if (rates[i] < rates[i - 1] - 1e-12) inc = false; if (rates[i] > rates[i - 1] + 1e-12) dec = false; }
+  return inc ? 'inc' : dec ? 'dec' : null;
+}
+
+// Solver de UM k: monotônico ⇒ testa as DUAS direções e fica com o maior IV (DEC-FR-005 —
+// direção detectada automaticamente); livre ⇒ DP sem restrição de monotonia.
+function solveRiskK(units, pre, totalQty, totalGood, totalBad, k, minShare, monotonic) {
+  if (!monotonic) {
+    const r = dpRiskBands(units, pre, totalQty, totalGood, totalBad, k, minShare, 0);
+    return r ? { iv: r.iv, cuts: r.cuts, dir: riskMonotonicDir(units, pre, r.cuts) } : null;
+  }
+  const inc = dpRiskBands(units, pre, totalQty, totalGood, totalBad, k, minShare, 1);
+  const dec = dpRiskBands(units, pre, totalQty, totalGood, totalBad, k, minShare, -1);
+  if (!inc && !dec) return null;
+  let pick, dir;
+  if (inc && (!dec || inc.iv > dec.iv + RANGE_IV_TIE)) { pick = inc; dir = 'inc'; }
+  else if (dec && (!inc || dec.iv > inc.iv + RANGE_IV_TIE)) { pick = dec; dir = 'dec'; }
+  else if (riskCutsLexLess(dec.cuts, inc.cuts)) { pick = dec; dir = 'dec'; } // empate de IV ⇒ lex
+  else { pick = inc; dir = 'inc'; }
+  return { iv: pick.iv, cuts: pick.cuts, dir };
+}
+
+// Passo 4 — auto-k: roda a DP p/ k=2..RANGE_MAX_K e escolhe o MAIOR k cujo ganho relativo de
+// IV sobre k−1 é ≥ RANGE_AUTO_MIN_GAIN; o critério é DECLARADO (`autoKReason`). Base = menor k
+// viável ≥ 2 (minShare/monotonia podem tornar k pequenos inviáveis).
+function chooseRiskAutoK(solveK, maxK) {
+  const results = {};
+  for (let k = 2; k <= maxK; k++) results[k] = solveK(k);
+  let base = null;
+  for (let k = 2; k <= maxK; k++) if (results[k]) { base = k; break; }
+  if (base == null) return { k: null, results, reason: null };
+  let chosen = base, ivPrev = results[base].iv, reason = null;
+  for (let k = base + 1; k <= maxK; k++) {
+    const r = results[k];
+    if (!r) { reason = `k=${chosen} escolhido: k=${k} inviável (piso de volume/monotonia)`; break; }
+    const gain = ivPrev > 0 ? (r.iv - ivPrev) / ivPrev : (r.iv > 0 ? Infinity : 0);
+    if (gain >= RANGE_AUTO_MIN_GAIN) { chosen = k; ivPrev = r.iv; }
+    else { reason = `k=${chosen} escolhido: k=${k} adicionaria <${Math.round(RANGE_AUTO_MIN_GAIN * 100)}% de IV`; break; }
+  }
+  if (reason == null) reason = `k=${chosen} escolhido (ganho marginal ≥${Math.round(RANGE_AUTO_MIN_GAIN * 100)}% até o teto k=${maxK})`;
+  return { k: chosen, results, reason };
+}
+
+// Passo 5 — referência de honestidade (DEC-FR-010): IV do corte CEGO (quantis uniformes por
+// volume com o mesmo k), via computeIV — exibido lado a lado do IV otimizado.
+function computeUniformIV(units, pre, k) {
+  const M = units.length;
+  const total = pre.q[M];
+  const cuts = [];
+  if (k < M) {
+    for (let b = 1; b < k; b++) {
+      const target = total * b / k;
+      let e = 1; while (e < M && pre.q[e] < target - 1e-9) e++;
+      if (e < 1) e = 1; if (e > M - 1) e = M - 1;
+      if (cuts.length && e <= cuts[cuts.length - 1]) e = cuts[cuts.length - 1] + 1;
+      if (e > M - 1) e = M - 1;
+      if (!cuts.length || e > cuts[cuts.length - 1]) cuts.push(e);
+    }
+  } else {
+    for (let i = 1; i < M; i++) cuts.push(i);
+  }
+  const starts = [0, ...cuts], ends = [...cuts, M];
+  const bins = starts.map((s, i) => ({ altas: pre.d[ends[i]] - pre.d[s], maus: pre.n[ends[i]] - pre.n[s] }));
+  return computeIV(bins);
+}
+
+// Rótulo compacto pt-BR de uma faixa [min, max) (null = ±∞). Rótulo PROVISÓRIO do worker —
+// o canônico (formatBandLabel, compartilhado) nasce em src/rangeVar.js (FR5).
+function riskNumberLabelPtBR(x) {
+  const abs = Math.abs(x);
+  const fmt = (v, suf) => (Math.round(v * 100) / 100).toString().replace('.', ',') + suf;
+  if (abs >= 1e9) return fmt(x / 1e9, ' bi');
+  if (abs >= 1e6) return fmt(x / 1e6, ' mi');
+  if (abs >= 1e3) return fmt(x / 1e3, ' mil');
+  return (Math.round(x * 100) / 100).toString().replace('.', ',');
+}
+function riskBandLabelPtBR(min, max) {
+  if (min == null && max == null) return 'Todos';
+  if (min == null) return `até ${riskNumberLabelPtBR(max)}`;
+  if (max == null) return `acima de ${riskNumberLabelPtBR(min)}`;
+  return `${riskNumberLabelPtBR(min)} a ${riskNumberLabelPtBR(max)}`;
+}
+
+// Ponto de entrada. `params = {csvId, col, metric, k?, autoK?, monotonic?, minShare?}`;
+// `scopeCtx = {shapes, conns, scope:{nodeId,label}, masks?}` (FR1, opcional). Devolve o
+// RangeModel (dados crus, nunca prosa — padrão docModel). scope=null ⇒ base inteira.
+function computeRiskBands(csvStore, params = {}, scopeCtx = null) {
+  const model = {
+    version: '1.0', generatedAt: new Date().toISOString(), error: null,
+    dataset: null, col: params.col ?? null, metric: null, scope: null,
+    params: null, bands: [], unmatched: null, quality: null,
+  };
+  const spec = resolveRiskMetric(params.metric);
+  model.metric = { id: spec.id, label: spec.label, direction: spec.direction };
+
+  // ── Escopo por nó (DEC-FR-001): REUSA resolveScopeRowMask; scope=null ⇒ base inteira.
+  const scopeNodeId = scopeCtx && scopeCtx.scope && scopeCtx.scope.nodeId ? scopeCtx.scope.nodeId : null;
+  const scopeShapes = scopeCtx && Array.isArray(scopeCtx.shapes) ? scopeCtx.shapes : [];
+  const scopeConns = scopeCtx && Array.isArray(scopeCtx.conns) ? scopeCtx.conns : [];
+  const masks = scopeNodeId
+    ? ((scopeCtx.masks && typeof scopeCtx.masks === 'object')
+        ? scopeCtx.masks
+        : resolveScopeRowMask(scopeShapes, scopeConns, csvStore, scopeNodeId))
+    : null;
+  if (scopeNodeId) {
+    const scopeLabel = (scopeCtx.scope.label != null)
+      ? scopeCtx.scope.label
+      : (scopeShapes.find(s => s.id === scopeNodeId)?.label ?? scopeNodeId);
+    model.scope = { nodeId: scopeNodeId, label: scopeLabel };
+  }
+
+  // csv alvo: explícito, senão maior população (NO ESCOPO, se escopado — mesma resolução
+  // de winner de discoverSegments/computeClusterSegments).
+  const scopedPopOf = (csv, mask) => {
+    const qi = segColIdxs(csv).qty; const n = rowCount(csv); let s = 0;
+    for (let r = 0; r < n; r++) if (!mask || mask[r]) s += qi >= 0 ? (cellNum(csv, r, qi) || 0) : 1;
+    return s;
+  };
+  const ids = Object.keys(csvStore || {});
+  let csvId = params.csvId != null && csvStore[params.csvId] ? params.csvId : null;
+  if (!csvId) {
+    let best = -1;
+    for (const id of ids) {
+      const metric = masks ? scopedPopOf(csvStore[id], masks[id]) : rowCount(csvStore[id]);
+      if (metric > best) { best = metric; csvId = id; }
+    }
+  }
+  const csv = csvId ? csvStore[csvId] : null;
+  const nRows = csv ? rowCount(csv) : 0;
+  if (!csv || nRows === 0) { model.error = 'no_rows'; return model; }
+  model.dataset = { csvId, name: csv.name || csvId, rowCount: nRows };
+
+  const colIdx = (csv.headers || []).indexOf(params.col);
+  if (colIdx < 0) { model.error = 'not_numeric'; return model; }
+  const mask = masks ? masks[csvId] : null;
+  if (mask) { // escopo vazio ⇒ no_rows DECLARADO com o escopo preenchido
+    let any = false; for (let r = 0; r < nRows; r++) if (mask[r]) { any = true; break; }
+    if (!any) { model.error = 'no_rows'; return model; }
+  }
+
+  const idxs = segColIdxs(csv);
+  const { groups, unmatched } = aggregateRiskByValue(csv, colIdx, idxs, spec, mask);
+  const matchedQty = groups.reduce((s, g) => s + g.qty, 0);
+  const grandQty = matchedQty + unmatched.qty;
+
+  // Banda "Sem valor" (DEC-FR-006) — sempre exibida quando existe; share sobre o total geral.
+  if (unmatched.qty > 0) {
+    model.unmatched = {
+      qty: unmatched.qty,
+      share: grandQty > 0 ? unmatched.qty / grandQty : null,
+      rate: unmatched.den > 0 ? unmatched.num / unmatched.den : null,
+    };
+  }
+  // not_numeric quando < RANGE_MIN_PARSE do VOLUME é parseável (DEC-FR-004).
+  if (grandQty > 0 && (matchedQty / grandQty) < RANGE_MIN_PARSE) { model.error = 'not_numeric'; return model; }
+  if (groups.length === 0) { model.error = 'not_numeric'; return model; }
+
+  const units = equalFreqUnits(groups, RANGE_PREBINS);
+  const M = units.length;
+  const pre = { q: new Float64Array(M + 1), n: new Float64Array(M + 1), d: new Float64Array(M + 1) };
+  for (let i = 0; i < M; i++) { pre.q[i + 1] = pre.q[i] + units[i].qty; pre.n[i + 1] = pre.n[i] + units[i].num; pre.d[i + 1] = pre.d[i] + units[i].den; }
+  const totalQty = pre.q[M], totalNum = pre.n[M], totalDen = pre.d[M];
+  const totalGood = totalDen - totalNum, totalBad = totalNum;
+  // no_contrast = mesma regra do computeIV (sem bons OU sem maus, nenhuma fórmula de IV se aplica).
+  if (totalGood <= 0 || totalBad <= 0) { model.error = 'no_contrast'; return model; }
+
+  const minShare = params.minShare != null ? params.minShare : RANGE_MIN_SHARE_DEFAULT;
+  const monotonic = params.monotonic !== false; // default true (DEC-FR-005)
+  const autoK = !!params.autoK;
+  const solveK = (k) => solveRiskK(units, pre, totalQty, totalGood, totalBad, k, minShare, monotonic);
+
+  let kEff, solution, autoKReason = null;
+  if (autoK) {
+    const chooser = chooseRiskAutoK(solveK, Math.min(RANGE_MAX_K, M));
+    if (chooser.k == null) { model.params = { k: null, autoK: true, monotonic, minShare, prebins: M }; model.error = 'infeasible'; return model; }
+    kEff = chooser.k; solution = chooser.results[kEff]; autoKReason = chooser.reason;
+  } else {
+    kEff = Math.max(2, Math.min(params.k != null ? params.k : 3, M));
+    solution = solveK(kEff);
+    if (!solution) { model.params = { k: kEff, autoK: false, monotonic, minShare, prebins: M }; model.error = 'infeasible'; return model; }
+  }
+
+  // ── Monta as faixas [min, max) (null = ±∞) a partir dos cortes vencedores ──────
+  const cuts = solution.cuts;
+  const starts = [0, ...cuts], ends = [...cuts, M];
+  const bins = [];
+  const bands = starts.map((s, bi) => {
+    const eExcl = ends[bi];
+    const qty = pre.q[eExcl] - pre.q[s], num = pre.n[eExcl] - pre.n[s], den = pre.d[eExcl] - pre.d[s];
+    const min = bi === 0 ? null : units[s].loX;
+    const max = bi === starts.length - 1 ? null : units[eExcl].loX;
+    bins.push({ altas: den, maus: num });
+    let good = Math.max(0, den - num), bad = num;
+    if (good === 0 || bad === 0) { good += IV_EPS; bad += IV_EPS; }
+    return {
+      id: `b${bi + 1}`, label: riskBandLabelPtBR(min, max), min, max,
+      qty, share: totalQty > 0 ? qty / totalQty : null,
+      num, den, rate: den > 0 ? num / den : null,
+      woe: Math.log((good / totalGood) / (bad / totalBad)),
+    };
+  });
+
+  model.params = { k: kEff, autoK, monotonic, minShare, prebins: M };
+  model.bands = bands;
+  model.quality = {
+    iv: computeIV(bins),                       // fonte única do IV das faixas (DEC-FR-004 GATE 2)
+    ivUniform: computeUniformIV(units, pre, kEff), // corte cego de referência (DEC-FR-010)
+    monotonic: solution.dir,                   // 'inc' | 'dec' | null (livre não-monotônico)
+    autoKReason,
+  };
+  return model;
+}
+
 // ── COMPUTE_POLICY_INSIGHTS — Copiloto Sessão 1 (lint estrutural, DEC-IA-006) ────
 // Achados são FATOS estruturais sobre o grafo do canvas ativo — nunca bloqueiam a
 // simulação (só informam). Reaproveita o `nodeArrivals`/`lensCounts` que o tick já
@@ -6925,6 +7304,22 @@ function handleMessage(e) {
     return;
   }
 
+  // Criar Faixas por Risco (Épico FR, DEC-FR-004) — binning supervisionado por IV sobre uma
+  // coluna contínua. Classe A: SEMPRE no worker, FORA do cache do tick (como as demais
+  // análises do Copiloto), NUNCA roteia ao sidecar. O escopo por nó é opcional (FR1):
+  // ausentes shapes/scope ⇒ base inteira (o walk de política é single-sourced no worker).
+  if (type === 'COMPUTE_RISK_BANDS') {
+    const { csvId = null, col = null, metric = 'inadReal', k = null, autoK = false,
+            monotonic = true, minShare = null, shapes = null, conns = [], scope = null } = e.data;
+    const scopeCtx = (scope && scope.nodeId && Array.isArray(shapes)) ? { shapes, conns, scope } : null;
+    const params = { csvId, col, metric, autoK, monotonic };
+    if (k != null) params.k = k;
+    if (minShare != null) params.minShare = minShare;
+    const rangeModel = computeRiskBands(workerCsvStore, params, scopeCtx);
+    self.postMessage({ type: 'RISK_BANDS_RESULT', rangeModel });
+    return;
+  }
+
   // Execução Híbrida H7 — anexa recomendações (patch + delta re-simulado REAL,
   // DEC-SD-003) ao SegmentModel que o sidecar devolveu sem elas. O motor de simulação
   // continua single-sourced neste worker (a dupla implementação dele é a Sessão H9).
@@ -7000,6 +7395,9 @@ export {
   clampSegmentParamsForBrowser,
   segStrCmp,
   computeClusterSegments,
+  computeRiskBands,
+  isContinuousColumn,
+  computeIV,
   clampClusterParamsForBrowser,
   clusterSeedOf,
   clusterMulberry32,
