@@ -75,7 +75,8 @@ listeners sem closure stale. Em todo `setX(...)`, o ref correspondente é atuali
 imediatamente. Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, `editR`,
 `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`,
 `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`,
-`businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`.
+`businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`, `rangeModalR`,
+`rangeVarModalR`.
 
 ## ⚠️ Regra para novas features — o que o usuário cria/ajusta PRECISA ser salvo
 
@@ -97,8 +98,9 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"2.6"`** (bumped na Variável de Cluster — novo campo
-   `csvStore[csvId].clusterDefs`, já coberto pelo contêiner `csvStore`).
+   Versão atual: **`"2.7"`** (bumped na Variável de Faixas — novo campo
+   `csvStore[csvId].rangeDefs`, Épico FR/Sessão FR5, já coberto pelo contêiner
+   `csvStore`; `2.6` foi a Variável de Cluster — `clusterDefs`).
 4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
    adicionar serialize/deserialize dedicados (padrão de
    `serializeCsvStore`/`deserializeCsvStore`) e cobrir o round-trip em teste.
@@ -108,7 +110,8 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
 **Checklist do que hoje é salvo** (mantê-lo em dia): canvas e todos os shapes/conns
 de **todas** as abas (losangos, Cineminhas, Decision Lens e suas `rules`, frames,
 terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados completas
-(`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `clusterDefs`) · Dashboard
+(`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `clusterDefs`,
+`rangeDefs`) · Dashboard
 (`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`) ·
@@ -142,9 +145,11 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 | `tests/policyDoc.test.js` | Documentação Automática — `docModel` ≡ motor (KPIs/funil); completude; determinismo; degradação sem AS IS; privacidade; changelog via `diffPolicyIR` |
 | `tests/segmentDiscovery.test.js` | Descoberta de Segmentos — subgrupo plantado, agregados, p-value, FDR, shrinkage, escopo por nó, dedup, determinismo |
 | `tests/segmentDiscoveryGolden.test.js` | GATE cross-runtime (DEC-HX-005): fixtures douradas da Descoberta profunda (H7); costura sidecar→worker |
-| `tests/clusterSegments.test.js` | Clusterização — clusters plantados, perfil ≡ agregação manual, determinismo, clamp/truncamento declarados |
-| `tests/clusterSegmentsGolden.test.js` | GATE cross-runtime (DEC-HX-005): fixtures douradas do ClusterModel (H8) |
+| `tests/clusterSegments.test.js` | Clusterização — clusters plantados, perfil ≡ agregação manual, determinismo, clamp/truncamento declarados, escopo por nó ≡ sub-base (FR1) |
+| `tests/clusterSegmentsGolden.test.js` | GATE cross-runtime (DEC-HX-005): fixtures douradas do ClusterModel (H8), incl. fixture escopada (FR3) |
 | `tests/clusterVar.test.js` | Variável de Cluster — materialização, sugestões, redação de regras, edição, propagação de refs, round-trip |
+| `tests/riskBands.test.js` | Criar Faixas por Risco (`computeRiskBands`, Épico FR) — cortes plantados via DP exata ≡ IV ótimo, monotonia default/toggle livre, `minShare`, banda "Sem valor", auto-k, escopo por nó, determinismo |
+| `tests/rangeVar.test.js` | Variável de Faixas — materialização (`deriveRangeColumn`, fronteiras `[min,max)`/±∞/unmatched/ordinal), rótulos pt-BR, edição de cortes, round-trip de persistência, integração `computeRiskBands` real → def → coluna |
 | `tests/workerPool.test.js` | Pool de Workers (H3) — pool ≡ single-worker número a número; determinismo; fallback |
 | `tests/computeRouter.test.js` | ComputeRouter (H4) — Classe A jamais roteia; detecção silenciosa; fallback transparente Classe B |
 | `tests_python/*.py` | Protocolo do sidecar (health/token/caps/dataset/job) + paridade número a número dos motores numpy (Descoberta H7, Clusterização H8) |
@@ -170,8 +175,9 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Documentação Automática (`docModal`, Copiloto Sessão 6) | `docs/claude/Copiloto-Documentacao.md` |
 | Descoberta de Segmentos (Copiloto Sessão 10/11/12) | `docs/claude/Copiloto-Segmentos.md` |
 | PolicyIR — JSON canônico da política (Copiloto Sessão 0) | `docs/claude/Copiloto-PolicyIR.md` |
-| Clusterização de Segmentos + Variável de Cluster | `docs/claude/Copiloto-Clusterizacao.md` |
-| Cluster Contextual (escopo por nó) + Criar Faixas por Risco de contínuas (Épico FR — planejado) | `docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md` |
+| Clusterização de Segmentos + Variável de Cluster + escopo por nó (FR1–FR3) + ponteiro da Variável de Faixas | `docs/claude/Copiloto-Clusterizacao.md` |
+| Criar Faixas por Risco de contínuas — motor, `rangeVar.js`, UI (FR4–FR6) | `docs/claude/Copiloto-Clusterizacao.md` (§ Variável de Faixas) |
+| Decisões de arquitetura do Épico FR (DEC-FR-001..010) | `docs/wiki/Copiloto-ClusterContextual-FaixasRisco.md` |
 | Bibliotecas (Cineminha e Políticas) | `docs/claude/Bibliotecas.md` |
 | Domínio Exibido ("Configurar nó") | `docs/claude/Dominio-Exibido.md` |
 | Decision Lens (populações M10, fluxo no motor) | `docs/claude/Decision-Lens.md` |

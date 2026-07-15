@@ -4,18 +4,25 @@ Funcionalidades planejadas, ainda não implementadas. Organizadas por área.
 
 ---
 
-## Copiloto — Clusterização Contextual + Criar Faixas por Risco (Épico FR — planejado)
+## Copiloto — Clusterização Contextual + Criar Faixas por Risco (Épico FR) ✅ ENTREGUE
 
-Plano de execução completo (DEC-FR-001..010, sessões FR1–FR7 com prompts prontos):
-[[Copiloto-ClusterContextual-FaixasRisco]].
+Decisões (DEC-FR-001..010) e histórico das sessões FR1–FR7:
+[[Copiloto-ClusterContextual-FaixasRisco]] · sumário: [[Decisoes]] (ADR-FR) · detalhe
+de implementação: `docs/claude/Copiloto-Clusterizacao.md`.
 
-- **Escopo por nó da Clusterização** (FR1–FR3): "🧩 Clusterizar aqui" nas toolbars de
+- **Escopo por nó da Clusterização** (FR1–FR3) ✅ — "🧩 Clusterizar aqui" nas toolbars de
   losango/Cineminha/Lens — clusteriza só a população que efetivamente chega ao nó
-  (walk M8, mesmo padrão do "🔍 Descobrir aqui"), incl. modo profundo via rowMask.
-- **Criar Faixas por Risco** (FR4–FR6): binning supervisionado de variáveis contínuas (ex.:
-  faturamento presumido) — cortes que maximizam IV/WoE de inadimplência, monotônicos
-  por padrão, materializados como variável derivada persistente (`rangeDefs`) usável
-  no canvas, no Dashboard e na própria Clusterização.
+  (walk M8, mesmo padrão do "🔍 Descobrir aqui"), incl. modo profundo via `rowMask`
+  (`COMPUTE_SCOPE_MASK`, teto `FR_MASK_MAX_ROWS=20M` linhas).
+- **Criar Faixas por Risco** (FR4–FR6) ✅ — binning supervisionado de variáveis contínuas
+  (ex.: faturamento presumido) — cortes que maximizam IV/WoE de inadimplência (DP
+  exata), monotônicos por padrão, materializados como variável derivada persistente
+  (`rangeDefs`, `schemaVersion 2.7`) usável no canvas, no Dashboard e na própria
+  Clusterização (`isContinuousColumn` bloqueia binarização silenciosa).
+- **Pendência residual**: a Documentação Automática já anexa a descrição das faixas ao
+  glossário (`buildGlossary`/`describeRangeRules`), mas o render (`renderDocMarkdown`/
+  `renderDocHTML`) ainda não imprime uma seção "Regras das Faixas" (só a de Clusters) —
+  ver nota em [[Decisoes]] (ADR-FR).
 
 ---
 
@@ -119,4 +126,4 @@ independente do híbrido; a sonda de ambiente (Sessão HP) pode rodar desde já.
 ## Persistência
 
 - Salvar estado do canvas no localStorage (autosave)
-- ~~Exportar/importar sessão completa como arquivo `.credito.json`~~ ✅ ENTREGUE (Salvar/Abrir Projeto — schema 2.6; auto-persistência em `sessionStorage`)
+- ~~Exportar/importar sessão completa como arquivo `.credito.json`~~ ✅ ENTREGUE (Salvar/Abrir Projeto — schema 2.7; auto-persistência em `sessionStorage`)
