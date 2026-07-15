@@ -142,7 +142,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 | `tests/policyTemplates.test.js` | Biblioteca de Políticas — mapeamento de variáveis em base renomeada ≡ roteamento original; variável sem mapeamento vira pendência |
 | `tests/goalSeek.test.js` | Goal Seek — delta O(1) por movimento ≡ resimulação; precedência ordinal; restrições/travas; determinismo |
 | `tests/policySimplify.test.js` | Simplificação — nó colapsável/chegada zero/regra sem efeito/variável re-testada ⇒ proposta prova `diff=0`; caso lossy ⇒ delta declarado bate com `runSimulation` |
-| `tests/policyDoc.test.js` | Documentação Automática — `docModel` ≡ motor (KPIs/funil); completude; determinismo; degradação sem AS IS; privacidade; changelog via `diffPolicyIR` |
+| `tests/policyDoc.test.js` | Documentação Automática — `docModel` ≡ motor (KPIs/funil); completude; determinismo; degradação sem AS IS; privacidade; changelog via `diffPolicyIR`; seção "Regras das Faixas" (glossário `g.range`) |
 | `tests/segmentDiscovery.test.js` | Descoberta de Segmentos — subgrupo plantado, agregados, p-value, FDR, shrinkage, escopo por nó, dedup, determinismo |
 | `tests/segmentDiscoveryGolden.test.js` | GATE cross-runtime (DEC-HX-005): fixtures douradas da Descoberta profunda (H7); costura sidecar→worker |
 | `tests/clusterSegments.test.js` | Clusterização — clusters plantados, perfil ≡ agregação manual, determinismo, clamp/truncamento declarados, escopo por nó ≡ sub-base (FR1) |

@@ -584,6 +584,8 @@ escrever — documente o estado real, não o plano.
 
 - **Binning multivariado** (cortes 2D simultâneos, árvore de decisão rasa) — a versão 1
   é univariada; interações contínuas ficam para um épico próprio se a demanda aparecer.
+  **Escopo detalhado do épico futuro registrado em [[Epicos-Binning-Multivariado]]**
+  (árvore rasa no sidecar → sugestão de Cineminha, reusando `rangeDefs` + otimizadores).
 - **Faixas profundas no sidecar** (optimal binning exato com solver MILP, estilo
   `optbinning`) — a DP browser já é exata dado o pré-binning de 50 quantis; um modo
   profundo só faria sentido para pré-bins na casa dos milhares, sem demanda hoje.

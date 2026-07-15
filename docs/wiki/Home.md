@@ -20,6 +20,7 @@ Whiteboard interativo para modelagem e simulação de políticas de crédito. O 
 | [[Epicos-Importacao]] | Wizard de importação CSV e variável AS IS |
 | [[Epicos-CopilotoIA]] | Copiloto de política (IA opcional, local-first) — arquitetura evolutiva |
 | [[Roadmap]] | Funcionalidades planejadas e não implementadas |
+| [[Epicos-Binning-Multivariado]] | Épico futuro (não iniciado): binning multivariado — árvore rasa → sugestão de Cineminha |
 | [[Decisoes]] | Registros de decisão arquitetural (ADRs) |
 
 ## Stack resumida

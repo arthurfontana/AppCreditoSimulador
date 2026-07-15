@@ -295,3 +295,73 @@ describe('Documentação Automática · changelog (diffPolicyIR)', () => {
     expect(docModel.kpis.simResult).toEqual(tickB.simResult);
   });
 });
+
+describe('Documentação Automática · Regras das Faixas (Variável de Faixas no glossário)', () => {
+  // Def de faixas anexada à coluna FAIXA (referenciada pelo Cineminha da fixture) — o
+  // buildGlossary só olha csvStore[csvId].rangeDefs[col], então basta registrar a def.
+  const RANGE_DEF = {
+    id: 'rd1', col: 'FAIXA', csvId: 'base', source: 'range', sourceCol: 'SCORE',
+    metric: { id: 'inadReal', label: 'Inad. Real' },
+    bands: [
+      { id: 'b1', label: 'Risco baixo', min: null, max: 617 },
+      { id: 'b2', label: 'Risco alto', min: 617, max: null },
+    ],
+    unmatchedLabel: 'Sem valor',
+    meta: { k: 2, monotonic: 'auto' },
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+  const STORE_RANGE = { base: { ...STORE.base, rangeDefs: { FAIXA: RANGE_DEF } } };
+
+  it('com domínios ligados: seção "Regras das Faixas" com rótulos, origem, métrica e cortes', () => {
+    const csvStore = toColumnarStore(STORE_RANGE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: true });
+
+    // O glossário carrega a descrição CRUA das faixas (describeRangeRules).
+    const g = docModel.glossary.find(x => x.col === 'FAIXA');
+    expect(g.range).not.toBeNull();
+    expect(g.range.sourceCol).toBe('SCORE');
+    expect(g.range.bands.map(b => b.label)).toEqual(['Risco baixo', 'Risco alto']);
+    expect(g.range.bands[0].max).toBe(617);
+
+    const md = renderDocMarkdown(docModel);
+    expect(md).toContain('### Regras das Faixas');
+    expect(md).toContain('**FAIXA** — faixas de **SCORE** (métrica: Inad. Real); sem valor → _Sem valor_.');
+    expect(md).toContain('- **Risco baixo** — até 617');
+    expect(md).toContain('- **Risco alto** — acima de 617');
+
+    const html = renderDocHTML(docModel);
+    expect(html).toContain('Regras das Faixas');
+    expect(html).toContain('Risco baixo');
+    expect(html).toContain('até 617');
+    expect(html).toContain('acima de 617');
+  });
+
+  it('com domínios desligados (N2): rótulos e proveniência ficam, cortes concretos somem', () => {
+    const csvStore = toColumnarStore(STORE_RANGE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: false });
+
+    // describeRangeRules já redige min/max no worker sob N2.
+    const g = docModel.glossary.find(x => x.col === 'FAIXA');
+    expect(g.range.bands.every(b => b.min === null && b.max === null)).toBe(true);
+
+    for (const text of [renderDocMarkdown(docModel), renderDocHTML(docModel)]) {
+      expect(text).toContain('Regras das Faixas');
+      expect(text).toContain('Risco baixo');
+      expect(text).toContain('(cortes omitidos)');
+      expect(text).not.toContain('617');
+    }
+  });
+
+  it('sem rangeDefs: nenhuma seção "Regras das Faixas" (fixture original inalterada)', () => {
+    const csvStore = toColumnarStore(STORE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: true });
+    expect(renderDocMarkdown(docModel)).not.toContain('Regras das Faixas');
+    expect(renderDocHTML(docModel)).not.toContain('Regras das Faixas');
+  });
+});
