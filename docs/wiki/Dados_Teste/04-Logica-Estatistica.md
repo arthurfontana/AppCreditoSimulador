@@ -1,5 +1,9 @@
 # Lógica Estatística da Geração — a "verdade plantada"
 
+> **Manutenção**: mudou a verdade plantada (segmento, correlação, multiplicador)?
+> Documentar aqui **antes** de mexer no gerador — ver `README.md § Contrato de manutenção`.
+> O CSV versionado só é regenerado a pedido do usuário.
+
 Fonte única: `gerar_base_teste.mjs` (este documento descreve; o script manda).
 Determinístico: PRNG mulberry32, seed padrão `20260716` — mesma seed ⇒ mesmo CSV byte a byte.
 

@@ -187,6 +187,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Execução Híbrida H4–H8 — ComputeRouter, Sidecar Python, UX do Motor Python, Descoberta profunda no sidecar, Clusterização no sidecar | `docs/wiki/Arquitetura-Execucao-Hibrida.md` + `docs/wiki/Hibrido-Prompts-Sessoes.md` |
 | Widget de negócio, `BuildBadge`, CI/CD, suporte a touch/mobile | `docs/claude/UI-Complementar-CI.md` |
 | Epics/decisões/roadmap de produto (histórico completo) | `docs/wiki/Decisoes.md`, `docs/wiki/Roadmap.md`, `docs/wiki/Epicos-*.md` |
+| Base de Testes Oficial — inventário, dicionário, matriz de cobertura, gerador de CSV; **feature nova/ajustada ⇒ atualizar docs + regras do gerador na mesma sessão; NUNCA regenerar o CSV sem pedido do usuário** | `docs/wiki/Dados_Teste/README.md` (§ Contrato de manutenção) |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
 | Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
 

@@ -1,5 +1,9 @@
 # Matriz de Cobertura Funcional
 
+> **Manutenção**: feature nova/ajustada ⇒ atualizar a linha da matriz (ou a lista de
+> não-cobertos, com motivo) na mesma sessão — ver `README.md § Contrato de manutenção`.
+> Não regenerar o CSV; a regeneração é decisão do usuário.
+
 ## Funcionalidade → Colunas → Cenário presente na base
 
 | Funcionalidade | Colunas utilizadas | Cenário existente no dataset |

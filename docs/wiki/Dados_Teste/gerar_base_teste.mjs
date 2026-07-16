@@ -16,6 +16,12 @@
  * Determinístico: mesma seed ⇒ mesmo arquivo, byte a byte.
  * A "verdade plantada" (multiplicadores, segmentos, anomalias) está documentada em
  * docs/wiki/Dados_Teste/04-Logica-Estatistica.md — mantenha os dois em sincronia.
+ *
+ * CONTRATO DE MANUTENÇÃO (ver README.md § Contrato de manutenção): toda funcionalidade
+ * nova/ajustada na aplicação que mude o que a base precisa cobrir exige atualizar as
+ * regras deste gerador + os docs 01–04 na mesma sessão. NÃO regenerar o CSV versionado
+ * automaticamente — a regeneração é decisão do usuário (registrar o gap na seção
+ * "Pendências de regeneração" do README).
  */
 
 import { writeFileSync } from 'node:fs';
