@@ -33,6 +33,19 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Capturar número/hash de build da fonte (antes do commit de release/)
+        run: |
+          # Captura ANTES do commit "chore: atualiza build local" que a etapa
+          # seguinte cria — mesmo HEAD que o vite.config.js leu para embutir
+          # __BUILD_NUMBER__/__BUILD_HASH__ no bundle. Se capturássemos depois
+          # (como antes), o commit de release/ (e o loop de rebase em caso de
+          # corrida) incrementa o HEAD, e a Release do GitHub anunciava um
+          # "Build #N+1"/commit diferente do que o BuildBadge mostra dentro do
+          # app rodando localmente — parecendo (incorretamente) que a release
+          # local ficou desatualizada em relação à "produção".
+          echo "SOURCE_BUILD_NUM=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          echo "SOURCE_COMMIT_SHORT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
       - name: Copiar dist/ para release/ (preserva scripts locais + Motor Python)
         run: |
           # Salva os artefatos de distribuição local (não vêm do build do Vite):
@@ -107,10 +120,8 @@ jobs:
 
       - name: Empacotar release/ em ZIP
         run: |
-          BUILD_NUM=$(git rev-list --count HEAD)
           cd release
           zip -r ../AppCreditoSimulador-local.zip .
-          echo "BUILD_NUM=${BUILD_NUM}" >> $GITHUB_ENV
 
       - name: Publicar GitHub Release (latest)
         run: |
@@ -123,18 +134,23 @@ jobs:
           git push origin :refs/tags/latest 2>/dev/null || true
           git tag -d latest 2>/dev/null || true
 
-          COMMIT_SHORT=$(git rev-parse --short HEAD)
           BUILD_DATE=$(date -u '+%d/%m/%Y %H:%M UTC')
 
-          # --target ancora a tag no commit atual (HEAD já é o commit da release),
-          # tornando a criação independente de qualquer tag local remanescente.
+          # --target ancora a tag no commit atual (HEAD já é o commit da release,
+          # com o conteúdo de release/ que foi empacotado no ZIP), tornando a
+          # criação independente de qualquer tag local remanescente. Título/notas
+          # usam SOURCE_BUILD_NUM/SOURCE_COMMIT_SHORT (capturados antes do commit
+          # "chore: atualiza build local") para bater exatamente com o que o
+          # BuildBadge mostra dentro do app — não com o HEAD pós-commit, que
+          # sempre estaria 1+ à frente e faria a release local parecer atrasada
+          # em relação à "produção".
           gh release create latest \
             --target "$(git rev-parse HEAD)" \
-            --title "Build #${BUILD_NUM} · ${BUILD_DATE}" \
+            --title "Build #${SOURCE_BUILD_NUM} · ${BUILD_DATE}" \
             --notes "## AppCreditoSimulador — distribuição local
 
-          **Build:** #${BUILD_NUM}
-          **Commit:** \`${COMMIT_SHORT}\`
+          **Build:** #${SOURCE_BUILD_NUM}
+          **Commit:** \`${SOURCE_COMMIT_SHORT}\`
           **Data:** ${BUILD_DATE}
 
           ### Como usar
