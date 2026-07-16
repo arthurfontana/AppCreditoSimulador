@@ -72,4 +72,41 @@ Mesma estrutura estatística em qualquer volume (a verdade plantada é proporcio
 node docs/wiki/Dados_Teste/gerar_base_teste.mjs   # regenera byte a byte (seed fixa 20260716)
 ```
 
-Se alterar o gerador, mantenha `04-Logica-Estatistica.md` em sincronia e regenere o CSV.
+**Regenerar o CSV é decisão do usuário** — nenhuma sessão de trabalho regenera
+`Base_Teste_Oficial.csv` por conta própria (ver Contrato de manutenção abaixo). Quando o
+usuário decidir regenerar, rode o comando acima, valide a importação pelo wizard e
+atualize os números de referência de `04-Logica-Estatistica.md` se tiverem mudado.
+
+## ⚠️ Contrato de manutenção (regra para toda sessão futura)
+
+**Toda sessão que criar ou ajustar uma funcionalidade da aplicação** que mude o que a
+base de testes precisa cobrir (nova variável consumida, novo motor/copiloto, novo tipo
+de coluna do wizard, novo cenário estatístico necessário, mudança de heurística que a
+base explora, etc.) **deve, na mesma sessão, deixar este diretório em dia**:
+
+1. **`01-Inventario-Funcionalidades.md`** — adicionar/ajustar a entrada da funcionalidade
+   (o que faz + o que exige da base). Toda funcionalidade nova entra aqui, mesmo que a
+   base atual já a cubra por acaso.
+2. **`02-Dicionario-Colunas.md`** — se a cobertura pedir coluna nova, valores novos ou
+   mudança de semântica, documentar a coluna (tipo, valores, justificativa, consumidores).
+3. **`03-Matriz-Cobertura.md`** — atualizar a linha da matriz (ou criar uma) e manter a
+   lista "o que NÃO é coberto" honesta: se a nova funcionalidade ainda não é coberta,
+   ela entra lá com o motivo.
+4. **`04-Logica-Estatistica.md`** — se a verdade plantada mudar (novo segmento, nova
+   correlação, novo multiplicador), documentar antes de mexer no gerador.
+5. **`gerar_base_teste.mjs`** — ajustar as **regras do motor de geração** para que uma
+   futura regeneração já produza a cobertura nova (coluna, cenário plantado, distribuição).
+   Manter o determinismo (mesma seed ⇒ mesmo arquivo) e a proporcionalidade por `--rows`.
+
+**O que NÃO fazer**: **não regenerar `Base_Teste_Oficial.csv` automaticamente.** O CSV
+versionado só é regenerado quando o **usuário pedir explicitamente** — ele decide o
+momento. Entre uma regeneração e outra, é esperado que gerador/documentação fiquem à
+frente do CSV; registre esse gap na seção "Pendências de regeneração" abaixo.
+
+### Pendências de regeneração
+
+Mudanças já aplicadas ao gerador/documentação que ainda **não** estão refletidas no
+`Base_Teste_Oficial.csv` versionado. Ao regenerar (a pedido do usuário), limpar as
+entradas atendidas.
+
+- _Nenhuma — CSV em sincronia com o gerador (seed 20260716)._

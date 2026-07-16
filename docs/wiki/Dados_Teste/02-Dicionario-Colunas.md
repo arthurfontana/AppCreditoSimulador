@@ -1,5 +1,8 @@
 # Dicionário de Colunas — Base_Teste_Oficial.csv
 
+> **Manutenção**: coluna nova, valor novo ou mudança de semântica exigida por uma feature
+> ⇒ documentar aqui na mesma sessão — ver `README.md § Contrato de manutenção`.
+
 24 colunas, todas com finalidade funcional declarada. A base é **sumarizada**: cada linha
 é um micro-grupo de propostas com o mesmo perfil (padrão da `Amostra_Fake.csv` e do motor
 de simulação, que pondera tudo por `QTD_PROPOSTA`).

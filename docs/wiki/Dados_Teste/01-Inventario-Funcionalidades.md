@@ -1,5 +1,9 @@
 # Inventário de Funcionalidades — análise do código-fonte
 
+> **Manutenção**: toda funcionalidade nova/ajustada na aplicação entra neste inventário
+> na mesma sessão (o que faz + o que exige da base) — ver `README.md § Contrato de
+> manutenção`. Não regenerar o CSV; só documentação e regras do gerador.
+
 Levantamento feito sobre `src/App.jsx` (~14.600 linhas), `src/simulation.worker.js`
 (~6.800 linhas), módulos compartilhados (`columnar.js`, `analytics.js`, `goalSeek.js`,
 `policySimplify.js`, `policyIR.js`, `clusterVar.js`, `rangeVar.js`, `computeRouter.js`,
