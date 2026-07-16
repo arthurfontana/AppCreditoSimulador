@@ -79,6 +79,11 @@ atualize os números de referência de `04-Logica-Estatistica.md` se tiverem mud
 
 ## ⚠️ Contrato de manutenção (regra para toda sessão futura)
 
+> Este contrato também existe como **skill de projeto**
+> (`.claude/skills/base-testes/SKILL.md`), que dispara automaticamente nas sessões
+> do Claude Code ao mexer em features ou neste diretório — os dois devem dizer a
+> mesma coisa; se divergirem, este README é o normativo.
+
 **Toda sessão que criar ou ajustar uma funcionalidade da aplicação** que mude o que a
 base de testes precisa cobrir (nova variável consumida, novo motor/copiloto, novo tipo
 de coluna do wizard, novo cenário estatístico necessário, mudança de heurística que a
