@@ -429,12 +429,21 @@ exatos. Nenhuma feature nova. Ao fim, app 100% funcional e npm test verde.
 ```
 
 **Checklist**:
-- [ ] 6 abas contextuais aparecem/somem corretamente por tipo/estado de seleção
-- [ ] Auto-ativação ao selecionar; retorno ao desselecionar
-- [ ] Todo comando das toolbars flutuantes + alinhamento migrado; nenhum perdido
-- [ ] Grupo "Analisar aqui" sem código triplicado
-- [ ] Toolbars flutuantes removidas
-- [ ] `npm test` verde; app funcional
+- [x] 6 abas contextuais aparecem/somem corretamente por tipo/estado de seleção
+- [x] Auto-ativação ao selecionar; retorno ao desselecionar
+- [x] Todo comando das toolbars flutuantes + alinhamento migrado; nenhum perdido
+- [x] Grupo "Analisar aqui" sem código triplicado
+- [x] Toolbars flutuantes removidas
+- [x] `npm test` verde; app funcional
+
+> **Entregue (2026-07-20).** A aba contextual é derivada da seleção em `App` via
+> `activeContextTab` (single shape → Matriz/Decisão/Lens/Terminal/Porta; multi → Seleção) e
+> renderizada pelo `Ribbon` a partir de `contextCommands = COMMANDS.filter(c =>
+> c.contextWhen(sel))` — o `tab: 'ctx-*'` dos descritores deixou de gate a renderização.
+> Auto-ativação/retorno via `ctxTabShown` (efêmero) + `useEffect` sobre `activeContextTab`.
+> As 6 toolbars flutuantes + a de alinhamento foram removidas do JSX do canvas (só a paleta
+> de cor, acionada por `org.color`, permanece). Seleção ganhou `ctx.sel.johnny` (habilita só
+> com todos Cineminhas) e `ctx.sel.delete`. Sem estado persistido novo → sem bump de schema.
 
 ---
 
@@ -698,8 +707,8 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 
 ## Checklist de Execução
 
-- [ ] **Sessão 1** — Registro de Comandos + casca do Ribbon (fixed) 🏷️ `Opus 4.8`
-- [ ] **Sessão 2** — Abas contextuais + fim das toolbars flutuantes 🏷️ `Opus 4.8`
+- [x] **Sessão 1** — Registro de Comandos + casca do Ribbon (fixed) 🏷️ `Opus 4.8`
+- [x] **Sessão 2** — Abas contextuais + fim das toolbars flutuantes 🏷️ `Opus 4.8`
 - [ ] **Sessão 3** — ⚙ Hub de Configurações 🏷️ `Opus 4.8`
 - [ ] **Sessão 4** — Colapso em 3 estados 🏷️ `Opus 4.8`
 - [ ] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
@@ -753,5 +762,7 @@ Cada sessão segue o mesmo template:
 
 **Última atualização**: 2026-07-20 (v2 — reavaliação completa pós-Épicos FR/GS/H4–H8:
 inventário de 12 superfícies, abas Analisar/Otimizar separadas, Hub de Configurações,
-Busca de comandos e painel Ativos/Inspetor/Copiloto. Sessões 1–8 aguardando
-desenvolvimento; a v1, de 2026-07-09, nunca foi executada e está substituída por esta.)
+Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1 e 2 entregues**
+(registro `COMMANDS` + Ribbon fixed; abas contextuais + aposentadoria das 6 toolbars
+flutuantes); Sessões 3–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
+executada e está substituída por esta.)

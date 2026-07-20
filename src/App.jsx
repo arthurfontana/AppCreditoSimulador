@@ -1688,12 +1688,13 @@ export function cloneCanvasWithNewIds(shapes, conns) {
   return { newShapes, newConns, idMap: { ...idMap, ...connIdMap } };
 }
 
-// ═══ REGIÃO: Ribbon (UX 2.0 — Sessão 1) ═══
-// Componente de casca do Ribbon (modo `fixed`). É puramente apresentacional: renderiza
-// as 7 abas fixas + a QAT a partir do registro declarativo `COMMANDS` (fonte única,
+// ═══ REGIÃO: Ribbon (UX 2.0 — Sessão 1/2) ═══
+// Componente de casca do Ribbon. É puramente apresentacional: renderiza as 7 abas fixas,
+// a aba contextual ativa e a QAT a partir do registro declarativo `COMMANDS` (fonte única,
 // montado dentro do App). Cada descritor carrega `onRun`/`enabledWhen`/`activeWhen` como
-// closures do App — o Ribbon só lê. Abas contextuais (tab `ctx-*`) NÃO são filtradas aqui
-// (chegam na Sessão 2).
+// closures do App — o Ribbon só lê. As abas contextuais (Sessão 2) surgem destacadas só com
+// o tipo correspondente selecionado; seu conteúdo é filtrado por `contextWhen(selection)`
+// (o App já entrega o array `contextCommands` pronto).
 const RIBBON_TABS = [
   { id: 'inicio',   label: 'Início'   },
   { id: 'inserir',  label: 'Inserir'  },
@@ -1703,6 +1704,16 @@ const RIBBON_TABS = [
   { id: 'politica', label: 'Política' },
   { id: 'projeto',  label: 'Projeto'  },
 ];
+// Rótulo pt-BR de cada aba contextual (padrão "Contextual Tabs" do Office). O `id`
+// corresponde ao valor de `activeContextTab` derivado da seleção no App.
+const CTX_TAB_META = {
+  'ctx-matriz':   'Matriz',
+  'ctx-decisao':  'Decisão',
+  'ctx-lens':     'Lens',
+  'ctx-terminal': 'Terminal',
+  'ctx-porta':    'Porta',
+  'ctx-selecao':  'Seleção',
+};
 
 function RibbonCmdButton({ cmd }) {
   const enabled = cmd.enabledWhen ? !!cmd.enabledWhen() : true;
@@ -1722,8 +1733,11 @@ function RibbonCmdButton({ cmd }) {
   );
 }
 
-function Ribbon({ commands, activeTab, onTab, qat }) {
-  const tabCmds = commands.filter(c => c.tab === activeTab);
+function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, onCtxTab }) {
+  // Aba contextual em foco? Então o conteúdo vem de `contextCommands` (já filtrado por
+  // contextWhen no App); senão, das abas fixas por `c.tab`.
+  const isCtx = !!contextTab && activeTab === contextTab.id;
+  const tabCmds = isCtx ? (contextCommands || []) : commands.filter(c => c.tab === activeTab);
   // Agrupa preservando a ordem de primeira aparição no registro (a ordem do `COMMANDS`
   // define o layout dos grupos — sem tabela de ordenação separada).
   const groupOrder = [];
@@ -1741,12 +1755,13 @@ function Ribbon({ commands, activeTab, onTab, qat }) {
       <span style={{ fontSize: 14, lineHeight: 1 }}>{icon}</span>
     </button>
   );
+  const CTX_ACCENT = '#7c3aed'; // violeta — cor da aba contextual (destaque "Contextual Tabs")
   return (
     <div style={{ flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', zIndex: 250 }}>
       {/* Faixa de abas + QAT */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', borderBottom: '1px solid #f1f5f9' }}>
         {RIBBON_TABS.map(t => {
-          const on = activeTab === t.id;
+          const on = !isCtx && activeTab === t.id;
           return (
             <button key={t.id} onClick={() => onTab(t.id)}
               style={{ padding: '5px 14px', borderRadius: 8, border: 'none',
@@ -1757,6 +1772,19 @@ function Ribbon({ commands, activeTab, onTab, qat }) {
             </button>
           );
         })}
+        {/* Aba contextual — surge destacada só com o tipo correspondente selecionado. */}
+        {contextTab && (
+          <button key={contextTab.id} onClick={onCtxTab} title={`Ferramentas de ${contextTab.label}`}
+            style={{ marginLeft: 6, padding: '5px 15px', borderRadius: 8,
+              border: `1px solid ${isCtx ? CTX_ACCENT : '#ddd6fe'}`,
+              borderTop: `3px solid ${CTX_ACCENT}`,
+              background: isCtx ? '#f5f3ff' : '#faf5ff', color: CTX_ACCENT,
+              fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
+              whiteSpace: 'nowrap', transition: 'all .12s', boxShadow: isCtx ? `0 1px 0 ${CTX_ACCENT}` : 'none' }}>
+            <span style={{ fontSize: 10, marginRight: 5, opacity: .8, textTransform: 'uppercase', letterSpacing: .3 }}>◆</span>
+            {contextTab.label}
+          </button>
+        )}
         <div style={{ flex: 1 }} />
         {/* QAT — Desfazer / Refazer / Deletar (com seleção) / Salvar Projeto. Sempre a um clique. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 2, paddingLeft: 8, borderLeft: '1px solid #f1f5f9' }}>
@@ -1766,8 +1794,9 @@ function Ribbon({ commands, activeTab, onTab, qat }) {
           {qBtn('💾', 'Salvar Projeto', qat.onSave, true, false)}
         </div>
       </div>
-      {/* Grupos de comandos da aba ativa */}
-      <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 58 }}>
+      {/* Grupos de comandos da aba ativa (fundo levemente tingido quando contextual) */}
+      <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 58,
+        background: isCtx ? '#fbfaff' : '#fff' }}>
         {groupOrder.length === 0 ? (
           <div style={{ fontSize: 11.5, color: '#cbd5e1', padding: '10px 6px' }}>—</div>
         ) : groupOrder.map((g, gi) => (
@@ -1776,7 +1805,7 @@ function Ribbon({ commands, activeTab, onTab, qat }) {
             <div style={{ display: 'flex', gap: 2, alignItems: 'center', flex: 1, flexWrap: 'wrap' }}>
               {byGroup.get(g).map(c => <RibbonCmdButton key={c.id} cmd={c} />)}
             </div>
-            <div style={{ fontSize: 9.5, color: '#94a3b8', textAlign: 'center', marginTop: 3,
+            <div style={{ fontSize: 9.5, color: isCtx ? '#8b5cf6' : '#94a3b8', textAlign: 'center', marginTop: 3,
               textTransform: 'uppercase', letterSpacing: .4, fontWeight: 600 }}>{g}</div>
           </div>
         ))}
@@ -1815,6 +1844,9 @@ export default function App() {
   const [ribbonActiveTab, setRibbonActiveTab] = useState(() => {
     try { const s = sessionStorage.getItem('ribbon_active_tab_v1'); return s || 'inicio'; } catch { return 'inicio'; }
   });
+  // Ribbon (UX 2.0 — Sessão 2): a aba contextual está em foco? Efêmero — deriva da seleção
+  // (auto-ativa ao selecionar, volta à aba fixa ao desselecionar). Não persiste.
+  const [ctxTabShown, setCtxTabShown] = useState(false);
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
   const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = sessionStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
   const [analyticsGroupings, setAnalyticsGroupings] = useState(() => { try { const s = sessionStorage.getItem('aw_groupings_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // Grouping[] — dimensões derivadas reutilizáveis
@@ -7210,10 +7242,45 @@ export default function App() {
     // Porta solta: sugerir próximo passo (só faz sentido em porta sem conexão de saída).
     { id: 'ctx.port.suggest', label: 'Sugerir próximo passo', icon: '💡', tab: 'ctx-porta', group: 'Sugestão', keywords: ['sugerir', 'próximo passo', 'ranking de variáveis'], contextWhen: (s) => s?.type === 'port', enabledWhen: () => conns.filter(c => c.from === sel).length === 0, onRun: () => openVariableRanking(sel) },
     // Seleção múltipla: alinhar/distribuir (8). Mesmo grupo da toolbar flutuante #2.
-    ...[['left', 'Alinhar à esquerda'], ['right', 'Alinhar à direita'], ['top', 'Alinhar ao topo'], ['bottom', 'Alinhar à base'], ['centerH', 'Centralizar H'], ['centerV', 'Centralizar V'], ['distH', 'Distribuir H'], ['distV', 'Distribuir V']].map(([d, l]) => ({
-      id: `ctx.align.${d}`, label: l, icon: '▚', tab: 'ctx-selecao', group: 'Alinhar', keywords: ['alinhar', 'distribuir', l], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, onRun: () => applyAlign(d),
+    ...[['left', 'Alinhar à esquerda', '⊢'], ['right', 'Alinhar à direita', '⊣'], ['top', 'Alinhar ao topo', '⊤'], ['bottom', 'Alinhar à base', '⊥'], ['centerH', 'Centralizar H', '↔'], ['centerV', 'Centralizar V', '↕'], ['distH', 'Distribuir H', '⇹'], ['distV', 'Distribuir V', '⤡']].map(([d, l, ic]) => ({
+      id: `ctx.align.${d}`, label: l, icon: ic, tab: 'ctx-selecao', group: 'Alinhar', keywords: ['alinhar', 'distribuir', l], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, onRun: () => applyAlign(d),
     })),
+    // Otimização Johnny em massa (habilita só com todos Cineminhas) + Deletar em massa.
+    { id: 'ctx.sel.johnny', label: `Otimização Johnny (${multiSel.size})`, icon: '⚡', tab: 'ctx-selecao', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha'], contextWhen: () => multiSel.size > 1, enabledWhen: () => _allCinemas, onRun: () => openJohnnyModal([...multiSel]) },
+    { id: 'ctx.sel.delete', label: `Deletar (${multiSel.size})`, icon: '🗑', tab: 'ctx-selecao', group: 'Ações', keywords: ['deletar', 'excluir', 'remover em massa'], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, onRun: deleteSelected },
   ];
+
+  // ═══ REGIÃO: Abas contextuais do Ribbon (UX 2.0 — Sessão 2) ═══
+  // Uma aba contextual (padrão "Contextual Tabs" do Office) surge destacada só quando a
+  // seleção casa com um tipo. Seu conteúdo = TODOS os descritores cujo contextWhen(sel) é
+  // verdadeiro — o grupo "Analisar aqui" é UM conjunto de descritores compartilhado por
+  // losango/Cineminha/Lens/terminal (sem triplicação). Um único shape selecionado por vez
+  // (multiSel.size<=1) casa uma aba de tipo; multi-seleção casa a aba Seleção.
+  const _selTypeCtx = (!sel || multiSel.size > 1) ? null : selShape?.type;
+  const activeContextTab =
+    multiSel.size > 1 ? 'ctx-selecao'
+    : _selTypeCtx === 'cineminha' ? 'ctx-matriz'
+    : _selTypeCtx === 'decision' ? 'ctx-decisao'
+    : _selTypeCtx === 'decision_lens' ? 'ctx-lens'
+    : (_selTypeCtx === 'approved' || _selTypeCtx === 'rejected' || _selTypeCtx === 'as_is') ? 'ctx-terminal'
+    : (_selTypeCtx === 'port' && conns.filter(c => c.from === sel).length === 0) ? 'ctx-porta'
+    : null;
+  // Alvo do predicado contextWhen: o shape único selecionado. Em multi-seleção passamos
+  // null (os descritores de Seleção checam multiSel diretamente) pra nenhum comando de
+  // shape único vazar para a aba Seleção.
+  const _ctxSelArg = multiSel.size > 1 ? null : selShape;
+  const contextCommands = activeContextTab ? COMMANDS.filter(c => c.contextWhen && c.contextWhen(_ctxSelArg)) : [];
+  // Auto-ativação ao selecionar; retorno à aba fixa anterior ao desselecionar (ou quando a
+  // seleção muda para outro tipo → foca a nova aba contextual). Efeito só reage à troca do
+  // tipo de contexto, não a cada render.
+  const _prevCtxRef = useRef(null);
+  useEffect(() => {
+    if (activeContextTab && activeContextTab !== _prevCtxRef.current) setCtxTabShown(true);
+    else if (!activeContextTab) setCtxTabShown(false);
+    _prevCtxRef.current = activeContextTab;
+  }, [activeContextTab]);
+  // Aba efetivamente exibida: a contextual quando em foco; senão a fixa persistida.
+  const ribbonShownTab = (activeContextTab && ctxTabShown) ? activeContextTab : ribbonActiveTab;
 
   // ═══ REGIÃO: JSX — Shell da Aplicação (toolbar, abas, canvas) ═══
   // ────────────────────────────────────────────────────────────────────────────
@@ -7238,8 +7305,11 @@ export default function App() {
       {activeTab === "canvas" && (
         <Ribbon
           commands={COMMANDS}
-          activeTab={ribbonActiveTab}
-          onTab={setRibbonActiveTab}
+          activeTab={ribbonShownTab}
+          onTab={(id) => { setRibbonActiveTab(id); setCtxTabShown(false); }}
+          contextTab={activeContextTab ? { id: activeContextTab, label: CTX_TAB_META[activeContextTab] } : null}
+          contextCommands={contextCommands}
+          onCtxTab={() => setCtxTabShown(true)}
           qat={{
             undo, redo, canUndo: undoStack.length > 0, canRedo: redoStack.length > 0,
             onDelete: deleteSelected, canDelete: (!!sel || multiSel.size > 0), onSave: saveProject,
@@ -7256,310 +7326,13 @@ export default function App() {
       {/* ═══════════════ CANVAS AREA ═══════════════ */}
       <div style={{flex:1,position:"relative",overflow:"hidden"}}>
 
-        {/* Toolbar de topo migrada para o Ribbon (UX 2.0 — Sessão 1). As toolbars
-        flutuantes de contexto abaixo permanecem intocadas até a Sessão 2. */}
-
-        {/* Alignment toolbar — shows when multiSel.size > 1 */}
-        {multiSel.size>1&&(()=>{
-          const applyAlign=(dir)=>{
-            const sel2=shapes.filter(s=>multiSel.has(s.id));
-            if(sel2.length<2) return;
-            pushHistory();
-            setShapes(prev=>prev.map(s=>{
-              if(!multiSel.has(s.id)) return s;
-              if(dir==="left")    return {...s,x:Math.min(...sel2.map(q=>q.x))};
-              if(dir==="right")   return {...s,x:Math.max(...sel2.map(q=>q.x+q.w))-s.w};
-              if(dir==="top")     return {...s,y:Math.min(...sel2.map(q=>q.y))};
-              if(dir==="bottom")  return {...s,y:Math.max(...sel2.map(q=>q.y+q.h))-s.h};
-              if(dir==="centerH") {
-                const midX=(Math.min(...sel2.map(q=>q.x))+Math.max(...sel2.map(q=>q.x+q.w)))/2;
-                return {...s,x:midX-s.w/2};
-              }
-              if(dir==="centerV") {
-                const midY=(Math.min(...sel2.map(q=>q.y))+Math.max(...sel2.map(q=>q.y+q.h)))/2;
-                return {...s,y:midY-s.h/2};
-              }
-              if(dir==="distH"){
-                const sorted=[...sel2].sort((a,b)=>(a.x+a.w/2)-(b.x+b.w/2));
-                const totalW=sorted.reduce((a,q)=>a+q.w,0);
-                const span=Math.max(...sorted.map(q=>q.x+q.w))-Math.min(...sorted.map(q=>q.x));
-                const gap=(span-totalW)/(sorted.length-1);
-                let cx2=Math.min(...sorted.map(q=>q.x));
-                const posMap={};
-                for(const q of sorted){posMap[q.id]=cx2;cx2+=q.w+gap;}
-                return {...s,x:posMap[s.id]??s.x};
-              }
-              if(dir==="distV"){
-                const sorted=[...sel2].sort((a,b)=>(a.y+a.h/2)-(b.y+b.h/2));
-                const totalH=sorted.reduce((a,q)=>a+q.h,0);
-                const span=Math.max(...sorted.map(q=>q.y+q.h))-Math.min(...sorted.map(q=>q.y));
-                const gap=(span-totalH)/(sorted.length-1);
-                let cy2=Math.min(...sorted.map(q=>q.y));
-                const posMap={};
-                for(const q of sorted){posMap[q.id]=cy2;cy2+=q.h+gap;}
-                return {...s,y:posMap[s.id]??s.y};
-              }
-              return s;
-            }));
-          };
-          const btnStyle={padding:"5px 10px",borderRadius:7,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",whiteSpace:"nowrap"};
-          return (
-            <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-              display:"flex",flexWrap:"wrap",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-              border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)",maxWidth:"calc(100% - 24px)",justifyContent:"center"}}>
-              {[["left","Esq ←"],["right","Dir →"],["top","Topo ↑"],["bottom","Base ↓"],["centerH","Centro ↔"],["centerV","Centro ↕"],["distH","Dist. H"],["distV","Dist. V"]].map(([d,l])=>(
-                <button key={d} style={btnStyle} onClick={()=>applyAlign(d)}>{l}</button>
-              ))}
-            </div>
-          );
-        })()}
-
-        {/* Cineminha toolbar — shows when a single cineminha is selected */}
-        {selShape?.type==='cineminha'&&multiSel.size<=1&&(()=>{
-          const selCfg = getCinemaType(selShape.cinemaType);
-          return (
-            <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-              display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-              border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)",alignItems:"center"}}>
-              {/* Type selector */}
-              <div style={{display:"flex",gap:2,marginRight:4,paddingRight:8,borderRight:"1px solid #e2e8f0"}}>
-                {Object.values(CINEMINHA_TYPES).map(t=>{
-                  const active = (selShape.cinemaType ?? 'eligibility') === t.id;
-                  return (
-                    <button key={t.id} onClick={()=>changeCinemaType(sel,t.id)}
-                      title={t.desc}
-                      style={{padding:"4px 10px",borderRadius:6,fontFamily:"inherit",fontSize:11,fontWeight:600,cursor:"pointer",
-                        whiteSpace:"nowrap",transition:"all .12s",
-                        border: active ? `1.5px solid ${t.badgeFg}` : "1.5px solid #e2e8f0",
-                        background: active ? t.badgeBg : "#fff",
-                        color: active ? t.badgeFg : "#94a3b8"}}>
-                      {t.icon} {t.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <button onClick={()=>setResultVarModal({shapeId:sel})}
-                title="Configurar qual coluna do CSV define o valor de cada casela"
-                style={{padding:"5px 14px",borderRadius:7,
-                  border:`1.5px solid ${selShape.resultVar ? selCfg.badgeFg : "#e2e8f0"}`,
-                  background:selShape.resultVar ? selCfg.badgeBg : "#fff",
-                  color:selShape.resultVar ? selCfg.badgeFg : "#64748b",
-                  cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:selShape.resultVar ? 700 : 500}}>
-                {selShape.resultVar ? `⊞ ${trunc(selShape.resultVar.col,10)}` : "⊞ Resultado"}
-              </button>
-              <button onClick={()=>openDomainModal(sel)}
-                title="Escolher quais valores de linha/coluna aparecem neste Cineminha"
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #e2e8f0",background:"#fff",
-                  color:"#64748b",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                ⚙ Domínio
-              </button>
-              <button onClick={()=>openOptimModal(sel)}
-                style={{padding:"5px 14px",borderRadius:7,border:`1px solid ${selCfg.badgeBg}`,background:selCfg.badgeBg,
-                  color:selCfg.badgeFg,cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                ⚙ Otimizar Decisão
-              </button>
-              <button onClick={()=>openJohnnyModal([sel])}
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fde68a",background:"#fefce8",
-                  color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                ⚡ Otimização Johnny
-              </button>
-              <button onClick={()=>exportCinema(sel)}
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #bbf7d0",background:"#f0fdf4",
-                  color:"#16a34a",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                ⬇ Exportar
-              </button>
-              <button onClick={()=>startCinemaImport(sel)}
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fed7aa",background:"#fff7ed",
-                  color:"#ea580c",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                ⬆ Importar
-              </button>
-              <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 2px"}}/>
-              <button onClick={()=>openCinemaLibrary(sel,'browse')}
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
-                  color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                📚 Biblioteca
-              </button>
-              <button onClick={()=>openCinemaLibrary(sel,'save')}
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #bbf7d0",background:"#f0fdf4",
-                  color:"#15803d",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                💾 Salvar
-              </button>
-              <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 2px"}}/>
-              <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
-                title="Descobrir segmentos na população que efetivamente chega a este Cineminha"
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
-                  color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                🔍 Descobrir aqui
-              </button>
-              <button onClick={()=>openClusterModal({nodeId:sel})}
-                title="Clusterizar segmentos na população que efetivamente chega a este Cineminha"
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
-                  color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                🧩 Clusterizar aqui
-              </button>
-              <button onClick={()=>openRangeModal({scope:{nodeId:sel}})}
-                title="Criar faixas por risco na população que efetivamente chega a este Cineminha"
-                style={{padding:"5px 14px",borderRadius:7,border:"1px solid #99f6e4",background:"#f0fdfa",
-                  color:"#0f766e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                  whiteSpace:"nowrap",fontWeight:600}}>
-                📐 Faixas aqui
-              </button>
-              <button onClick={()=>toggleShapeLock(sel)}
-                title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
-                style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
-                  background:selShape.locked?"#fef2f2":"#fff",color:selShape.locked?"#b91c1c":"#64748b",
-                  cursor:"pointer",fontSize:13,fontFamily:"inherit",whiteSpace:"nowrap"}}>
-                {selShape.locked ? "🔒" : "🔓"}
-              </button>
-            </div>
-          );
-        })()}
-
-        {/* Johnny toolbar — shows when 2+ cineminhas are selected */}
-        {multiSel.size>1&&[...multiSel].every(id=>shapesById.get(id)?.type==='cineminha')&&(
-          <div style={{position:"absolute",top:110,left:"50%",transform:"translateX(-50%)",zIndex:300,
-            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-            border:"1px solid #fde68a",boxShadow:"0 2px 12px rgba(0,0,0,.08)",alignItems:"center"}}>
-            <span style={{fontSize:11,color:"#92400e",fontWeight:600,padding:"0 4px"}}>
-              ⊞ {multiSel.size} cineminhas
-            </span>
-            <div style={{width:1,height:20,background:"#fde68a"}}/>
-            <button onClick={()=>openJohnnyModal([...multiSel])}
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fde68a",background:"#fefce8",
-                color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:700}}>
-              ⚡ Otimização Johnny ({multiSel.size})
-            </button>
-          </div>
-        )}
-
-        {/* Decision (losango) toolbar — shows when a single decision is selected */}
-        {selShape?.type==='decision'&&multiSel.size<=1&&(
-          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-            border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
-            <button onClick={()=>openDomainModal(sel)}
-              title="Escolher quais valores aparecem como saídas deste losango"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #fde68a",background:"#fffbeb",
-                color:"#92400e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              ⚙ Domínio
-            </button>
-            <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
-              title="Descobrir segmentos na população que efetivamente chega a este losango"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
-                color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              🔍 Descobrir aqui
-            </button>
-            <button onClick={()=>openClusterModal({nodeId:sel})}
-              title="Clusterizar segmentos na população que efetivamente chega a este losango"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
-                color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              🧩 Clusterizar aqui
-            </button>
-            <button onClick={()=>openRangeModal({scope:{nodeId:sel}})}
-              title="Criar faixas por risco na população que efetivamente chega a este losango"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #99f6e4",background:"#f0fdfa",
-                color:"#0f766e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              📐 Faixas aqui
-            </button>
-            <button onClick={()=>toggleShapeLock(sel)}
-              title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
-              style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
-                background:selShape.locked?"#fef2f2":"#fff",color:selShape.locked?"#b91c1c":"#64748b",
-                cursor:"pointer",fontSize:13,fontFamily:"inherit",whiteSpace:"nowrap"}}>
-              {selShape.locked ? "🔒" : "🔓"}
-            </button>
-          </div>
-        )}
-
-        {/* Decision Lens toolbar — shows when a single decision_lens is selected */}
-        {selShape?.type==='decision_lens'&&multiSel.size<=1&&(
-          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-            border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
-            <button onClick={()=>openLensModal(sel)}
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #a5f3fc",background:"#ecfeff",
-                color:"#0891b2",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              🔎 Configurar
-            </button>
-            <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
-              title="Descobrir segmentos na população que passa por este Decision Lens"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
-                color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              🔍 Descobrir aqui
-            </button>
-            <button onClick={()=>openClusterModal({nodeId:sel})}
-              title="Clusterizar segmentos na população que passa por este Decision Lens"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
-                color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              🧩 Clusterizar aqui
-            </button>
-            <button onClick={()=>openRangeModal({scope:{nodeId:sel}})}
-              title="Criar faixas por risco na população que passa por este Decision Lens"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #99f6e4",background:"#f0fdfa",
-                color:"#0f766e",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              📐 Faixas aqui
-            </button>
-            <button onClick={()=>toggleShapeLock(sel)}
-              title={selShape.locked ? "Destravar (Goal Seek pode propor movimentos neste nó)" : "Travar (Goal Seek nunca propõe movimentos neste nó)"}
-              style={{padding:"5px 10px",borderRadius:7,border:selShape.locked?"1px solid #fca5a5":"1px solid #e2e8f0",
-                background:selShape.locked?"#fef2f2":"#fff",color:selShape.locked?"#b91c1c":"#64748b",
-                cursor:"pointer",fontSize:13,fontFamily:"inherit",whiteSpace:"nowrap"}}>
-              {selShape.locked ? "🔒" : "🔓"}
-            </button>
-          </div>
-        )}
-
-        {/* Terminal toolbar (Aprovado/Reprovado/AS IS) — Descoberta de Segmentos escopada
-            à população que efetivamente TERMINA neste nó (útil pra "por que este terminal
-            tem inad alta?"). Terminais não têm trava (shape.locked é só de fluxo/decisão). */}
-        {['approved','rejected','as_is'].includes(selShape?.type)&&multiSel.size<=1&&(
-          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-            border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
-            <button onClick={()=>openSegmentDiscoveryModal({nodeId:sel})}
-              title="Descobrir segmentos na população que termina neste nó"
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #c7d2fe",background:"#eef2ff",
-                color:"#4f46e5",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              🔍 Descobrir aqui
-            </button>
-          </div>
-        )}
-
-        {/* Porta solta toolbar (Copiloto Sessão 3) — sugestão de próximo nó só faz
-            sentido numa porta sem NENHUMA conexão de saída (mesmo critério do lint
-            port_dangling); portas já conectadas seguem sem toolbar contextual. */}
-        {selShape?.type==='port'&&multiSel.size<=1&&conns.filter(c=>c.from===sel).length===0&&(
-          <div style={{position:"absolute",top:70,left:"50%",transform:"translateX(-50%)",zIndex:300,
-            display:"flex",gap:4,padding:"5px 8px",borderRadius:10,background:"rgba(255,255,255,.95)",
-            border:"1px solid #ddd6fe",boxShadow:"0 2px 12px rgba(0,0,0,.08)"}}>
-            <button onClick={()=>openVariableRanking(sel)}
-              style={{padding:"5px 14px",borderRadius:7,border:"1px solid #ddd6fe",background:"#f5f3ff",
-                color:"#6d28d9",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",
-                whiteSpace:"nowrap",fontWeight:600}}>
-              💡 Sugerir próximo passo
-            </button>
-          </div>
-        )}
+        {/* Toolbars flutuantes de contexto APOSENTADAS (UX 2.0 — Sessão 2): todo o
+        conteúdo (alinhamento, Cineminha, Johnny, losango, Lens, terminal, porta) migrou
+        para as abas contextuais do Ribbon (Matriz/Decisão/Lens/Terminal/Porta/Seleção),
+        renderizadas a partir dos descritores `ctx.*` do registro COMMANDS via
+        contextWhen(selection). O mini-flutuante ergonômico de Deletar/Duplicar chega na
+        Sessão 8. A paleta de cor abaixo NÃO é uma toolbar de contexto (é acionada pelo
+        comando org.color) e permanece. */}
 
         {/* Color palette */}
         {palette&&selShape&&(
