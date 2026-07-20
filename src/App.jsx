@@ -15,6 +15,11 @@ import { suggestClusterVarName, suggestClusterLabels, buildClusterDefFromModel, 
 // (materialização deriveRangeColumn em columnar.js; propagação de refs REUSA
 // renameClusterColumnRefs/renameClusterLabelRefs, DEC-FR-009).
 import { suggestRangeVarName, buildRangeDefFromModel, formatBandLabel, isRangeVar, editRangeCuts, renameRangeBand } from "./rangeVar.js";
+// Heurística de variável (temporal/score por nome) + parse temporal — módulo folha
+// compartilhado com o worker (Explorar a Base, DEC-EB-008). `parseTemporalKey` é
+// re-exportado abaixo para os consumidores que ainda o importam de App.jsx (analytics.js).
+import { segVarDefaultReason, parseTemporalKey } from "./segVar.js";
+export { parseTemporalKey };
 // Execução Híbrida H4/H6 — ComputeRouter (fronteira única worker/sidecar, DEC-HX-002)
 // + funções puras de UX do motor (badge, degradação declarada, aviso de fallback).
 import { createComputeRouter, createWorkerProvider, createSidecarProvider, describeComputeBadge, describeCapabilitiesDetail, ceilingNotice, fallbackNoticeText, hashChunks } from "./computeRouter.js";
@@ -520,35 +525,8 @@ const VAR_TYPES = [
   { value:"categorical", label:"Categórica", icon:"🏷️" },
 ];
 
-// Abreviações de mês de 3 letras (SAS DDMONYYYY) — inglês e português, já que
-// "JUN"/"JAN" coincidem nos dois idiomas mas MAI/ABR/AGO/SET/OUT/DEZ/FEV não
-// são reconhecidos pelo Date.parse do JS (só entende abreviações em inglês).
-const MONTH_ABBR = {
-  jan:0, fev:1, feb:1, mar:2, abr:3, apr:3, mai:4, may:4, jun:5,
-  jul:6, ago:7, aug:7, set:8, sep:8, out:9, oct:9, nov:10, dez:11, dec:11,
-};
-
-// Parse a temporal cell value into a sortable numeric key (UTC ms), or null if
-// unparseable. Supports ISO (YYYY-MM-DD / YYYY-MM), BR (DD/MM/YYYY), compact
-// (YYYYMMDD), SAS DDMONYYYY (ex: 10MAI2026), e um fallback via Date.parse.
-// Usado para ordenar o eixo X cronologicamente.
-export function parseTemporalKey(str) {
-  const s = String(str ?? "").trim();
-  if (!s) return null;
-  let m = s.match(/^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?$/);          // YYYY-MM-DD / YYYY-MM
-  if (m) return Date.UTC(+m[1], +m[2] - 1, m[3] ? +m[3] : 1);
-  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);                  // DD/MM/YYYY
-  if (m) { let y = +m[3]; if (y < 100) y += 2000; return Date.UTC(y, +m[2] - 1, +m[1]); }
-  m = s.match(/^(\d{4})(\d{2})(\d{2})?$/);                               // YYYYMMDD / YYYYMM
-  if (m) return Date.UTC(+m[1], +m[2] - 1, m[3] ? +m[3] : 1);
-  m = s.match(/^(\d{1,2})[-\s]?([A-Za-zÀ-ÿ]{3})[-\s]?(\d{2,4})$/);       // DDMONYYYY (SAS)
-  if (m) {
-    const mon = MONTH_ABBR[m[2].toLowerCase()];
-    if (mon != null) { let y = +m[3]; if (y < 100) y += 2000; return Date.UTC(y, mon, +m[1]); }
-  }
-  const t = Date.parse(s);
-  return isNaN(t) ? null : t;
-}
+// parseTemporalKey / MONTH_ABBR migraram para ./segVar.js (módulo folha compartilhado
+// com o worker — Explorar a Base, DEC-EB-008); importados e re-exportados no topo.
 
 // Heuristics: infer whether a column is likely ordinal or categorical
 function suggestVarType(colName, values) {
@@ -614,21 +592,9 @@ function suggestMetricColumns(headers) {
   return result;
 }
 
-// Heurística do seletor de variáveis da Descoberta de Segmentos (Copiloto Sessão 10):
-// colunas de cohort/vintage (mês/safra de referência) e de score já vêm DESMARCADAS por
-// padrão no `segmentDiscoveryModal` — a primeira é um artefato temporal/de coleta (não um
-// driver de risco acionável, e pode vazar maturação de inadimplência entre safras), a
-// segunda costuma já SER o risco (circular) ou já estar em uso em outro nó da política.
-// Só define o estado INICIAL do checklist — o usuário marca/desmarca qualquer coluna.
-const SEG_TEMPORAL_NAME_TOKENS = new Set(['mes','meses','month','ano','anos','year','safra','vintage','periodo','competencia','data','date','dt']);
-const SEG_SCORE_NAME_TOKENS = new Set(['score','rating','bureau']);
-function segVarDefaultReason(colName) {
-  const norm = (colName || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
-  const tokens = norm.split(/[^a-z0-9]+/).filter(Boolean);
-  if (tokens.some(t => SEG_TEMPORAL_NAME_TOKENS.has(t))) return 'temporal';
-  if (tokens.some(t => SEG_SCORE_NAME_TOKENS.has(t))) return 'score';
-  return null;
-}
+// segVarDefaultReason (heurística temporal/score por nome de coluna) migrou para
+// ./segVar.js (módulo folha compartilhado com o worker — Copiloto Sessão 10 + Explorar a
+// Base, DEC-EB-008); importado no topo. Tokens inalterados (contrato).
 
 // ── CSV helpers ──────────────────────────────────────────────────────────────
 // Extrai as linhas [start, end) do texto por índice, sem materializar o array
