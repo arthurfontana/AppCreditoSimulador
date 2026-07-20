@@ -2079,6 +2079,13 @@ export default function App() {
   const cycleRibbonMode = useCallback(() => {
     setRibbonMode(m => (m === 'fixed' ? 'compact' : m === 'compact' ? 'auto' : 'fixed'));
   }, []);
+  // Painel direito (UX 2.0 — Sessão 6): aba interna ativa — 'assets' (bases + variáveis +
+  // bibliotecas) | 'inspector' (propriedades do objeto selecionado) | 'copilot' (lint +
+  // Descoberta). Persistido (sessionStorage + .credito.json, schema 3.1). O painel continua
+  // à direita, com o mesmo panelCollapsed.
+  const [rightPanelMode, setRightPanelMode] = useState(() => {
+    try { const s = sessionStorage.getItem('right_panel_mode_v1'); return (s === 'inspector' || s === 'copilot') ? s : 'assets'; } catch { return 'assets'; }
+  });
   // Status Bar (UX 2.0 — Sessão 5): quais indicadores aparecem na zona esquerda, e em
   // que ordem — engrenagem/clique-direito na barra (e a seção 🗔 Interface do Hub, mesmo
   // estado). Persistido (sessionStorage + .credito.json, schema 3.0).
@@ -2799,6 +2806,8 @@ export default function App() {
   useEffect(() => { try { sessionStorage.setItem('ribbon_mode_v1', ribbonMode); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonMode]);
   // Status Bar (UX 2.0 — Sessão 5): persiste os indicadores escolhidos.
   useEffect(() => { try { sessionStorage.setItem('status_bar_indicators_v1', JSON.stringify(statusBarIndicators)); } catch { /* quota/privacidade — não bloqueia */ } }, [statusBarIndicators]);
+  // Painel direito (UX 2.0 — Sessão 6): persiste a aba interna ativa (Ativos/Inspetor/Copiloto).
+  useEffect(() => { try { sessionStorage.setItem('right_panel_mode_v1', rightPanelMode); } catch { /* quota/privacidade — não bloqueia */ } }, [rightPanelMode]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
   // Debounced (500ms, mesmo padrão dos effects de simulação): setShapes é chamado por
@@ -3990,13 +3999,14 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "3.0",
+      schemaVersion: "3.1",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
       ribbonActiveTab,
       ribbonMode,
       statusBarIndicators,
+      rightPanelMode,
       viewport: vp,
       panelCollapsed,
       canvases: mergedCanvases,
@@ -4124,6 +4134,8 @@ export default function App() {
         : DEFAULT_STATUS_BAR_INDICATORS;
       setStatusBarIndicators(loadedIndicators);
     }
+    // Painel direito (UX 2.0 — Sessão 6): default defensivo p/ projetos antigos (schema < 3.1).
+    setRightPanelMode((data.rightPanelMode === 'inspector' || data.rightPanelMode === 'copilot') ? data.rightPanelMode : 'assets');
     if (typeof data.panelCollapsed === 'boolean') setPanelCollapsed(data.panelCollapsed);
     const pref = data.preferences || {};
     if (typeof pref.enableDynThickness === 'boolean') setEnableDynThickness(pref.enableDynThickness);
@@ -7468,7 +7480,7 @@ export default function App() {
     { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura'], onRun: () => openSegmentDiscoveryModal(null) },
     { id: 'analyze.cluster', label: 'Clusterizar Segmentos', icon: '🧩', tab: 'analisar', group: 'Descoberta', keywords: ['cluster', 'clusterizar', 'k-means', 'agrupar'], onRun: () => openClusterModal(null) },
     { id: 'analyze.range', label: 'Criar Faixas por Risco', icon: '📐', tab: 'analisar', group: 'Descoberta', keywords: ['faixas', 'binning', 'risco', 'iv', 'woe', 'bandas'], onRun: () => openRangeModal() },
-    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico'], onRun: () => setPanelCollapsed(false) },
+    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
 
     // ─── OTIMIZAR ───
     { id: 'optimize.goalSeek', label: 'Atingir Objetivo', icon: '🎯', tab: 'otimizar', group: 'Política', keywords: ['goal seek', 'objetivo', 'meta', 'milp', 'profundo'], onRun: openGoalSeekModal },
@@ -7580,6 +7592,160 @@ export default function App() {
       baseRows:       { id: 'baseRows',       label: 'Linhas da Base', text: fmtQty(baseRows) },
     };
   }, [simResult, incrementalResult, sel, multiSel, selShape, nodeArrivals, csvStore]);
+
+  // ═══ Inspetor do painel direito (UX 2.0 — Sessão 6) ═══
+  // Renderiza as PROPRIEDADES do objeto selecionado (não comandos — comandos vivem na
+  // Ribbon). Read-only, exceto o rótulo, que reusa a edição inline já existente (via
+  // setShapes+pushHistory, o mesmo caminho do duplo-clique/commitEdit). Sem seleção →
+  // propriedades do estudo/canvas com dica.
+  const _inspTitleStyle = { fontSize:13, fontWeight:700, color:"#1e293b", marginBottom:12, display:"flex", alignItems:"center", gap:7 };
+  const _inspHintStyle = { marginTop:6, padding:"9px 11px", borderRadius:8, background:"#f8fafc", border:"1px solid #eef2f7", fontSize:11, color:"#94a3b8", lineHeight:1.5 };
+  const _INSP_TYPE_LABEL = { decision:'Losango', cineminha:'Cineminha', decision_lens:'Decision Lens', approved:'Terminal Aprovado', rejected:'Terminal Reprovado', as_is:'Terminal AS IS', frame:'Frame', port:'Porta', simPanel:'Painel de Simulação', csv:'Base' };
+  const inspRow = (label, value, opts = {}) => (
+    <div key={label} style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:11 }}>
+      <span style={{ fontSize:10, color:"#94a3b8", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{label}</span>
+      <div style={{ fontSize:12.5, color:opts.color || "#1e293b", fontWeight:500, lineHeight:1.45, wordBreak:"break-word" }}>{value}</div>
+    </div>
+  );
+  const inspLabelInput = (shape) => (
+    <input
+      value={shape.label ?? ''}
+      onFocus={e => { pushHistory(); e.target.style.borderColor = '#3b82f6'; }}
+      onChange={e => { const v = e.target.value; setShapes(p => p.map(s => s.id === shape.id ? { ...s, label: v } : s)); }}
+      onBlur={e => { e.target.style.borderColor = '#e2e8f0'; }}
+      placeholder="(sem rótulo)"
+      style={{ width:"100%", padding:"6px 9px", borderRadius:7, border:"1.5px solid #e2e8f0", background:"#f8fafc",
+        fontSize:12.5, color:"#1e293b", fontFamily:"inherit", fontWeight:500, outline:"none", boxSizing:"border-box", transition:"border-color .15s" }}
+    />
+  );
+  const renderInspector = () => {
+    // Multi-seleção: sumário + dica (comandos em massa na aba Seleção do Ribbon).
+    if (multiSel.size > 1) {
+      const byType = {};
+      for (const id of multiSel) { const s = shapesById.get(id); if (s) byType[s.type] = (byType[s.type] || 0) + 1; }
+      return (
+        <div style={{ padding:"14px 16px" }}>
+          <div style={_inspTitleStyle}><span>🔲</span>{multiSel.size} objetos selecionados</div>
+          {inspRow('Composição', Object.entries(byType).map(([tp, n]) => `${_INSP_TYPE_LABEL[tp] || tp}: ${n}`).join(' · ') || '—')}
+          <div style={_inspHintStyle}>Selecione um único objeto para ver e editar suas propriedades. Alinhar, distribuir, Johnny e deletar em massa estão na aba <b>Seleção</b> do Ribbon.</div>
+        </div>
+      );
+    }
+    const s = selShape;
+    // Sem seleção → propriedades do estudo/canvas.
+    if (!s) {
+      const canvasName = canvasesR.current?.[activeCanvasId]?.name ?? 'Canvas';
+      const bases = Object.values(csvStore);
+      return (
+        <div style={{ padding:"14px 16px" }}>
+          <div style={_inspTitleStyle}><span>📋</span>Estudo</div>
+          {inspRow('Aba ativa', canvasName)}
+          {inspRow('Objetos no canvas', `${shapes.length} ${shapes.length === 1 ? 'objeto' : 'objetos'}`)}
+          {inspRow('Bases vinculadas', bases.length ? bases.map(b => b.name).join(' · ') : '—')}
+          <div style={_inspHintStyle}>💡 Selecione um objeto no canvas para inspecionar suas propriedades aqui. Os comandos para criar e transformar objetos estão na Ribbon acima.</div>
+        </div>
+      );
+    }
+    const t = s.type;
+    // ── Losango de Decisão ──
+    if (t === 'decision') {
+      const full = conns.filter(c => c.from === s.id).map(c => c.label);
+      const visible = effectiveDomain(full, s.visibleVals, nodeArrivals[s.id]?.val);
+      const arrival = totalNodeArrival(s, nodeArrivals[s.id]);
+      return (
+        <div style={{ padding:"14px 16px" }}>
+          <div style={_inspTitleStyle}><span>◇</span>Losango de Decisão</div>
+          {inspRow('Rótulo', inspLabelInput(s))}
+          {inspRow('Variável', s.variableCol || '—')}
+          {inspRow('Domínio', full.length
+            ? `${visible.length} de ${full.length} ${full.length === 1 ? 'saída visível' : 'saídas visíveis'}${visible.length ? ' — ' + visible.slice(0, 8).join(', ') + (visible.length > 8 ? '…' : '') : ''}`
+            : 'Sem saídas conectadas')}
+          {inspRow('Chegadas', arrival === null ? '—' : fmtQty(arrival))}
+          <div style={_inspHintStyle}>Ajuste variável e domínio pelo <b>⚙ Domínio</b> na aba <b>Decisão</b> do Ribbon.</div>
+        </div>
+      );
+    }
+    // ── Cineminha ──
+    if (t === 'cineminha') {
+      const cfg = getCinemaType(s.cinemaType);
+      const rows = (s.rowDomain || []).length || (s.rowVar ? 0 : 1);
+      const cols = (s.colDomain || []).length || (s.colVar ? 0 : 1);
+      const filled = Object.keys(s.cells || {}).length;
+      const arrival = totalNodeArrival(s, nodeArrivals[s.id]);
+      return (
+        <div style={{ padding:"14px 16px" }}>
+          <div style={_inspTitleStyle}><span>{cfg.icon}</span>Cineminha</div>
+          {inspRow('Rótulo', inspLabelInput(s))}
+          {inspRow('Tipo', `${cfg.icon} ${cfg.label}`)}
+          {inspRow('Variável de linha', s.rowVar?.col || '—')}
+          {inspRow('Variável de coluna', s.colVar?.col || '—')}
+          {inspRow('Grade', `${rows || '—'} × ${cols || '—'} (${filled} ${filled === 1 ? 'célula preenchida' : 'células preenchidas'})`)}
+          {inspRow('Resultado', s.resultVar?.col || '—')}
+          {inspRow('Travado', s.locked ? 'Sim 🔒' : 'Não', s.locked ? { color:'#b45309' } : {})}
+          {inspRow('Chegadas', arrival === null ? '—' : fmtQty(arrival))}
+          <div style={_inspHintStyle}>Edite eixos, células e travas pela aba <b>Matriz</b> do Ribbon (⚙ Domínio, ⚙ Otimizar, 🔒 Travar).</div>
+        </div>
+      );
+    }
+    // ── Decision Lens ──
+    if (t === 'decision_lens') {
+      const rules = s.rules || [];
+      const pop = computeLensPopulation(rules, csvStore);
+      const share = pop.total > 0 ? (pop.count / pop.total) * 100 : null;
+      return (
+        <div style={{ padding:"14px 16px" }}>
+          <div style={_inspTitleStyle}><span>🔎</span>Decision Lens</div>
+          {inspRow('Rótulo', inspLabelInput(s))}
+          {inspRow('Regras', rules.length
+            ? <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                {rules.slice(0, 6).map((r, i) => (
+                  <div key={i} style={{ padding:"4px 8px", borderRadius:6, background:"#f8fafc", border:"1px solid #eef2f7", fontSize:11.5 }}>
+                    {r.col} {r.op} {Array.isArray(r.value) ? r.value.join('–') : r.value}
+                  </div>
+                ))}
+                {rules.length > 6 && <div style={{ fontSize:11, color:"#94a3b8" }}>+{rules.length - 6} regras…</div>}
+              </div>
+            : 'Nenhuma regra definida')}
+          {inspRow('População', pop.total > 0 ? `${fmtQty(pop.count)} de ${fmtQty(pop.total)}${share !== null ? ` (${share.toFixed(1)}%)` : ''}` : '—')}
+          <div style={_inspHintStyle}>Ajuste as regras pelo <b>🔎 Configurar</b> na aba <b>Lens</b> do Ribbon.</div>
+        </div>
+      );
+    }
+    // ── Terminais (Aprovado / Reprovado / AS IS) ──
+    if (t === 'approved' || t === 'rejected' || t === 'as_is') {
+      const meta = t === 'approved' ? { icon:'✅', label:'Aprovado' } : t === 'rejected' ? { icon:'❌', label:'Reprovado' } : { icon:'⟳', label:'AS IS' };
+      const es = simResult.edgeStats || {};
+      const vol = conns.filter(c => c.to === s.id).reduce((a, c) => a + (es[c.id]?.qty || 0), 0);
+      return (
+        <div style={{ padding:"14px 16px" }}>
+          <div style={_inspTitleStyle}><span>{meta.icon}</span>Terminal · {meta.label}</div>
+          {inspRow('Rótulo', inspLabelInput(s))}
+          {inspRow('Tipo', `${meta.icon} ${meta.label}`)}
+          {inspRow('Volume que chega', fmtQty(vol))}
+          {t === 'as_is' && <div style={_inspHintStyle}>O terminal AS IS mantém o comportamento original da base sem alterar o resultado da simulação.</div>}
+        </div>
+      );
+    }
+    // ── Frame ──
+    if (t === 'frame') {
+      return (
+        <div style={{ padding:"14px 16px" }}>
+          <div style={_inspTitleStyle}><span>▭</span>Frame</div>
+          {inspRow('Rótulo', inspLabelInput(s))}
+          {inspRow('Dimensões', `${Math.round(s.w)} × ${Math.round(s.h)} px`)}
+        </div>
+      );
+    }
+    // ── Painel de Simulação / Porta / outros — read-only mínimo ──
+    return (
+      <div style={{ padding:"14px 16px" }}>
+        <div style={_inspTitleStyle}><span>🔧</span>{_INSP_TYPE_LABEL[t] || t}</div>
+        {s.label != null && t !== 'simPanel' && t !== 'port' && inspRow('Rótulo', inspLabelInput(s))}
+        {inspRow('Tipo', _INSP_TYPE_LABEL[t] || t)}
+        <div style={_inspHintStyle}>Este objeto não tem propriedades editáveis no Inspetor.</div>
+      </div>
+    );
+  };
 
   // ═══ REGIÃO: JSX — Shell da Aplicação (toolbar, abas, canvas) ═══
   // ────────────────────────────────────────────────────────────────────────────
@@ -8035,6 +8201,33 @@ export default function App() {
           </button>
         </div>
 
+        {/* Abas internas do painel (UX 2.0 — Sessão 6): Ativos / Inspetor / 🧭 Copiloto.
+            Painel continua à direita (com o panelCollapsed existente); só o conteúdo do
+            corpo troca por aba. `rightPanelMode` persistido (sessionStorage + .credito.json). */}
+        <div style={{display:"flex",gap:2,padding:"6px 8px",borderBottom:"1px solid #f1f5f9",flexShrink:0}}>
+          {[
+            { id:'assets',    label:'Ativos' },
+            { id:'inspector', label:'Inspetor' },
+            { id:'copilot',   label:'Copiloto', icon:'🧭', badge: copilotFindings.length },
+          ].map(tab => {
+            const on = rightPanelMode === tab.id;
+            return (
+              <button key={tab.id} onClick={()=>setRightPanelMode(tab.id)} title={tab.label}
+                style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"6px 4px",borderRadius:7,
+                  border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11.5,fontWeight:on?700:500,
+                  background:on?"#eff6ff":"transparent",color:on?"#2563eb":"#64748b",transition:"all .12s"}}
+                onMouseEnter={e=>{if(!on)e.currentTarget.style.background="#f8fafc";}}
+                onMouseLeave={e=>{if(!on)e.currentTarget.style.background="transparent";}}>
+                {tab.icon && <span style={{fontSize:12}}>{tab.icon}</span>}
+                <span>{tab.label}</span>
+                {tab.badge > 0 && (
+                  <span style={{fontSize:9.5,fontWeight:700,color:"#fff",background:on?"#2563eb":"#94a3b8",borderRadius:20,padding:"1px 5px",lineHeight:1.3,minWidth:15,textAlign:"center"}}>{tab.badge}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
         {/* Scrollable content area */}
         <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column"}}>
 
@@ -8093,8 +8286,9 @@ export default function App() {
             `settingsModal` mais abaixo. Os estados (computeSidecar, toggles de aresta)
             continuam vivos aqui no App e persistidos como antes (sem bump de schema). */}
 
+        {/* ═══ Aba ATIVOS: bases carregadas + variáveis de decisão + atalhos às bibliotecas ═══ */}
         {/* Loaded CSVs list */}
-        {Object.keys(csvStore).length > 0 && (
+        {rightPanelMode === 'assets' && Object.keys(csvStore).length > 0 && (
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
             <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Arquivos carregados</p>
             {Object.entries(csvStore).map(([cid,csv])=>(
@@ -8126,7 +8320,7 @@ export default function App() {
         )}
 
         {/* Decision Variables */}
-        {decisionVars.length > 0 && (
+        {rightPanelMode === 'assets' && decisionVars.length > 0 && (
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
             <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Variáveis de Decisão</p>
             <p style={{fontSize:10.5,color:"#cbd5e1",marginBottom:8,lineHeight:1.5}}>Arraste para o canvas → losango, ou sobre um ⊞ Cineminha → matriz cruzada</p>
@@ -8210,10 +8404,43 @@ export default function App() {
           </div>
         )}
 
+        {/* Atalhos às bibliotecas (UX 2.0 — Sessão 6): entrada rápida para as bibliotecas de
+            Cineminha e de Políticas direto do painel de Ativos. O comando canônico continua na
+            Ribbon (Inserir/Política) — aqui é só um atalho de descoberta. */}
+        {rightPanelMode === 'assets' && (
+          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
+            <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Bibliotecas</p>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              <button onClick={()=>openCinemaLibrary(null,'browse')}
+                title="Abrir a biblioteca de Cineminhas salvas"
+                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,border:"1px solid #e0e7ff",background:"#eef2ff",color:"#4338ca",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600,textAlign:"left",transition:"all .12s"}}
+                onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";}}
+                onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";}}>
+                <span style={{fontSize:14}}>📥</span><span style={{flex:1}}>Biblioteca de Cineminhas</span><span style={{opacity:.5}}>›</span>
+              </button>
+              <button onClick={()=>openPolicyLibrary('browse')}
+                title="Abrir a biblioteca de Políticas salvas"
+                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,border:"1px solid #fde68a",background:"#fef9c3",color:"#92400e",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600,textAlign:"left",transition:"all .12s"}}
+                onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";}}
+                onMouseLeave={e=>{e.currentTarget.style.background="#fef9c3";}}>
+                <span style={{fontSize:14}}>📚</span><span style={{flex:1}}>Biblioteca de Políticas</span><span style={{opacity:.5}}>›</span>
+              </button>
+            </div>
+          </div>
+        )}
 
+        {/* ═══ Aba INSPETOR: propriedades do objeto selecionado (sem comandos) ═══ */}
+        {rightPanelMode === 'inspector' && renderInspector()}
+
+        {/* ═══ Aba COPILOTO: lint estrutural + card da Descoberta ═══ */}
         {/* Copiloto — lint estrutural (Sessão 1, DEC-IA-006): achados por severidade,
             "ir até o nó" e quick-fixes não-destrutivos. Efêmero (não persiste). */}
-        {shapes.length > 0 && (
+        {rightPanelMode === 'copilot' && shapes.length === 0 && (
+          <div style={{padding:"18px 16px",fontSize:12,color:"#94a3b8",lineHeight:1.6,textAlign:"center"}}>
+            🧭 O Copiloto analisa a estrutura do fluxo. Adicione nós ao canvas para ver os achados aqui.
+          </div>
+        )}
+        {rightPanelMode === 'copilot' && shapes.length > 0 && (
           <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
               <p style={{fontSize:11,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.6,margin:0}}>🧭 Copiloto</p>
@@ -8291,8 +8518,8 @@ export default function App() {
         {/* Visualização (Espessura Dinâmica + indicadores de aresta) MIGROU para o ⚙ Hub
             de Configurações → seção 🎨 Visualização (UX 2.0 — Sessão 3). */}
 
-        {/* Empty state */}
-        {Object.keys(csvStore).length === 0 && (
+        {/* Empty state (só na aba Ativos) */}
+        {rightPanelMode === 'assets' && Object.keys(csvStore).length === 0 && (
           <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:24,color:"#cbd5e1"}}>
             <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
               <rect x="6" y="6" width="32" height="32" rx="7" stroke="#e2e8f0" strokeWidth="1.5" strokeDasharray="4 3"/>

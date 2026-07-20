@@ -673,12 +673,28 @@ de schema, restore defensivo). Ao fim, app 100% funcional e npm test verde.
 ```
 
 **Checklist**:
-- [ ] 3 abas; posição e colapso inalterados; drag de chips intacto
-- [ ] Ativos = bases + variáveis (com editores ✏️) + bibliotecas
-- [ ] Inspetor = propriedades por tipo (sem comandos); estado sem seleção tratado
-- [ ] Copiloto = lint + Descoberta, com badge; comando do Ribbon foca a aba
-- [ ] `rightPanelMode` persistido; `panelCollapsed` respeitado
-- [ ] `npm test` verde; app funcional
+- [x] 3 abas; posição e colapso inalterados; drag de chips intacto
+- [x] Ativos = bases + variáveis (com editores ✏️) + bibliotecas
+- [x] Inspetor = propriedades por tipo (sem comandos); estado sem seleção tratado
+- [x] Copiloto = lint + Descoberta, com badge; comando do Ribbon foca a aba
+- [x] `rightPanelMode` persistido; `panelCollapsed` respeitado
+- [x] `npm test` verde; app funcional
+
+> **Entregue (2026-07-20).** Estado de topo `rightPanelMode: 'assets' | 'inspector' |
+> 'copilot'` (init de `sessionStorage['right_panel_mode_v1']`, default `'assets'`) +
+> persistência no `.credito.json` (bump `schemaVersion 3.0 → 3.1`, restore defensivo). O
+> painel **não mudou de posição** (segue à direita, mesmo `panelCollapsed`); ganhou uma
+> faixa de 3 abas internas abaixo do header. **Ativos** = bases carregadas (✏️/✕) +
+> Variáveis de Decisão (busca + chips arrastáveis via `startPanelDrag` intacto + ✏️ de
+> cluster/faixas) + atalhos às bibliotecas de Cineminha/Políticas. **Inspetor** =
+> `renderInspector()`, propriedades read-only por tipo (losango/Cineminha/Lens/terminal/
+> frame/multi/estudo), com o rótulo editável reusando `setShapes`+`pushHistory`; terminal
+> soma o volume de entrada do `edgeStats`; sem seleção mostra propriedades do estudo com
+> dica. **🧭 Copiloto** = o lint estrutural + card da Descoberta migrados como estavam,
+> com badge de `copilotFindings.length` no título da aba; o comando `analyze.copilot` da
+> aba Analisar agora faz `setRightPanelMode('copilot')` além de reabrir o painel. Avisos de
+> Projeto/Fluxo e inputs de arquivo ficaram fora das abas (sempre montados no topo do
+> corpo). Sem mudança de matemática/motor → GATEs numéricos intocados.
 
 ---
 
@@ -768,7 +784,7 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 - [x] **Sessão 3** — ⚙ Hub de Configurações 🏷️ `Opus 4.8`
 - [x] **Sessão 4** — Colapso em 3 estados 🏷️ `Opus 4.8`
 - [x] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
-- [ ] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
+- [x] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
 - [ ] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
 - [ ] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
 
@@ -818,9 +834,10 @@ Cada sessão segue o mesmo template:
 
 **Última atualização**: 2026-07-20 (v2 — reavaliação completa pós-Épicos FR/GS/H4–H8:
 inventário de 12 superfícies, abas Analisar/Otimizar separadas, Hub de Configurações,
-Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–5 entregues**
+Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–6 entregues**
 (registro `COMMANDS` + Ribbon fixed; abas contextuais + aposentadoria das 6 toolbars
 flutuantes; ⚙ Hub de Configurações; colapso do Ribbon em 3 estados — `ribbonMode`,
 schema 2.9; Status Bar configurável + realocação de badges — `statusBarIndicators`,
-schema 3.0); Sessões 6–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
+schema 3.0; painel direito em 3 abas Ativos/Inspetor/Copiloto — `rightPanelMode`,
+schema 3.1); Sessões 7–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
 executada e está substituída por esta.)
