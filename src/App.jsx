@@ -1733,7 +1733,13 @@ function RibbonCmdButton({ cmd }) {
   );
 }
 
-function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, onCtxTab, onOpenSettings }) {
+const RIBBON_MODE_META = {
+  fixed:   { icon: '⌃', label: 'Fixo',       hint: 'Ribbon inteiro fixo — clique para modo Compacto' },
+  compact: { icon: '⌃', label: 'Compacto',   hint: 'Só a faixa de abas — clique para modo Automático' },
+  auto:    { icon: '⌄', label: 'Automático', hint: 'Ribbon oculto (hover no topo revela) — clique para modo Fixo' },
+};
+
+function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, onCtxTab, onOpenSettings, mode, onCycleMode }) {
   // Aba contextual em foco? Então o conteúdo vem de `contextCommands` (já filtrado por
   // contextWhen no App); senão, das abas fixas por `c.tab`.
   const isCtx = !!contextTab && activeTab === contextTab.id;
@@ -1746,6 +1752,17 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
     if (!byGroup.has(c.group)) { byGroup.set(c.group, []); groupOrder.push(c.group); }
     byGroup.get(c.group).push(c);
   }
+  // Revelação por hover (modos compact/auto) — o conteúdo revelado é OVERLAY absoluto,
+  // NUNCA empurra o SVG (invariante de posicionamento, Sessão 4). Fecho com pequeno atraso
+  // para o mouse poder transitar da faixa de abas para o overlay sem sumir.
+  const [reveal, setReveal] = useState(false);
+  const closeTimer = useRef(null);
+  const openReveal = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } setReveal(true); };
+  const scheduleClose = () => { if (closeTimer.current) clearTimeout(closeTimer.current); closeTimer.current = setTimeout(() => setReveal(false), 160); };
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
+  // Ao trocar de modo, recolhe qualquer revelação pendente.
+  useEffect(() => { setReveal(false); }, [mode]);
+
   const qBtn = (icon, label, on, enabled, danger) => (
     <button className="wbt" disabled={!enabled} onClick={enabled ? on : undefined} title={label}
       style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 9px', borderRadius: 8, border: 'none',
@@ -1756,68 +1773,154 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
     </button>
   );
   const CTX_ACCENT = '#7c3aed'; // violeta — cor da aba contextual (destaque "Contextual Tabs")
-  return (
-    <div style={{ flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', zIndex: 250 }}>
-      {/* Faixa de abas + QAT */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', borderBottom: '1px solid #f1f5f9' }}>
-        {RIBBON_TABS.map(t => {
-          const on = !isCtx && activeTab === t.id;
-          return (
-            <button key={t.id} onClick={() => onTab(t.id)}
-              style={{ padding: '5px 14px', borderRadius: 8, border: 'none',
-                background: on ? '#eff6ff' : 'transparent', color: on ? '#2563eb' : '#64748b',
-                fontWeight: on ? 700 : 500, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
-                whiteSpace: 'nowrap', transition: 'all .12s' }}>
-              {t.label}
-            </button>
-          );
-        })}
-        {/* Aba contextual — surge destacada só com o tipo correspondente selecionado. */}
-        {contextTab && (
-          <button key={contextTab.id} onClick={onCtxTab} title={`Ferramentas de ${contextTab.label}`}
-            style={{ marginLeft: 6, padding: '5px 15px', borderRadius: 8,
-              border: `1px solid ${isCtx ? CTX_ACCENT : '#ddd6fe'}`,
-              borderTop: `3px solid ${CTX_ACCENT}`,
-              background: isCtx ? '#f5f3ff' : '#faf5ff', color: CTX_ACCENT,
-              fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
-              whiteSpace: 'nowrap', transition: 'all .12s', boxShadow: isCtx ? `0 1px 0 ${CTX_ACCENT}` : 'none' }}>
-            <span style={{ fontSize: 10, marginRight: 5, opacity: .8, textTransform: 'uppercase', letterSpacing: .3 }}>◆</span>
-            {contextTab.label}
+  const modeMeta = RIBBON_MODE_META[mode] || RIBBON_MODE_META.fixed;
+
+  // Cluster QAT + ciclo de modo + ⚙ — visível nos 3 modos (na faixa de abas em fixed/compact;
+  // flutuante em auto). Não faz parte do conteúdo colapsável.
+  const rightCluster = (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2, paddingLeft: 8, borderLeft: '1px solid #f1f5f9' }}>
+        {qBtn('↩', 'Desfazer (Ctrl+Z)', qat.undo, qat.canUndo, false)}
+        {qBtn('↪', 'Refazer (Ctrl+Y)', qat.redo, qat.canRedo, false)}
+        {qBtn('🗑', 'Deletar (Del)', qat.onDelete, qat.canDelete, true)}
+        {qBtn('💾', 'Salvar Projeto', qat.onSave, true, false)}
+      </div>
+      {/* Botão de ciclo de colapso do Ribbon (fixed → compact → auto → fixed). */}
+      <button className="wbt" onClick={onCycleMode} title={modeMeta.hint}
+        style={{ display: 'flex', alignItems: 'center', gap: 4, height: 28, padding: '0 8px', marginLeft: 6,
+          borderRadius: 8, border: '1px solid #e2e8f0', background: 'transparent', color: '#475569',
+          cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', flexShrink: 0, fontWeight: 600 }}>
+        <span style={{ fontSize: 13, lineHeight: 1 }}>{modeMeta.icon}</span>
+        <span className="wbl">{modeMeta.label}</span>
+      </button>
+      {/* ⚙ Hub de Configurações — visível nos 3 modos de colapso (UX 2.0 Sessão 3/4). */}
+      <button className="wbt" onClick={onOpenSettings} title="Configurações (Ctrl+,)"
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 28,
+          marginLeft: 6, borderRadius: 8, border: 'none', background: 'transparent', color: '#475569',
+          cursor: 'pointer', fontSize: 15, fontFamily: 'inherit', flexShrink: 0 }}>
+        ⚙
+      </button>
+    </>
+  );
+
+  // Faixa de abas (tabs + contextual + spacer + rightCluster). `withCluster` controla se o
+  // cluster QAT/⚙ vem embutido (fixed/compact) ou não (auto usa o flutuante).
+  const tabStrip = (withCluster) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', borderBottom: '1px solid #f1f5f9', background: '#fff' }}
+      onMouseEnter={mode === 'compact' ? openReveal : undefined}>
+      {RIBBON_TABS.map(t => {
+        const on = !isCtx && activeTab === t.id;
+        return (
+          <button key={t.id} onClick={() => onTab(t.id)} onDoubleClick={on ? onCycleMode : undefined}
+            title={on ? 'Duplo-clique alterna o colapso do Ribbon' : undefined}
+            style={{ padding: '5px 14px', borderRadius: 8, border: 'none',
+              background: on ? '#eff6ff' : 'transparent', color: on ? '#2563eb' : '#64748b',
+              fontWeight: on ? 700 : 500, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
+              whiteSpace: 'nowrap', transition: 'all .12s' }}>
+            {t.label}
           </button>
-        )}
-        <div style={{ flex: 1 }} />
-        {/* QAT — Desfazer / Refazer / Deletar (com seleção) / Salvar Projeto. Sempre a um clique. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2, paddingLeft: 8, borderLeft: '1px solid #f1f5f9' }}>
-          {qBtn('↩', 'Desfazer (Ctrl+Z)', qat.undo, qat.canUndo, false)}
-          {qBtn('↪', 'Refazer (Ctrl+Y)', qat.redo, qat.canRedo, false)}
-          {qBtn('🗑', 'Deletar (Del)', qat.onDelete, qat.canDelete, true)}
-          {qBtn('💾', 'Salvar Projeto', qat.onSave, true, false)}
-        </div>
-        {/* ⚙ Hub de Configurações — extremidade direita da faixa de abas (visível como a
-            QAT em todos os modos; UX 2.0 Sessão 3). Fora do conteúdo colapsável. */}
-        <button className="wbt" onClick={onOpenSettings} title="Configurações (Ctrl+,)"
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 28,
-            marginLeft: 6, borderRadius: 8, border: 'none', background: 'transparent', color: '#475569',
-            cursor: 'pointer', fontSize: 15, fontFamily: 'inherit', flexShrink: 0 }}>
-          ⚙
+        );
+      })}
+      {/* Aba contextual — surge destacada só com o tipo correspondente selecionado. */}
+      {contextTab && (
+        <button key={contextTab.id} onClick={onCtxTab} title={`Ferramentas de ${contextTab.label}`}
+          style={{ marginLeft: 6, padding: '5px 15px', borderRadius: 8,
+            border: `1px solid ${isCtx ? CTX_ACCENT : '#ddd6fe'}`,
+            borderTop: `3px solid ${CTX_ACCENT}`,
+            background: isCtx ? '#f5f3ff' : '#faf5ff', color: CTX_ACCENT,
+            fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
+            whiteSpace: 'nowrap', transition: 'all .12s', boxShadow: isCtx ? `0 1px 0 ${CTX_ACCENT}` : 'none' }}>
+          <span style={{ fontSize: 10, marginRight: 5, opacity: .8, textTransform: 'uppercase', letterSpacing: .3 }}>◆</span>
+          {contextTab.label}
         </button>
-      </div>
-      {/* Grupos de comandos da aba ativa (fundo levemente tingido quando contextual) */}
-      <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 58,
-        background: isCtx ? '#fbfaff' : '#fff' }}>
-        {groupOrder.length === 0 ? (
-          <div style={{ fontSize: 11.5, color: '#cbd5e1', padding: '10px 6px' }}>—</div>
-        ) : groupOrder.map((g, gi) => (
-          <div key={g} style={{ display: 'flex', flexDirection: 'column', padding: '0 10px',
-            borderRight: gi < groupOrder.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
-            <div style={{ display: 'flex', gap: 2, alignItems: 'center', flex: 1, flexWrap: 'wrap' }}>
-              {byGroup.get(g).map(c => <RibbonCmdButton key={c.id} cmd={c} />)}
-            </div>
-            <div style={{ fontSize: 9.5, color: isCtx ? '#8b5cf6' : '#94a3b8', textAlign: 'center', marginTop: 3,
-              textTransform: 'uppercase', letterSpacing: .4, fontWeight: 600 }}>{g}</div>
+      )}
+      <div style={{ flex: 1 }} />
+      {withCluster && rightCluster}
+    </div>
+  );
+
+  // Grupos de comandos da aba ativa (fundo levemente tingido quando contextual).
+  const groups = (
+    <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 58,
+      background: isCtx ? '#fbfaff' : '#fff' }}>
+      {groupOrder.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: '#cbd5e1', padding: '10px 6px' }}>—</div>
+      ) : groupOrder.map((g, gi) => (
+        <div key={g} style={{ display: 'flex', flexDirection: 'column', padding: '0 10px',
+          borderRight: gi < groupOrder.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
+          <div style={{ display: 'flex', gap: 2, alignItems: 'center', flex: 1, flexWrap: 'wrap' }}>
+            {byGroup.get(g).map(c => <RibbonCmdButton key={c.id} cmd={c} />)}
           </div>
-        ))}
+          <div style={{ fontSize: 9.5, color: isCtx ? '#8b5cf6' : '#94a3b8', textAlign: 'center', marginTop: 3,
+            textTransform: 'uppercase', letterSpacing: .4, fontWeight: 600 }}>{g}</div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const overlayShadow = '0 12px 28px rgba(15,23,42,.16)';
+
+  // ── Modo FIXED: Ribbon inteiro, ocupa altura no flex-column → canvas reflowa. ──
+  if (mode === 'fixed') {
+    return (
+      <div style={{ flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', zIndex: 250 }}>
+        {tabStrip(true)}
+        {groups}
       </div>
+    );
+  }
+
+  // ── Modo COMPACT: só a faixa de abas ocupa altura (reflowa); os grupos abrem como
+  //    OVERLAY absoluto ao passar o mouse / clicar numa aba — SEM reflow do canvas. ──
+  if (mode === 'compact') {
+    return (
+      <div style={{ position: 'relative', flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', zIndex: 450 }}
+        onMouseLeave={scheduleClose}>
+        {tabStrip(true)}
+        {reveal && (
+          <div onMouseEnter={openReveal}
+            style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 300,
+              background: isCtx ? '#fbfaff' : '#fff', borderBottom: '1px solid #e2e8f0',
+              boxShadow: overlayShadow }}>
+            {groups}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Modo AUTO: Ribbon oculto, só uma hotzone de ~6px no topo ocupa altura. Hover na
+  //    hotzone (ou no overlay) revela o Ribbon INTEIRO como OVERLAY absoluto — SEM reflow.
+  //    A QAT + ⚙ ficam num cluster flutuante sempre visível (recolhido durante a revelação,
+  //    pois o Ribbon revelado já mostra a faixa completa). ──
+  return (
+    // Wrapper de 6px `position:relative` — só ele ocupa altura no flex-column (constante →
+    // sem reflow ao revelar). Serve de âncora para os overlays absolutos (robusto contra o
+    // `overflow:hidden` da raiz do app).
+    <div style={{ position: 'relative', flexShrink: 0, height: 6, zIndex: 450 }}>
+      {/* Hotzone fina — passe o mouse para revelar o Ribbon inteiro. */}
+      <div onMouseEnter={openReveal}
+        title="Passe o mouse para revelar o Ribbon"
+        style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 6,
+          background: 'linear-gradient(#e2e8f0,#f1f5f9)', borderBottom: '1px solid #e2e8f0', cursor: 'default' }} />
+      {/* Cluster flutuante QAT + ciclo + ⚙ — mantém QAT/⚙ visíveis no modo auto sem reflow.
+          Recolhe enquanto o Ribbon está revelado (a faixa revelada já os contém). */}
+      {!reveal && (
+        <div style={{ position: 'absolute', top: 8, right: 14, zIndex: 320, display: 'flex', alignItems: 'center',
+          gap: 2, padding: '2px 4px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10,
+          boxShadow: '0 2px 10px rgba(15,23,42,.10)' }}>
+          {rightCluster}
+        </div>
+      )}
+      {/* Ribbon revelado — OVERLAY absoluto no topo (position:absolute → não empurra o SVG). */}
+      {reveal && (
+        <div onMouseEnter={openReveal} onMouseLeave={scheduleClose}
+          style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 320,
+            background: '#fff', borderBottom: '1px solid #e2e8f0', boxShadow: overlayShadow }}>
+          {tabStrip(true)}
+          {groups}
+        </div>
+      )}
     </div>
   );
 }
@@ -1852,6 +1955,16 @@ export default function App() {
   const [ribbonActiveTab, setRibbonActiveTab] = useState(() => {
     try { const s = sessionStorage.getItem('ribbon_active_tab_v1'); return s || 'inicio'; } catch { return 'inicio'; }
   });
+  // Ribbon (UX 2.0 — Sessão 4): colapso em 3 estados. 'fixed' (Ribbon inteiro, reflowa o
+  // canvas) | 'compact' (só a faixa de abas fixa reflowa; grupos abrem como OVERLAY sem
+  // reflow) | 'auto' (Ribbon oculto exceto hotzone de ~6px; hover revela o Ribbon inteiro
+  // como OVERLAY sem reflow). Persistido (sessionStorage + .credito.json, schema 2.9).
+  const [ribbonMode, setRibbonMode] = useState(() => {
+    try { const s = sessionStorage.getItem('ribbon_mode_v1'); return (s === 'compact' || s === 'auto') ? s : 'fixed'; } catch { return 'fixed'; }
+  });
+  const cycleRibbonMode = useCallback(() => {
+    setRibbonMode(m => (m === 'fixed' ? 'compact' : m === 'compact' ? 'auto' : 'fixed'));
+  }, []);
   // Ribbon (UX 2.0 — Sessão 2): a aba contextual está em foco? Efêmero — deriva da seleção
   // (auto-ativa ao selecionar, volta à aba fixa ao desselecionar). Não persiste.
   const [ctxTabShown, setCtxTabShown] = useState(false);
@@ -2554,6 +2667,7 @@ export default function App() {
   useEffect(() => { sessionStorage.setItem('aw_page_filters_v1', JSON.stringify(analyticsPageFilters)); }, [analyticsPageFilters]);
   // Ribbon (UX 2.0 — Sessão 1): persiste a aba ativa do Ribbon na sessionStorage.
   useEffect(() => { try { sessionStorage.setItem('ribbon_active_tab_v1', ribbonActiveTab); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonActiveTab]);
+  useEffect(() => { try { sessionStorage.setItem('ribbon_mode_v1', ribbonMode); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonMode]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
   // Debounced (500ms, mesmo padrão dos effects de simulação): setShapes é chamado por
@@ -3745,11 +3859,12 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.8",
+      schemaVersion: "2.9",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
       ribbonActiveTab,
+      ribbonMode,
       viewport: vp,
       panelCollapsed,
       canvases: mergedCanvases,
@@ -3866,6 +3981,8 @@ export default function App() {
     if (data.activeTab) setActiveTab(data.activeTab);
     // Ribbon (UX 2.0 — Sessão 1): default defensivo p/ projetos antigos (schema < 2.8).
     setRibbonActiveTab(typeof data.ribbonActiveTab === 'string' ? data.ribbonActiveTab : 'inicio');
+    // Ribbon colapso (UX 2.0 — Sessão 4): default defensivo p/ projetos antigos (schema < 2.9).
+    setRibbonMode((data.ribbonMode === 'compact' || data.ribbonMode === 'auto') ? data.ribbonMode : 'fixed');
     if (typeof data.panelCollapsed === 'boolean') setPanelCollapsed(data.panelCollapsed);
     const pref = data.preferences || {};
     if (typeof pref.enableDynThickness === 'boolean') setEnableDynThickness(pref.enableDynThickness);
@@ -7326,6 +7443,8 @@ export default function App() {
           contextCommands={contextCommands}
           onCtxTab={() => setCtxTabShown(true)}
           onOpenSettings={() => openSettings()}
+          mode={ribbonMode}
+          onCycleMode={cycleRibbonMode}
           qat={{
             undo, redo, canUndo: undoStack.length > 0, canRedo: redoStack.length > 0,
             onDelete: deleteSelected, canDelete: (!!sel || multiSel.size > 0), onSave: saveProject,
@@ -8198,17 +8317,48 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* ── 🗔 Interface (colapso do painel direito, por ora) ── */}
+                  {/* ── 🗔 Interface (colapso do Ribbon + colapso do painel direito) ── */}
                   {section==='interface' && (
-                    <div style={{display:"flex",flexDirection:"column",gap:8,maxWidth:460}}>
-                      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
-                        <input type="checkbox" checked={panelCollapsed} onChange={()=>setPanelCollapsed(v=>!v)}
-                          style={{width:15,height:15,accentColor:"#3b82f6"}}/>
-                        Ocultar painel direito
-                      </label>
-                      <div style={{fontSize:10.5,color:"#94a3b8",marginLeft:23,lineHeight:1.5}}>
-                        Recolhe o painel lateral para ganhar espaço de canvas. (Colapso do Ribbon e
-                        indicadores da Status Bar chegam nas próximas sessões da evolução de UX.)
+                    <div style={{display:"flex",flexDirection:"column",gap:14,maxWidth:480}}>
+                      {/* Colapso do Ribbon em 3 estados (UX 2.0 — Sessão 4) */}
+                      <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                        <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,margin:0}}>Colapso do Ribbon</p>
+                        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                          {[
+                            {id:'fixed',   icon:'▭', label:'Fixo',       desc:'Sempre visível — empurra o canvas'},
+                            {id:'compact', icon:'▬', label:'Compacto',   desc:'Só as abas fixas; grupos abrem ao passar o mouse'},
+                            {id:'auto',    icon:'▔', label:'Automático',  desc:'Oculto; revela ao encostar o mouse no topo'},
+                          ].map(o=>{
+                            const on = ribbonMode===o.id;
+                            return (
+                              <button key={o.id} onClick={()=>setRibbonMode(o.id)}
+                                style={{flex:"1 1 130px",minWidth:130,textAlign:"left",padding:"10px 12px",borderRadius:10,cursor:"pointer",fontFamily:"inherit",
+                                  border:on?"1.5px solid #2563eb":"1.5px solid #e2e8f0",background:on?"#eff6ff":"#fff",transition:"all .12s"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:7,fontSize:12.5,fontWeight:700,color:on?"#2563eb":"#334155"}}>
+                                  <span style={{fontSize:14,lineHeight:1}}>{o.icon}</span>{o.label}
+                                </div>
+                                <div style={{fontSize:10,color:"#94a3b8",marginTop:4,lineHeight:1.45}}>{o.desc}</div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5}}>
+                          Também alternável pelo botão de ciclo na faixa de abas do Ribbon ou por duplo-clique
+                          na aba ativa. A QAT (desfazer/refazer/deletar/salvar) e o ⚙ ficam sempre acessíveis.
+                        </div>
+                      </div>
+                      {/* Painel direito */}
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,margin:0}}>Painel direito</p>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                          <input type="checkbox" checked={panelCollapsed} onChange={()=>setPanelCollapsed(v=>!v)}
+                            style={{width:15,height:15,accentColor:"#3b82f6"}}/>
+                          Ocultar painel direito
+                        </label>
+                        <div style={{fontSize:10.5,color:"#94a3b8",marginLeft:23,lineHeight:1.5}}>
+                          Recolhe o painel lateral para ganhar espaço de canvas. (Indicadores da Status Bar
+                          chegam na próxima sessão da evolução de UX.)
+                        </div>
                       </div>
                     </div>
                   )}
@@ -8218,7 +8368,7 @@ export default function App() {
                     <div style={{display:"flex",flexDirection:"column",gap:16,maxWidth:480}}>
                       <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
                         <BuildBadge />
-                        <span style={{fontSize:11.5,color:"#64748b"}}>Versão do schema de Projeto: <b style={{color:"#334155"}}>2.8</b></span>
+                        <span style={{fontSize:11.5,color:"#64748b"}}>Versão do schema de Projeto: <b style={{color:"#334155"}}>2.9</b></span>
                       </div>
                       <div>
                         <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Atalhos de teclado</p>

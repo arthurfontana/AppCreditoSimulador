@@ -11,10 +11,12 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"2.6", kind:"credito-project", generatedAt,
-  activeTab, viewport, panelCollapsed, canvases, activeCanvasId, csvStore,
+  Monta o snapshot `{schemaVersion:"2.9", kind:"credito-project", generatedAt,
+  activeTab, ribbonActiveTab, ribbonMode, viewport, panelCollapsed, canvases,
+  activeCanvasId, csvStore,
   analyticsLayout, analyticsGroupings, analyticsPageFilters,
   cinemaLibrary, policyLibrary, businessWidget, preferences}`.
+  (`ribbonActiveTab` desde 2.8; `ribbonMode` — colapso do Ribbon em 3 estados — desde 2.9.)
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
   (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
