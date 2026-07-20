@@ -11,13 +11,14 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"3.0", kind:"credito-project", generatedAt,
-  activeTab, ribbonActiveTab, ribbonMode, statusBarIndicators, viewport, panelCollapsed,
+  Monta o snapshot `{schemaVersion:"3.1", kind:"credito-project", generatedAt,
+  activeTab, ribbonActiveTab, ribbonMode, statusBarIndicators, rightPanelMode, viewport, panelCollapsed,
   canvases, activeCanvasId, csvStore,
   analyticsLayout, analyticsGroupings, analyticsPageFilters,
   cinemaLibrary, policyLibrary, businessWidget, preferences}`.
   (`ribbonActiveTab` desde 2.8; `ribbonMode` — colapso do Ribbon em 3 estados — desde 2.9;
-  `statusBarIndicators` — quais indicadores aparecem na Status Bar, UX 2.0 Sessão 5 — desde 3.0.)
+  `statusBarIndicators` — quais indicadores aparecem na Status Bar, UX 2.0 Sessão 5 — desde 3.0;
+  `rightPanelMode` — aba interna do painel direito Ativos/Inspetor/Copiloto, UX 2.0 Sessão 6 — desde 3.1.)
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
   (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
@@ -96,6 +97,9 @@ Além do save/load explícito, parte do estado é persistida automaticamente em
 - **`status_bar_indicators_v1`**: `statusBarIndicators` (indicadores da Status Bar, UX 2.0
   Sessão 5) — array de ids filtrado contra `STATUS_BAR_INDICATORS_META` na carga (id
   desconhecido de uma versão futura nunca quebra a barra).
+- **`right_panel_mode_v1`**: `rightPanelMode` (aba interna do painel direito —
+  `'assets'`|`'inspector'`|`'copilot'`, UX 2.0 Sessão 6) — valor desconhecido cai no
+  default defensivo `'assets'`.
 
 `csvStore` e `cinemaLibrary` **não** vão para `sessionStorage`
 (muito grandes / precisam do Projeto `.credito.json`). Init/gravação são
@@ -103,8 +107,31 @@ defensivos (`try/catch`), então quota estourada ou JSON inválido nunca quebram
 
 ## Painel direito colapsável (`panelCollapsed`)
 
-O painel lateral direito (chips de variáveis, Projeto, Dados, indicadores) pode ser
-colapsado para uma faixa fina de 28px, liberando espaço de canvas. Estado
-`panelCollapsed` (boolean, default `false`); largura anima entre `272px` e `28px`.
-Quando colapsado, o conteúdo é escondido (`display:none`) e só a faixa com o botão de
-reabrir fica visível.
+O painel lateral direito pode ser colapsado para uma faixa fina de 28px, liberando espaço
+de canvas. Estado `panelCollapsed` (boolean, default `false`); largura anima entre `272px`
+e `28px`. Quando colapsado, o conteúdo é escondido (`display:none`) e só a faixa com o
+botão de reabrir fica visível.
+
+Desde a UX 2.0 Sessão 6, o corpo do painel tem **3 abas internas** (`rightPanelMode`,
+persistido — ver acima), abaixo do header e do mesmo botão de colapsar:
+
+- **Ativos** (`'assets'`, default): bases carregadas (lista + ✏️/✕), Variáveis de Decisão
+  (busca + chips arrastáveis via `startPanelDrag` + ✏️ de cluster/faixas) e atalhos às
+  bibliotecas de Cineminha/Políticas. "Recursos do estudo."
+- **Inspetor** (`'inspector'`): **propriedades** do objeto selecionado (não comandos —
+  comandos vivem na Ribbon), via `renderInspector()`. Por tipo: losango (rótulo editável,
+  variável, resumo do domínio, chegadas via `nodeArrivals`/`totalNodeArrival`), Cineminha
+  (tipo, rowVar/colVar, grade, resultado, trava, chegadas), Decision Lens (regras,
+  população via `computeLensPopulation`), terminal (tipo + volume somado do `edgeStats` das
+  arestas de entrada), frame (rótulo, dimensões). Rótulo editável reusa `setShapes`+
+  `pushHistory` (mesmo caminho do `commitEdit` do duplo-clique); o resto é read-only. Sem
+  seleção → propriedades do estudo (aba ativa, nº de objetos, bases vinculadas) + dica;
+  multi-seleção → sumário + dica apontando à aba Seleção do Ribbon.
+- **🧭 Copiloto** (`'copilot'`): o lint estrutural (achados por severidade, "ir até o nó",
+  quick-fixes) + o card informativo da Descoberta de Segmentos. Um **badge** com o nº de
+  achados (`copilotFindings.length`) aparece no título da aba. O comando "🧭 Copiloto" da
+  aba Analisar do Ribbon foca esta aba (`setRightPanelMode('copilot')`).
+
+Os avisos de Projeto/Fluxo (`projectSaveNotice`/`projectLoadNotice`/`importWarn`) e os
+inputs de arquivo ocultos ficam **fora** das abas (sempre montados/visíveis no topo do
+corpo).
