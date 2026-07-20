@@ -10,6 +10,10 @@ import { applyGoalSeekMoves } from './goalSeek.js';
 import { applySimplifyCandidates } from './policySimplify.js';
 import { describeClusterRules } from './clusterVar.js';
 import { formatBandLabel, describeRangeRules } from './rangeVar.js';
+// Heurística de variável (temporal/score por nome) + parse temporal — módulo folha
+// compartilhado com App.jsx (Explorar a Base, DEC-EB-008/009). Antes só existiam em
+// App.jsx, invisíveis ao worker; agora o perfil da base os reusa direto.
+import { segVarDefaultReason, parseTemporalKey } from './segVar.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -3335,17 +3339,25 @@ function candidateKeyOf(coder, csv, r) {
   return coder.mode === 'code' ? coder.codes[r] : (cellStr(csv, r, coder.colIdx) ?? '').toString().trim();
 }
 
-function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
+// DEC-EB-008 — âncora nula ⇒ ranking GLOBAL: população = base inteira do csv alvo
+// (`options.csvId`, ou o winner por população se ausente), `usedCols` vazio, MESMO shape
+// de resultado. É o segundo consumidor do mesmo motor: a porta (âncora não-nula) continua
+// byte-idêntica (caminho ancorado inalterado). `options.metric` ('real'|'inferida') força
+// a métrica-alvo (o perfil da base a resolve por `resolveRiskMetric`); ausente ⇒ auto-seleção
+// legada (real quando há altas, senão inferida) — os callers ancorados nunca a passam.
+function computeVariableRanking(shapes, conns, csvStore, anchorNodeId = null, options = {}) {
+  options = options || {};   // callers antigos passam `null` como 5º arg posicional (era ignorado)
   const shapesMap = Object.fromEntries(shapes.map(s => [s.id, s]));
-  const anchor = shapesMap[anchorNodeId];
-  if (!anchor) return { nodeId: anchorNodeId, error: 'anchor_not_found' };
+  const globalMode = anchorNodeId == null;
+  if (!globalMode && !shapesMap[anchorNodeId]) return { nodeId: anchorNodeId, error: 'anchor_not_found' };
 
   const { out, inc } = buildFlowGraph(shapes, conns);
 
   // Variáveis já testadas em algum ancestral do anchor (losango/eixo de Cineminha) —
   // excluídas dos candidatos (mesmo espírito da regra 6 do lint, duplicate_variable_path).
+  // No modo global não há âncora ⇒ nenhuma variável está "acima": usedCols fica vazio.
   const usedCols = new Set();
-  {
+  if (!globalMode) {
     const seen = new Set([anchorNodeId]);
     const stack = (inc[anchorNodeId] || []).map(e => e.from);
     while (stack.length) {
@@ -3441,6 +3453,9 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
   const perCsv = {};
 
   for (const [csvId, csv] of Object.entries(csvStore)) {
+    // Modo global com csv alvo declarado ⇒ só o csv pedido concorre a winner (perfil por
+    // base, DEC-EB-007). Sem alvo, todos concorrem (winner por população, como no ancorado).
+    if (globalMode && options.csvId && csvId !== options.csvId) continue;
     const types = csv.columnTypes || {};
     const getColIdx = (type) => {
       const col = Object.entries(types).find(([, t]) => t === type)?.[0];
@@ -3456,7 +3471,7 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
       .map(([col]) => col);
     const candidateCoders = candidateCols.map(col => candidateCoder(csv, csv.headers.indexOf(col)));
 
-    const csvRoots = rootNodes.filter(d => {
+    const csvRoots = globalMode ? [] : rootNodes.filter(d => {
       if (d.type === 'decision')      return d.csvId === csvId;
       if (d.type === 'cineminha')     return d.rowVar?.csvId === csvId || d.colVar?.csvId === csvId;
       if (d.type === 'decision_lens') return true;
@@ -3483,13 +3498,16 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
       baseReal.altas += nums.altas; baseReal.maus += nums.maus;
       baseInfer.altasInfer += nums.altasInfer; baseInfer.inadIRaw += nums.inadIRaw;
 
-      if (!compiled) continue; // csv sem raiz alcançando este anchor
-      let hit = false;
-      for (const root of csvRoots) {
-        epoch++;
-        if (reachesAnchor(csv, r, root.id, compiled, lastVisit, epoch)) { hit = true; break; }
+      if (!globalMode) {
+        if (!compiled) continue; // csv sem raiz alcançando este anchor
+        let hit = false;
+        for (const root of csvRoots) {
+          epoch++;
+          if (reachesAnchor(csv, r, root.id, compiled, lastVisit, epoch)) { hit = true; break; }
+        }
+        if (!hit) continue;
       }
-      if (!hit) continue;
+      // Modo global: toda linha da base entra no segmento (seg == base inteira).
 
       hitRows.push(r);
       segReal.qty += nums.qty; segReal.altas += nums.altas; segReal.maus += nums.maus;
@@ -3517,7 +3535,12 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
     return { nodeId: anchorNodeId, error: 'no_population' };
   }
 
-  const metric = winner.segReal.altas > 0 ? 'real' : (winner.segInfer.altasInfer > 0 ? 'inferida' : null);
+  // `options.metric` (perfil da base — métrica-alvo do seletor) força real/inferida; sem
+  // ele, auto-seleção legada. Métrica forçada sem volume de conversão ⇒ IV null (degradação
+  // declarada), nunca cai silenciosamente na outra métrica.
+  const metric = (options.metric === 'real' || options.metric === 'inferida')
+    ? options.metric
+    : (winner.segReal.altas > 0 ? 'real' : (winner.segInfer.altasInfer > 0 ? 'inferida' : null));
 
   const ranking = winner.candidateCols.map((col, ci) => {
     const coder = winner.candidateCoders[ci];
@@ -3632,6 +3655,304 @@ function computeVariableRanking(shapes, conns, csvStore, anchorNodeId) {
     ranking,
     interactions,
   };
+}
+
+// ── COMPUTE_BASE_PROFILE — Explorar a Base (Épico EB, Sessão EB1) ─────────────────
+// docs/wiki/Epicos-ExplorarBase.md (DEC-EB-001..012). Motor do PERFIL DA BASE: a análise
+// exploratória que um analista sênior faria ANTES de desenhar o primeiro galho. É
+// derivado só da base (csvStore) — independe de shapes/conns (funciona com canvas vazio,
+// DEC-EB-001) — e Classe A absoluta: agregação O(distintos) sobre os dicionários colunares,
+// JAMAIS roteia ao sidecar (DEC-HX-007), fora do cache do tick (é análise, não simulação).
+//
+// Devolve o `BaseProfileModel` no padrão docModel/SegmentModel — DADOS CRUS + CÓDIGOS DE
+// ACHADO, nunca prosa (DEC-EB-003): a camada interpretativa (exploreInsights.js) é da EB3.
+// Todo número vem de agregação EXATA (nunca amostrado/estimado); mesma entrada ⇒ mesmo
+// model (determinístico, à parte de `generatedAt`, carimbado como os modelos irmãos).
+//
+// Reusa o MESMO motor de ranking (DEC-EB-008): `computeVariableRanking` com âncora nula ⇒
+// população = base inteira do csv alvo, `usedCols` vazio. Daí saem o IV e o profile por
+// valor de cada variável; a passada dedicada aqui acrescenta o que o ranking não dá:
+// cobertura/dominância/cardinalidade (qualidade), retrato AS IS (__DECISAO_ORIGINAL),
+// série temporal por safra e o PSI entre metades cronológicas (DEC-EB-009).
+const BASE_PROFILE_VERSION = '1.0';
+const BASE_IV_STRONG = 0.3;              // IV ≥ isto ⇒ variável promissora (high_iv / "forte")
+const BASE_LOW_COVERAGE_PCT = 85;        // cobertura de volume < isto ⇒ vazios demais p/ topo da árvore
+const BASE_DOMINANT_SHARE_PCT = 80;      // 1 categoria com share ≥ isto ⇒ pouco poder de corte
+const BASE_HIGH_CARDINALITY = 30;        // distintos ≥ isto ⇒ candidata a Agrupamento/Faixas (= RANGE_MIN_DISTINCT)
+const BASE_IMMATURE_RATIO = 0.5;         // inad da última safra < isto × média ⇒ maturação incompleta
+const BASE_PSI_ATTENTION = 0.1;          // limiares PSI declarados (DEC-EB-009)
+const BASE_PSI_UNSTABLE = 0.25;
+const BASE_PSI_EPS = 1e-6;               // suavização ε antes do log (declarada)
+const BASE_PROFILE_MAX_POINTS = 50;      // teto declarado de pontos do profile por variável
+
+// Severidade visual por código de achado (consumida pela UI/EB3 — aqui só o token).
+const BASE_INSIGHT_SEVERITY = {
+  high_iv: 'good', suspect_score: 'warn', suspect_temporal: 'warn', low_coverage: 'warn',
+  dominant_value: 'info', high_cardinality: 'info', immature_vintage: 'danger',
+  unstable_psi: 'warn', no_temporal_column: 'info', no_asis: 'info',
+};
+
+// Ordena rótulos de safra cronologicamente por parseTemporalKey (chaves não-parseáveis vão
+// para o fim, desempate lexicográfico determinístico segStrCmp — mesmo contrato cross-runtime).
+function baseSortTemporalBuckets(buckets) {
+  return [...buckets].sort((a, b) => {
+    const ka = parseTemporalKey(a), kb = parseTemporalKey(b);
+    if (ka != null && kb != null) return ka !== kb ? ka - kb : segStrCmp(a, b);
+    if (ka != null) return -1;
+    if (kb != null) return 1;
+    return segStrCmp(a, b);
+  });
+}
+
+// PSI = Σ (pᵢ − qᵢ)·ln(pᵢ/qᵢ) sobre os valores da variável (DEC-EB-009). q = distribuição
+// na janela de referência (1ª metade cronológica), p = janela atual (2ª metade); ε em
+// ambas antes do log. `entries` = [{ref, cur}] em VOLUME por valor.
+function basePSI(entries) {
+  let refTot = 0, curTot = 0;
+  for (const e of entries) { refTot += e.ref; curTot += e.cur; }
+  if (refTot <= 0 || curTot <= 0) return null;
+  let psi = 0;
+  for (const e of entries) {
+    const q = e.ref / refTot + BASE_PSI_EPS;
+    const p = e.cur / curTot + BASE_PSI_EPS;
+    psi += (p - q) * Math.log(p / q);
+  }
+  return psi;
+}
+
+function computeBaseProfile(csvStore, params = {}) {
+  const spec = resolveRiskMetric(params.riskMetric);
+  const metricMode = spec.numColType === 'inadInferida' ? 'inferida' : 'real';
+
+  // csv alvo: `params.csvId` (perfil por base, DEC-EB-007), ou o de maior população.
+  let csvId = params.csvId;
+  if (!csvId || !csvStore[csvId]) {
+    let best = null;
+    for (const [id, csv] of Object.entries(csvStore)) {
+      const qtyIdx = segColIdxs(csv).qty, n = rowCount(csv);
+      let qty = 0;
+      for (let r = 0; r < n; r++) qty += qtyIdx >= 0 ? (cellNum(csv, r, qtyIdx) || 0) : 1;
+      if (!best || qty > best.qty) best = { id, qty };
+    }
+    csvId = best?.id;
+  }
+  const csv = csvId ? csvStore[csvId] : null;
+
+  const model = {
+    version: BASE_PROFILE_VERSION,
+    generatedAt: new Date().toISOString(),
+    csvId: csvId || null,
+    metric: { id: spec.id, label: spec.label, direction: spec.direction },
+    asIs: null,
+    variables: [],
+    temporal: null,
+    quality: [],
+    insights: [],
+  };
+  if (!csv) { model.error = 'no_base'; return model; }
+
+  const types = csv.columnTypes || {};
+  const varTypes = csv.varTypes || {};
+  const idxs = segColIdxs(csv);
+  const nRows = rowCount(csv);
+
+  // Ranking global (DEC-EB-008): mesmo motor da porta, âncora nula, base inteira do csv
+  // alvo. Canvas irrelevante para o perfil ⇒ shapes/conns vazios (usedCols já é vazio no
+  // modo global). Daí saem IV + profile por valor de cada variável.
+  const rank = computeVariableRanking([], [], csvStore, null, { csvId, metric: metricMode });
+  const rankByCol = new Map((rank.ranking || []).map(e => [e.col, e]));
+  const orderedCols = (rank.ranking || []).map(e => e.col);
+
+  const candidateCols = Object.entries(types).filter(([, t]) => t === 'decision').map(([c]) => c);
+  const coderByCol = new Map(candidateCols.map(c => [c, candidateCoder(csv, csv.headers.indexOf(c))]));
+
+  // Coluna temporal (DEC-AW-005) ⇒ metades cronológicas p/ PSI + série por safra.
+  const temporalCol = Object.entries(types).find(([, t]) => t === 'temporal')?.[0] || null;
+  let tCoder = null, tIdx = -1, bucketHalf = null, refWindow = null, curWindow = null;
+  if (temporalCol) {
+    tIdx = csv.headers.indexOf(temporalCol);
+    tCoder = candidateCoder(csv, tIdx);
+    // Valores distintos de safra (não-vazios) → metades cronológicas.
+    let bucketVals;
+    if (tCoder.mode === 'code') bucketVals = tCoder.dict.filter(v => v !== '' && v != null);
+    else {
+      const set = new Set();
+      for (let r = 0; r < nRows; r++) { const v = (cellStr(csv, r, tIdx) ?? '').toString().trim(); if (v) set.add(v); }
+      bucketVals = [...set];
+    }
+    const sorted = baseSortTemporalBuckets(bucketVals);
+    if (sorted.length >= 2) {
+      const half = Math.ceil(sorted.length / 2);
+      bucketHalf = new Map();
+      sorted.slice(0, half).forEach(b => bucketHalf.set(b, 'ref'));
+      sorted.slice(half).forEach(b => bucketHalf.set(b, 'cur'));
+      refWindow = { from: sorted[0], to: sorted[half - 1], buckets: half };
+      curWindow = { from: sorted[half], to: sorted[sorted.length - 1], buckets: sorted.length - half };
+    }
+  }
+
+  // ── Passada única sobre a base ─────────────────────────────────────────────────
+  // AS IS (retrato da operação): decisão original por linha (__DECISAO_ORIGINAL).
+  const decCoder = cluDecisionCoder(csv);
+  const asIs = decCoder
+    ? { totalQty: 0, approvedQty: 0, rejectedQty: 0, otherQty: 0,
+        aprRealNum: 0, aprRealDen: 0, aprInfNum: 0, aprInfDen: 0 }
+    : null;
+  // Por variável: value(code|string) → {qty, ref, cur} (volume total + por metade temporal).
+  const colVal = new Map(candidateCols.map(c => [c, new Map()]));
+  // Série temporal por safra: bucket → agregado métrico + decisão AS IS.
+  const tSeries = temporalCol ? new Map() : null;
+  let totalVol = 0;
+
+  for (let r = 0; r < nRows; r++) {
+    const s = segReadSums(csv, r, idxs);
+    totalVol += s.qty;
+
+    if (asIs) {
+      asIs.totalQty += s.qty;
+      const dec = cluDecisionOf(decCoder, csv, r);
+      if (dec === 1) {
+        asIs.approvedQty += s.qty;
+        asIs.aprRealNum += s.inadReal; asIs.aprRealDen += s.qtdAltas;
+        asIs.aprInfNum += s.inadInferida; asIs.aprInfDen += s.qtdAltasInfer;
+      } else if (dec === 2) asIs.rejectedQty += s.qty;
+      else asIs.otherQty += s.qty;
+    }
+
+    let bucket = null, half = null;
+    if (temporalCol) {
+      bucket = tCoder.mode === 'code' ? tCoder.dict[tCoder.codes[r]] : (cellStr(csv, r, tIdx) ?? '').toString().trim();
+      half = bucketHalf ? bucketHalf.get(bucket) : null;
+      let ag = tSeries.get(bucket);
+      if (!ag) { ag = { qty: 0, approvedQty: 0, num: 0, den: 0 }; tSeries.set(bucket, ag); }
+      ag.qty += s.qty;
+      ag.num += metricMode === 'inferida' ? s.inadInferida : s.inadReal;
+      ag.den += metricMode === 'inferida' ? s.qtdAltasInfer : s.qtdAltas;
+      if (decCoder && cluDecisionOf(decCoder, csv, r) === 1) ag.approvedQty += s.qty;
+    }
+
+    for (const c of candidateCols) {
+      const coder = coderByCol.get(c);
+      const key = candidateKeyOf(coder, csv, r);
+      const m = colVal.get(c);
+      let e = m.get(key);
+      if (!e) { e = { qty: 0, ref: 0, cur: 0 }; m.set(key, e); }
+      e.qty += s.qty;
+      if (half === 'ref') e.ref += s.qty; else if (half === 'cur') e.cur += s.qty;
+    }
+  }
+
+  // ── Retrato AS IS ──────────────────────────────────────────────────────────────
+  if (asIs) {
+    const decided = asIs.approvedQty + asIs.rejectedQty;
+    model.asIs = {
+      totalQty: asIs.totalQty, approvedQty: asIs.approvedQty, rejectedQty: asIs.rejectedQty,
+      otherQty: asIs.otherQty,
+      approvalRate: decided > 0 ? asIs.approvedQty / decided : null,
+      inadRealAprovados: asIs.aprRealDen > 0 ? asIs.aprRealNum / asIs.aprRealDen : null,
+      inadInferidaAprovados: asIs.aprInfDen > 0 ? asIs.aprInfNum / asIs.aprInfDen : null,
+    };
+  } else {
+    model.insights.push({ code: 'no_asis', severity: BASE_INSIGHT_SEVERITY.no_asis, facts: {} });
+  }
+
+  // ── Variáveis (ordem do ranking — DEC-EB-006) ──────────────────────────────────
+  for (const col of orderedCols) {
+    const rEntry = rankByCol.get(col);
+    const coder = coderByCol.get(col);
+    const valMap = colVal.get(col);
+
+    // Resolve os valores (code→dict) e separa vazios.
+    const valEntries = [...valMap.entries()].map(([key, e]) => ({
+      value: coder.mode === 'code' ? coder.dict[key] : key, qty: e.qty, ref: e.ref, cur: e.cur,
+    }));
+    const nonEmpty = valEntries.filter(v => v.value !== '' && v.value != null);
+    const nonEmptyVol = nonEmpty.reduce((a, v) => a + v.qty, 0);
+    const distinct = nonEmpty.filter(v => v.qty > 0).length;
+    const coveragePct = totalVol > 0 ? (nonEmptyVol / totalVol) * 100 : 0;
+    const parseFailVol = nonEmpty.reduce((a, v) => a + (Number.isFinite(parseFloat(v.value)) ? 0 : v.qty), 0);
+    const unparseablePct = nonEmptyVol > 0 ? (parseFailVol / nonEmptyVol) * 100 : null;
+    let dom = null;
+    for (const v of nonEmpty) if (!dom || v.qty > dom.qty) dom = v;
+    const dominantValue = dom && totalVol > 0 ? { value: dom.value, sharePct: (dom.qty / totalVol) * 100 } : null;
+
+    const psiVal = bucketHalf ? basePSI(valEntries) : null;
+    const psi = psiVal == null ? null : { value: psiVal, refWindow, curWindow };
+
+    // Profile por valor (do ranking): volume + taxa; teto declarado de pontos. `share` é
+    // sobre o volume TOTAL do profile (inclui a categoria vazia, quando houver) — soma 1.
+    const bins = rEntry ? rEntry.bins : [];
+    const profileTotal = bins.reduce((a, b) => a + b.qty, 0);
+    let profile = bins.map(b => ({ value: b.value, qty: b.qty, share: profileTotal > 0 ? b.qty / profileTotal : 0, rate: b.rate }));
+    let profileTruncated = false;
+    if (profile.length > BASE_PROFILE_MAX_POINTS) {
+      profile = [...profile].sort((a, b) => b.qty - a.qty).slice(0, BASE_PROFILE_MAX_POINTS)
+        .sort((a, b) => segStrCmp(String(a.value), String(b.value)));
+      profileTruncated = true;
+    }
+
+    const iv = rEntry ? rEntry.iv : null;
+    const continuous = isContinuousColumn(csv, col);
+    const reason = segVarDefaultReason(col);
+
+    const flags = [];
+    if (reason === 'temporal') flags.push('suspect_temporal');
+    if (reason === 'score') flags.push('suspect_score');
+    if (coveragePct < BASE_LOW_COVERAGE_PCT) flags.push('low_coverage');
+    if (dominantValue && dominantValue.sharePct >= BASE_DOMINANT_SHARE_PCT) flags.push('dominant_value');
+    if (distinct >= BASE_HIGH_CARDINALITY) flags.push('high_cardinality');
+    if (psi && psi.value > BASE_PSI_UNSTABLE) flags.push('unstable_psi');
+    if (iv != null && iv >= BASE_IV_STRONG) flags.push('high_iv');
+
+    model.variables.push({
+      col, varType: varTypes[col] === 'ordinal' ? 'ordinal' : 'categorical',
+      distinct, coveragePct, iv, flags, profile, profileTruncated, psi, continuous,
+    });
+    model.quality.push({ col, coveragePct, unparseablePct, dominantValue });
+
+    // Achados por variável → insights (código + fatos crus, nunca prosa).
+    const push = (code, facts) => model.insights.push({ code, severity: BASE_INSIGHT_SEVERITY[code], facts: { col, ...facts } });
+    if (iv != null && iv >= BASE_IV_STRONG) push('high_iv', { iv });
+    if (reason === 'temporal') push('suspect_temporal', {});
+    if (reason === 'score') push('suspect_score', { iv });
+    if (coveragePct < BASE_LOW_COVERAGE_PCT) push('low_coverage', { coveragePct });
+    if (dominantValue && dominantValue.sharePct >= BASE_DOMINANT_SHARE_PCT) push('dominant_value', { value: dominantValue.value, sharePct: dominantValue.sharePct });
+    if (distinct >= BASE_HIGH_CARDINALITY) push('high_cardinality', { distinct, continuous });
+    if (psi && psi.value > BASE_PSI_UNSTABLE) push('unstable_psi', { psi: psi.value, refWindow, curWindow });
+  }
+
+  // ── Estabilidade temporal da base ──────────────────────────────────────────────
+  if (temporalCol) {
+    const buckets = baseSortTemporalBuckets([...tSeries.keys()].filter(b => b !== '' && b != null));
+    const series = buckets.map(b => {
+      const ag = tSeries.get(b);
+      const decidedApr = ag.approvedQty; // aprovações AS IS por safra (retrato da maturação)
+      return {
+        bucket: b, qty: ag.qty,
+        approvalRate: ag.qty > 0 ? decidedApr / ag.qty : null,
+        inadRate: ag.den > 0 ? ag.num / ag.den : null,
+      };
+    });
+    model.temporal = { col: temporalCol, series };
+
+    // immature_vintage: inad da última safra muito abaixo da média da base (maturação
+    // incompleta — armadilha nº 1 do júnior). Métrica-alvo resolvida.
+    let baseNum = 0, baseDen = 0;
+    for (const ag of tSeries.values()) { baseNum += ag.num; baseDen += ag.den; }
+    const overallRate = baseDen > 0 ? baseNum / baseDen : null;
+    const last = series.length ? series[series.length - 1] : null;
+    if (last && last.qty > 0 && last.inadRate != null && overallRate != null && overallRate > 0
+        && last.inadRate < BASE_IMMATURE_RATIO * overallRate) {
+      model.insights.push({
+        code: 'immature_vintage', severity: BASE_INSIGHT_SEVERITY.immature_vintage,
+        facts: { col: temporalCol, lastBucket: last.bucket, lastRate: last.inadRate, overallRate, ratio: last.inadRate / overallRate },
+      });
+    }
+  } else {
+    model.insights.push({ code: 'no_temporal_column', severity: BASE_INSIGHT_SEVERITY.no_temporal_column, facts: {} });
+  }
+
+  return model;
 }
 
 // ── COMPUTE_SEGMENT_DISCOVERY — Copiloto Sessão 10 (Descoberta de Segmentos) ─────
@@ -7172,6 +7493,16 @@ function handleMessage(e) {
     return;
   }
 
+  // Perfil da base (Explorar a Base — Épico EB, EB1). Recomputo on-demand quando a base ou
+  // a métrica-alvo mudam (debounced na main, DEC-EB-002) — NÃO entra no cache do tick de
+  // edição (é análise da base, canvas-independente). Classe A: só agregação local.
+  if (type === 'COMPUTE_BASE_PROFILE') {
+    const { params = {} } = e.data;
+    const profile = computeBaseProfile(workerCsvStore, params);
+    self.postMessage({ type: 'BASE_PROFILE_RESULT', profile });
+    return;
+  }
+
   // Documentação Automática (Copiloto Sessão 6) — geração on-demand ao abrir o modal de
   // composição; não entra no cache do tick (não é um gesto de edição recorrente). `ir`
   // chega pronto no payload (buildPolicyIR só existe em App.jsx); `canvases` são as abas
@@ -7356,6 +7687,7 @@ export {
   computeLensPopulations,
   computePolicyInsights,
   computeVariableRanking,
+  computeBaseProfile,
   computeJohnnyData,
   buildFlowGraph,
   computeGoalSeek,

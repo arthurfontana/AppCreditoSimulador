@@ -156,6 +156,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 | `tests/clusterVar.test.js` | Variável de Cluster — materialização, sugestões, redação de regras, edição, propagação de refs, round-trip |
 | `tests/riskBands.test.js` | Criar Faixas por Risco (`computeRiskBands`, Épico FR) — cortes plantados via DP exata ≡ IV ótimo, monotonia default/toggle livre, `minShare`, banda "Sem valor", auto-k, escopo por nó, determinismo |
 | `tests/rangeVar.test.js` | Variável de Faixas — materialização (`deriveRangeColumn`, fronteiras `[min,max)`/±∞/unmatched/ordinal), rótulos pt-BR, edição de cortes, round-trip de persistência, integração `computeRiskBands` real → def → coluna |
+| `tests/baseProfile.test.js` | Perfil da Base (Explorar a Base, EB1) — agregados/IV ≡ manual; ranking global ≡ porta-100% (DEC-EB-008); PSI (ε e null); `immature_vintage`/`unstable_psi`/`dominant_value`/`low_coverage` disparam plantados e não limpos; degradações `no_temporal_column`/`no_asis`; determinismo |
 | `tests/workerPool.test.js` | Pool de Workers (H3) — pool ≡ single-worker número a número; determinismo; fallback |
 | `tests/computeRouter.test.js` | ComputeRouter (H4) — Classe A jamais roteia; detecção silenciosa; fallback transparente Classe B |
 | `tests_python/*.py` | Protocolo do sidecar (health/token/caps/dataset/job) + paridade número a número dos motores numpy (Descoberta H7, Clusterização H8) |
