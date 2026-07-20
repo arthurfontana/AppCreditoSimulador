@@ -1688,6 +1688,103 @@ export function cloneCanvasWithNewIds(shapes, conns) {
   return { newShapes, newConns, idMap: { ...idMap, ...connIdMap } };
 }
 
+// ═══ REGIÃO: Ribbon (UX 2.0 — Sessão 1) ═══
+// Componente de casca do Ribbon (modo `fixed`). É puramente apresentacional: renderiza
+// as 7 abas fixas + a QAT a partir do registro declarativo `COMMANDS` (fonte única,
+// montado dentro do App). Cada descritor carrega `onRun`/`enabledWhen`/`activeWhen` como
+// closures do App — o Ribbon só lê. Abas contextuais (tab `ctx-*`) NÃO são filtradas aqui
+// (chegam na Sessão 2).
+const RIBBON_TABS = [
+  { id: 'inicio',   label: 'Início'   },
+  { id: 'inserir',  label: 'Inserir'  },
+  { id: 'dados',    label: 'Dados'    },
+  { id: 'analisar', label: 'Analisar' },
+  { id: 'otimizar', label: 'Otimizar' },
+  { id: 'politica', label: 'Política' },
+  { id: 'projeto',  label: 'Projeto'  },
+];
+
+function RibbonCmdButton({ cmd }) {
+  const enabled = cmd.enabledWhen ? !!cmd.enabledWhen() : true;
+  const active  = cmd.activeWhen  ? !!cmd.activeWhen()  : false;
+  return (
+    <button className="wbt" disabled={!enabled} onClick={enabled ? cmd.onRun : undefined}
+      title={(cmd.title || cmd.label) + (cmd.shortcut ? ` (${cmd.shortcut})` : '')}
+      style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px', borderRadius: 8,
+        border: active ? '1px solid #2563eb' : '1px solid transparent',
+        background: active ? '#2563eb' : 'transparent',
+        color: !enabled ? '#cbd5e1' : active ? '#fff' : '#475569',
+        cursor: enabled ? 'pointer' : 'default', fontSize: 12.5, fontWeight: 500,
+        fontFamily: 'inherit', whiteSpace: 'nowrap', flexShrink: 0 }}>
+      {cmd.icon && <span style={{ fontSize: 14, lineHeight: 1 }}>{cmd.icon}</span>}
+      <span className="wbl">{cmd.label}</span>
+    </button>
+  );
+}
+
+function Ribbon({ commands, activeTab, onTab, qat }) {
+  const tabCmds = commands.filter(c => c.tab === activeTab);
+  // Agrupa preservando a ordem de primeira aparição no registro (a ordem do `COMMANDS`
+  // define o layout dos grupos — sem tabela de ordenação separada).
+  const groupOrder = [];
+  const byGroup = new Map();
+  for (const c of tabCmds) {
+    if (!byGroup.has(c.group)) { byGroup.set(c.group, []); groupOrder.push(c.group); }
+    byGroup.get(c.group).push(c);
+  }
+  const qBtn = (icon, label, on, enabled, danger) => (
+    <button className="wbt" disabled={!enabled} onClick={enabled ? on : undefined} title={label}
+      style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 9px', borderRadius: 8, border: 'none',
+        background: danger && enabled ? '#fff1f2' : 'transparent',
+        color: !enabled ? '#cbd5e1' : danger ? '#e11d48' : '#475569',
+        cursor: enabled ? 'pointer' : 'default', fontSize: 12.5, fontFamily: 'inherit', flexShrink: 0 }}>
+      <span style={{ fontSize: 14, lineHeight: 1 }}>{icon}</span>
+    </button>
+  );
+  return (
+    <div style={{ flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', zIndex: 250 }}>
+      {/* Faixa de abas + QAT */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', borderBottom: '1px solid #f1f5f9' }}>
+        {RIBBON_TABS.map(t => {
+          const on = activeTab === t.id;
+          return (
+            <button key={t.id} onClick={() => onTab(t.id)}
+              style={{ padding: '5px 14px', borderRadius: 8, border: 'none',
+                background: on ? '#eff6ff' : 'transparent', color: on ? '#2563eb' : '#64748b',
+                fontWeight: on ? 700 : 500, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
+                whiteSpace: 'nowrap', transition: 'all .12s' }}>
+              {t.label}
+            </button>
+          );
+        })}
+        <div style={{ flex: 1 }} />
+        {/* QAT — Desfazer / Refazer / Deletar (com seleção) / Salvar Projeto. Sempre a um clique. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, paddingLeft: 8, borderLeft: '1px solid #f1f5f9' }}>
+          {qBtn('↩', 'Desfazer (Ctrl+Z)', qat.undo, qat.canUndo, false)}
+          {qBtn('↪', 'Refazer (Ctrl+Y)', qat.redo, qat.canRedo, false)}
+          {qBtn('🗑', 'Deletar (Del)', qat.onDelete, qat.canDelete, true)}
+          {qBtn('💾', 'Salvar Projeto', qat.onSave, true, false)}
+        </div>
+      </div>
+      {/* Grupos de comandos da aba ativa */}
+      <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 58 }}>
+        {groupOrder.length === 0 ? (
+          <div style={{ fontSize: 11.5, color: '#cbd5e1', padding: '10px 6px' }}>—</div>
+        ) : groupOrder.map((g, gi) => (
+          <div key={g} style={{ display: 'flex', flexDirection: 'column', padding: '0 10px',
+            borderRight: gi < groupOrder.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
+            <div style={{ display: 'flex', gap: 2, alignItems: 'center', flex: 1, flexWrap: 'wrap' }}>
+              {byGroup.get(g).map(c => <RibbonCmdButton key={c.id} cmd={c} />)}
+            </div>
+            <div style={{ fontSize: 9.5, color: '#94a3b8', textAlign: 'center', marginTop: 3,
+              textTransform: 'uppercase', letterSpacing: .4, fontWeight: 600 }}>{g}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ═══ REGIÃO: Estado Principal do Componente ═══
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -1713,6 +1810,11 @@ export default function App() {
   const [csvImportError, setCsvImportError] = useState(null); // string | null — erro ao carregar/processar uma base CSV
   // Analytics Workspace
   const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
+  // Ribbon (UX 2.0 — Sessão 1): aba ativa do Ribbon fixo. Persistida em sessionStorage
+  // (sobrevive a reload na mesma sessão) e no .credito.json (buildProjectPayload/loadProject).
+  const [ribbonActiveTab, setRibbonActiveTab] = useState(() => {
+    try { const s = sessionStorage.getItem('ribbon_active_tab_v1'); return s || 'inicio'; } catch { return 'inicio'; }
+  });
   const [analyticsDataset, setAnalyticsDataset] = useState(null); // wide dataset cacheado do worker
   const [analyticsLayout, setAnalyticsLayout] = useState(() => { try { const s = sessionStorage.getItem('aw_layout_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // WidgetConfig[] — gráficos do dashboard
   const [analyticsGroupings, setAnalyticsGroupings] = useState(() => { try { const s = sessionStorage.getItem('aw_groupings_v1'); return s ? JSON.parse(s) : []; } catch { return []; } }); // Grouping[] — dimensões derivadas reutilizáveis
@@ -2405,6 +2507,8 @@ export default function App() {
   useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
   useEffect(() => { sessionStorage.setItem('aw_groupings_v1', JSON.stringify(analyticsGroupings)); }, [analyticsGroupings]);
   useEffect(() => { sessionStorage.setItem('aw_page_filters_v1', JSON.stringify(analyticsPageFilters)); }, [analyticsPageFilters]);
+  // Ribbon (UX 2.0 — Sessão 1): persiste a aba ativa do Ribbon na sessionStorage.
+  useEffect(() => { try { sessionStorage.setItem('ribbon_active_tab_v1', ribbonActiveTab); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonActiveTab]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
   // Debounced (500ms, mesmo padrão dos effects de simulação): setShapes é chamado por
@@ -3595,10 +3699,11 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.7",
+      schemaVersion: "2.8",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
+      ribbonActiveTab,
       viewport: vp,
       panelCollapsed,
       canvases: mergedCanvases,
@@ -3713,6 +3818,8 @@ export default function App() {
     if (data.businessWidget) setBusinessWidget(data.businessWidget);
     if (data.viewport) setVp(data.viewport);
     if (data.activeTab) setActiveTab(data.activeTab);
+    // Ribbon (UX 2.0 — Sessão 1): default defensivo p/ projetos antigos (schema < 2.8).
+    setRibbonActiveTab(typeof data.ribbonActiveTab === 'string' ? data.ribbonActiveTab : 'inicio');
     if (typeof data.panelCollapsed === 'boolean') setPanelCollapsed(data.panelCollapsed);
     const pref = data.preferences || {};
     if (typeof pref.enableDynThickness === 'boolean') setEnableDynThickness(pref.enableDynThickness);
@@ -6963,6 +7070,151 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragIds, dragDelta, shapes, conns, shapesById, hiddenPortIds, simResult, sel, multiSel, fromId, tool, flowErrors, csvStore, nodeArrivals, lensCounts, edgeColorScale, edgeQtyScale, enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf, activeCell, incrementalResult]);
 
+  // ═══ REGIÃO: Ações do Ribbon (extraídas de JSX inline para o registro) ═══
+  // Adiciona um Decision Lens no centro do viewport (antes: botão "Adicionar Decision
+  // Lens" da seção Segmentação do painel). Comportamento idêntico.
+  const addDecisionLens = () => {
+    pushHistory();
+    const svgEl = svgRef.current;
+    const cx = (svgEl.clientWidth / 2 - vp.x) / vp.s, cy = (svgEl.clientHeight / 2 - vp.y) / vp.s;
+    const id = uid();
+    setShapes(p => [...p, { id, type: "decision_lens", x: cx - LENS_W / 2, y: cy - LENS_H / 2, w: LENS_W, h: LENS_H, label: "Decision Lens", rules: [], color: "#fff" }]);
+    setSel(id);
+  };
+  // Adiciona o Painel de Simulação no centro do viewport (antes: seção Simulação do
+  // painel). Desabilitado se já existe — preservado exatamente pelo enabledWhen.
+  const addSimPanel = () => {
+    if (shapes.some(s => s.type === "simPanel")) return;
+    pushHistory();
+    const svgEl = svgRef.current;
+    const cx = (svgEl.clientWidth / 2 - vp.x) / vp.s, cy = (svgEl.clientHeight / 2 - vp.y) / vp.s;
+    setShapes(p => [...p, { id: uid(), type: "simPanel", x: cx - 150, y: cy - 220, w: 300, h: 440, label: "Simulação", color: "#fff" }]);
+  };
+  // Alinhar/distribuir multi-seleção — mesma matemática da toolbar flutuante de alinhamento
+  // (surface #2, que segue intocada até a Sessão 2). Aqui só para os descritores contextuais
+  // do registro (aba ctx-selecao); ainda não renderizado em modo fixed nesta sessão.
+  const applyAlign = (dir) => {
+    const sel2 = shapes.filter(s => multiSel.has(s.id));
+    if (sel2.length < 2) return;
+    pushHistory();
+    setShapes(prev => prev.map(s => {
+      if (!multiSel.has(s.id)) return s;
+      if (dir === "left")   return { ...s, x: Math.min(...sel2.map(q => q.x)) };
+      if (dir === "right")  return { ...s, x: Math.max(...sel2.map(q => q.x + q.w)) - s.w };
+      if (dir === "top")    return { ...s, y: Math.min(...sel2.map(q => q.y)) };
+      if (dir === "bottom") return { ...s, y: Math.max(...sel2.map(q => q.y + q.h)) - s.h };
+      if (dir === "centerH") { const midX = (Math.min(...sel2.map(q => q.x)) + Math.max(...sel2.map(q => q.x + q.w))) / 2; return { ...s, x: midX - s.w / 2 }; }
+      if (dir === "centerV") { const midY = (Math.min(...sel2.map(q => q.y)) + Math.max(...sel2.map(q => q.y + q.h))) / 2; return { ...s, y: midY - s.h / 2 }; }
+      if (dir === "distH") { const sorted = [...sel2].sort((a, b) => (a.x + a.w / 2) - (b.x + b.w / 2)); const totalW = sorted.reduce((a, q) => a + q.w, 0); const span = Math.max(...sorted.map(q => q.x + q.w)) - Math.min(...sorted.map(q => q.x)); const gap = (span - totalW) / (sorted.length - 1); let cx2 = Math.min(...sorted.map(q => q.x)); const posMap = {}; for (const q of sorted) { posMap[q.id] = cx2; cx2 += q.w + gap; } return { ...s, x: posMap[s.id] ?? s.x }; }
+      if (dir === "distV") { const sorted = [...sel2].sort((a, b) => (a.y + a.h / 2) - (b.y + b.h / 2)); const totalH = sorted.reduce((a, q) => a + q.h, 0); const span = Math.max(...sorted.map(q => q.y + q.h)) - Math.min(...sorted.map(q => q.y)); const gap = (span - totalH) / (sorted.length - 1); let cy2 = Math.min(...sorted.map(q => q.y)); const posMap = {}; for (const q of sorted) { posMap[q.id] = cy2; cy2 += q.h + gap; } return { ...s, y: posMap[s.id] ?? s.y }; }
+      return s;
+    }));
+  };
+
+  // ═══ REGIÃO: Registro Declarativo de Comandos (COMMANDS — FONTE ÚNICA) ═══
+  // Descritores {id, label, icon, tab, group, keywords, shortcut, contextWhen, enabledWhen,
+  // activeWhen, onRun}. Um comando = um descritor. A Ribbon (7 abas fixas), as abas
+  // contextuais (Sessão 2) e a Busca de comandos (Sessão 7) renderizam TODAS deste array.
+  // Cobre as 12 superfícies do inventário (docs/wiki/Ribbon-Prompts-Sessoes.md):
+  //   - tab ∈ {inicio,inserir,dados,analisar,otimizar,politica,projeto}: renderizadas AGORA.
+  //   - tab `ctx-*`: descritores nascem agora, renderizados quando a superfície migrar
+  //     (abas contextuais Matriz/Decisão/Lens/Terminal/Porta/Seleção — Sessão 2).
+  // `contextWhen(shape)` = predicado por tipo de shape selecionado (null = global).
+  // Os comandos escopados "Descobrir/Clusterizar/Faixas aqui" são UM descritor cada, com
+  // contextWhen aceitando os tipos aplicáveis — sem triplicação por tipo.
+  const _hasSel        = !!sel || multiSel.size > 0;
+  const _simPanelExists = shapes.some(s => s.type === "simPanel");
+  const _allCinemas    = multiSel.size > 1 && [...multiSel].every(id => shapesById.get(id)?.type === 'cineminha');
+  const _scopeNode     = (t) => ['decision', 'cineminha', 'decision_lens'].includes(t);
+  const COMMANDS = [
+    // ─── INÍCIO / Edição (toolbar de topo #1) ───
+    { id: 'tool.select', label: 'Selecionar', icon: '↖', tab: 'inicio', group: 'Edição', keywords: ['selecionar', 'seta', 'mover shapes'], activeWhen: () => tool === 'select', onRun: () => { setTool('select'); setFromId(null); } },
+    { id: 'tool.hand', label: 'Mover', icon: '✋', tab: 'inicio', group: 'Edição', keywords: ['mão', 'pan', 'arrastar canvas', 'navegar'], activeWhen: () => tool === 'hand', onRun: () => { setTool('hand'); setFromId(null); } },
+    { id: 'tool.connect', label: 'Conectar', icon: '⟶', tab: 'inicio', group: 'Edição', keywords: ['conexão', 'aresta', 'ligar', 'seta'], activeWhen: () => tool === 'connect', onRun: () => { setTool('connect'); setFromId(null); } },
+    { id: 'edit.undo', label: 'Desfazer', icon: '↩', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Z', keywords: ['undo', 'voltar', 'desfazer'], enabledWhen: () => undoStack.length > 0, onRun: undo },
+    { id: 'edit.redo', label: 'Refazer', icon: '↪', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Y', keywords: ['redo', 'avançar', 'refazer'], enabledWhen: () => redoStack.length > 0, onRun: redo },
+    { id: 'edit.delete', label: 'Deletar', icon: '🗑', tab: 'inicio', group: 'Edição', shortcut: 'Del', keywords: ['excluir', 'remover', 'apagar', 'deletar'], enabledWhen: () => _hasSel, onRun: deleteSelected },
+    // ─── INÍCIO / Organizar ───
+    { id: 'org.reorganize', label: 'Reorganizar', icon: '⊹', tab: 'inicio', group: 'Organizar', keywords: ['auto layout', 'organizar', 'arrumar', 'camadas', 'reorganizar'], onRun: autoLayout },
+    { id: 'org.color', label: 'Cor', icon: '🎨', tab: 'inicio', group: 'Organizar', keywords: ['cor', 'paleta', 'pintar'], enabledWhen: () => !!selShape && selShape.type !== 'csv', onRun: () => setPalette(v => !v) },
+    // ─── INÍCIO / Ver (zoom, canto do canvas #10) ───
+    { id: 'view.zoomIn', label: 'Zoom +', icon: '➕', tab: 'inicio', group: 'Ver', keywords: ['aproximar', 'ampliar', 'zoom in'], onRun: () => zoomCenter(1.2) },
+    { id: 'view.zoomOut', label: 'Zoom −', icon: '➖', tab: 'inicio', group: 'Ver', keywords: ['afastar', 'reduzir', 'zoom out'], onRun: () => zoomCenter(1 / 1.2) },
+    { id: 'view.zoomReset', label: 'Centralizar', icon: '⌂', tab: 'inicio', group: 'Ver', keywords: ['reset', 'início', 'home', 'centralizar', 'enquadrar'], onRun: () => setVp({ x: 20, y: 40, s: 1 }) },
+
+    // ─── INSERIR / Nós ───
+    { id: 'insert.decision', label: 'Losango', icon: '▭', tab: 'inserir', group: 'Nós', keywords: ['losango', 'decisão', 'retângulo', 'nó'], activeWhen: () => tool === 'rect', onRun: () => { setTool('rect'); setFromId(null); } },
+    { id: 'insert.cineminha', label: 'Cineminha', icon: '⊞', tab: 'inserir', group: 'Nós', keywords: ['matriz', 'cineminha', 'cruzada', 'cinema'], activeWhen: () => tool === 'cineminha', onRun: () => { setTool('cineminha'); setFromId(null); } },
+    { id: 'insert.cineminhaLibrary', label: 'Cineminha da Biblioteca', icon: '📥', tab: 'inserir', group: 'Nós', keywords: ['importar cineminha', 'biblioteca', 'modelos salvos'], onRun: () => openCinemaLibrary(null, 'browse') },
+    { id: 'insert.lensTool', label: 'Decision Lens', icon: '🔎', tab: 'inserir', group: 'Nós', keywords: ['lens', 'segmentação', 'regras', 'ferramenta lens'], activeWhen: () => tool === 'decision_lens', onRun: () => { setTool('decision_lens'); setFromId(null); } },
+    { id: 'insert.lensAdd', label: 'Adicionar Lens', icon: '🛢', tab: 'inserir', group: 'Nós', keywords: ['decision lens', 'segmentação', 'adicionar lens'], enabledWhen: () => Object.keys(csvStore).length > 0, onRun: addDecisionLens },
+    { id: 'insert.frame', label: 'Frame', icon: '⬚', tab: 'inserir', group: 'Nós', keywords: ['moldura', 'grupo', 'área', 'frame'], activeWhen: () => tool === 'frame', onRun: () => { setTool('frame'); setFromId(null); } },
+    // ─── INSERIR / Terminais ───
+    { id: 'insert.approved', label: 'Aprovado', icon: '✅', tab: 'inserir', group: 'Terminais', keywords: ['aprovar', 'terminal aprovado'], activeWhen: () => tool === 'approved', onRun: () => { setTool('approved'); setFromId(null); } },
+    { id: 'insert.rejected', label: 'Reprovado', icon: '❌', tab: 'inserir', group: 'Terminais', keywords: ['reprovar', 'recusar', 'terminal reprovado'], activeWhen: () => tool === 'rejected', onRun: () => { setTool('rejected'); setFromId(null); } },
+    { id: 'insert.asIs', label: 'AS IS', icon: '⟳', tab: 'inserir', group: 'Terminais', keywords: ['as is', 'política atual', 'baseline'], activeWhen: () => tool === 'as_is', onRun: () => { setTool('as_is'); setFromId(null); } },
+    // ─── INSERIR / Painéis ───
+    { id: 'insert.simPanel', label: _simPanelExists ? 'Painel ativo' : 'Painel de Simulação', icon: '📊', tab: 'inserir', group: 'Painéis', keywords: ['simulação', 'painel', 'indicadores', 'kpi', 'taxa de aprovação'], enabledWhen: () => !_simPanelExists, onRun: addSimPanel },
+    { id: 'insert.businessImpact', label: businessWidget.visible ? 'Widget ativo' : 'Business Impact', icon: '⬡', tab: 'inserir', group: 'Painéis', keywords: ['business impact', 'widget', 'impacto', 'negócio'], enabledWhen: () => !businessWidget.visible, onRun: () => setBusinessWidget(p => ({ ...p, visible: true })) },
+
+    // ─── DADOS ───
+    { id: 'data.importCsv', label: 'Importar CSV', icon: '📂', tab: 'dados', group: 'Bases', keywords: ['csv', 'importar', 'carregar base', 'dados'], onRun: () => fileInputRef.current?.click() },
+
+    // ─── ANALISAR ───
+    { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura'], onRun: () => openSegmentDiscoveryModal(null) },
+    { id: 'analyze.cluster', label: 'Clusterizar Segmentos', icon: '🧩', tab: 'analisar', group: 'Descoberta', keywords: ['cluster', 'clusterizar', 'k-means', 'agrupar'], onRun: () => openClusterModal(null) },
+    { id: 'analyze.range', label: 'Criar Faixas por Risco', icon: '📐', tab: 'analisar', group: 'Descoberta', keywords: ['faixas', 'binning', 'risco', 'iv', 'woe', 'bandas'], onRun: () => openRangeModal() },
+    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico'], onRun: () => setPanelCollapsed(false) },
+
+    // ─── OTIMIZAR ───
+    { id: 'optimize.goalSeek', label: 'Atingir Objetivo', icon: '🎯', tab: 'otimizar', group: 'Política', keywords: ['goal seek', 'objetivo', 'meta', 'milp', 'profundo'], onRun: openGoalSeekModal },
+    { id: 'optimize.simplify', label: 'Simplificar', icon: '🧹', tab: 'otimizar', group: 'Política', keywords: ['simplificar', 'reduzir', 'equivalência', 'limpar'], onRun: openSimplifyModal },
+    { id: 'optimize.johnny', label: 'Otimização Johnny', icon: '⚡', tab: 'otimizar', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha'], enabledWhen: () => _allCinemas, onRun: () => openJohnnyModal([...multiSel]) },
+
+    // ─── POLÍTICA ───
+    { id: 'policy.library', label: 'Biblioteca de Políticas', icon: '📚', tab: 'politica', group: 'Biblioteca', keywords: ['políticas', 'biblioteca', 'templates', 'policy'], onRun: () => openPolicyLibrary('browse') },
+    { id: 'policy.doc', label: 'Documentar Política', icon: '📄', tab: 'politica', group: 'Documento', keywords: ['documentar', 'documentação', 'relatório', 'executivo'], onRun: openDocModal },
+    { id: 'policy.export', label: 'Exportar Fluxo', icon: '⬇', tab: 'politica', group: 'Fluxo', keywords: ['exportar', 'policyir', 'json', 'fluxo'], onRun: exportFlow },
+    { id: 'policy.import', label: 'Importar Fluxo', icon: '⬆', tab: 'politica', group: 'Fluxo', keywords: ['importar', 'fluxo', 'carregar política'], onRun: () => flowImportRef.current?.click() },
+
+    // ─── PROJETO ───
+    { id: 'project.save', label: 'Salvar Projeto', icon: '💾', tab: 'projeto', group: 'Arquivo', shortcut: '', keywords: ['salvar', 'projeto', 'credito', 'gravar'], onRun: saveProject },
+    { id: 'project.open', label: 'Abrir Projeto', icon: '📁', tab: 'projeto', group: 'Arquivo', keywords: ['abrir', 'carregar projeto', 'credito'], onRun: () => projectInputRef.current?.click() },
+
+    // ─── CONTEXTUAIS (surfaces #3–#8) — nascem agora; abas contextuais renderizam na Sessão 2 ───
+    // Matriz (Cineminha): seletor de tipo (×3), Resultado, Domínio, Otimizar, Johnny, Exportar/
+    // Importar, Biblioteca, Salvar. contextWhen por tipo.
+    ...Object.values(CINEMINHA_TYPES).map(t => ({
+      id: `ctx.cinema.type.${t.id}`, label: `Tipo: ${t.label}`, icon: t.icon, tab: 'ctx-matriz', group: 'Tipo',
+      keywords: ['tipo de cineminha', t.label], contextWhen: (s) => s?.type === 'cineminha',
+      activeWhen: () => (selShape?.cinemaType ?? 'eligibility') === t.id, onRun: () => changeCinemaType(sel, t.id),
+    })),
+    { id: 'ctx.cinema.result', label: 'Resultado', icon: '⊞', tab: 'ctx-matriz', group: 'Configurar', keywords: ['variável de resultado', 'coluna', 'casela'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => setResultVarModal({ shapeId: sel }) },
+    { id: 'ctx.node.domain', label: 'Domínio', icon: '⚙', tab: 'ctx-matriz', group: 'Configurar', keywords: ['domínio', 'valores', 'linhas colunas', 'configurar nó'], contextWhen: (s) => s?.type === 'cineminha' || s?.type === 'decision', onRun: () => openDomainModal(sel) },
+    { id: 'ctx.cinema.optimize', label: 'Otimizar Decisão', icon: '⚙', tab: 'ctx-matriz', group: 'Otimizar', keywords: ['otimizar decisão', 'pareto'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openOptimModal(sel) },
+    { id: 'ctx.cinema.johnny', label: 'Otimização Johnny', icon: '⚡', tab: 'ctx-matriz', group: 'Otimizar', keywords: ['johnny'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openJohnnyModal([sel]) },
+    { id: 'ctx.cinema.export', label: 'Exportar', icon: '⬇', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['exportar cineminha'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => exportCinema(sel) },
+    { id: 'ctx.cinema.import', label: 'Importar', icon: '⬆', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['importar cineminha'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => startCinemaImport(sel) },
+    { id: 'ctx.cinema.library', label: 'Biblioteca', icon: '📚', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['biblioteca de cineminhas'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openCinemaLibrary(sel, 'browse') },
+    { id: 'ctx.cinema.save', label: 'Salvar na Biblioteca', icon: '💾', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['salvar cineminha'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openCinemaLibrary(sel, 'save') },
+    // Decisão (losango): Configurar (domínio) — já coberto por ctx.node.domain acima.
+    // Lens (Decision Lens): Configurar regras.
+    { id: 'ctx.lens.configure', label: 'Configurar regras', icon: '🔎', tab: 'ctx-lens', group: 'Configurar', keywords: ['configurar lens', 'regras', 'população'], contextWhen: (s) => s?.type === 'decision_lens', onRun: () => openLensModal(sel) },
+    // "Analisar aqui" — UM descritor cada, contextWhen aceitando os tipos aplicáveis (fim da
+    // triplicação losango/Cineminha/Lens). 🔍 aceita também terminais (Aprovado/Reprovado/AS IS).
+    { id: 'ctx.scope.discover', label: 'Descobrir aqui', icon: '🔍', tab: 'ctx-analisar', group: 'Analisar aqui', keywords: ['descobrir segmentos', 'escopo do nó', 'aqui'], contextWhen: (s) => _scopeNode(s?.type) || ['approved', 'rejected', 'as_is'].includes(s?.type), onRun: () => openSegmentDiscoveryModal({ nodeId: sel }) },
+    { id: 'ctx.scope.cluster', label: 'Clusterizar aqui', icon: '🧩', tab: 'ctx-analisar', group: 'Analisar aqui', keywords: ['clusterizar', 'escopo do nó', 'aqui'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => openClusterModal({ nodeId: sel }) },
+    { id: 'ctx.scope.range', label: 'Faixas aqui', icon: '📐', tab: 'ctx-analisar', group: 'Analisar aqui', keywords: ['faixas por risco', 'escopo do nó', 'aqui', 'binning'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => openRangeModal({ scope: { nodeId: sel } }) },
+    // Trava (Goal Seek) — losango/Cineminha/Lens.
+    { id: 'ctx.node.lock', label: 'Travar / Destravar', icon: '🔒', tab: 'ctx-analisar', group: 'Trava', keywords: ['travar', 'destravar', 'goal seek', 'lock'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => toggleShapeLock(sel) },
+    // Porta solta: sugerir próximo passo (só faz sentido em porta sem conexão de saída).
+    { id: 'ctx.port.suggest', label: 'Sugerir próximo passo', icon: '💡', tab: 'ctx-porta', group: 'Sugestão', keywords: ['sugerir', 'próximo passo', 'ranking de variáveis'], contextWhen: (s) => s?.type === 'port', enabledWhen: () => conns.filter(c => c.from === sel).length === 0, onRun: () => openVariableRanking(sel) },
+    // Seleção múltipla: alinhar/distribuir (8). Mesmo grupo da toolbar flutuante #2.
+    ...[['left', 'Alinhar à esquerda'], ['right', 'Alinhar à direita'], ['top', 'Alinhar ao topo'], ['bottom', 'Alinhar à base'], ['centerH', 'Centralizar H'], ['centerV', 'Centralizar V'], ['distH', 'Distribuir H'], ['distV', 'Distribuir V']].map(([d, l]) => ({
+      id: `ctx.align.${d}`, label: l, icon: '▚', tab: 'ctx-selecao', group: 'Alinhar', keywords: ['alinhar', 'distribuir', l], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, onRun: () => applyAlign(d),
+    })),
+  ];
+
   // ═══ REGIÃO: JSX — Shell da Aplicação (toolbar, abas, canvas) ═══
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
@@ -6979,6 +7231,21 @@ export default function App() {
         @media(max-width:560px){.wbl{display:none!important;}}
       `}</style>
 
+      {/* ═══════════════ RIBBON (UX 2.0 — Sessão 1) ═══════════════ */}
+      {/* Modo `fixed`: ocupa altura no topo do flex-column → o CANVAS PANE (flex:1) reflowa
+          para baixo sozinho. svgPt/toWorld leem getBoundingClientRect ao vivo (invariante de
+          posicionamento intacto — nada cacheado). Só no canvas; o Dashboard tem UI própria. */}
+      {activeTab === "canvas" && (
+        <Ribbon
+          commands={COMMANDS}
+          activeTab={ribbonActiveTab}
+          onTab={setRibbonActiveTab}
+          qat={{
+            undo, redo, canUndo: undoStack.length > 0, canRedo: redoStack.length > 0,
+            onDelete: deleteSelected, canDelete: (!!sel || multiSel.size > 0), onSave: saveProject,
+          }}
+        />
+      )}
 
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
       {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} pageFilters={analyticsPageFilters} setPageFilters={setAnalyticsPageFilters} scopeNotice={analyticsScopeNotice} onDismissScopeNotice={()=>setAnalyticsScopeNotice(null)} />}
@@ -6989,113 +7256,8 @@ export default function App() {
       {/* ═══════════════ CANVAS AREA ═══════════════ */}
       <div style={{flex:1,position:"relative",overflow:"hidden"}}>
 
-        {/* Toolbar */}
-        <div style={{position:"absolute",top:14,left:"50%",transform:"translateX(-50%)",zIndex:300,
-          display:"flex",gap:2,alignItems:"center",background:"#fff",padding:"6px 8px",borderRadius:14,
-          border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,.08)",maxWidth:"calc(100% - 24px)",overflowX:"auto"}}>
-          {TOOLS.map(t=>{
-            if (t.id === 'cineminha') return (
-              <div key={t.id} style={{position:"relative"}}>
-                <button className="wbt"
-                  ref={cinemaDropdownBtnRef}
-                  onClick={()=>{
-                    const r = cinemaDropdownBtnRef.current?.getBoundingClientRect();
-                    if(r) setCinemaDropdownPos({x:r.left, y:r.bottom+6});
-                    setCinemaDropdownOpen(o=>!o);
-                  }}
-                  title={t.label}
-                  style={{display:"flex",alignItems:"center",gap:5,padding:"6px 11px",borderRadius:9,border:"none",
-                    background:tool==='cineminha'?"#2563eb":"transparent",
-                    color:tool==='cineminha'?"#fff":"#475569",
-                    cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",whiteSpace:"nowrap"}}>
-                  <span style={{fontSize:15,lineHeight:1}}>⊞</span>
-                  <span className="wbl">Cineminha</span>
-                  <span style={{fontSize:9,marginLeft:1,opacity:.7}}>▾</span>
-                </button>
-                {cinemaDropdownOpen && createPortal(
-                  <>
-                    <div style={{position:"fixed",inset:0,zIndex:9998}} onClick={()=>setCinemaDropdownOpen(false)}/>
-                    <div style={{position:"fixed",top:cinemaDropdownPos.y,left:cinemaDropdownPos.x,background:"#fff",borderRadius:10,
-                      border:"1px solid #e2e8f0",boxShadow:"0 8px 24px rgba(0,0,0,.12)",minWidth:210,zIndex:9999,overflow:"hidden"}}>
-                      <button
-                        onClick={()=>{setTool('cineminha');setFromId(null);setCinemaDropdownOpen(false);}}
-                        style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 16px",border:"none",
-                          background:"transparent",cursor:"pointer",fontSize:13,fontFamily:"inherit",color:"#1e293b",textAlign:"left"}}
-                        onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"}
-                        onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                        <span style={{fontSize:15}}>⊞</span>
-                        <div>
-                          <div style={{fontWeight:600}}>Inserir no Canvas</div>
-                          <div style={{fontSize:11,color:"#94a3b8",marginTop:1}}>Clique no canvas para posicionar</div>
-                        </div>
-                      </button>
-                      <div style={{height:1,background:"#f1f5f9",margin:"0 12px"}}/>
-                      <button
-                        onClick={()=>{openCinemaLibrary(null,'browse');setCinemaDropdownOpen(false);}}
-                        style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 16px",border:"none",
-                          background:"transparent",cursor:"pointer",fontSize:13,fontFamily:"inherit",color:"#1e293b",textAlign:"left"}}
-                        onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"}
-                        onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                        <span style={{fontSize:15}}>📥</span>
-                        <div>
-                          <div style={{fontWeight:600}}>Importar da Biblioteca</div>
-                          <div style={{fontSize:11,color:"#94a3b8",marginTop:1}}>Adicionar modelos salvos ao canvas</div>
-                        </div>
-                      </button>
-                    </div>
-                  </>,
-                  document.body
-                )}
-              </div>
-            );
-            return (
-              <button key={t.id} className="wbt" onClick={()=>{setTool(t.id);setFromId(null);}} title={t.label}
-                style={{display:"flex",alignItems:"center",gap:5,padding:"6px 11px",borderRadius:9,border:"none",
-                  background:tool===t.id?"#2563eb":"transparent",color:tool===t.id?"#fff":"#475569",
-                  cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",whiteSpace:"nowrap"}}>
-                <span style={{fontSize:15,lineHeight:1}}>{t.icon}</span>
-                <span className="wbl">{t.label}</span>
-              </button>
-            );
-          })}
-          <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
-          {/* Undo / Redo */}
-          <button className="wbt" onClick={undo} disabled={undoStack.length===0} title="Desfazer (Ctrl+Z)"
-            style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
-              background:"transparent",color:undoStack.length>0?"#475569":"#cbd5e1",
-              cursor:undoStack.length>0?"pointer":"default",fontSize:12.5,fontFamily:"inherit",flexShrink:0}}>
-            ↩ <span className="wbl">Desfazer</span>
-          </button>
-          <button className="wbt" onClick={redo} disabled={redoStack.length===0} title="Refazer (Ctrl+Y)"
-            style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
-              background:"transparent",color:redoStack.length>0?"#475569":"#cbd5e1",
-              cursor:redoStack.length>0?"pointer":"default",fontSize:12.5,fontFamily:"inherit",flexShrink:0}}>
-            ↪ <span className="wbl">Refazer</span>
-          </button>
-          <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
-          <button className="wbt" onClick={autoLayout} title="Reorganizar o fluxo (camadas + portas à direita); datasets e componentes soltos vão para a área lateral"
-            style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
-              background:"transparent",color:"#475569",
-              cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",flexShrink:0}}>
-            <span style={{fontSize:15,lineHeight:1}}>⊹</span>
-            <span className="wbl">Reorganizar</span>
-          </button>
-          <div style={{width:1,height:22,background:"#e2e8f0",margin:"0 3px",flexShrink:0}}/>
-          {selShape&&selShape.type!=="csv"&&(
-            <button className="wbt" onClick={()=>setPalette(v=>!v)} title="Cor"
-              style={{width:28,height:28,borderRadius:8,flexShrink:0,
-                border:`2px solid ${palette?"#3b82f6":"#e2e8f0"}`,
-                background:selShape.color||"#fff",cursor:"pointer",transition:"border-color .15s"}}/>
-          )}
-          {(sel||multiSel.size>0)&&(
-            <button className="wbt" onClick={deleteSelected}
-              style={{display:"flex",alignItems:"center",gap:4,padding:"6px 10px",borderRadius:9,border:"none",
-                background:"#fff1f2",color:"#e11d48",
-                cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",flexShrink:0}}>
-              🗑 <span className="wbl">{multiSel.size>1?`Deletar (${multiSel.size})`:"Deletar"}</span>
-            </button>
-          )}
-        </div>
+        {/* Toolbar de topo migrada para o Ribbon (UX 2.0 — Sessão 1). As toolbars
+        flutuantes de contexto abaixo permanecem intocadas até a Sessão 2. */}
 
         {/* Alignment toolbar — shows when multiSel.size > 1 */}
         {multiSel.size>1&&(()=>{
@@ -7802,55 +7964,55 @@ export default function App() {
         {/* Scrollable content area */}
         <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column"}}>
 
-        {/* Salvar / Abrir Projeto completo */}
-        <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
-          <p style={{fontSize:11,color:"#94a3b8",marginBottom:10,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Projeto</p>
-          <button onClick={saveProject}
-            title="Salvar todo o estudo num arquivo .credito.json — abas, bases, Tabela de Inferência, gráficos do Dashboard, biblioteca e preferências — para retomar exatamente de onde parou"
-            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"11px 14px",borderRadius:10,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:13.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-            onMouseEnter={e=>{e.currentTarget.style.background="#15803d";}}
-            onMouseLeave={e=>{e.currentTarget.style.background="#16a34a";}}>
-            <span style={{fontSize:17}}>💾</span> Salvar Projeto
-          </button>
-          <button onClick={()=>projectInputRef.current?.click()}
-            title="Abrir um projeto salvo (.credito.json) — substitui o estudo atual"
-            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #86efac",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",transition:"all .15s",marginTop:8}}
-            onMouseEnter={e=>{e.currentTarget.style.background="#dcfce7";e.currentTarget.style.borderColor="#4ade80";}}
-            onMouseLeave={e=>{e.currentTarget.style.background="#f0fdf4";e.currentTarget.style.borderColor="#86efac";}}>
-            <span style={{fontSize:16}}>📁</span> Abrir Projeto
-          </button>
-          <input ref={projectInputRef} type="file" accept=".json,.credito.json,application/json" style={{display:"none"}} onChange={onProjectFileChange}/>
-          {projectSaveNotice && (
-            <div style={{marginTop:8,padding:"7px 10px",borderRadius:8,fontSize:11.5,lineHeight:1.35,display:"flex",alignItems:"flex-start",gap:6,
-              background: projectSaveNotice.kind==="ok" ? "#f0fdf4" : "#fef2f2",
-              color: projectSaveNotice.kind==="ok" ? "#15803d" : "#b91c1c",
-              border: `1px solid ${projectSaveNotice.kind==="ok" ? "#bbf7d0" : "#fecaca"}`}}>
-              <span>{projectSaveNotice.kind==="ok" ? "✅" : "⚠️"}</span>
-              <span style={{flex:1}}>{projectSaveNotice.msg}</span>
-              <span onClick={()=>setProjectSaveNotice(null)} style={{cursor:"pointer",opacity:.6,fontWeight:700}} title="Dispensar">×</span>
-            </div>
-          )}
-          {/* Execução Híbrida H6 (DEC-HX-009) — recomendação proativa ao abrir um
-              projeto acima da zona de conforto. Nunca bloqueou o load (já aconteceu
-              acima); isto é só o aviso + atalho pra ligar o motor. Dismissível. */}
-          {projectLoadNotice && (
-            <div style={{marginTop:8,padding:"9px 10px",borderRadius:8,fontSize:11.5,lineHeight:1.5,display:"flex",alignItems:"flex-start",gap:7,
-              background:"#fdf4ff",border:"1px solid #f0abfc",color:"#86198f"}}>
-              <span style={{fontSize:14}}>🐍</span>
-              <span style={{flex:1}}>
-                Este projeto tem ~{projectLoadNotice.totalRows.toLocaleString('pt-BR')} linhas
-                (~{formatRamBytes(projectLoadNotice.totalBytes)} estimados) — acima da zona de
-                conforto do navegador (~5MM linhas / ~1,2GB). O app segue funcionando normalmente
-                no browser; para trabalhar sem tetos, {' '}
-                <span onClick={()=>{ setSidecarPrefsOpen(true); setProjectLoadNotice(null); }}
-                  style={{textDecoration:"underline",cursor:"pointer",fontWeight:600}}>
-                  saiba como ligar o Motor Python
-                </span>.
-              </span>
-              <span onClick={()=>setProjectLoadNotice(null)} style={{cursor:"pointer",opacity:.6,fontWeight:700}} title="Dispensar">×</span>
-            </div>
-          )}
-        </div>
+        {/* Inputs de arquivo (ocultos) — acionados pelos comandos do Ribbon (Projeto/Dados/
+            Fluxo) e pelas toolbars de contexto. Migraram para cá com as seções; permanecem
+            sempre montados, fora de qualquer seção condicional. */}
+        <input ref={projectInputRef} type="file" accept=".json,.credito.json,application/json" style={{display:"none"}} onChange={onProjectFileChange}/>
+        <input ref={fileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onFileChange}/>
+        <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
+        <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
+        <input ref={libFileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onLibFileChange}/>
+        <input ref={policyLibFileInputRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onPolicyLibFileChange}/>
+
+        {/* Avisos de Projeto/Fluxo — antes viviam nas seções Projeto/Fluxo (migradas ao
+            Ribbon). O feedback continua no painel, no topo do conteúdo. */}
+        {(projectSaveNotice || projectLoadNotice || importWarn) && (
+          <div style={{padding:"12px 16px 0",display:"flex",flexDirection:"column",gap:8}}>
+            {projectSaveNotice && (
+              <div style={{padding:"7px 10px",borderRadius:8,fontSize:11.5,lineHeight:1.35,display:"flex",alignItems:"flex-start",gap:6,
+                background: projectSaveNotice.kind==="ok" ? "#f0fdf4" : "#fef2f2",
+                color: projectSaveNotice.kind==="ok" ? "#15803d" : "#b91c1c",
+                border: `1px solid ${projectSaveNotice.kind==="ok" ? "#bbf7d0" : "#fecaca"}`}}>
+                <span>{projectSaveNotice.kind==="ok" ? "✅" : "⚠️"}</span>
+                <span style={{flex:1}}>{projectSaveNotice.msg}</span>
+                <span onClick={()=>setProjectSaveNotice(null)} style={{cursor:"pointer",opacity:.6,fontWeight:700}} title="Dispensar">×</span>
+              </div>
+            )}
+            {projectLoadNotice && (
+              <div style={{padding:"9px 10px",borderRadius:8,fontSize:11.5,lineHeight:1.5,display:"flex",alignItems:"flex-start",gap:7,
+                background:"#fdf4ff",border:"1px solid #f0abfc",color:"#86198f"}}>
+                <span style={{fontSize:14}}>🐍</span>
+                <span style={{flex:1}}>
+                  Este projeto tem ~{projectLoadNotice.totalRows.toLocaleString('pt-BR')} linhas
+                  (~{formatRamBytes(projectLoadNotice.totalBytes)} estimados) — acima da zona de
+                  conforto do navegador (~5MM linhas / ~1,2GB). O app segue funcionando normalmente
+                  no browser; para trabalhar sem tetos, {' '}
+                  <span onClick={()=>{ setSidecarPrefsOpen(true); setProjectLoadNotice(null); }}
+                    style={{textDecoration:"underline",cursor:"pointer",fontWeight:600}}>
+                    saiba como ligar o Motor Python
+                  </span>.
+                </span>
+                <span onClick={()=>setProjectLoadNotice(null)} style={{cursor:"pointer",opacity:.6,fontWeight:700}} title="Dispensar">×</span>
+              </div>
+            )}
+            {importWarn && (
+              <div style={{padding:"8px 10px",borderRadius:8,background:"#fffbeb",border:"1px solid #fde68a",fontSize:11,color:"#92400e",lineHeight:1.5,display:"flex",gap:6,alignItems:"flex-start"}}>
+                <span style={{flexShrink:0}}>⚠</span>
+                <span>{importWarn}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Motor Python (Execução Híbrida H4/H5/H6) — preferência opt-in. Desligado
             por padrão: com o toggle off o ComputeRouter nem tenta detectar e NADA muda
@@ -7934,94 +8096,7 @@ export default function App() {
           )}
         </div>
 
-        {/* Importar CSV button */}
-        <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
-          <p style={{fontSize:11,color:"#94a3b8",marginBottom:10,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Dados</p>
-          <button onClick={()=>fileInputRef.current?.click()}
-            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"10px 14px",borderRadius:10,border:"1.5px dashed #cbd5e1",background:"#fafafa",color:"#475569",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
-            onMouseEnter={e=>{e.currentTarget.style.borderColor="#3b82f6";e.currentTarget.style.color="#2563eb";e.currentTarget.style.background="#eff6ff";}}
-            onMouseLeave={e=>{e.currentTarget.style.borderColor="#cbd5e1";e.currentTarget.style.color="#475569";e.currentTarget.style.background="#fafafa";}}>
-            <span style={{fontSize:18}}>📂</span> Importar CSV
-          </button>
-          <input ref={fileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onFileChange}/>
-        </div>
 
-        {/* Exportar / Importar Fluxo */}
-        <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
-          <p style={{fontSize:11,color:"#94a3b8",marginBottom:10,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Fluxo</p>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            <button onClick={exportFlow}
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #a5b4fc",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#818cf8";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#a5b4fc";}}>
-              <span style={{fontSize:16}}>⬇</span> Exportar Fluxo
-            </button>
-            <button onClick={()=>flowImportRef.current?.click()}
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px dashed #a5b4fc",background:"#fafafa",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor="#6366f1";e.currentTarget.style.background="#eef2ff";}}
-              onMouseLeave={e=>{e.currentTarget.style.borderColor="#a5b4fc";e.currentTarget.style.background="#fafafa";}}>
-              <span style={{fontSize:16}}>⬆</span> Importar Fluxo
-            </button>
-            <button onClick={()=>openPolicyLibrary('browse')}
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#818cf8";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#c7d2fe";}}>
-              <span style={{fontSize:16}}>📚</span> Políticas{policyLibrary.length>0?` (${policyLibrary.length})`:''}
-            </button>
-            <button onClick={openGoalSeekModal}
-              title="Declarar um objetivo (ex.: +2pp de aprovação) e deixar o motor buscar os movimentos que atingem"
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #fde68a",background:"#fffbeb",color:"#92400e",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#fef3c7";e.currentTarget.style.borderColor="#f59e0b";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#fffbeb";e.currentTarget.style.borderColor="#fde68a";}}>
-              <span style={{fontSize:16}}>🎯</span> Atingir Objetivo
-            </button>
-            <button onClick={openSimplifyModal}
-              title="Detectar nós colapsáveis, chegada zero, regras de lens sem efeito e variáveis re-testadas — propõe a política reduzida com prova de equivalência"
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #bbf7d0",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#dcfce7";e.currentTarget.style.borderColor="#86efac";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#f0fdf4";e.currentTarget.style.borderColor="#bbf7d0";}}>
-              <span style={{fontSize:16}}>🧹</span> Simplificar
-            </button>
-            <button onClick={openDocModal}
-              title="Gerar documento executivo/técnico da política atual — KPIs, fluxo, regras achatadas, funil, cenários e glossário, com os números da simulação"
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #bfdbfe",background:"#eff6ff",color:"#1d4ed8",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#dbeafe";e.currentTarget.style.borderColor="#93c5fd";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#eff6ff";e.currentTarget.style.borderColor="#bfdbfe";}}>
-              <span style={{fontSize:16}}>📄</span> Documentar Política
-            </button>
-            <button onClick={()=>openSegmentDiscoveryModal(null)}
-              title="Varrer a base (subgroup discovery) procurando segmentos onde a política atual está desalinhada — aprovação deixada na mesa, risco vazando ou blocos heterogêneos"
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #c7d2fe",background:"#eef2ff",color:"#4f46e5",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#a5b4fc";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#eef2ff";e.currentTarget.style.borderColor="#c7d2fe";}}>
-              <span style={{fontSize:16}}>🔍</span> Descobrir Segmentos
-            </button>
-            <button onClick={()=>openClusterModal(null)}
-              title="Agrupar segmentos parecidos por comportamento (aprovação AS IS, inadimplência) via k-means determinístico — sempre disponível; o Motor Python remove os tetos e libera k automático/hierárquico"
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #ddd6fe",background:"#f5f3ff",color:"#6d28d9",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#ede9fe";e.currentTarget.style.borderColor="#c4b5fd";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#f5f3ff";e.currentTarget.style.borderColor="#ddd6fe";}}>
-              <span style={{fontSize:16}}>🧩</span> Clusterizar Segmentos
-            </button>
-            <button onClick={()=>openRangeModal()}
-              title="Descobre os cortes que maximizam a discriminação de inadimplência (binning supervisionado por IV/WoE) sobre uma coluna contínua — monotônico por padrão, materializa como variável de fluxo"
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"9px 14px",borderRadius:10,border:"1.5px solid #99f6e4",background:"#f0fdfa",color:"#0f766e",cursor:"pointer",fontSize:12.5,fontWeight:600,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#ccfbf1";e.currentTarget.style.borderColor="#5eead4";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#f0fdfa";e.currentTarget.style.borderColor="#99f6e4";}}>
-              <span style={{fontSize:16}}>📐</span> Criar Faixas por Risco
-            </button>
-            <input ref={flowImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onFlowFileChange}/>
-            <input ref={cinemaImportRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onCinemaFileChange}/>
-            <input ref={libFileInputRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onLibFileChange}/>
-            <input ref={policyLibFileInputRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={onPolicyLibFileChange}/>
-          </div>
-          {importWarn&&(
-            <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#fffbeb",border:"1px solid #fde68a",fontSize:11,color:"#92400e",lineHeight:1.5,display:"flex",gap:6,alignItems:"flex-start"}}>
-              <span style={{flexShrink:0}}>⚠</span>
-              <span>{importWarn}</span>
-            </div>
-          )}
-        </div>
 
         {/* Loaded CSVs list */}
         {Object.keys(csvStore).length > 0 && (
@@ -8140,29 +8215,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Decision Lens button */}
-        {Object.keys(csvStore).length > 0 && (
-          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
-            <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Segmentação</p>
-            <button
-              onClick={()=>{
-                pushHistory();
-                const svgEl=svgRef.current;
-                const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
-                const id=uid();
-                setShapes(p=>[...p,{id,type:"decision_lens",x:cx-LENS_W/2,y:cy-LENS_H/2,w:LENS_W,h:LENS_H,label:"Decision Lens",rules:[],color:"#fff"}]);
-                setSel(id);
-              }}
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"10px 14px",borderRadius:10,
-                border:"1.5px solid #a5f3fc",background:"#ecfeff",
-                color:"#0891b2",cursor:"pointer",fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.background="#cffafe";e.currentTarget.style.borderColor="#06b6d4";}}
-              onMouseLeave={e=>{e.currentTarget.style.background="#ecfeff";e.currentTarget.style.borderColor="#a5f3fc";}}>
-              <span style={{fontSize:16}}>🛢</span> Adicionar Decision Lens
-            </button>
-            <p style={{fontSize:10.5,color:"#cbd5e1",marginTop:6,lineHeight:1.4}}>Ou use a ferramenta 🔎 na barra lateral</p>
-          </div>
-        )}
 
         {/* Copiloto — lint estrutural (Sessão 1, DEC-IA-006): achados por severidade,
             "ir até o nó" e quick-fixes não-destrutivos. Efêmero (não persiste). */}
@@ -8240,58 +8292,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Simulation panel button — always shown so user can add the panel even without data */}
-        {true && (
-          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
-            <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Simulação</p>
-            <button
-              onClick={()=>{
-                if (shapes.some(s=>s.type==="simPanel")) return;
-                pushHistory();
-                const svgEl=svgRef.current;
-                const cx=(svgEl.clientWidth/2-vp.x)/vp.s, cy=(svgEl.clientHeight/2-vp.y)/vp.s;
-                setShapes(p=>[...p,{id:uid(),type:"simPanel",x:cx-150,y:cy-220,w:300,h:440,label:"Simulação",color:"#fff"}]);
-              }}
-              disabled={shapes.some(s=>s.type==="simPanel")}
-              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"10px 14px",borderRadius:10,
-                border:"1.5px solid",borderColor:shapes.some(s=>s.type==="simPanel")?"#c7d2fe":"#a5b4fc",
-                background:shapes.some(s=>s.type==="simPanel")?"#f5f3ff":"#eef2ff",
-                color:shapes.some(s=>s.type==="simPanel")?"#a78bfa":"#4f46e5",
-                cursor:shapes.some(s=>s.type==="simPanel")?"default":"pointer",
-                fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
-              onMouseEnter={e=>{if(!shapes.some(s=>s.type==="simPanel")){e.currentTarget.style.background="#e0e7ff";e.currentTarget.style.borderColor="#818cf8";}}}
-              onMouseLeave={e=>{e.currentTarget.style.background=shapes.some(s=>s.type==="simPanel")?"#f5f3ff":"#eef2ff";e.currentTarget.style.borderColor=shapes.some(s=>s.type==="simPanel")?"#c7d2fe":"#a5b4fc";}}>
-              <span style={{fontSize:16}}>📊</span>
-              {shapes.some(s=>s.type==="simPanel")?"Painel ativo no canvas":"Adicionar Painel"}
-            </button>
-            {/* Business Impact widget toggle */}
-            <div style={{marginTop:12,padding:"10px 12px",borderRadius:10,background:"linear-gradient(135deg,#0f172a,#1a1040)",border:"1px solid rgba(129,140,248,0.25)"}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-                <span style={{fontSize:10,fontWeight:800,color:"#818cf8",textTransform:"uppercase",letterSpacing:"0.1em"}}>Business Impact</span>
-                <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
-                  <input type="checkbox" checked={businessWidget.visible}
-                    onChange={e => setBusinessWidget(p => ({ ...p, visible: e.target.checked }))}
-                    style={{width:14,height:14,accentColor:"#818cf8",cursor:"pointer"}}/>
-                  <span style={{fontSize:11,color:"#94a3b8",fontWeight:500}}>Exibir no board</span>
-                </label>
-              </div>
-              <button
-                onClick={() => setBusinessWidget(p => ({ ...p, visible: true }))}
-                disabled={businessWidget.visible}
-                style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                  padding:"7px 12px",borderRadius:8,border:"1px solid",
-                  borderColor:businessWidget.visible?"rgba(129,140,248,0.2)":"rgba(129,140,248,0.5)",
-                  background:businessWidget.visible?"rgba(255,255,255,0.03)":"rgba(129,140,248,0.12)",
-                  color:businessWidget.visible?"#475569":"#a5b4fc",
-                  cursor:businessWidget.visible?"default":"pointer",fontSize:12,fontWeight:500,fontFamily:"inherit",transition:"all .15s"}}
-                onMouseEnter={e=>{if(!businessWidget.visible){e.currentTarget.style.background="rgba(129,140,248,0.2)";e.currentTarget.style.borderColor="rgba(129,140,248,0.7)";}}}
-                onMouseLeave={e=>{if(!businessWidget.visible){e.currentTarget.style.background="rgba(129,140,248,0.12)";e.currentTarget.style.borderColor="rgba(129,140,248,0.5)";}}}>
-                <span style={{fontSize:14}}>{businessWidget.visible ? "✦" : "⬡"}</span>
-                {businessWidget.visible ? "Widget ativo no board" : "Abrir Widget"}
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Feature flags */}
         <div style={{padding:"10px 16px",borderBottom:"1px solid #f1f5f9"}}>
