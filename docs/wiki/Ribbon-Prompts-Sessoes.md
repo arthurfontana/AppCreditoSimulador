@@ -605,11 +605,37 @@ default defensivo + bump de schema). Ao fim, app 100% funcional e npm test verde
 ```
 
 **Checklist**:
-- [ ] Status Bar renderiza e atualiza com simulação/seleção; matemática inalterada
-- [ ] Zona direita: 🐍 (→ Hub) + BuildBadge + zoom %; removidos das casas antigas
-- [ ] Menu de configuração (engrenagem + clique-direito + Hub) funciona
-- [ ] `statusBarIndicators` persistido (bump de schema, restore defensivo)
-- [ ] `npm test` verde; app funcional
+- [x] Status Bar renderiza e atualiza com simulação/seleção; matemática inalterada
+- [x] Zona direita: 🐍 (→ Hub) + BuildBadge + zoom %; removidos das casas antigas
+- [x] Menu de configuração (engrenagem + clique-direito + Hub) funciona
+- [x] `statusBarIndicators` persistido (bump de schema, restore defensivo)
+- [x] `npm test` verde; app funcional
+
+> **Entregue (2026-07-20).** `StatusBar` (novo componente, junto do `Ribbon`) renderizado
+> entre o fim do CANVAS PANE e a barra de abas de canvas — faixa fina (`height:26`) sempre
+> visível (Dashboard e Canvas), fora do fluxo condicionado a `activeTab`. Registro
+> `STATUS_BAR_INDICATORS_META` (fonte única, 6 ids: `approvalRate`, `inadReal`,
+> `inadInferida`, `selectionCount`, `nodeArrival`, `baseRows`) consumido tanto pela zona
+> esquerda configurável quanto pela seção 🗔 Interface do Hub — mesmo estado
+> `statusBarIndicators`, dois pontos de entrada. Valores computados em `statusBarValues`
+> (useMemo): `approvalRate`/`inadReal`/`inadInferida` leem a mesma
+> `incrementalResult ?? simResult` que o Business Impact/SimIndicators (nenhum
+> denominador novo); `selectionCount` = `multiSel.size` ou `sel?1:0`;
+> `nodeArrival` = novo helper `totalNodeArrival(shape, arr)` (leitura pura de
+> `nodeArrivals[selShape.id]`, mesma regra de `totalArrivalOf` do worker — soma o(s)
+> eixo(s) configurado(s), maior dos dois quando losango de linha+coluna) — `null`
+> (mostra "—") em multi-seleção ou tipo sem domínio; `baseRows` = soma de `rowCount(csv)`
+> sobre todo o `csvStore` carregado. Zona direita fixa: `ComputeEngineBadge` (generalizado
+> com prop `onClick`/`title` opcionais — o badge do header/Hub continua com `onRecheck`
+> inalterado) clicando para `openSettings('motor-python')`; `BuildBadge` reaproveitado
+> sem mudança; zoom % clicável → `setVp({x:20,y:40,s:1})` (mesmo centralizar do ⌂).
+> Engrenagem na zona esquerda + `onContextMenu` na barra inteira abrem o mesmo popover
+> (`createPortal`, ancorado para cima — a barra fica perto do rodapé) com checkboxes por
+> indicador. **Removido**: `ComputeEngineBadge`/`BuildBadge` do header do painel direito;
+> o texto de `%` solto do canto do canvas (os botões `+`/`−`/`⌂` permanecem). Persistido em
+> `sessionStorage` (`status_bar_indicators_v1`) + `.credito.json` com bump
+> `schemaVersion 2.9 → 3.0` e restore defensivo (filtra ids desconhecidos contra o
+> registro, para uma versão futura nunca quebrar a barra de um projeto antigo).
 
 ---
 
@@ -741,7 +767,7 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 - [x] **Sessão 2** — Abas contextuais + fim das toolbars flutuantes 🏷️ `Opus 4.8`
 - [x] **Sessão 3** — ⚙ Hub de Configurações 🏷️ `Opus 4.8`
 - [x] **Sessão 4** — Colapso em 3 estados 🏷️ `Opus 4.8`
-- [ ] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
+- [x] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
 - [ ] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
 - [ ] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
 - [ ] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
@@ -792,8 +818,9 @@ Cada sessão segue o mesmo template:
 
 **Última atualização**: 2026-07-20 (v2 — reavaliação completa pós-Épicos FR/GS/H4–H8:
 inventário de 12 superfícies, abas Analisar/Otimizar separadas, Hub de Configurações,
-Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–4 entregues**
+Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–5 entregues**
 (registro `COMMANDS` + Ribbon fixed; abas contextuais + aposentadoria das 6 toolbars
 flutuantes; ⚙ Hub de Configurações; colapso do Ribbon em 3 estados — `ribbonMode`,
-schema 2.9); Sessões 5–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
+schema 2.9; Status Bar configurável + realocação de badges — `statusBarIndicators`,
+schema 3.0); Sessões 6–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
 executada e está substituída por esta.)
