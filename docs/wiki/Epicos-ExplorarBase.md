@@ -286,11 +286,12 @@ porquê.
 
 ---
 
-## Fora de escopo deste épico (peças 2 e 3 da Jornada — épicos futuros)
+## Fora de escopo deste épico (peças 2 e 3 da Jornada — especificadas em [[Jornada-Prompts-Sessoes]])
 
 - Feed de próxima melhor ação no painel Copiloto (orquestração priorizada de
-  ranking/descoberta/lint/simplificação/goal-seek).
-- Etapas da política como mapa de progresso + checklist de prontidão/governança.
+  ranking/descoberta/lint/simplificação/goal-seek) — **Épico NB** (DEC-NB-001..008).
+- Etapas da política como mapa de progresso + checklist de prontidão/governança —
+  **Épico EP** (DEC-EP-001..007).
 - Esqueleto sugerido de política ("montar rascunho a partir da análise").
 - Novas métricas-alvo além de inad (margem/churn — extensão do wizard, DEC-SD-006 já
   deixa o motor pronto).
