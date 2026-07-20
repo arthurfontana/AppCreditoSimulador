@@ -160,7 +160,7 @@ const COMPUTE_BADGE_TONE = {
 // Badge ao lado do BuildBadge: ⚡ tier full / ⚙ tier stdlib / 🐍 ausente (cinza,
 // inclui desligado). Clique dispara `onRecheck` — mesma re-checagem do boot
 // (DEC-HX-004: `capabilities` é barato, pode ser chamado sob demanda).
-function ComputeEngineBadge({ enabled, status, checking, onRecheck }) {
+function ComputeEngineBadge({ enabled, status, checking, onRecheck, onClick, title }) {
   const [tip, setTip] = useState(false);
   const badge = describeComputeBadge(enabled, status);
   const detailLines = describeCapabilitiesDetail(status);
@@ -170,8 +170,8 @@ function ComputeEngineBadge({ enabled, status, checking, onRecheck }) {
     <div style={{position:"relative",display:"inline-flex",alignItems:"center"}}
       onMouseEnter={()=>setTip(true)} onMouseLeave={()=>setTip(false)}>
       <span
-        onClick={onRecheck}
-        title="Clique para verificar a conexão com o Motor Python"
+        onClick={onClick || onRecheck}
+        title={title || "Clique para verificar a conexão com o Motor Python"}
         style={{
           fontSize:9.5,fontWeight:600,color:tone.color,letterSpacing:.3,textTransform:"none",
           background:tone.bg,borderRadius:6,padding:"2px 7px",cursor:"pointer",
@@ -1265,6 +1265,26 @@ function effectiveDomain(fullDomain, cfg, counts) {
   return withVol.length > 0 ? withVol : fullDomain;
 }
 
+// Volume total que chega a um losango/Cineminha, a partir do `nodeArrivals[shape.id]`
+// já computado pelo worker (val/row/col) — mesma regra de `totalArrivalOf` em
+// simulation.worker.js (Simplificação): losango soma todos os valores; Cineminha soma
+// o eixo configurado (o maior dos dois quando linha e coluna estão configuradas, já
+// que descrevem a MESMA população por ângulos diferentes). Usado pela Status Bar
+// (indicador "volume no nó selecionado") — leitura pura, não muda nenhuma matemática.
+function totalNodeArrival(shape, arr) {
+  if (!arr) return null;
+  if (shape.type === 'decision') return Object.values(arr.val || {}).reduce((a, b) => a + b, 0);
+  if (shape.type === 'cineminha') {
+    const rowSum = Object.values(arr.row || {}).reduce((a, b) => a + b, 0);
+    const colSum = Object.values(arr.col || {}).reduce((a, b) => a + b, 0);
+    if (shape.rowVar && shape.colVar) return Math.max(rowSum, colSum);
+    if (shape.rowVar) return rowSum;
+    if (shape.colVar) return colSum;
+    return 0;
+  }
+  return null;
+}
+
 function buildProposedByShape(poolCells, shapeMetas, pooledMetrics) {
   const result = {};
   for (const meta of shapeMetas) {
@@ -1925,6 +1945,100 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
   );
 }
 
+// ═══ Status Bar (UX 2.0 — Sessão 5) ════════════════════════════════════════════
+// Faixa fina "soma automática" (padrão Excel), acima da barra de abas de canvas.
+// Zona esquerda: indicadores configuráveis — registro abaixo é a FONTE ÚNICA,
+// também consumida pela seção 🗔 Interface do Hub de Configurações (mesma escolha,
+// dois pontos de entrada). Zona direita fixa: 🐍 Motor Python (abre o Hub),
+// BuildBadge, zoom % (clique → centralizar). Só leitura de simResult/
+// incrementalResult/nodeArrivals/csvStore já computados pelo App — nenhuma
+// matemática nova.
+const STATUS_BAR_INDICATORS_META = [
+  { id: 'approvalRate',   label: 'Taxa de Aprovação' },
+  { id: 'inadReal',       label: 'Inad. Real' },
+  { id: 'inadInferida',   label: 'Inad. Inferida' },
+  { id: 'selectionCount', label: 'Shapes Selecionados' },
+  { id: 'nodeArrival',    label: 'Volume no Nó Selecionado' },
+  { id: 'baseRows',       label: 'Linhas da Base' },
+];
+const DEFAULT_STATUS_BAR_INDICATORS = STATUS_BAR_INDICATORS_META.map(m => m.id);
+
+function StatusBar({ indicators, values, onToggleIndicator, computeSidecar, computeSidecarStatus,
+  computeSidecarChecking, onOpenSettings, zoomPct, onZoomClick }) {
+  const [menu, setMenu] = useState(null); // efêmero — null | {x,y}
+  const closeMenu = () => setMenu(null);
+  const openMenuAt = (e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); };
+
+  const shown = indicators.map(id => values[id]).filter(Boolean);
+
+  return (
+    <div onContextMenu={openMenuAt}
+      title="Clique-direito para escolher os indicadores"
+      style={{ display: 'flex', alignItems: 'center', height: 26, flexShrink: 0, background: '#f1f5f9',
+        borderTop: '1px solid #e2e8f0', padding: '0 8px', fontSize: 11, color: '#475569',
+        fontFamily: "'DM Sans',system-ui,sans-serif", userSelect: 'none', gap: 14 }}>
+
+      {/* Zona esquerda — indicadores configuráveis */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flex: 1, minWidth: 0, overflowX: 'auto' }}>
+        <button onClick={openMenuAt} title="Escolher indicadores da Status Bar"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18,
+            borderRadius: 5, border: 'none', background: 'transparent', color: '#94a3b8', cursor: 'pointer',
+            fontSize: 12, fontFamily: 'inherit', flexShrink: 0 }}>
+          ⚙
+        </button>
+        {shown.length === 0 ? (
+          <span style={{ color: '#cbd5e1' }}>Nenhum indicador — clique em ⚙ para escolher</span>
+        ) : shown.map(v => (
+          <span key={v.id} style={{ display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap', flexShrink: 0 }}>
+            <span style={{ color: '#94a3b8' }}>{v.label}</span>
+            <span style={{ fontWeight: 700, color: v.color || '#1e293b' }}>{v.text}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* Zona direita — fixa: 🐍 Motor Python · Build · zoom % */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <ComputeEngineBadge enabled={computeSidecar.enabled} status={computeSidecarStatus}
+          checking={computeSidecarChecking} onClick={onOpenSettings}
+          title="Motor Python — clique para abrir Configurações"/>
+        <BuildBadge/>
+        <span onClick={onZoomClick} title="Zoom — clique para centralizar"
+          style={{ cursor: 'pointer', color: '#94a3b8', fontWeight: 600, padding: '2px 5px', borderRadius: 5,
+            transition: 'background .12s' }}
+          onMouseEnter={e => { e.currentTarget.style.background = '#e2e8f0'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+          {zoomPct}%
+        </span>
+      </div>
+
+      {/* Menu de configuração — engrenagem ou clique-direito na barra (abre para cima). */}
+      {menu && createPortal(
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 9000 }} onClick={closeMenu}/>
+          <div style={{ position: 'fixed', left: menu.x, bottom: Math.max(8, window.innerHeight - menu.y + 4),
+            background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0',
+            boxShadow: '0 -8px 24px rgba(0,0,0,.12)', minWidth: 230, zIndex: 9001, padding: '6px 2px' }}>
+            <div style={{ padding: '6px 12px 4px', fontSize: 10, fontWeight: 700, color: '#94a3b8',
+              textTransform: 'uppercase', letterSpacing: .5 }}>Indicadores da Status Bar</div>
+            {STATUS_BAR_INDICATORS_META.map(m => (
+              <label key={m.id}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5,
+                  color: '#475569', fontWeight: 500, padding: '6px 12px' }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#f8fafc'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+                <input type="checkbox" checked={indicators.includes(m.id)} onChange={() => onToggleIndicator(m.id)}
+                  style={{ width: 14, height: 14, accentColor: '#3b82f6' }}/>
+                {m.label}
+              </label>
+            ))}
+          </div>
+        </>,
+        document.body
+      )}
+    </div>
+  );
+}
+
 // ═══ REGIÃO: Estado Principal do Componente ═══
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -1964,6 +2078,21 @@ export default function App() {
   });
   const cycleRibbonMode = useCallback(() => {
     setRibbonMode(m => (m === 'fixed' ? 'compact' : m === 'compact' ? 'auto' : 'fixed'));
+  }, []);
+  // Status Bar (UX 2.0 — Sessão 5): quais indicadores aparecem na zona esquerda, e em
+  // que ordem — engrenagem/clique-direito na barra (e a seção 🗔 Interface do Hub, mesmo
+  // estado). Persistido (sessionStorage + .credito.json, schema 3.0).
+  const [statusBarIndicators, setStatusBarIndicators] = useState(() => {
+    try {
+      const s = sessionStorage.getItem('status_bar_indicators_v1');
+      if (!s) return DEFAULT_STATUS_BAR_INDICATORS;
+      const arr = JSON.parse(s);
+      const valid = new Set(STATUS_BAR_INDICATORS_META.map(m => m.id));
+      return Array.isArray(arr) ? arr.filter(id => valid.has(id)) : DEFAULT_STATUS_BAR_INDICATORS;
+    } catch { return DEFAULT_STATUS_BAR_INDICATORS; }
+  });
+  const toggleStatusBarIndicator = useCallback((id) => {
+    setStatusBarIndicators(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   }, []);
   // Ribbon (UX 2.0 — Sessão 2): a aba contextual está em foco? Efêmero — deriva da seleção
   // (auto-ativa ao selecionar, volta à aba fixa ao desselecionar). Não persiste.
@@ -2668,6 +2797,8 @@ export default function App() {
   // Ribbon (UX 2.0 — Sessão 1): persiste a aba ativa do Ribbon na sessionStorage.
   useEffect(() => { try { sessionStorage.setItem('ribbon_active_tab_v1', ribbonActiveTab); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonActiveTab]);
   useEffect(() => { try { sessionStorage.setItem('ribbon_mode_v1', ribbonMode); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonMode]);
+  // Status Bar (UX 2.0 — Sessão 5): persiste os indicadores escolhidos.
+  useEffect(() => { try { sessionStorage.setItem('status_bar_indicators_v1', JSON.stringify(statusBarIndicators)); } catch { /* quota/privacidade — não bloqueia */ } }, [statusBarIndicators]);
 
   // Persiste multi-canvas store — inclui working copy do canvas ativo (Sub-sessão 5A).
   // Debounced (500ms, mesmo padrão dos effects de simulação): setShapes é chamado por
@@ -3859,12 +3990,13 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "2.9",
+      schemaVersion: "3.0",
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
       ribbonActiveTab,
       ribbonMode,
+      statusBarIndicators,
       viewport: vp,
       panelCollapsed,
       canvases: mergedCanvases,
@@ -3983,6 +4115,15 @@ export default function App() {
     setRibbonActiveTab(typeof data.ribbonActiveTab === 'string' ? data.ribbonActiveTab : 'inicio');
     // Ribbon colapso (UX 2.0 — Sessão 4): default defensivo p/ projetos antigos (schema < 2.9).
     setRibbonMode((data.ribbonMode === 'compact' || data.ribbonMode === 'auto') ? data.ribbonMode : 'fixed');
+    // Status Bar (UX 2.0 — Sessão 5): default defensivo p/ projetos antigos (schema < 3.0) —
+    // filtra para ids conhecidos, para uma versão futura desconhecida não quebrar a barra.
+    {
+      const validIds = new Set(STATUS_BAR_INDICATORS_META.map(m => m.id));
+      const loadedIndicators = Array.isArray(data.statusBarIndicators)
+        ? data.statusBarIndicators.filter(id => validIds.has(id))
+        : DEFAULT_STATUS_BAR_INDICATORS;
+      setStatusBarIndicators(loadedIndicators);
+    }
     if (typeof data.panelCollapsed === 'boolean') setPanelCollapsed(data.panelCollapsed);
     const pref = data.preferences || {};
     if (typeof pref.enableDynThickness === 'boolean') setEnableDynThickness(pref.enableDynThickness);
@@ -7414,6 +7555,32 @@ export default function App() {
   // Aba efetivamente exibida: a contextual quando em foco; senão a fixa persistida.
   const ribbonShownTab = (activeContextTab && ctxTabShown) ? activeContextTab : ribbonActiveTab;
 
+  // ═══ Status Bar (UX 2.0 — Sessão 5) — valores dos indicadores ═══
+  // Mesma leitura de simResult/incrementalResult que o Business Impact (linha 7559+) e a
+  // SimIndicators — nenhum denominador novo, só formatação para a faixa fina.
+  const statusBarValues = useMemo(() => {
+    const inc = incrementalResult;
+    const displayResult = inc ? inc.simulated : simResult;
+    const hasData = displayResult.totalQty > 0;
+    const rate = hasData ? displayResult.approvalRate : null;
+    const irV = displayResult.inadReal;
+    const iiV = displayResult.inadInferida;
+    const selCount = multiSel.size > 0 ? multiSel.size : (sel ? 1 : 0);
+    const nodeVol = (multiSel.size === 0 && selShape) ? totalNodeArrival(selShape, nodeArrivals[selShape.id]) : null;
+    const baseRows = Object.values(csvStore).reduce((a, c) => a + rowCount(c), 0);
+    return {
+      approvalRate:   { id: 'approvalRate',   label: 'Taxa de Aprovação', text: rate === null ? 'N/A' : `${rate.toFixed(1)}%`,
+        color: rate === null ? undefined : rate >= 70 ? '#16a34a' : rate >= 40 ? '#d97706' : '#dc2626' },
+      inadReal:       { id: 'inadReal',       label: 'Inad. Real', text: fmtPct(irV),
+        color: irV === null ? undefined : irV > 0.05 ? '#dc2626' : '#d97706' },
+      inadInferida:   { id: 'inadInferida',   label: 'Inad. Inferida', text: fmtPct(iiV),
+        color: iiV === null ? undefined : iiV > 0.05 ? '#dc2626' : '#d97706' },
+      selectionCount: { id: 'selectionCount', label: 'Shapes Selecionados', text: String(selCount) },
+      nodeArrival:    { id: 'nodeArrival',    label: 'Volume no Nó Selecionado', text: nodeVol === null ? '—' : fmtQty(nodeVol) },
+      baseRows:       { id: 'baseRows',       label: 'Linhas da Base', text: fmtQty(baseRows) },
+    };
+  }, [simResult, incrementalResult, sel, multiSel, selShape, nodeArrivals, csvStore]);
+
   // ═══ REGIÃO: JSX — Shell da Aplicação (toolbar, abas, canvas) ═══
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
@@ -7482,12 +7649,12 @@ export default function App() {
           </div>
         )}
 
-        {/* Zoom controls */}
+        {/* Zoom controls — o indicador de % solto migrou para a Status Bar (UX 2.0 —
+            Sessão 5, zona direita fixa); os botões +/−/⌂ permanecem no canto do canvas. */}
         <div style={{position:"absolute",bottom:16,right:16,zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
           {[["+",()=>zoomCenter(1.2)],["−",()=>zoomCenter(1/1.2)],["⌂",()=>setVp({x:20,y:40,s:1})]].map(([icon,fn])=>(
             <button key={icon} className="wbz" onClick={fn} style={{width:36,height:36,borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",boxShadow:"0 1px 4px rgba(0,0,0,.08)",color:"#64748b",cursor:"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit",transition:"all .15s"}}>{icon}</button>
           ))}
-          <div style={{color:"#94a3b8",fontSize:10,fontFamily:"inherit",marginTop:1}}>{Math.round(vp.s*100)}%</div>
         </div>
 
         {/* Floating hint */}
@@ -7856,9 +8023,8 @@ export default function App() {
         <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #f1f5f9",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
           <div style={{width:6,height:6,borderRadius:"50%",background:"#3b82f6",boxShadow:"0 0 0 3px #dbeafe",flexShrink:0}}/>
           <span style={{fontSize:13,fontWeight:600,color:"#1e293b",letterSpacing:.1,flex:1}}>Painel</span>
-          <ComputeEngineBadge enabled={computeSidecar.enabled} status={computeSidecarStatus}
-            checking={computeSidecarChecking} onRecheck={detectSidecar}/>
-          <BuildBadge />
+          {/* 🐍 ComputeEngineBadge + BuildBadge MIGRARAM para a Status Bar (UX 2.0 — Sessão 5,
+              zona direita fixa). */}
           <button
             onClick={()=>setPanelCollapsed(true)}
             title="Ocultar painel"
@@ -8356,8 +8522,24 @@ export default function App() {
                           Ocultar painel direito
                         </label>
                         <div style={{fontSize:10.5,color:"#94a3b8",marginLeft:23,lineHeight:1.5}}>
-                          Recolhe o painel lateral para ganhar espaço de canvas. (Indicadores da Status Bar
-                          chegam na próxima sessão da evolução de UX.)
+                          Recolhe o painel lateral para ganhar espaço de canvas.
+                        </div>
+                      </div>
+                      {/* Indicadores da Status Bar (UX 2.0 — Sessão 5) — mesmo estado
+                          statusBarIndicators da engrenagem/clique-direito na própria barra. */}
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,margin:0}}>Indicadores da Status Bar</p>
+                        {STATUS_BAR_INDICATORS_META.map(m=>(
+                          <label key={m.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                            <input type="checkbox" checked={statusBarIndicators.includes(m.id)} onChange={()=>toggleStatusBarIndicator(m.id)}
+                              style={{width:15,height:15,accentColor:"#3b82f6"}}/>
+                            {m.label}
+                          </label>
+                        ))}
+                        <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5}}>
+                          Faixa fina acima das abas de canvas — Taxa de Aprovação/Inad. espelham a
+                          simulação atual; também alternável pela engrenagem ou clique-direito na
+                          própria barra.
                         </div>
                       </div>
                     </div>
@@ -8368,7 +8550,7 @@ export default function App() {
                     <div style={{display:"flex",flexDirection:"column",gap:16,maxWidth:480}}>
                       <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
                         <BuildBadge />
-                        <span style={{fontSize:11.5,color:"#64748b"}}>Versão do schema de Projeto: <b style={{color:"#334155"}}>2.9</b></span>
+                        <span style={{fontSize:11.5,color:"#64748b"}}>Versão do schema de Projeto: <b style={{color:"#334155"}}>3.0</b></span>
                       </div>
                       <div>
                         <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Atalhos de teclado</p>
@@ -13580,6 +13762,19 @@ export default function App() {
         );
       })()}
       </div>{/* ── fim CANVAS PANE ── */}
+
+      {/* ═══════════════ STATUS BAR (UX 2.0 — Sessão 5) ═══════════════ */}
+      <StatusBar
+        indicators={statusBarIndicators}
+        values={statusBarValues}
+        onToggleIndicator={toggleStatusBarIndicator}
+        computeSidecar={computeSidecar}
+        computeSidecarStatus={computeSidecarStatus}
+        computeSidecarChecking={computeSidecarChecking}
+        onOpenSettings={() => openSettings('motor-python')}
+        zoomPct={Math.round(vp.s * 100)}
+        onZoomClick={() => setVp({ x: 20, y: 40, s: 1 })}
+      />
 
       {/* ═══════════════ TAB BAR (BOTTOM LEFT) — multi-canvas ═══════════════ */}
       <div style={{display:"flex",alignItems:"flex-start",gap:2,background:"#e2e8f0",borderTop:"1px solid #cbd5e1",padding:"0 8px 0",flexShrink:0,alignSelf:"flex-start",overflowX:"auto",maxWidth:"100%"}}>

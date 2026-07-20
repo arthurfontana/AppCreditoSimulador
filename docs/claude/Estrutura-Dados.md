@@ -33,6 +33,8 @@
 - `canvases`: store multi-canvas (Sub-sessão 5A, DEC-AW-007) — `{[id]: {id, name, shapes, conns, includeInDashboard}}`; `shapes`/`conns` são o **working copy** do canvas ativo
 - `activeCanvasId`: ID do canvas ativo
 - `renamingCanvasId` / `renameValue` / `canvasTabMenu`: estado UI da barra de abas de canvas
+- `ribbonActiveTab` / `ribbonMode`: aba ativa e colapso em 3 estados do Ribbon (UX 2.0 — ver `docs/wiki/Ribbon-Prompts-Sessoes.md`)
+- `statusBarIndicators`: ids (ordem = ordem de exibição) dos indicadores ativos na Status Bar (UX 2.0 — Sessão 5) — `string[]` sobre o registro `STATUS_BAR_INDICATORS_META`; escolhido pela engrenagem/clique-direito na própria barra ou pela seção 🗔 Interface do Hub de Configurações (mesmo estado)
 
 ### Tipos de coluna (`COL_TYPES`)
 | value          | icon | label              | uso                                              |
@@ -165,8 +167,10 @@
 - `renderSimPanel(shape)`: painel SVG com Taxa de Aprovação, Inad. Real e Inad. Inferida
 
 ### Componentes globais (fora do componente principal)
-- `BuildBadge`: badge de versão/deploy exibido no header do painel direito — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
+- `BuildBadge`: badge de versão/deploy exibido na zona direita da Status Bar (UX 2.0 — Sessão 5; migrou do header do painel direito) — lê as constantes de build injetadas pelo Vite, exibe `#<número> · DD/MM HH:MM`, fica verde se o build tem menos de 5 min, e mostra tooltip com hash, branch e autor ao hover
+- `ComputeEngineBadge({enabled, status, checking, onRecheck, onClick, title})`: badge 🐍 Motor Python — `onClick` (se dado) substitui `onRecheck` no clique (usado pela Status Bar para abrir `openSettings('motor-python')`; o header/Hub continuam com `onRecheck`, que re-testa a conexão)
 - `SimIndicators`: exibe indicadores de simulação na sidebar direita — mostra resultado atual + comparativo com baseline AS IS quando disponível (`incrementalResult`)
+- `Ribbon` / `StatusBar`: casca de UX 2.0 (registro `COMMANDS` renderizado em abas + faixa fina de indicadores acima da barra de abas de canvas) — ver `docs/wiki/Ribbon-Prompts-Sessoes.md`. `StatusBar` consome `STATUS_BAR_INDICATORS_META` (registro top-level) e `statusBarValues` (computado no `App` via `totalNodeArrival`, ver Funções-chave)
 - `AnalysisTab`: aba Dashboard — layout em 2 colunas (gráficos + `FieldPanel`); funções `addWidget`, `addTextWidget`, `duplicateWidget(id)`, `removeWidget(id)`, `changeConfig(id, patch)`, `changeType(id, type)`
 - `FieldPanel({analyticsDataset})`: chips arrastáveis (HTML5 drag, MIME `application/aw-field`) com dimensões e métricas do dataset analítico
 - `AnalyticsWidget({widget, analyticsDataset, onConfigChange, onTypeChange, onDelete})`: card de gráfico configurável com `FieldWell`, seletor de tipo (`line`/`bar`/`bar100`/`kpi`) e `LineChart`/`BarChart`/`KpiCard` (Recharts)
@@ -184,6 +188,7 @@
 - `buildParetoFrontier(cellMetrics)`: ordena células por `inadInferida` crescente e varre acumulando pontos da fronteira Pareto → array de pontos
 - `extractScenarios(frontier)`: extrai 4 pontos representativos → `{conservador, balanceado, melhorEficiencia, expansao}` onde `melhorEficiencia` é o joelho da curva
 - `isCellEligible(cells, key)`: retorna `true` se a célula está elegível (considera `null`/`true` como elegível, `false` como não elegível)
+- `totalNodeArrival(shape, arr)`: volume total que chega a um losango/Cineminha a partir de `nodeArrivals[shape.id]` — mesma regra de `totalArrivalOf` em `simulation.worker.js` (Simplificação): losango soma todos os valores de `arr.val`; Cineminha soma o eixo configurado (o maior entre `row`/`col` quando os dois estão configurados). `null` para outros tipos ou sem `arr`. Leitura pura — usada pela Status Bar (indicador "Volume no Nó Selecionado", UX 2.0 Sessão 5)
 - `computeAsIsCells(shape, csvStore)`: deriva a prévia de elegibilidade das caselas a partir da decisão histórica AS IS (`__DECISAO_ORIGINAL`) — agrega volume aprovado/reprovado por interseção `rowVal|colVal` **sobre a base completa** (sem roteamento); casela = `1` (elegível) se há qualquer aprovação, `0` só quando 100% do volume decidido é REPROVADO. Retorna `null` sem AS IS. Exportada do `App.jsx`. Usada no botão **↺ Resgatar AS IS** do Johnny (contexto pooled) e como valor de controle do GATE de paridade da prévia contextualizada. A prévia do `assignCinemaVar` **não** usa mais esta função (migrou para o worker — ver `computeCinemaAsIsCells` / Prévia AS IS)
 - `suggestVarType(colName, values)`: heurística para sugerir `ordinal` ou `categorical`
 - `suggestMetricColumns(headers)`: heurística para mapear nomes de colunas aos tipos de métrica

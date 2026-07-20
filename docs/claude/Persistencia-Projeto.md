@@ -11,12 +11,13 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"2.9", kind:"credito-project", generatedAt,
-  activeTab, ribbonActiveTab, ribbonMode, viewport, panelCollapsed, canvases,
-  activeCanvasId, csvStore,
+  Monta o snapshot `{schemaVersion:"3.0", kind:"credito-project", generatedAt,
+  activeTab, ribbonActiveTab, ribbonMode, statusBarIndicators, viewport, panelCollapsed,
+  canvases, activeCanvasId, csvStore,
   analyticsLayout, analyticsGroupings, analyticsPageFilters,
   cinemaLibrary, policyLibrary, businessWidget, preferences}`.
-  (`ribbonActiveTab` desde 2.8; `ribbonMode` — colapso do Ribbon em 3 estados — desde 2.9.)
+  (`ribbonActiveTab` desde 2.8; `ribbonMode` — colapso do Ribbon em 3 estados — desde 2.9;
+  `statusBarIndicators` — quais indicadores aparecem na Status Bar, UX 2.0 Sessão 5 — desde 3.0.)
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
   (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
@@ -75,7 +76,7 @@ terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados comp
 (`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`, H4/H6) ·
-viewport · aba ativa · painel colapsado.
+viewport · aba ativa · indicadores da Status Bar (`statusBarIndicators`) · painel colapsado.
 
 ## Auto-persistência de sessão (`sessionStorage`)
 
@@ -91,6 +92,10 @@ Além do save/load explícito, parte do estado é persistida automaticamente em
 - **`aw_layout_v1`**: `analyticsLayout` (gráficos do dashboard).
 - **`aw_groupings_v1`**: `analyticsGroupings` (dimensões derivadas).
 - **`aw_page_filters_v1`**: `analyticsPageFilters` (filtro de página do Dashboard).
+- **`ribbon_active_tab_v1`** / **`ribbon_mode_v1`**: aba ativa e colapso do Ribbon.
+- **`status_bar_indicators_v1`**: `statusBarIndicators` (indicadores da Status Bar, UX 2.0
+  Sessão 5) — array de ids filtrado contra `STATUS_BAR_INDICATORS_META` na carga (id
+  desconhecido de uma versão futura nunca quebra a barra).
 
 `csvStore` e `cinemaLibrary` **não** vão para `sessionStorage`
 (muito grandes / precisam do Projeto `.credito.json`). Init/gravação são

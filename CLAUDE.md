@@ -98,7 +98,8 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"2.9"`** (bumped na UX 2.0/Ribbon Sessão 4 — novo campo de topo
+   Versão atual: **`"3.0"`** (bumped na UX 2.0/Ribbon Sessão 5 — novo campo de topo
+   `statusBarIndicators`, indicadores configuráveis da Status Bar; `2.9` foi a Sessão 4 —
    `ribbonMode`, colapso do Ribbon em 3 estados; `2.8` foi a Ribbon Sessão 1 — campo de
    topo `ribbonActiveTab`; `2.7` foi a Variável de Faixas — `csvStore[csvId].rangeDefs`,
    Épico FR/Sessão FR5; `2.6` foi a Variável de Cluster — `clusterDefs`).
@@ -117,7 +118,7 @@ terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados comp
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`) ·
 viewport · aba ativa · aba do Ribbon (`ribbonActiveTab`) · modo de colapso do Ribbon
-(`ribbonMode`) · painel colapsado.
+(`ribbonMode`) · indicadores da Status Bar (`statusBarIndicators`) · painel colapsado.
 
 ## Comandos de desenvolvimento
 
