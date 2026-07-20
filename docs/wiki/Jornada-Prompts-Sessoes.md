@@ -92,6 +92,7 @@ leituras) é colapsável/ignorável pelo sênior e onipresente para quem precisa
 | DEC-NB-006 | Descartar/adiar por card, persistente: fingerprint estável por (kind + alvo) para que regeneração não ressuscite descartados; "ver descartados" reexibe. Estado em `nextActionsPrefs {dismissed[], snoozed[], autoScanIdle:false}` — `schemaVersion` 3.2 → **3.3** |
 | DEC-NB-007 | Educação embutida: todo card tem "ⓘ Por que isso importa" — templates determinísticos em módulo puro `src/nextActionInsights.js` (mesmo contrato do `exploreInsights.js` da DEC-EB-004), com GATE de cobertura total código→template |
 | DEC-NB-008 | CTAs = descritores do registro (UX 2.0) com `contextWhen`; aplicar cria cenário/patch pelos aplicadores existentes com `pushHistory()` (undo cobre); nó 🔒 travado ⇒ card `actionable:false` com razão declarada (padrão da Descoberta) |
+| DEC-NB-009 | **Lint consciente de tráfego + colapso por causa-raiz** (bug de produção, 20/07/2026): achado estrutural sobre porta/valor/nó **sem tráfego** nunca sobe como `error` independente — `port_dangling` com 0 chegadas funde-se ao `zero_arrival` num único achado "ramo morto" (higiene, com CTA "remover do domínio / conectar mesmo assim"); achados a jusante de um nó com chegada zero colapsam no achado da causa-raiz (dominância, mesmo espírito do dedup da Descoberta); todo card estrutural exibe a contagem de chegadas. Correção aplicada **na fonte** (`computePolicyInsights`) — o painel atual já melhora antes mesmo do feed; pode ser antecipada como correção isolada pré-épico |
 
 ### `NextActionsModel` (esboço)
 
@@ -114,6 +115,29 @@ leituras) é colapsável/ignorável pelo sênior e onipresente para quem precisa
 }
 ```
 
+### DEC-NB-009 — Lint consciente de tráfego (motivação: observação de produção, 20/07/2026)
+
+Hoje as regras de `computePolicyInsights` são independentes e não conversam: a Regra 1
+(`port_dangling`, **error**) dispara para qualquer porta sem saída, mesmo quando a
+Regra 4 (`zero_arrival`, warning) sabe que **nenhuma proposta chega** àquele valor —
+o usuário vê um error pedindo para conectar uma porta que não tem o que rotear, mais
+um warning redundante, para CADA valor sem tráfego de cada nó. A lista fica poluída
+com achados que não fazem sentido operacional. Correção normativa:
+
+- `computePolicyInsights` cruza os achados com `nodeArrivals` ANTES de emitir:
+  porta solta cujo valor tem 0 chegadas ⇒ **um único** achado consolidado
+  `dead_branch` (severidade higiene/info), mensagem declarando a causa ("valor sem
+  tráfego na base atual — por isso sem rota"), CTAs "remover valor do domínio" /
+  "conectar mesmo assim" (o valor pode voltar a ter tráfego se a política a montante
+  mudar — o achado informa, não esconde).
+- Porta solta COM tráfego continua `error` `port_dangling` (população some de
+  verdade) — agora com a contagem de linhas na mensagem.
+- **Colapso por causa-raiz**: achados sobre nós inteiramente a jusante de um nó de
+  chegada zero não geram cards próprios — o achado da causa-raiz os representa
+  (dominância; contador "cobre N achados derivados" no card).
+- Determinismo e GATE: fixtures com porta solta com/sem tráfego; nunca error com 0
+  chegadas; consolidação 2→1; jusante colapsado; contagens exibidas ≡ `nodeArrivals`.
+
 Catálogo de `kind` do v1: `connect_port` (porta solta — com top-3 do ranking da
 porta embutido), `fix_lint_*` (categorias do lint S1), `add_break`
 (`heterogeneous_block`), `apply_opportunity` (deviation da Descoberta),
@@ -131,12 +155,17 @@ explorada + canvas vazio ⇒ top do ranking global como sugestão de raiz, DEC-E
 **Pré-requisitos**: Épico EB concluído (ranking global DEC-EB-008; padrão de insights).
 
 **O que vai entregar**:
+- **Correção DEC-NB-009 na fonte**: `computePolicyInsights` consciente de tráfego
+  (achado `dead_branch` consolidado, `port_dangling` só com tráfego real, colapso
+  por causa-raiz, contagens nas mensagens) — o painel de lint atual já melhora
+  nesta sessão, antes do feed existir
 - `computeNextActions` no worker (Tier 1 completo; Tier 2 = costura sobre resultados
   já calculados que a main envia — o orquestrador NÃO roda Descoberta/Simplificação)
 - Fingerprints (card e PolicyIR — reusa `diffPolicyIR`/serialização canônica do IR)
 - Priorização unificada DEC-NB-004; mensagens novas documentadas no protocolo
-- **GATE novo `tests/nextActions.test.js`**: cada fonte Tier 1 ≡ motor original
-  (mesmos achados do lint, mesmas portas soltas, mesmo ranking); ordenação
+- **GATE novo `tests/nextActions.test.js`**: casos da DEC-NB-009 (nunca `error` com
+  0 chegadas; consolidação 2→1; jusante colapsado); cada fonte Tier 1 ≡ motor
+  original pós-correção (mesmos achados do lint, mesmas portas soltas, mesmo ranking); ordenação
   determinística e monótona por severidade/score; fingerprint estável sob
   regeneração; staleness vira `true` quando o IR muda; card de nó travado
   `actionable:false`; feed nunca vazio (fixture sem pendências ⇒ cards `journey`)
@@ -146,10 +175,15 @@ explorada + canvas vazio ⇒ top do ranking global como sugestão de raiz, DEC-E
 **Prompt**:
 ```
 Vamos à Sessão NB1 da Jornada de Construção (feed de próxima melhor ação — motor),
-conforme docs/wiki/Jornada-Prompts-Sessoes.md (DEC-NB-001..004 e 008 são
+conforme docs/wiki/Jornada-Prompts-Sessoes.md (DEC-NB-001..004, 008 e 009 são
 normativas; releia também docs/claude/Worker-Protocolo.md e os motores que serão
 orquestrados: lint do Copiloto S1, computeVariableRanking, diffPolicyIR).
-Implemente computeNextActions no worker com as fontes Tier 1 (lint, portas
+Comece pela DEC-NB-009: torne computePolicyInsights consciente de tráfego
+(port_dangling com 0 chegadas funde-se ao zero_arrival num achado dead_branch de
+severidade info, com CTAs "remover do domínio"/"conectar mesmo assim"; achados a
+jusante de chegada zero colapsam na causa-raiz; contagens de chegadas nas
+mensagens) — o painel atual melhora já nesta sessão. Depois implemente
+computeNextActions no worker com as fontes Tier 1 (lint corrigido, portas
 desconectadas com top-3 do ranking, estado estrutural: canvas vazio, AS IS
 ausente, variável pendente, doc desatualizada por fingerprint do PolicyIR) e a
 costura Tier 2 (recebe achados de Descoberta/Simplificação já calculados — o
