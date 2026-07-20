@@ -727,11 +727,38 @@ a persistir. Ao fim, app 100% funcional e npm test verde.
 ```
 
 **Checklist**:
-- [ ] `Ctrl+K` + campo na faixa de abas abrem o popover
-- [ ] Fuzzy com acentos; keywords pt-BR nos descritores
-- [ ] Respeita contextWhen/enabledWhen (com motivo)
-- [ ] Teclado completo (setas/Enter/Esc); atalhos exibidos
-- [ ] `npm test` verde; app funcional
+- [x] `Ctrl+K` + campo na faixa de abas abrem o popover
+- [x] Fuzzy com acentos; keywords pt-BR nos descritores
+- [x] Respeita contextWhen/enabledWhen (com motivo)
+- [x] Teclado completo (setas/Enter/Esc); atalhos exibidos
+- [x] `npm test` verde; app funcional
+
+> **Entregue (2026-07-20).** Estado efêmero `cmdPalette` (`null | {query, activeIndex}`) +
+> ref espelho `cmdPaletteR` (padrão de refs do CLAUDE.md — o listener global de teclado usa
+> a ref pra ignorar Delete/Backspace/Escape do canvas enquanto o popover está aberto).
+> `Ctrl+K` (global, em qualquer aba do app) e o campo compacto "Pesquisar comando… Ctrl+K"
+> na faixa de abas do Ribbon (à esquerda do ⚙, some em telas estreitas junto dos outros
+> rótulos) chamam `openCmdPalette()`. Componente `CommandPalette` (novo, ao lado de
+> `Ribbon`/`StatusBar`) renderizado num portal (`createPortal` sobre `document.body`, mesmo
+> padrão dos dropdowns existentes) com backdrop + input autofocado + lista. `cmdPaletteResults`
+> filtra `COMMANDS` por completo (fixas + `ctx-*`) pelo mesmo `contextWhen(_ctxSelArg)` já
+> usado por `contextCommands` (Sessão 2) — comando fora de contexto nunca aparece. Fuzzy
+> simples: mesma normalização de acentos da busca de Variáveis de Decisão do painel
+> (`normalize("NFD").replace(...).toLowerCase()`) + substring sobre `label`+`keywords`,
+> ranqueado (match exato > prefixo > contém > só keyword). Novo campo `disabledReason`
+> (string ou função) nos descritores que têm `enabledWhen` — a Busca mostra o comando
+> acinzentado com o motivo curto (ex.: "requer 2+ Cineminhas selecionadas", "nada para
+> desfazer"); a Ribbon continua só desabilitando o botão (sem motivo, como antes). Setas
+> navegam, Enter executa `onRun` e fecha, Esc fecha, `Ctrl+K` com o popover focado também
+> fecha — tudo com `stopPropagation` no próprio input pra nunca vazar pro listener global.
+> Keywords ampliadas com sinônimos pt-BR nos descritores existentes (ex.: "binning" já
+> apontava pra Criar Faixas por Risco; "político"/"regra" adicionados às 4 entradas da aba
+> Política; "diamante", "planilha", "assistente" etc. em outras). Tabela de atalhos do Hub
+> (seção ℹ️ Sobre) ganhou a linha `Ctrl+K`. Estado 100% efêmero — nada novo em
+> `buildProjectPayload`/`loadProject`, sem bump de schema. Validado ponta a ponta com
+> Playwright: abrir via clique e via `Ctrl+K`, busca por keyword sinônimo, navegação/Enter/
+> Esc, filtragem por seleção (Cineminha único → "Domínio" aparece, Johnny global aparece
+> desabilitado com motivo enquanto o Johnny contextual do nó aparece habilitado).
 
 ---
 
@@ -785,7 +812,7 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 - [x] **Sessão 4** — Colapso em 3 estados 🏷️ `Opus 4.8`
 - [x] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
 - [x] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
-- [ ] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
+- [x] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
 - [ ] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
 
 ---
@@ -834,10 +861,11 @@ Cada sessão segue o mesmo template:
 
 **Última atualização**: 2026-07-20 (v2 — reavaliação completa pós-Épicos FR/GS/H4–H8:
 inventário de 12 superfícies, abas Analisar/Otimizar separadas, Hub de Configurações,
-Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–6 entregues**
+Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–7 entregues**
 (registro `COMMANDS` + Ribbon fixed; abas contextuais + aposentadoria das 6 toolbars
 flutuantes; ⚙ Hub de Configurações; colapso do Ribbon em 3 estados — `ribbonMode`,
 schema 2.9; Status Bar configurável + realocação de badges — `statusBarIndicators`,
 schema 3.0; painel direito em 3 abas Ativos/Inspetor/Copiloto — `rightPanelMode`,
-schema 3.1); Sessões 7–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
-executada e está substituída por esta.)
+schema 3.1; Busca de comandos Ctrl+K — `cmdPalette` efêmero, sem bump de schema);
+Sessão 8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi executada e está
+substituída por esta.)
