@@ -120,6 +120,26 @@ independente do híbrido; a sonda de ambiente (Sessão HP) pode rodar desde já.
 
 ---
 
+## UX 2.0 — Ribbon, Hub de Configurações e reorganização do app (planejado)
+
+Evolução de **arquitetura de experiência** (sem features novas de domínio), especificada
+com prompts de sessão em [[Ribbon-Prompts-Sessoes]] (v2, 2026-07-20 — substitui a v1
+nunca executada). Motivação: os comandos hoje vivem em **12 superfícies** (~70
+comandos/controles) — 6 toolbars flutuantes contextuais, painel direito com 10 seções,
+cantos do canvas — e **não existe área de configurações** (preferências pulverizadas no
+painel). Entregas, em 8 sessões incrementais:
+
+- **Registro declarativo de comandos** (fonte única) + **Ribbon** com abas por intenção
+  (Início/Inserir/Dados/**Analisar**/**Otimizar**/Política/Projeto) e abas contextuais
+  por seleção (Matriz/Decisão/Lens/Terminal/Porta/Seleção), colapsável em 3 estados.
+- **⚙ Hub de Configurações** central (Motor Python, Visualização, Interface, Sobre) —
+  preferência nova passa a ter endereço único; deep-links preservados.
+- **Busca de comandos** (`Ctrl+K`, padrão "Diga-me").
+- **Status Bar** configurável (KPIs + badges 🐍/Build + zoom).
+- Painel direito com abas **Ativos / Inspetor / 🧭 Copiloto**.
+
+---
+
 ## Exportação
 
 - ~~Exportar política de crédito como JSON estruturado~~ ✅ ENTREGUE (PolicyIR — Copiloto Sessão 0; opção "JSON Canônico da Política" no modal Exportar Fluxo)
