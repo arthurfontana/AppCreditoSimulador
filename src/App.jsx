@@ -80,6 +80,11 @@ export { newFilterCard };
 
 // ═══ REGIÃO: Constantes e Helpers Globais ═══
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
+// Versão do schema de Projeto (.credito.json) — fonte única para buildProjectPayload e para
+// a tabela "Versão do schema" da seção ℹ️ Sobre do Hub (evita os dois textos divergirem,
+// como aconteceu entre a Sessão 5, que fixou "3.0" na Sobre, e a Sessão 6, que bumpou o
+// schema real para "3.1" sem atualizar aquele texto).
+export const PROJECT_SCHEMA_VERSION = "3.1";
 export const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
 const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   : new Date().toISOString();
 export const BUILD_HASH   = typeof __BUILD_HASH__   !== "undefined" ? __BUILD_HASH__   : "local";
@@ -473,19 +478,6 @@ export const CINEMINHA_TYPES = {
   },
 };
 export const getCinemaType = (cinemaType) => CINEMINHA_TYPES[cinemaType] ?? CINEMINHA_TYPES.eligibility;
-
-const TOOLS  = [
-  { id:"hand",          icon:"✋",  label:"Mover"          },
-  { id:"select",        icon:"↖",   label:"Selecionar"     },
-  { id:"frame",         icon:"⬚",   label:"Frame"          },
-  { id:"rect",          icon:"▭",   label:"Retângulo"      },
-  { id:"cineminha",     icon:"⊞",   label:"Cineminha"      },
-  { id:"decision_lens", icon:"🔎",  label:"Decision Lens"  },
-  { id:"connect",       icon:"⟶",   label:"Conectar"       },
-  { id:"approved",      icon:"✅",  label:"Aprovado"       },
-  { id:"rejected",      icon:"❌",  label:"Reprovado"      },
-  { id:"as_is",         icon:"⟳",   label:"AS IS"          },
-];
 
 // ── Decision Lens constants ───────────────────────────────────────────────────
 export const LENS_W = 182, LENS_H = 86;
@@ -1389,177 +1381,6 @@ export function computeAsIsCells(shape, csvStore) {
   return cells;
 }
 
-// ── SimIndicators — right panel simulation card ───────────────────────────────
-function SimIndicators({ simResult, csvStore, incrementalResult }) {
-  const inc = incrementalResult;
-  const hasInc = !!inc;
-  const displayResult = hasInc ? inc.simulated : simResult;
-  const hasData = displayResult.totalQty > 0;
-
-  const rate = hasData ? displayResult.approvalRate : null;
-  const irV = displayResult.inadReal;
-  const iiV = displayResult.inadInferida;
-
-  // Semantic color system — direction-aware
-  const rateColor = rate === null ? "#94a3b8" : rate >= 70 ? "#22c55e" : rate >= 40 ? "#f59e0b" : "#ef4444";
-  const inadColor = (v) => v === null ? "#64748b" : v > 0.05 ? "#ef4444" : v > 0.02 ? "#f59e0b" : "#22c55e";
-  const deltaClr = (d, positiveHigh = true) => {
-    if (d === null || d === undefined || isNaN(d)) return "#64748b";
-    return positiveHigh ? (d > 0 ? "#4ade80" : d < 0 ? "#f87171" : "#64748b")
-                        : (d < 0 ? "#4ade80" : d > 0 ? "#f87171" : "#64748b");
-  };
-  const fmtDelta = (d, scale = 100) => {
-    if (d === null || isNaN(d)) return null;
-    return `${d >= 0 ? '+' : '−'}${Math.abs(d * scale).toFixed(2)} p.p`;
-  };
-
-  const rateDelta = hasInc && inc.baseline.totalQty > 0 ? inc.simulated.approvalRate - inc.baseline.approvalRate : null;
-  const irDelta = hasInc && irV !== null && inc.baseline.inadReal !== null ? irV - inc.baseline.inadReal : null;
-  const iiDelta = hasInc && iiV !== null && inc.baseline.inadInferida !== null ? iiV - inc.baseline.inadInferida : null;
-
-  // Hero KPI
-  const heroVal = hasInc && rateDelta !== null ? (fmtDelta(rateDelta / 100) ?? '—') : (rate !== null ? `${rate.toFixed(1)}%` : '—');
-  const heroLabel = hasInc && rateDelta !== null ? 'VARIAÇÃO NA APROVAÇÃO' : 'TAXA DE APROVAÇÃO';
-  const heroColor = hasInc && rateDelta !== null ? deltaClr(rateDelta, true) : rateColor;
-  const heroIsGood = hasInc && rateDelta !== null ? rateDelta > 0 : rate !== null && rate >= 50;
-
-
-  // Context badges
-  const badges = [];
-  if (hasInc) {
-    if (rateDelta !== null) {
-      const txt = fmtDelta(rateDelta / 100);
-      if (txt) badges.push({ text: `Δ Aprov. ${txt}`, bg: rateDelta > 0 ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)', color: rateDelta > 0 ? '#4ade80' : '#f87171' });
-    }
-    if (irDelta !== null && Math.abs(irDelta) > 0.0005) {
-      const txt = fmtDelta(irDelta);
-      if (txt) badges.push({ text: `Inad. ${txt}`, bg: irDelta < 0 ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)', color: irDelta < 0 ? '#4ade80' : '#f87171' });
-    }
-  }
-  if (hasData && irV !== null) {
-    const rl = irV > 0.05 ? 'Alto Risco' : irV > 0.02 ? 'Risco Moderado' : 'Baixo Risco';
-    const rlColor = irV > 0.05 ? '#f87171' : irV > 0.02 ? '#fbbf24' : '#4ade80';
-    badges.push({ text: rl, bg: rlColor + '22', color: rlColor });
-  }
-
-  const MCard = ({ label, value, delta, positiveHigh = true, sub }) => (
-    <div style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 9, padding: '8px 10px', flex: 1, minWidth: 0 }}>
-      <div style={{ fontSize: 9, color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>{label}</div>
-      <div style={{ fontSize: 17, fontWeight: 800, color: '#e2e8f0', lineHeight: 1, fontFamily: "'DM Sans',system-ui,sans-serif" }}>{value}</div>
-      {delta !== null && delta !== undefined && (
-        <div style={{ fontSize: 9.5, fontWeight: 700, color: deltaClr(delta, positiveHigh), marginTop: 3 }}>
-          {fmtDelta(delta)}
-        </div>
-      )}
-      {sub && <div style={{ fontSize: 8, color: '#475569', marginTop: 2 }}>{sub}</div>}
-    </div>
-  );
-
-  return (
-    <div style={{
-      marginTop: 10,
-      background: 'linear-gradient(160deg, #0f172a 0%, #1a1040 100%)',
-      borderRadius: 14,
-      overflow: 'hidden',
-      boxShadow: '0 4px 28px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.07)',
-      fontFamily: "'DM Sans',system-ui,sans-serif",
-    }}>
-      {/* Header */}
-      <div style={{ padding: '11px 13px 9px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: badges.length ? 8 : 0 }}>
-          <span style={{ fontSize: 10, fontWeight: 800, color: '#818cf8', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Business Impact</span>
-          <span style={{ fontSize: 9, color: '#334155', fontWeight: 500 }}>
-            {hasData ? `${fmtQty(displayResult.totalQty)} reg.` : 'sem dados'}
-          </span>
-        </div>
-        {badges.length > 0 && (
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {badges.map((b, i) => (
-              <span key={i} style={{ fontSize: 8.5, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: b.bg, color: b.color, letterSpacing: '0.03em' }}>{b.text}</span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Hero KPI */}
-      <div style={{ padding: '16px 14px 12px', textAlign: 'center', position: 'relative', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-        {heroIsGood && hasData && (
-          <div style={{ position: 'absolute', inset: 0, background: `radial-gradient(ellipse at 50% 0%, ${heroColor}20 0%, transparent 70%)`, pointerEvents: 'none' }}/>
-        )}
-        <div style={{ fontSize: 42, fontWeight: 900, color: hasData ? heroColor : '#1e293b', lineHeight: 1, letterSpacing: '-0.02em', fontFamily: "'DM Sans',system-ui,sans-serif" }}>
-          {heroVal}
-        </div>
-        <div style={{ fontSize: 9.5, color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginTop: 5, textTransform: 'uppercase' }}>{heroLabel}</div>
-        {hasInc && inc.baseline.totalQty > 0 && (
-          <div style={{ fontSize: 9, color: '#334155', marginTop: 5 }}>
-            {inc.baseline.approvalRate.toFixed(1)}% → {(displayResult.approvalRate ?? 0).toFixed(1)}%
-          </div>
-        )}
-      </div>
-
-      {/* Approval bar */}
-      {hasData && (
-        <div style={{ padding: '7px 13px 0' }}>
-          <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden', position: 'relative' }}>
-            <div style={{ height: '100%', width: `${rate ?? 0}%`, borderRadius: 2, background: `linear-gradient(90deg, ${rateColor}99, ${rateColor})`, transition: 'width 0.4s ease' }}/>
-            {hasInc && inc.baseline.totalQty > 0 && (
-              <div style={{ position: 'absolute', top: 0, height: '100%', left: `${inc.baseline.approvalRate}%`, width: 2, background: 'rgba(255,255,255,0.35)', borderRadius: 1 }}/>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Metric Grid */}
-      <div style={{ padding: '9px 11px 9px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <MCard label="Aprovação" value={rate !== null ? `${rate.toFixed(1)}%` : '—'} delta={rateDelta !== null ? rateDelta / 100 : null} positiveHigh={true} sub={hasData ? `✓ ${fmtQty(displayResult.approvedQty)} · ✗ ${fmtQty(displayResult.rejectedQty)}${simResult.asIsQty>0?` · ⟳${fmtQty(simResult.asIsQty)}`:""}` : null}/>
-          <MCard label="Inad. Real" value={irV !== null ? fmtPct(irV) : '—'} delta={irDelta} positiveHigh={false} sub="∑ Inad / ∑ Altas"/>
-        </div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <MCard label="Inad. Inferida" value={iiV !== null ? fmtPct(iiV) : '—'} delta={iiDelta} positiveHigh={false} sub="∑ Inad.I / Aprov."/>
-          <MCard label="Vol. Aprovado" value={hasData ? fmtQty(displayResult.approvedQty) : '—'} delta={null} positiveHigh={true} sub={hasData ? `${(rate ?? 0).toFixed(1)}% da base` : null}/>
-        </div>
-      </div>
-
-      {/* Efeito da Mudança */}
-      {hasInc && inc.impacted.qty > 0 && (
-        <div style={{ padding: '9px 11px 12px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-          <div style={{ fontSize: 9, color: '#a78bfa', fontWeight: 800, marginBottom: 7, textTransform: 'uppercase', letterSpacing: '0.08em' }}>⚡ Efeito da Mudança</div>
-          {/* Volume row */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
-            <div style={{ background: 'rgba(74,222,128,0.07)', border: '1px solid rgba(74,222,128,0.2)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
-              <div style={{ fontSize: 7.5, color: '#4ade80', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Novos Aprovados</div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: '#4ade80' }}>+{fmtQty(inc.impacted.rToA)}</div>
-            </div>
-            <div style={{ background: 'rgba(248,113,113,0.07)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
-              <div style={{ fontSize: 7.5, color: '#f87171', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Novos Reprovados</div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: '#f87171' }}>−{fmtQty(inc.impacted.aToR)}</div>
-            </div>
-          </div>
-          {/* Vendas row — only when conv. inferida is available */}
-          {(inc.impacted.altasInferRtoA > 0 || inc.impacted.altasRealAtoR > 0) && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
-              <div style={{ background: 'rgba(74,222,128,0.05)', border: '1px solid rgba(74,222,128,0.15)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
-                <div style={{ fontSize: 7.5, color: '#86efac', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Conv. Inferida</div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#86efac' }}>+{fmtQty(inc.impacted.altasInferRtoA)}</div>
-                <div style={{ fontSize: 7, color: '#475569', marginTop: 1 }}>altas estimadas</div>
-              </div>
-              <div style={{ background: 'rgba(248,113,113,0.05)', border: '1px solid rgba(248,113,113,0.15)', borderRadius: 8, padding: '6px 10px', textAlign: 'center' }}>
-                <div style={{ fontSize: 7.5, color: '#fca5a5', fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Altas Reais Perdidas</div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#fca5a5' }}>−{fmtQty(inc.impacted.altasRealAtoR)}</div>
-                <div style={{ fontSize: 7, color: '#475569', marginTop: 1 }}>altas históricas</div>
-              </div>
-            </div>
-          )}
-          <div style={{ marginTop: 2, textAlign: 'center', fontSize: 8.5, color: '#475569' }}>
-            {fmtQty(inc.impacted.qty)} registros impactados · {inc.impacted.pct.toFixed(1)}% da base
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Analytics Workspace (Sessão 2: builder configurável) ─────────────────────
 // Constantes de série/gráfico (SCENARIO_COLORS, SERIE_COLORS, MAX_SERIES, SERIE_CENARIO,
 // SERIE_NONE, XDIM_CENARIO, CHART_TYPES, GOOD_WHEN_LOWER) foram extraídas para ./analytics.js
@@ -1734,6 +1555,21 @@ const CTX_TAB_META = {
   'ctx-porta':    'Porta',
   'ctx-selecao':  'Seleção',
 };
+// Touch/mobile (UX 2.0 — Sessão 8): abaixo desta largura o Ribbon nasce em modo `compact`
+// (em vez de `fixed`) — sem preferência salva ainda respeita o `ribbonMode` explícito do
+// usuário (sessionStorage/.credito.json) — e o card de Dicas do canto do canvas migra para
+// a seção Sobre do Hub (uma só constante para os dois lugares, ver mais abaixo).
+const NARROW_SCREEN_BREAKPOINT = 720;
+function defaultRibbonModeForScreen() {
+  try { return window.innerWidth <= NARROW_SCREEN_BREAKPOINT ? 'compact' : 'fixed'; } catch { return 'fixed'; }
+}
+// Conteúdo do card "Dicas" do canto do canvas — fonte única consumida também pela seção
+// ℹ️ Sobre do Hub em telas estreitas (Sessão 8), para as duas casas nunca divergirem.
+const CANVAS_TIPS = [
+  '✋ Mover · ↖ Selecionar e arrastar',
+  '📱 Pinça → zoom · Segurar → editar',
+  'Clique na seta → deletar conexão',
+];
 
 function RibbonCmdButton({ cmd }) {
   const enabled = cmd.enabledWhen ? !!cmd.enabledWhen() : true;
@@ -1782,6 +1618,20 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
   useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
   // Ao trocar de modo, recolhe qualquer revelação pendente.
   useEffect(() => { setReveal(false); }, [mode]);
+  // Touch/mobile (Sessão 8): fecho ao tocar fora do Ribbon revelado. Mouse já tem
+  // onMouseLeave (scheduleClose) — bom o bastante, não duplicar com um backdrop: um backdrop
+  // position:fixed cobrindo a tela BLOQUEARIA o clique no canvas (ex.: posicionar um shape
+  // logo após abrir o Ribbon precisaria de dois toques). Em vez disso, um listener NATIVO de
+  // `touchstart` no documento (passivo — não intercepta, só observa) fecha o Ribbon quando o
+  // toque cai fora de `rootRef`, sem impedir esse mesmo toque de continuar até o canvas.
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!reveal) return;
+    const onDocTouch = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) scheduleClose(); };
+    document.addEventListener('touchstart', onDocTouch, { passive: true });
+    return () => document.removeEventListener('touchstart', onDocTouch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal]);
 
   const qBtn = (icon, label, on, enabled, danger) => (
     <button className="wbt" disabled={!enabled} onClick={enabled ? on : undefined} title={label}
@@ -1833,39 +1683,45 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
     </>
   );
 
-  // Faixa de abas (tabs + contextual + spacer + rightCluster). `withCluster` controla se o
-  // cluster QAT/⚙ vem embutido (fixed/compact) ou não (auto usa o flutuante).
+  // Faixa de abas (tabs + contextual, num filho rolável | rightCluster fixo). `withCluster`
+  // controla se o cluster QAT/⚙ vem embutido (fixed/compact) ou não (auto usa o flutuante).
+  // Touch/mobile (Sessão 8): `onTouchStart` espelha `onMouseEnter` (revela por toque, já
+  // que hover não existe em touchscreen) e as abas ficam num filho `overflowX:auto` próprio
+  // — em telas estreitas com muitas abas, o rightCluster (QAT + ⚙) nunca fica fora da tela,
+  // só as abas rolam.
   const tabStrip = (withCluster) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', borderBottom: '1px solid #f1f5f9', background: '#fff' }}
-      onMouseEnter={mode === 'compact' ? openReveal : undefined}>
-      {RIBBON_TABS.map(t => {
-        const on = !isCtx && activeTab === t.id;
-        return (
-          <button key={t.id} onClick={() => onTab(t.id)} onDoubleClick={on ? onCycleMode : undefined}
-            title={on ? 'Duplo-clique alterna o colapso do Ribbon' : undefined}
-            style={{ padding: '5px 14px', borderRadius: 8, border: 'none',
-              background: on ? '#eff6ff' : 'transparent', color: on ? '#2563eb' : '#64748b',
-              fontWeight: on ? 700 : 500, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
-              whiteSpace: 'nowrap', transition: 'all .12s' }}>
-            {t.label}
+      onMouseEnter={mode === 'compact' ? openReveal : undefined}
+      onTouchStart={mode === 'compact' ? openReveal : undefined}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 1, minWidth: 0, overflowX: 'auto' }}>
+        {RIBBON_TABS.map(t => {
+          const on = !isCtx && activeTab === t.id;
+          return (
+            <button key={t.id} className="rtab" onClick={() => onTab(t.id)} onDoubleClick={on ? onCycleMode : undefined}
+              title={on ? 'Duplo-clique alterna o colapso do Ribbon' : undefined}
+              style={{ padding: '5px 14px', borderRadius: 8, border: 'none', flexShrink: 0,
+                background: on ? '#eff6ff' : 'transparent', color: on ? '#2563eb' : '#64748b',
+                fontWeight: on ? 700 : 500, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
+                whiteSpace: 'nowrap', transition: 'all .12s' }}>
+              {t.label}
+            </button>
+          );
+        })}
+        {/* Aba contextual — surge destacada só com o tipo correspondente selecionado. */}
+        {contextTab && (
+          <button key={contextTab.id} className="rctxtab" onClick={onCtxTab} title={`Ferramentas de ${contextTab.label}`}
+            style={{ marginLeft: 6, padding: '5px 15px', borderRadius: 8, flexShrink: 0,
+              border: `1px solid ${isCtx ? CTX_ACCENT : '#ddd6fe'}`,
+              borderTop: `3px solid ${CTX_ACCENT}`,
+              background: isCtx ? '#f5f3ff' : '#faf5ff', color: CTX_ACCENT,
+              fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
+              whiteSpace: 'nowrap', transition: 'all .12s', boxShadow: isCtx ? `0 1px 0 ${CTX_ACCENT}` : 'none' }}>
+            <span style={{ fontSize: 10, marginRight: 5, opacity: .8, textTransform: 'uppercase', letterSpacing: .3 }}>◆</span>
+            {contextTab.label}
           </button>
-        );
-      })}
-      {/* Aba contextual — surge destacada só com o tipo correspondente selecionado. */}
-      {contextTab && (
-        <button key={contextTab.id} onClick={onCtxTab} title={`Ferramentas de ${contextTab.label}`}
-          style={{ marginLeft: 6, padding: '5px 15px', borderRadius: 8,
-            border: `1px solid ${isCtx ? CTX_ACCENT : '#ddd6fe'}`,
-            borderTop: `3px solid ${CTX_ACCENT}`,
-            background: isCtx ? '#f5f3ff' : '#faf5ff', color: CTX_ACCENT,
-            fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
-            whiteSpace: 'nowrap', transition: 'all .12s', boxShadow: isCtx ? `0 1px 0 ${CTX_ACCENT}` : 'none' }}>
-          <span style={{ fontSize: 10, marginRight: 5, opacity: .8, textTransform: 'uppercase', letterSpacing: .3 }}>◆</span>
-          {contextTab.label}
-        </button>
-      )}
-      <div style={{ flex: 1 }} />
-      {withCluster && rightCluster}
+        )}
+      </div>
+      {withCluster && <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>{rightCluster}</div>}
     </div>
   );
 
@@ -1904,7 +1760,7 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
   //    OVERLAY absoluto ao passar o mouse / clicar numa aba — SEM reflow do canvas. ──
   if (mode === 'compact') {
     return (
-      <div style={{ position: 'relative', flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', zIndex: 450 }}
+      <div ref={rootRef} style={{ position: 'relative', flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', zIndex: 450 }}
         onMouseLeave={scheduleClose}>
         {tabStrip(true)}
         {reveal && (
@@ -1922,23 +1778,36 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
   // ── Modo AUTO: Ribbon oculto, só uma hotzone de ~6px no topo ocupa altura. Hover na
   //    hotzone (ou no overlay) revela o Ribbon INTEIRO como OVERLAY absoluto — SEM reflow.
   //    A QAT + ⚙ ficam num cluster flutuante sempre visível (recolhido durante a revelação,
-  //    pois o Ribbon revelado já mostra a faixa completa). ──
+  //    pois o Ribbon revelado já mostra a faixa completa). Touch/mobile (Sessão 8): a hotzone
+  //    responde a `onTouchStart` (hover não existe em touchscreen), o botão ⌄ é o alvo de
+  //    toque confiável, e tocar fora (listener no documento, ver acima) fecha o Ribbon. ──
   return (
     // Wrapper de 6px `position:relative` — só ele ocupa altura no flex-column (constante →
     // sem reflow ao revelar). Serve de âncora para os overlays absolutos (robusto contra o
-    // `overflow:hidden` da raiz do app).
-    <div style={{ position: 'relative', flexShrink: 0, height: 6, zIndex: 450 }}>
-      {/* Hotzone fina — passe o mouse para revelar o Ribbon inteiro. */}
-      <div onMouseEnter={openReveal}
-        title="Passe o mouse para revelar o Ribbon"
+    // `overflow:hidden` da raiz do app) e para o fecho por toque-fora (rootRef).
+    <div ref={rootRef} style={{ position: 'relative', flexShrink: 0, height: 6, zIndex: 450 }}>
+      {/* Hotzone fina — passe o mouse (ou toque) para revelar o Ribbon inteiro. Numa faixa de
+          6px, toque impreciso ("fat finger") é o caso comum — o botão ⌄ no cluster flutuante
+          logo abaixo é o alvo de toque garantido; a hotzone é o atalho de hover no desktop. */}
+      <div onMouseEnter={openReveal} onTouchStart={openReveal}
+        title="Passe o mouse ou toque para revelar o Ribbon"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 6,
           background: 'linear-gradient(#e2e8f0,#f1f5f9)', borderBottom: '1px solid #e2e8f0', cursor: 'default' }} />
       {/* Cluster flutuante QAT + ciclo + ⚙ — mantém QAT/⚙ visíveis no modo auto sem reflow.
-          Recolhe enquanto o Ribbon está revelado (a faixa revelada já os contém). */}
+          Recolhe enquanto o Ribbon está revelado (a faixa revelada já os contém). O botão ⌄
+          (Sessão 8) é o alvo de toque explícito e confiável para revelar o Ribbon — um alvo de
+          ~30px é ergonômico em touch; a hotzone de 6px sozinha não é. */}
       {!reveal && (
         <div style={{ position: 'absolute', top: 8, right: 14, zIndex: 320, display: 'flex', alignItems: 'center',
           gap: 2, padding: '2px 4px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10,
           boxShadow: '0 2px 10px rgba(15,23,42,.10)' }}>
+          <button className="wbt" onClick={openReveal} title="Mostrar Ribbon"
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26,
+              borderRadius: 7, border: 'none', background: 'transparent', color: '#475569',
+              cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', flexShrink: 0 }}>
+            ⌄
+          </button>
+          <div style={{ width: 1, height: 16, background: '#f1f5f9', flexShrink: 0 }} />
           {rightCluster}
         </div>
       )}
@@ -2126,6 +1995,37 @@ function CommandPalette({ query, activeIndex, results, onQueryChange, onActiveIn
   );
 }
 
+// ═══ Mini-flutuante de seleção (UX 2.0 — Sessão 8) ═════════════════════════════
+// Ergonomia de mão: perto do shape selecionado (single-seleção), só Deletar e Duplicar —
+// os mesmos onRun dos descritores `edit.delete`/`edit.duplicate`. Posição em coordenadas
+// de tela derivada de shape.x/y/w/h + vp (mesma conta do editor de rótulo inline, algumas
+// linhas abaixo no JSX) — nenhuma matemática de viewport nova. Some durante o arraste (o
+// shape arrastado sai da cena para o overlay leve — ver dragIds/dragDelta — e sua posição
+// em `shapes` só é commitada no mouseup, então a leitura ficaria congelada) e durante a
+// edição inline do rótulo.
+function SelectionMiniToolbar({ shape, vp, onDuplicate, onDelete }) {
+  const sw = shape.w * vp.s, sh = shape.h * vp.s;
+  const sx = shape.x * vp.s + vp.x, sy = shape.y * vp.s + vp.y;
+  const above = sy > 46;
+  const top = above ? sy - 38 : sy + sh + 8;
+  const left = sx + sw / 2;
+  const btnStyle = {
+    display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 28,
+    borderRadius: 7, border: 'none', background: 'transparent', color: '#e2e8f0',
+    cursor: 'pointer', fontSize: 14, fontFamily: 'inherit', touchAction: 'manipulation',
+  };
+  return (
+    <div style={{ position: 'absolute', left, top, transform: 'translateX(-50%)', zIndex: 410,
+      display: 'flex', alignItems: 'center', gap: 2, padding: 3, background: '#1e293b',
+      borderRadius: 10, boxShadow: '0 6px 18px rgba(15,23,42,.32)' }}
+      onMouseDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()}>
+      <button className="wbmini" onClick={onDuplicate} title="Duplicar" style={btnStyle}>⧉</button>
+      <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,.18)' }} />
+      <button className="wbmini" onClick={onDelete} title="Deletar" style={{ ...btnStyle, color: '#fca5a5' }}>🗑</button>
+    </div>
+  );
+}
+
 // ═══ REGIÃO: Estado Principal do Componente ═══
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -2161,10 +2061,27 @@ export default function App() {
   // reflow) | 'auto' (Ribbon oculto exceto hotzone de ~6px; hover revela o Ribbon inteiro
   // como OVERLAY sem reflow). Persistido (sessionStorage + .credito.json, schema 2.9).
   const [ribbonMode, setRibbonMode] = useState(() => {
-    try { const s = sessionStorage.getItem('ribbon_mode_v1'); return (s === 'compact' || s === 'auto') ? s : 'fixed'; } catch { return 'fixed'; }
+    try {
+      const s = sessionStorage.getItem('ribbon_mode_v1');
+      if (s === 'compact' || s === 'auto' || s === 'fixed') return s;
+      // Sem preferência salva ainda nesta sessão: tela estreita (touch/mobile) nasce compact.
+      return defaultRibbonModeForScreen();
+    } catch { return 'fixed'; }
   });
   const cycleRibbonMode = useCallback(() => {
     setRibbonMode(m => (m === 'fixed' ? 'compact' : m === 'compact' ? 'auto' : 'fixed'));
+  }, []);
+  // Touch/mobile (UX 2.0 — Sessão 8): estado efêmero, reativo a resize (não persiste — é
+  // só um sinal de layout, igual a "a viewport ficou estreita agora"). Usado para: ocultar
+  // o card de Dicas flutuante do canto do canvas em telas pequenas (o conteúdo migra para a
+  // seção ℹ️ Sobre do Hub, que já existe e tem espaço de sobra).
+  const [isNarrowScreen, setIsNarrowScreen] = useState(() => {
+    try { return window.innerWidth <= NARROW_SCREEN_BREAKPOINT; } catch { return false; }
+  });
+  useEffect(() => {
+    const onResize = () => setIsNarrowScreen(window.innerWidth <= NARROW_SCREEN_BREAKPOINT);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   }, []);
   // Painel direito (UX 2.0 — Sessão 6): aba interna ativa — 'assets' (bases + variáveis +
   // bibliotecas) | 'inspector' (propriedades do objeto selecionado) | 'copilot' (lint +
@@ -2312,10 +2229,6 @@ export default function App() {
   const [lensModal,  setLensModal]  = useState(null);   // null | {shapeId, rules, population}
   // Sugestão de próximo nó (Copiloto Sessão 3) — ranking on-demand para a porta selecionada
   const [variableRankingModal, setVariableRankingModal] = useState(null); // null | {portId, loading} | {portId, ...VARIABLE_RANKING_RESULT}
-  // Cineminha toolbar dropdown
-  const [cinemaDropdownOpen, setCinemaDropdownOpen] = useState(false);
-  const [cinemaDropdownPos,  setCinemaDropdownPos]  = useState({x:0,y:0});
-  const cinemaDropdownBtnRef = useRef(null);
   // Cineminha export/import
   const [cinemaImportModal, setCinemaImportModal] = useState(null); // null | {shapeId, config, step, rowMapping, colMapping, availableVars}
   // Cineminha library
@@ -3415,6 +3328,40 @@ export default function App() {
     setSel(null); setMultiSel(new Set()); setPalette(false);
   }, []); // eslint-disable-line
 
+  // Duplicar seleção (UX 2.0 — Sessão 8, mini-flutuante + Início›Edição). Mesmo escopo de
+  // "o que viaja junto" que deleteSelected: duplicar um losango/Cineminha também duplica as
+  // portas que só ele referencia. Reusa cloneCanvasWithNewIds (mesmo helper do duplicateCanvas)
+  // sobre o subconjunto selecionado + suas conexões internas; cópia nasce deslocada (+32,+32)
+  // e selecionada.
+  const duplicateSelected = useCallback(() => {
+    const ids = multiSelR.current.size > 0 ? [...multiSelR.current] : (selR.current ? [selR.current] : []);
+    if (ids.length === 0) return;
+    const shapes_ = shapesR.current;
+    const conns_  = connsR.current;
+    const idSet = new Set(ids);
+    for (const id of ids) {
+      const shape = shapes_.find(s=>s.id===id);
+      if (shape?.type==="decision"||shape?.type==="cineminha") {
+        conns_.filter(c=>c.from===id).forEach(c=>{
+          if (shapes_.find(s=>s.id===c.to&&s.type==="port")) idSet.add(c.to);
+        });
+      }
+    }
+    const srcShapes = shapes_.filter(s=>idSet.has(s.id));
+    if (srcShapes.length===0) return;
+    const srcConns = conns_.filter(c=>idSet.has(c.from)&&idSet.has(c.to));
+    pushHistory();
+    const { newShapes, newConns } = cloneCanvasWithNewIds(srcShapes, srcConns);
+    const OFFSET = 32;
+    const offsetShapes = newShapes.map(s=>({...s, x:s.x+OFFSET, y:s.y+OFFSET}));
+    setShapes(p=>[...p, ...offsetShapes]);
+    setConns(p=>[...p, ...newConns]);
+    const newSelIds = offsetShapes.filter(s=>s.type!=="port").map(s=>s.id);
+    if (newSelIds.length===1) { setSel(newSelIds[0]); setMultiSel(new Set()); }
+    else { setSel(null); setMultiSel(new Set(newSelIds)); }
+    setPalette(false);
+  }, []); // eslint-disable-line
+
   // ── Auto Layout ──────────────────────────────────────────────
   const autoLayoutRafRef = useRef(null);
   const autoLayout = useCallback(() => {
@@ -3948,19 +3895,6 @@ export default function App() {
     });
   };
 
-  // ── deleteShape (com cascade de ports filhos) ─────────────────
-  const deleteShape = (id) => {
-    pushHistory();
-    const shape = shapesR.current.find(s=>s.id===id);
-    const portIds = (shape?.type==="decision" || shape?.type==="cineminha")
-      ? connsR.current.filter(c=>c.from===id).map(c=>c.to).filter(toId=>shapesR.current.find(s=>s.id===toId&&s.type==="port"))
-      : [];
-    const removeIds = [id,...portIds];
-    setShapes(p=>p.filter(s=>!removeIds.includes(s.id)));
-    setConns(p=>p.filter(c=>!removeIds.includes(c.from)&&!removeIds.includes(c.to)));
-    setSel(null); setPalette(false);
-  };
-
   // ── deleteCsvDataset ──────────────────────────────────────
   const deleteCsvDataset = (csvId) => {
     pushHistory();
@@ -4100,7 +4034,7 @@ export default function App() {
       [activeCanvasId]: { ...canvases[activeCanvasId], shapes, conns },
     };
     return {
-      schemaVersion: "3.1",
+      schemaVersion: PROJECT_SCHEMA_VERSION,
       kind: "credito-project",
       generatedAt: new Date().toISOString(),
       activeTab,
@@ -4225,7 +4159,7 @@ export default function App() {
     // Ribbon (UX 2.0 — Sessão 1): default defensivo p/ projetos antigos (schema < 2.8).
     setRibbonActiveTab(typeof data.ribbonActiveTab === 'string' ? data.ribbonActiveTab : 'inicio');
     // Ribbon colapso (UX 2.0 — Sessão 4): default defensivo p/ projetos antigos (schema < 2.9).
-    setRibbonMode((data.ribbonMode === 'compact' || data.ribbonMode === 'auto') ? data.ribbonMode : 'fixed');
+    setRibbonMode((data.ribbonMode === 'compact' || data.ribbonMode === 'auto' || data.ribbonMode === 'fixed') ? data.ribbonMode : defaultRibbonModeForScreen());
     // Status Bar (UX 2.0 — Sessão 5): default defensivo p/ projetos antigos (schema < 3.0) —
     // filtra para ids conhecidos, para uma versão futura desconhecida não quebrar a barra.
     {
@@ -7556,6 +7490,7 @@ export default function App() {
     { id: 'edit.undo', label: 'Desfazer', icon: '↩', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Z', keywords: ['undo', 'voltar', 'desfazer'], enabledWhen: () => undoStack.length > 0, disabledReason: 'nada para desfazer', onRun: undo },
     { id: 'edit.redo', label: 'Refazer', icon: '↪', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Y', keywords: ['redo', 'avançar', 'refazer'], enabledWhen: () => redoStack.length > 0, disabledReason: 'nada para refazer', onRun: redo },
     { id: 'edit.delete', label: 'Deletar', icon: '🗑', tab: 'inicio', group: 'Edição', shortcut: 'Del', keywords: ['excluir', 'remover', 'apagar', 'deletar'], enabledWhen: () => _hasSel, disabledReason: 'selecione algo para deletar', onRun: deleteSelected },
+    { id: 'edit.duplicate', label: 'Duplicar', icon: '⧉', tab: 'inicio', group: 'Edição', keywords: ['duplicar', 'clonar', 'copiar'], enabledWhen: () => _hasSel, disabledReason: 'selecione algo para duplicar', onRun: duplicateSelected },
     // ─── INÍCIO / Organizar ───
     { id: 'org.reorganize', label: 'Reorganizar', icon: '⊹', tab: 'inicio', group: 'Organizar', keywords: ['auto layout', 'organizar', 'arrumar', 'camadas', 'reorganizar', 'sugiyama'], onRun: autoLayout },
     { id: 'org.color', label: 'Cor', icon: '🎨', tab: 'inicio', group: 'Organizar', keywords: ['cor', 'paleta', 'pintar'], enabledWhen: () => !!selShape && selShape.type !== 'csv', disabledReason: 'selecione um shape para colorir', onRun: () => setPalette(v => !v) },
@@ -7699,8 +7634,9 @@ export default function App() {
   const ribbonShownTab = (activeContextTab && ctxTabShown) ? activeContextTab : ribbonActiveTab;
 
   // ═══ Status Bar (UX 2.0 — Sessão 5) — valores dos indicadores ═══
-  // Mesma leitura de simResult/incrementalResult que o Business Impact (linha 7559+) e a
-  // SimIndicators — nenhum denominador novo, só formatação para a faixa fina.
+  // Mesma leitura de simResult/incrementalResult que o widget Business Impact e o
+  // renderSimPanel (Painel de Simulação) — nenhum denominador novo, só formatação para a
+  // faixa fina.
   const statusBarValues = useMemo(() => {
     const inc = incrementalResult;
     const displayResult = inc ? inc.simulated : simResult;
@@ -7887,10 +7823,14 @@ export default function App() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap');
         *{box-sizing:border-box;margin:0;padding:0;}
-        .wbt{transition:background .12s,color .12s;}
+        .wbt{transition:background .12s,color .12s;touch-action:manipulation;}
         .wbt:hover{background:#eff6ff!important;color:#2563eb!important;}
+        .wbz{touch-action:manipulation;}
         .wbz:hover{background:#eff6ff!important;color:#2563eb!important;}
         .wbz:active{transform:scale(.93);}
+        .wbmini{transition:background .12s;}
+        .wbmini:hover{background:rgba(255,255,255,.12);}
+        .rtab,.rctxtab{touch-action:manipulation;}
         @media(max-width:560px){.wbl{display:none!important;}}
       `}</style>
 
@@ -7930,9 +7870,17 @@ export default function App() {
         conteúdo (alinhamento, Cineminha, Johnny, losango, Lens, terminal, porta) migrou
         para as abas contextuais do Ribbon (Matriz/Decisão/Lens/Terminal/Porta/Seleção),
         renderizadas a partir dos descritores `ctx.*` do registro COMMANDS via
-        contextWhen(selection). O mini-flutuante ergonômico de Deletar/Duplicar chega na
-        Sessão 8. A paleta de cor abaixo NÃO é uma toolbar de contexto (é acionada pelo
-        comando org.color) e permanece. */}
+        contextWhen(selection). O mini-flutuante ergonômico de Deletar/Duplicar (Sessão 8,
+        logo abaixo) e a paleta de cor (acionada pelo comando org.color) são os únicos
+        overlays de shape que restam fora do registro — não são "comandos de aba". */}
+
+        {/* Mini-flutuante de seleção (UX 2.0 — Sessão 8) — só Deletar/Duplicar, perto do
+            shape. Só single-seleção (sel sem multiSel); some durante arraste (shapes
+            arrastados saem de `shapes` para o overlay leve — posição ficaria congelada)
+            e durante a edição inline do rótulo/paleta de cor aberta. */}
+        {sel && multiSel.size===0 && selShape && !dragIds && !edit && !palette && (
+          <SelectionMiniToolbar shape={selShape} vp={vp} onDuplicate={duplicateSelected} onDelete={deleteSelected}/>
+        )}
 
         {/* Color palette */}
         {palette&&selShape&&(
@@ -7962,13 +7910,15 @@ export default function App() {
           </div>
         )}
 
-        {/* Tips */}
-        <div style={{position:"absolute",bottom:16,left:16,zIndex:100,background:"#fff",border:"1px solid #e2e8f0",boxShadow:"0 1px 4px rgba(0,0,0,.06)",color:"#94a3b8",padding:"7px 11px",borderRadius:10,fontSize:10.5,fontFamily:"inherit",lineHeight:1.9}}>
-          <span style={{color:"#64748b",fontWeight:600}}>Dicas</span><br/>
-          ✋ Mover · ↖ Selecionar e arrastar<br/>
-          📱 Pinça → zoom · Segurar → editar<br/>
-          Clique na seta → deletar conexão
-        </div>
+        {/* Tips — em telas estreitas (touch/mobile) o card ocuparia espaço precioso do
+            canvas; o mesmo conteúdo (CANVAS_TIPS) migra para a seção ℹ️ Sobre do Hub
+            (UX 2.0 — Sessão 8). */}
+        {!isNarrowScreen && (
+          <div style={{position:"absolute",bottom:16,left:16,zIndex:100,background:"#fff",border:"1px solid #e2e8f0",boxShadow:"0 1px 4px rgba(0,0,0,.06)",color:"#94a3b8",padding:"7px 11px",borderRadius:10,fontSize:10.5,fontFamily:"inherit",lineHeight:1.9}}>
+            <span style={{color:"#64748b",fontWeight:600}}>Dicas</span><br/>
+            {CANVAS_TIPS.map((t, i) => <span key={i}>{t}<br/></span>)}
+          </div>
+        )}
 
         {/* SVG Canvas */}
         <svg ref={svgRef} width="100%" height="100%" onMouseDown={onCanvasDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onClick={onCanvasClick} style={{display:"block",cursor:canvasCursor,touchAction:"none"}}>
@@ -8714,6 +8664,8 @@ export default function App() {
           { keys:'Esc',              desc:'Cancelar conexão / limpar seleção' },
           { keys:'Ctrl+,',           desc:'Abrir Configurações' },
           { keys:'Ctrl+K',           desc:'Busca de comandos' },
+          { keys:'Ctrl/Cmd+clique',  desc:'Alternar shape na multi-seleção' },
+          { keys:'Duplo-clique (aba do Ribbon)', desc:'Alternar colapso do Ribbon (fixo/compacto/automático)' },
         ];
         return (
           <div onMouseDown={()=>setSettingsModal(null)}
@@ -8925,7 +8877,7 @@ export default function App() {
                     <div style={{display:"flex",flexDirection:"column",gap:16,maxWidth:480}}>
                       <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
                         <BuildBadge />
-                        <span style={{fontSize:11.5,color:"#64748b"}}>Versão do schema de Projeto: <b style={{color:"#334155"}}>3.0</b></span>
+                        <span style={{fontSize:11.5,color:"#64748b"}}>Versão do schema de Projeto: <b style={{color:"#334155"}}>{PROJECT_SCHEMA_VERSION}</b></span>
                       </div>
                       <div>
                         <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Atalhos de teclado</p>
@@ -8942,6 +8894,17 @@ export default function App() {
                           </tbody>
                         </table>
                       </div>
+                      {/* Dicas do canvas — em telas estreitas o card flutuante do canto do
+                          canvas fica oculto (ocuparia espaço do canvas); o mesmo conteúdo
+                          (CANVAS_TIPS) aparece aqui (UX 2.0 — Sessão 8). */}
+                      {isNarrowScreen && (
+                        <div>
+                          <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Dicas do canvas</p>
+                          <ul style={{margin:0,paddingLeft:18,fontSize:12,color:"#475569",lineHeight:1.9}}>
+                            {CANVAS_TIPS.map((t, i) => <li key={i}>{t}</li>)}
+                          </ul>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

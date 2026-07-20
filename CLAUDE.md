@@ -194,7 +194,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Widget de negócio, `BuildBadge`, CI/CD, suporte a touch/mobile | `docs/claude/UI-Complementar-CI.md` |
 | Epics/decisões/roadmap de produto (histórico completo) | `docs/wiki/Decisoes.md`, `docs/wiki/Roadmap.md`, `docs/wiki/Epicos-*.md` |
 | Base de Testes Oficial — inventário, dicionário, matriz de cobertura, gerador de CSV; **feature nova/ajustada ⇒ atualizar docs + regras do gerador na mesma sessão; NUNCA regenerar o CSV sem pedido do usuário** | `docs/wiki/Dados_Teste/README.md` (§ Contrato de manutenção) |
-| UX 2.0 planejada — Ribbon, registro de comandos, ⚙ Hub de Configurações, Busca Ctrl+K, Status Bar, painel Ativos/Inspetor/Copiloto (prompts das 8 sessões) | `docs/wiki/Ribbon-Prompts-Sessoes.md` |
+| UX 2.0 — Ribbon, registro de comandos, ⚙ Hub de Configurações, Busca Ctrl+K, Status Bar, painel Ativos/Inspetor/Copiloto, mini-flutuante de seleção, touch/mobile (8 sessões, entregue) | `docs/wiki/Ribbon-Prompts-Sessoes.md` |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
 | Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
 

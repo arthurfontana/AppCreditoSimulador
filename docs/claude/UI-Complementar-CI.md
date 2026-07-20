@@ -65,3 +65,24 @@ A pasta `release/` contém o build compilado. O usuário pode abrir `release/ind
 - Seleção por rubber-band (retângulo) via touch em modo `select`
 - Drag de variáveis do painel lateral via touch (`startPanelDrag`)
 - Clique em células do Cineminha via touch
+- **Ribbon (UX 2.0 — Sessão 8)**: em tela estreita (`window.innerWidth <= 720`,
+  `NARROW_SCREEN_BREAKPOINT`) o `ribbonMode` nasce `compact` em vez de `fixed` — só quando
+  não há preferência salva ainda (`sessionStorage`/`.credito.json` sempre vencem;
+  `defaultRibbonModeForScreen()` é a fonte única, usada tanto no `useState` inicial quanto
+  no `loadProject`). A faixa de abas do modo `compact` responde a `onTouchStart` (espelha
+  `onMouseEnter`) para revelar os grupos por toque. No modo `auto`, a hotzone de 6px também
+  responde a `onTouchStart`, mas o alvo confiável em touch é o botão explícito **⌄ "Mostrar
+  Ribbon"** no cluster flutuante (uma faixa de 6px é um alvo de toque ruim — "fat finger").
+  Fechar ao tocar fora do Ribbon revelado usa um listener **nativo** de `touchstart` no
+  `document` (não um backdrop `position:fixed`) — um backdrop bloquearia o toque de também
+  chegar ao canvas (ex.: posicionar um shape logo após abrir o Ribbon exigiria dois toques).
+- **Mini-flutuante de seleção (UX 2.0 — Sessão 8)**: `SelectionMiniToolbar` — só Deletar e
+  Duplicar, ancorado perto do shape selecionado (single-seleção) via as mesmas contas de
+  `vp`/`shape.x/y/w/h` do editor de rótulo inline. Botões com `touchAction:'manipulation'`
+  para toque responsivo. Some durante arraste (posição ficaria congelada — o shape
+  arrastado sai de `shapes` para o overlay leve de `dragIds`/`dragDelta`) e durante edição
+  inline/paleta de cor.
+- QAT (Desfazer/Refazer/Deletar/Salvar) e o ⚙ do Hub permanecem sempre visíveis e
+  alcançáveis nos 3 modos do Ribbon, inclusive em tela estreita — a faixa de abas usa um
+  filho `overflowX:auto` só para as abas, então o `rightCluster` (QAT + ⚙) nunca sai da
+  tela por excesso de abas.

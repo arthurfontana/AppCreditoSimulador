@@ -795,12 +795,64 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 ```
 
 **Checklist**:
-- [ ] Mini-flutuante de Deletar/Duplicar na seleção
-- [ ] Atalhos auditados e documentados no Hub (Sobre)
-- [ ] Código morto das toolbars/seções antigas removido
-- [ ] Touch/mobile: `compact` por padrão em tela estreita; hotzone por toque; QAT + ⚙ acessíveis
-- [ ] Fluidez de desfazer/refazer/deletar em todos os modos
-- [ ] `npm test` verde; app funcional e sem código morto
+- [x] Mini-flutuante de Deletar/Duplicar na seleção
+- [x] Atalhos auditados e documentados no Hub (Sobre)
+- [x] Código morto das toolbars/seções antigas removido
+- [x] Touch/mobile: `compact` por padrão em tela estreita; hotzone por toque; QAT + ⚙ acessíveis
+- [x] Fluidez de desfazer/refazer/deletar em todos os modos
+- [x] `npm test` verde; app funcional e sem código morto
+
+> **Entregue (2026-07-20).** **Mini-flutuante de seleção** (`SelectionMiniToolbar`, novo
+> componente) — só Deletar/Duplicar, ancorado perto do shape selecionado (single-seleção)
+> pela mesma conta de `vp`/`shape.x/y/w/h` do editor de rótulo inline; some durante arraste
+> (posição ficaria congelada — o shape arrastado sai de `shapes` para o overlay leve de
+> `dragIds`/`dragDelta`) e durante edição inline/paleta de cor. **Duplicar** nasceu como
+> descritor `edit.duplicate` (registro `COMMANDS`, aba Início›Edição — já previsto no Mapa
+> das abas da Sessão 1, nunca implementado) chamando `duplicateSelected`, novo helper que
+> reusa `cloneCanvasWithNewIds` (o mesmo da duplicação de canvas) sobre o subconjunto
+> selecionado + conexões internas, deslocando a cópia (+32,+32) e reaplicando o mesmo escopo
+> de "porta filha viaja junto" de `deleteSelected`. **Atalhos**: auditoria completa dos
+> listeners de teclado/mouse do App confirmou `Ctrl+Z`/`Ctrl+Y`/`Del`/`Backspace`/`Esc`
+> preservados e achou um atalho existente não documentado — `Ctrl/Cmd+clique` (alternar
+> shape na multi-seleção) — ambos adicionados à tabela da seção ℹ️ Sobre do Hub, junto do
+> duplo-clique que alterna o colapso do Ribbon. A mesma auditoria achou a versão do schema
+> hardcoded como `"3.0"` na Sobre (a Sessão 5 fixou o texto; a Sessão 6 bumpou o schema real
+> para `3.1` sem atualizá-lo) — extraída para a constante `PROJECT_SCHEMA_VERSION`, fonte
+> única para `buildProjectPayload` e a Sobre, para as duas casas nunca mais divergirem.
+> **Touch/mobile**: `ribbonMode` nasce `compact` (em vez de `fixed`) em tela estreita
+> (`window.innerWidth <= 720`, `NARROW_SCREEN_BREAKPOINT`) só quando não há preferência
+> salva ainda (`defaultRibbonModeForScreen()`, fonte única usada no `useState` inicial e no
+> `loadProject`). A faixa de abas do modo `compact` e a hotzone do modo `auto` respondem a
+> `onTouchStart` (espelha `onMouseEnter`); no `auto`, o alvo de toque **confiável** é o novo
+> botão explícito **⌄ "Mostrar Ribbon"** no cluster flutuante (a hotzone de 6px sozinha é um
+> alvo de toque ruim — "fat finger"). Fechar ao tocar fora do Ribbon revelado usa um listener
+> **nativo** de `touchstart` no `document` checando `rootRef.current.contains(e.target)` —
+> deliberadamente **não** um backdrop `position:fixed` (uma primeira versão com backdrop
+> chegou a bloquear o toque de também chegar ao canvas, exigindo dois toques para posicionar
+> um shape logo após abrir o Ribbon; corrigido antes de fechar a sessão). A faixa de abas
+> ganhou um filho `overflowX:auto` só para as abas — em tela estreita com muitas abas, o
+> `rightCluster` (QAT + ⚙) nunca sai da tela por excesso de abas. O card de Dicas do canto do
+> canvas (`CANVAS_TIPS`, extraído como fonte única) some em tela estreita e o mesmo conteúdo
+> aparece na seção ℹ️ Sobre do Hub. **Fluidez**: QAT (Desfazer/Refazer/Deletar/Salvar) e ⚙ já
+> eram sempre visíveis nos 3 modos desde a Sessão 4 — confirmado que continuam 1-toque com
+> `touch-action:manipulation` adicionado às classes `.wbt`/`.wbz`/abas do Ribbon (evita atraso
+> de double-tap-zoom em touchscreen). **Código morto removido** (achado por auditoria com
+> ESLint `no-unused-vars` ad-hoc, escopado a remanescentes da migração Ribbon/painel — não
+> uma varredura geral do arquivo): `TOOLS` (array de ferramentas da toolbar de topo antiga,
+> substituído pelos descritores `tool.*`/Inserir do registro `COMMANDS`), o estado
+> `cinemaDropdownOpen`/`cinemaDropdownPos`/`cinemaDropdownBtnRef` (dropdown da toolbar
+> flutuante do Cineminha, aposentada na Sessão 2, nunca lido em lugar nenhum), a função
+> `deleteShape` (single-id, sem nenhum call-site — cascade de portas idêntica já vive em
+> `deleteSelected`) e o componente `SimIndicators` (~170 linhas, card de simulação do painel
+> direito de antes da Sessão 1 — o header dizia "Business Impact" mas a lógica idêntica
+> (mesmos `rate`/`irV`/`iiV`/`deltaClr`/`heroVal`) já vive duplicada no widget flutuante
+> Business Impact inline e em `renderSimPanel`; nenhum call-site de `<SimIndicators/>`
+> restava). Validado ponta a ponta com Playwright (mouse e emulação `isMobile` com touch
+> real): mini-flutuante duplica/deleta corretamente, Sobre mostra schema `3.1` e a tabela de
+> atalhos completa, tela estreita nasce `compact` com Dicas na Sobre, toque na aba/hotzone
+> revela o Ribbon sem reflow, toque fora fecha sem bloquear o toque seguinte no canvas
+> (posicionar um shape funciona no mesmo gesto). Sem estado persistido novo → sem bump de
+> schema. `npm test` (378/378) e `npm run build` verdes.
 
 ---
 
@@ -813,7 +865,7 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 - [x] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
 - [x] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
 - [x] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
-- [ ] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
+- [x] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
 
 ---
 
@@ -861,11 +913,15 @@ Cada sessão segue o mesmo template:
 
 **Última atualização**: 2026-07-20 (v2 — reavaliação completa pós-Épicos FR/GS/H4–H8:
 inventário de 12 superfícies, abas Analisar/Otimizar separadas, Hub de Configurações,
-Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–7 entregues**
-(registro `COMMANDS` + Ribbon fixed; abas contextuais + aposentadoria das 6 toolbars
-flutuantes; ⚙ Hub de Configurações; colapso do Ribbon em 3 estados — `ribbonMode`,
-schema 2.9; Status Bar configurável + realocação de badges — `statusBarIndicators`,
-schema 3.0; painel direito em 3 abas Ativos/Inspetor/Copiloto — `rightPanelMode`,
-schema 3.1; Busca de comandos Ctrl+K — `cmdPalette` efêmero, sem bump de schema);
-Sessão 8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi executada e está
-substituída por esta.)
+Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–8 entregues — migração
+UX 2.0 completa** (registro `COMMANDS` + Ribbon fixed; abas contextuais + aposentadoria das
+6 toolbars flutuantes; ⚙ Hub de Configurações; colapso do Ribbon em 3 estados —
+`ribbonMode`, schema 2.9; Status Bar configurável + realocação de badges —
+`statusBarIndicators`, schema 3.0; painel direito em 3 abas Ativos/Inspetor/Copiloto —
+`rightPanelMode`, schema 3.1; Busca de comandos Ctrl+K — `cmdPalette` efêmero, sem bump de
+schema; Sessão 8 — mini-flutuante de seleção Deletar/Duplicar, `edit.duplicate` no registro,
+atalhos auditados e documentados na Sobre (`PROJECT_SCHEMA_VERSION` fonte única), touch/
+mobile no Ribbon compact/auto e ribbonMode padrão `compact` em tela estreita, Dicas do
+canvas migrada para a Sobre em tela estreita, e remoção de código morto — `TOOLS`, dropdown
+do Cineminha antigo, `deleteShape`, `SimIndicators` —, tudo sem bump de schema). A v1, de
+2026-07-09, nunca foi executada e está substituída por esta.)
