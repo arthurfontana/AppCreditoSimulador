@@ -488,12 +488,25 @@ app 100% funcional e npm test verde.
 ```
 
 **Checklist**:
-- [ ] Hub com 4 seções e navegação lateral; visual consistente com os modais atuais
-- [ ] Seções Motor Python e Visualização removidas do painel; funcionalidade idêntica
-- [ ] 5 deep-links testados um a um (aviso de projeto grande + 4 UnlockHint)
-- [ ] ⚙ na faixa de abas + comando na aba Projeto + `Ctrl+,`
-- [ ] Persistência dos estados inalterada (sem bump — nenhum campo novo)
-- [ ] `npm test` verde; app funcional
+- [x] Hub com 4 seções e navegação lateral; visual consistente com os modais atuais
+- [x] Seções Motor Python e Visualização removidas do painel; funcionalidade idêntica
+- [x] 5 deep-links testados um a um (aviso de projeto grande + 4 UnlockHint)
+- [x] ⚙ na faixa de abas + comando na aba Projeto + `Ctrl+,`
+- [x] Persistência dos estados inalterada (sem bump — nenhum campo novo)
+- [x] `npm test` verde; app funcional
+
+> **Entregue (2026-07-20).** Estado efêmero `settingsModal` (`null | {section}`) +
+> `openSettings(sectionId?)` (useCallback estável). O modal segue o padrão visual dos modais
+> existentes (overlay `fixed`, `z-index` 4200) com sidebar de 4 seções: 🐍 Motor Python
+> (migração integral — toggle, URL/token só em `IS_DEV_BUILD`, 🔄 Verificar conexão,
+> `SidecarTestPanel`, textos de instalação/tier), 🎨 Visualização (Espessura Dinâmica + 3
+> indicadores de aresta), 🗔 Interface (colapso do painel direito), ℹ️ Sobre (`BuildBadge` +
+> schema `2.8` + tabela de atalhos). As seções Motor Python e Visualização foram REMOVIDAS
+> do painel direito. Os 5 `setSidecarPrefsOpen(true)` (aviso `projectLoadNotice` + 4
+> `onOpenPrefs` dos `UnlockHint`) agora chamam `openSettings('motor-python')`; o estado
+> `sidecarPrefsOpen` foi eliminado. Entradas: ⚙ na extremidade direita da faixa de abas do
+> Ribbon (prop `onOpenSettings`), comando `project.settings` na aba Projeto e atalho `Ctrl+,`.
+> Sem estado persistido novo → sem bump de schema.
 
 ---
 
@@ -709,7 +722,7 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 
 - [x] **Sessão 1** — Registro de Comandos + casca do Ribbon (fixed) 🏷️ `Opus 4.8`
 - [x] **Sessão 2** — Abas contextuais + fim das toolbars flutuantes 🏷️ `Opus 4.8`
-- [ ] **Sessão 3** — ⚙ Hub de Configurações 🏷️ `Opus 4.8`
+- [x] **Sessão 3** — ⚙ Hub de Configurações 🏷️ `Opus 4.8`
 - [ ] **Sessão 4** — Colapso em 3 estados 🏷️ `Opus 4.8`
 - [ ] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
 - [ ] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`

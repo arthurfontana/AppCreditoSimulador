@@ -1733,7 +1733,7 @@ function RibbonCmdButton({ cmd }) {
   );
 }
 
-function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, onCtxTab }) {
+function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, onCtxTab, onOpenSettings }) {
   // Aba contextual em foco? Então o conteúdo vem de `contextCommands` (já filtrado por
   // contextWhen no App); senão, das abas fixas por `c.tab`.
   const isCtx = !!contextTab && activeTab === contextTab.id;
@@ -1793,6 +1793,14 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
           {qBtn('🗑', 'Deletar (Del)', qat.onDelete, qat.canDelete, true)}
           {qBtn('💾', 'Salvar Projeto', qat.onSave, true, false)}
         </div>
+        {/* ⚙ Hub de Configurações — extremidade direita da faixa de abas (visível como a
+            QAT em todos os modos; UX 2.0 Sessão 3). Fora do conteúdo colapsável. */}
+        <button className="wbt" onClick={onOpenSettings} title="Configurações (Ctrl+,)"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 28,
+            marginLeft: 6, borderRadius: 8, border: 'none', background: 'transparent', color: '#475569',
+            cursor: 'pointer', fontSize: 15, fontFamily: 'inherit', flexShrink: 0 }}>
+          ⚙
+        </button>
       </div>
       {/* Grupos de comandos da aba ativa (fundo levemente tingido quando contextual) */}
       <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 58,
@@ -1902,9 +1910,14 @@ export default function App() {
   // no_sidecar|unreachable|protocol_mismatch|ok.
   const [computeSidecarStatus, setComputeSidecarStatus] = useState({ available: false, tier: null, capabilities: null, reason: 'not_detected' });
   const [computeSidecarChecking, setComputeSidecarChecking] = useState(false);
-  // Seção "Motor Python" das preferências — expandida sob demanda (inclusive pelos
-  // banners DEC-HX-009, que apontam pra cá via "Saiba como ligar").
-  const [sidecarPrefsOpen, setSidecarPrefsOpen] = useState(false);
+  // ⚙ Hub de Configurações (UX 2.0 — Sessão 3). Modal efêmero (nunca persistido) — o
+  // endereço único de toda preferência do app. `settingsModal` = null | { section }.
+  // As preferências que ele edita (computeSidecar, toggles de aresta) continuam
+  // persistidas onde já estavam (sem bump de schema). `openSettings(sectionId?)` abre o
+  // Hub direto numa seção — os 5 deep-links de "ligar o Motor Python" chamam
+  // openSettings('motor-python'). A seção aberta por último NÃO persiste.
+  const [settingsModal, setSettingsModal] = useState(null);
+  const openSettings = useCallback((sectionId) => setSettingsModal({ section: sectionId || 'motor-python' }), []);
   // Teste ponta a ponta (echo_stats) — smoke test do round-trip Browser⇄Python (§17
   // Fase 1: "sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark").
   // null | {step:'uploading'|'running'|'result'|'error', progress, via, fellBack, result, error}
@@ -3120,10 +3133,11 @@ export default function App() {
           return;
         }
       }
-      // Undo / Redo
+      // Undo / Redo + ⚙ Configurações (Ctrl+,)
       if (e.ctrlKey||e.metaKey) {
         if (e.key==="z"||e.key==="Z") { e.preventDefault(); undo(); return; }
         if (e.key==="y"||e.key==="Y") { e.preventDefault(); redo(); return; }
+        if (e.key===",") { e.preventDefault(); openSettings(); return; }
       }
       if (e.key==="Delete"||e.key==="Backspace") {
         const ms=multiSelR.current;
@@ -3132,7 +3146,7 @@ export default function App() {
       if (e.key==="Escape"){setFromId(null);setSel(null);}
     };
     window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h);
-  },[undo, redo, deleteSelected]);
+  },[undo, redo, deleteSelected, openSettings]);
 
   const zoomCenter=(f)=>{const r=getBR();doZoom(r.width/2,r.height/2,f);};
 
@@ -7212,6 +7226,7 @@ export default function App() {
     // ─── PROJETO ───
     { id: 'project.save', label: 'Salvar Projeto', icon: '💾', tab: 'projeto', group: 'Arquivo', shortcut: '', keywords: ['salvar', 'projeto', 'credito', 'gravar'], onRun: saveProject },
     { id: 'project.open', label: 'Abrir Projeto', icon: '📁', tab: 'projeto', group: 'Arquivo', keywords: ['abrir', 'carregar projeto', 'credito'], onRun: () => projectInputRef.current?.click() },
+    { id: 'project.settings', label: 'Configurações', icon: '⚙', tab: 'projeto', group: 'Sistema', shortcut: 'Ctrl+,', keywords: ['configurações', 'preferências', 'ajustes', 'settings', 'motor python', 'visualização', 'hub'], onRun: () => openSettings() },
 
     // ─── CONTEXTUAIS (surfaces #3–#8) — nascem agora; abas contextuais renderizam na Sessão 2 ───
     // Matriz (Cineminha): seletor de tipo (×3), Resultado, Domínio, Otimizar, Johnny, Exportar/
@@ -7310,6 +7325,7 @@ export default function App() {
           contextTab={activeContextTab ? { id: activeContextTab, label: CTX_TAB_META[activeContextTab] } : null}
           contextCommands={contextCommands}
           onCtxTab={() => setCtxTabShown(true)}
+          onOpenSettings={() => openSettings()}
           qat={{
             undo, redo, canUndo: undoStack.length > 0, canRedo: redoStack.length > 0,
             onDelete: deleteSelected, canDelete: (!!sel || multiSel.size > 0), onSave: saveProject,
@@ -7770,7 +7786,7 @@ export default function App() {
                   (~{formatRamBytes(projectLoadNotice.totalBytes)} estimados) — acima da zona de
                   conforto do navegador (~5MM linhas / ~1,2GB). O app segue funcionando normalmente
                   no browser; para trabalhar sem tetos, {' '}
-                  <span onClick={()=>{ setSidecarPrefsOpen(true); setProjectLoadNotice(null); }}
+                  <span onClick={()=>{ openSettings('motor-python'); setProjectLoadNotice(null); }}
                     style={{textDecoration:"underline",cursor:"pointer",fontWeight:600}}>
                     saiba como ligar o Motor Python
                   </span>.
@@ -7787,89 +7803,10 @@ export default function App() {
           </div>
         )}
 
-        {/* Motor Python (Execução Híbrida H4/H5/H6) — preferência opt-in. Desligado
-            por padrão: com o toggle off o ComputeRouter nem tenta detectar e NADA muda
-            no comportamento do app (DEC-HX-001). */}
-        <div style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9"}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer"}}
-            onClick={()=>setSidecarPrefsOpen(v=>!v)}>
-            <span style={{fontSize:11,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.6,display:"flex",alignItems:"center",gap:6}}>
-              🐍 Motor Python
-              <ComputeEngineBadge enabled={computeSidecar.enabled} status={computeSidecarStatus}
-                checking={computeSidecarChecking} onRecheck={(e)=>{e?.stopPropagation?.();detectSidecar();}}/>
-            </span>
-            <span style={{fontSize:11,color:"#94a3b8",transform:sidecarPrefsOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>▾</span>
-          </div>
-
-          {sidecarPrefsOpen && (
-            <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:10}}>
-              <p style={{fontSize:11,color:"#64748b",lineHeight:1.55}}>
-                Camada opcional de aceleração/ampliação de limites (clusterização, buscas mais
-                profundas, bases maiores) rodando localmente (127.0.0.1). Desligado, o app funciona
-                exatamente como hoje — nenhuma funcionalidade depende dele.
-              </p>
-              <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
-                <input type="checkbox" checked={computeSidecar.enabled}
-                  onChange={e=>setComputeSidecar(s=>({...s,enabled:e.target.checked}))}
-                  style={{width:15,height:15,accentColor:"#7c3aed"}}/>
-                Ligar Motor Python
-              </label>
-
-              {IS_DEV_BUILD && (
-                <>
-                  <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
-                    URL do sidecar (modo dev)
-                    <input type="text" value={computeSidecar.url}
-                      onChange={e=>setComputeSidecar(s=>({...s,url:e.target.value}))}
-                      placeholder="http://127.0.0.1:8090"
-                      style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
-                  </label>
-                  <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
-                    Token (impresso no console de <code>python sidecar.py --dev</code>)
-                    <input type="text" value={computeSidecar.token}
-                      onChange={e=>setComputeSidecar(s=>({...s,token:e.target.value}))}
-                      placeholder="cole o token aqui"
-                      style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"monospace",boxSizing:"border-box"}}/>
-                  </label>
-                </>
-              )}
-              {!IS_DEV_BUILD && (
-                <p style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5,margin:0}}>
-                  No release, o Motor Python roda na mesma origem do app (nenhuma URL/token a
-                  configurar) — <code>iniciar.bat</code> já sobe os dois juntos. Sem os pacotes
-                  instalados, o app segue 100% no navegador.
-                </p>
-              )}
-
-              <button onClick={detectSidecar} disabled={!computeSidecar.enabled || computeSidecarChecking}
-                style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e2e8f0",
-                  background: computeSidecar.enabled ? "#faf5ff" : "#f8fafc",
-                  color: computeSidecar.enabled ? "#7c3aed" : "#cbd5e1",
-                  cursor: computeSidecar.enabled ? "pointer" : "default",
-                  fontSize:12,fontWeight:600,fontFamily:"inherit"}}>
-                {computeSidecarChecking ? "Verificando…" : "🔄 Verificar conexão"}
-              </button>
-
-              {computeSidecar.enabled && (
-                <SidecarTestPanel
-                  status={computeSidecarStatus}
-                  test={sidecarTest}
-                  onRun={runSidecarTest}
-                  onCancel={cancelSidecarTest}
-                  hasDataset={Object.keys(csvStore).length > 0}
-                />
-              )}
-
-              <p style={{fontSize:10,color:"#94a3b8",lineHeight:1.5,margin:0}}>
-                Instalação (opcional): <code>release/python/instalar_motor.bat</code>. Sem pacotes
-                científicos instalados, o Motor Python roda em tier <b>stdlib</b> (só paralelismo);
-                com numpy/scipy, tier <b>full</b> (vetorizado).
-              </p>
-            </div>
-          )}
-        </div>
-
-
+        {/* Motor Python e Visualização MIGRARAM para o ⚙ Hub de Configurações (UX 2.0 —
+            Sessão 3): openSettings('motor-python') / seção 🎨 Visualização. Ver o modal
+            `settingsModal` mais abaixo. Os estados (computeSidecar, toggles de aresta)
+            continuam vivos aqui no App e persistidos como antes (sem bump de schema). */}
 
         {/* Loaded CSVs list */}
         {Object.keys(csvStore).length > 0 && (
@@ -8066,34 +8003,8 @@ export default function App() {
         )}
 
 
-        {/* Feature flags */}
-        <div style={{padding:"10px 16px",borderBottom:"1px solid #f1f5f9"}}>
-          <p style={{fontSize:11,color:"#94a3b8",marginBottom:8,fontWeight:500,textTransform:"uppercase",letterSpacing:.6}}>Visualização</p>
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
-            <input type="checkbox" checked={enableDynThickness} onChange={()=>setEnableDynThickness(v=>!v)}
-              style={{width:15,height:15,accentColor:"#6366f1"}}/>
-            Espessura Dinâmica
-          </label>
-          <div style={{fontSize:10.5,color:"#94a3b8",marginTop:3,marginLeft:23}}>Arestas mais espessas = maior volume</div>
-          <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:5}}>
-            <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:2}}>Indicadores nas Arestas</p>
-            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
-              <input type="checkbox" checked={showEdgeVol} onChange={()=>setShowEdgeVol(v=>!v)}
-                style={{width:15,height:15,accentColor:"#6366f1"}}/>
-              📊 Volume de Propostas
-            </label>
-            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
-              <input type="checkbox" checked={showEdgeInadReal} onChange={()=>setShowEdgeInadReal(v=>!v)}
-                style={{width:15,height:15,accentColor:"#6366f1"}}/>
-              ⚠️ Inad. Real
-            </label>
-            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
-              <input type="checkbox" checked={showEdgeInadInf} onChange={()=>setShowEdgeInadInf(v=>!v)}
-                style={{width:15,height:15,accentColor:"#6366f1"}}/>
-              🎯 Inad. Inferida
-            </label>
-          </div>
-        </div>
+        {/* Visualização (Espessura Dinâmica + indicadores de aresta) MIGROU para o ⚙ Hub
+            de Configurações → seção 🎨 Visualização (UX 2.0 — Sessão 3). */}
 
         {/* Empty state */}
         {Object.keys(csvStore).length === 0 && (
@@ -8122,6 +8033,216 @@ export default function App() {
           ◇ {panelDrag.col}
         </div>
       )}
+
+      {/* ═══════════════ ⚙ HUB DE CONFIGURAÇÕES (UX 2.0 — Sessão 3) ═══════════════ */}
+      {/* Modal com navegação lateral (mesmo padrão visual dos modais existentes). Endereço
+          único de toda preferência do app. Efêmero (`settingsModal`) — as preferências que
+          ele edita já são/continuam persistidas onde estavam (sem bump de schema). */}
+      {settingsModal&&(()=>{
+        const section = settingsModal.section;
+        const SECTIONS = [
+          { id:'motor-python', label:'Motor Python', icon:'🐍' },
+          { id:'visualizacao', label:'Visualização', icon:'🎨' },
+          { id:'interface',    label:'Interface',    icon:'🗔' },
+          { id:'sobre',        label:'Sobre',        icon:'ℹ️' },
+        ];
+        const go = (id) => setSettingsModal({ section: id });
+        const secTitle = SECTIONS.find(s=>s.id===section) || SECTIONS[0];
+        const SHORTCUTS = [
+          { keys:'Ctrl+Z',           desc:'Desfazer' },
+          { keys:'Ctrl+Y',           desc:'Refazer' },
+          { keys:'Del / Backspace',  desc:'Deletar seleção' },
+          { keys:'Esc',              desc:'Cancelar conexão / limpar seleção' },
+          { keys:'Ctrl+,',           desc:'Abrir Configurações' },
+        ];
+        return (
+          <div onMouseDown={()=>setSettingsModal(null)}
+            style={{position:"fixed",inset:0,zIndex:4200,background:"rgba(15,23,42,.45)",
+              display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+            <div onMouseDown={e=>e.stopPropagation()}
+              style={{width:760,maxWidth:"94vw",height:"84vh",maxHeight:640,display:"flex",flexDirection:"column",
+                background:"#fff",borderRadius:14,boxShadow:"0 20px 60px rgba(0,0,0,.25)",overflow:"hidden"}}>
+              {/* Header */}
+              <div style={{padding:"16px 20px",borderBottom:"1px solid #e2e8f0",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:15,fontWeight:700,color:"#1e293b"}}>⚙ Configurações</div>
+                  <div style={{fontSize:11.5,color:"#94a3b8",marginTop:2}}>Preferências do app — o endereço único de toda configuração</div>
+                </div>
+                <button onClick={()=>setSettingsModal(null)} title="Fechar"
+                  style={{width:28,height:28,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",color:"#94a3b8",cursor:"pointer",fontSize:15,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>×</button>
+              </div>
+              {/* Body: navegação lateral + conteúdo da seção */}
+              <div style={{display:"flex",flex:1,minHeight:0}}>
+                {/* Sidebar */}
+                <div style={{width:196,flexShrink:0,borderRight:"1px solid #f1f5f9",padding:"12px 10px",display:"flex",flexDirection:"column",gap:3,background:"#fafbfc"}}>
+                  {SECTIONS.map(s=>{
+                    const on = s.id===section;
+                    return (
+                      <button key={s.id} onClick={()=>go(s.id)}
+                        style={{display:"flex",alignItems:"center",gap:9,padding:"9px 11px",borderRadius:9,border:"none",
+                          background:on?"#eff6ff":"transparent",color:on?"#2563eb":"#475569",fontWeight:on?700:500,
+                          fontSize:12.5,cursor:"pointer",fontFamily:"inherit",textAlign:"left",transition:"all .12s"}}
+                        onMouseEnter={e=>{if(!on)e.currentTarget.style.background="#f1f5f9";}}
+                        onMouseLeave={e=>{if(!on)e.currentTarget.style.background="transparent";}}>
+                        <span style={{fontSize:15,lineHeight:1}}>{s.icon}</span>
+                        <span>{s.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* Conteúdo */}
+                <div style={{flex:1,overflowY:"auto",padding:"18px 22px",minWidth:0}}>
+                  <div style={{fontSize:13.5,fontWeight:700,color:"#1e293b",display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                    <span style={{fontSize:16}}>{secTitle.icon}</span>{secTitle.label}
+                  </div>
+
+                  {/* ── 🐍 Motor Python (migração integral da seção do painel) ── */}
+                  {section==='motor-python' && (
+                    <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:520}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <ComputeEngineBadge enabled={computeSidecar.enabled} status={computeSidecarStatus}
+                          checking={computeSidecarChecking} onRecheck={detectSidecar}/>
+                      </div>
+                      <p style={{fontSize:11.5,color:"#64748b",lineHeight:1.55,margin:0}}>
+                        Camada opcional de aceleração/ampliação de limites (clusterização, buscas mais
+                        profundas, bases maiores) rodando localmente (127.0.0.1). Desligado, o app funciona
+                        exatamente como hoje — nenhuma funcionalidade depende dele.
+                      </p>
+                      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                        <input type="checkbox" checked={computeSidecar.enabled}
+                          onChange={e=>setComputeSidecar(s=>({...s,enabled:e.target.checked}))}
+                          style={{width:15,height:15,accentColor:"#7c3aed"}}/>
+                        Ligar Motor Python
+                      </label>
+
+                      {IS_DEV_BUILD && (
+                        <>
+                          <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                            URL do sidecar (modo dev)
+                            <input type="text" value={computeSidecar.url}
+                              onChange={e=>setComputeSidecar(s=>({...s,url:e.target.value}))}
+                              placeholder="http://127.0.0.1:8090"
+                              style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"inherit",boxSizing:"border-box"}}/>
+                          </label>
+                          <label style={{fontSize:11.5,color:"#475569",fontWeight:600}}>
+                            Token (impresso no console de <code>python sidecar.py --dev</code>)
+                            <input type="text" value={computeSidecar.token}
+                              onChange={e=>setComputeSidecar(s=>({...s,token:e.target.value}))}
+                              placeholder="cole o token aqui"
+                              style={{width:"100%",marginTop:4,padding:"7px 8px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:12.5,fontFamily:"monospace",boxSizing:"border-box"}}/>
+                          </label>
+                        </>
+                      )}
+                      {!IS_DEV_BUILD && (
+                        <p style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5,margin:0}}>
+                          No release, o Motor Python roda na mesma origem do app (nenhuma URL/token a
+                          configurar) — <code>iniciar.bat</code> já sobe os dois juntos. Sem os pacotes
+                          instalados, o app segue 100% no navegador.
+                        </p>
+                      )}
+
+                      <button onClick={detectSidecar} disabled={!computeSidecar.enabled || computeSidecarChecking}
+                        style={{alignSelf:"flex-start",padding:"8px 12px",borderRadius:8,border:"1px solid #e2e8f0",
+                          background: computeSidecar.enabled ? "#faf5ff" : "#f8fafc",
+                          color: computeSidecar.enabled ? "#7c3aed" : "#cbd5e1",
+                          cursor: computeSidecar.enabled ? "pointer" : "default",
+                          fontSize:12,fontWeight:600,fontFamily:"inherit"}}>
+                        {computeSidecarChecking ? "Verificando…" : "🔄 Verificar conexão"}
+                      </button>
+
+                      {computeSidecar.enabled && (
+                        <SidecarTestPanel
+                          status={computeSidecarStatus}
+                          test={sidecarTest}
+                          onRun={runSidecarTest}
+                          onCancel={cancelSidecarTest}
+                          hasDataset={Object.keys(csvStore).length > 0}
+                        />
+                      )}
+
+                      <p style={{fontSize:10,color:"#94a3b8",lineHeight:1.5,margin:0}}>
+                        Instalação (opcional): <code>release/python/instalar_motor.bat</code>. Sem pacotes
+                        científicos instalados, o Motor Python roda em tier <b>stdlib</b> (só paralelismo);
+                        com numpy/scipy, tier <b>full</b> (vetorizado).
+                      </p>
+                    </div>
+                  )}
+
+                  {/* ── 🎨 Visualização (Espessura Dinâmica + 3 indicadores de aresta) ── */}
+                  {section==='visualizacao' && (
+                    <div style={{display:"flex",flexDirection:"column",gap:6,maxWidth:460}}>
+                      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                        <input type="checkbox" checked={enableDynThickness} onChange={()=>setEnableDynThickness(v=>!v)}
+                          style={{width:15,height:15,accentColor:"#6366f1"}}/>
+                        Espessura Dinâmica
+                      </label>
+                      <div style={{fontSize:10.5,color:"#94a3b8",marginTop:1,marginLeft:23}}>Arestas mais espessas = maior volume</div>
+                      <div style={{marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
+                        <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:2}}>Indicadores nas Arestas</p>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                          <input type="checkbox" checked={showEdgeVol} onChange={()=>setShowEdgeVol(v=>!v)}
+                            style={{width:15,height:15,accentColor:"#6366f1"}}/>
+                          📊 Volume de Propostas
+                        </label>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                          <input type="checkbox" checked={showEdgeInadReal} onChange={()=>setShowEdgeInadReal(v=>!v)}
+                            style={{width:15,height:15,accentColor:"#6366f1"}}/>
+                          ⚠️ Inad. Real
+                        </label>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                          <input type="checkbox" checked={showEdgeInadInf} onChange={()=>setShowEdgeInadInf(v=>!v)}
+                            style={{width:15,height:15,accentColor:"#6366f1"}}/>
+                          🎯 Inad. Inferida
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── 🗔 Interface (colapso do painel direito, por ora) ── */}
+                  {section==='interface' && (
+                    <div style={{display:"flex",flexDirection:"column",gap:8,maxWidth:460}}>
+                      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                        <input type="checkbox" checked={panelCollapsed} onChange={()=>setPanelCollapsed(v=>!v)}
+                          style={{width:15,height:15,accentColor:"#3b82f6"}}/>
+                        Ocultar painel direito
+                      </label>
+                      <div style={{fontSize:10.5,color:"#94a3b8",marginLeft:23,lineHeight:1.5}}>
+                        Recolhe o painel lateral para ganhar espaço de canvas. (Colapso do Ribbon e
+                        indicadores da Status Bar chegam nas próximas sessões da evolução de UX.)
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── ℹ️ Sobre (Build + schema + atalhos) ── */}
+                  {section==='sobre' && (
+                    <div style={{display:"flex",flexDirection:"column",gap:16,maxWidth:480}}>
+                      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                        <BuildBadge />
+                        <span style={{fontSize:11.5,color:"#64748b"}}>Versão do schema de Projeto: <b style={{color:"#334155"}}>2.8</b></span>
+                      </div>
+                      <div>
+                        <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Atalhos de teclado</p>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                          <tbody>
+                            {SHORTCUTS.map(sc=>(
+                              <tr key={sc.keys} style={{borderBottom:"1px solid #f1f5f9"}}>
+                                <td style={{padding:"7px 8px",width:150}}>
+                                  <code style={{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:6,padding:"2px 7px",fontSize:11,color:"#334155",whiteSpace:"nowrap"}}>{sc.keys}</code>
+                                </td>
+                                <td style={{padding:"7px 8px",color:"#475569"}}>{sc.desc}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═══════════════ AXIS SELECTION MODAL (Cineminha) ═══════════ */}
       {/* ═══════════════ DECISION LENS MODAL ═══════════════ */}
@@ -9801,7 +9922,7 @@ export default function App() {
                                 ceilingText="Motor Python ausente — ligá-lo prepara o estudo para trabalhar sem tetos declarados assim que as tarefas passarem a suportar bases grandes."
                                 unlockedText={`Motor Python detectado (tier ${computeSidecarStatus.tier || '—'}) — este estudo já pode usá-lo conforme as tarefas passarem a suportar bases grandes.`}
                                 status={computeSidecarStatus}
-                                onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                                onOpenPrefs={()=>openSettings('motor-python')}
                               />
                               {!computeSidecarStatus.available && (
                                 <button onClick={()=>setComputeSidecar(s=>({...s,enabled:true}))}
@@ -11536,7 +11657,7 @@ export default function App() {
                         ceilingText="Busca gulosa no navegador (padrão) — ligue o Motor Python para a busca ÓTIMA (MILP, sem teto artificial) e a fronteira completa."
                         unlockedText="Motor Python detectado — a busca roda ótima (MILP)."
                         status={{ available: false }}
-                        onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                        onOpenPrefs={()=>openSettings('motor-python')}
                       />
                     )}
                     <button onClick={runGoalSeek}
@@ -12049,7 +12170,7 @@ export default function App() {
                       ceilingText="Sem o Motor Python, a Descoberta respeita os tetos do navegador: profundidade ≤ 2 variáveis e beam 8 (paridade total — nada deixa de funcionar, só os tetos)."
                       unlockedText={`Motor Python detectado (tier ${computeSidecarStatus.tier || '—'}) — profundidade 3–4 e beam ampliado liberados; a varredura profunda roda vetorizada no sidecar.`}
                       status={deepOk ? computeSidecarStatus : { available: false }}
-                      onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                      onOpenPrefs={()=>openSettings('motor-python')}
                     />
                     {filtroVars.length > 0 && filtroVars.length === (params.excludedCols||[]).length && (
                       <p style={{fontSize:11,color:"#dc2626",margin:0}}>Marque ao menos uma variável para buscar.</p>
@@ -12341,7 +12462,7 @@ export default function App() {
                       ceilingText="Sem o Motor Python, a clusterização respeita os tetos do navegador: até 3 dimensões, k ≤ 8, 2.000 pontos agregados e só k-means (paridade total — nada deixa de funcionar, só os tetos)."
                       unlockedText={`Motor Python detectado (tier ${computeSidecarStatus.tier || '—'}) — dimensões/k ampliados liberados${sklearnOk ? ', com k automático (silhueta) e hierárquico via sklearn' : ''}; a clusterização roda vetorizada no sidecar.`}
                       status={deepOk ? computeSidecarStatus : { available: false }}
-                      onOpenPrefs={()=>setSidecarPrefsOpen(true)}
+                      onOpenPrefs={()=>openSettings('motor-python')}
                     />
                     <button onClick={runClusterSegments} disabled={dims.length===0}
                       style={{marginTop:6,padding:"11px 16px",borderRadius:10,border:"none",
