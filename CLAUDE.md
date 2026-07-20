@@ -195,6 +195,8 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Epics/decisões/roadmap de produto (histórico completo) | `docs/wiki/Decisoes.md`, `docs/wiki/Roadmap.md`, `docs/wiki/Epicos-*.md` |
 | Base de Testes Oficial — inventário, dicionário, matriz de cobertura, gerador de CSV; **feature nova/ajustada ⇒ atualizar docs + regras do gerador na mesma sessão; NUNCA regenerar o CSV sem pedido do usuário** | `docs/wiki/Dados_Teste/README.md` (§ Contrato de manutenção) |
 | UX 2.0 — Ribbon, registro de comandos, ⚙ Hub de Configurações, Busca Ctrl+K, Status Bar, painel Ativos/Inspetor/Copiloto, mini-flutuante de seleção, touch/mobile (8 sessões, entregue) | `docs/wiki/Ribbon-Prompts-Sessoes.md` |
+| Explorar a Base — aba de análise exploratória assistida da Jornada de Construção (Épico EB, DEC-EB-001..012, planejado — EB1–EB5 não iniciadas) | `docs/wiki/Epicos-ExplorarBase.md` |
+| Jornada de Construção peças 2–3 — Feed de Próxima Melhor Ação (Épico NB) + Etapas/Prontidão (Épico EP), planejados, prompts por sessão | `docs/wiki/Jornada-Prompts-Sessoes.md` |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
 | Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
 
@@ -209,7 +211,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | ADR-005 | Build em `release/` no mesmo repo | Distribuição simplificada — abrir `index.html` sem servidor |
 
 ## Branch de desenvolvimento atual
-`claude/ux-evolution-app-reorganization-af2rv6`
+`claude/policy-construction-from-scratch-6sre72`
 
 ## Roadmap futuro (não implementado)
 
