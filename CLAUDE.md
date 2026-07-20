@@ -98,8 +98,9 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"2.8"`** (bumped na UX 2.0/Ribbon Sessão 1 — novo campo de topo
-   `ribbonActiveTab`; `2.7` foi a Variável de Faixas — `csvStore[csvId].rangeDefs`,
+   Versão atual: **`"2.9"`** (bumped na UX 2.0/Ribbon Sessão 4 — novo campo de topo
+   `ribbonMode`, colapso do Ribbon em 3 estados; `2.8` foi a Ribbon Sessão 1 — campo de
+   topo `ribbonActiveTab`; `2.7` foi a Variável de Faixas — `csvStore[csvId].rangeDefs`,
    Épico FR/Sessão FR5; `2.6` foi a Variável de Cluster — `clusterDefs`).
 4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
    adicionar serialize/deserialize dedicados (padrão de
@@ -115,7 +116,8 @@ terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados comp
 (`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`) ·
-viewport · aba ativa · aba do Ribbon (`ribbonActiveTab`) · painel colapsado.
+viewport · aba ativa · aba do Ribbon (`ribbonActiveTab`) · modo de colapso do Ribbon
+(`ribbonMode`) · painel colapsado.
 
 ## Comandos de desenvolvimento
 

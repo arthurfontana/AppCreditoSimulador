@@ -545,13 +545,30 @@ zoom sem desvio; o modo auto não dispara recomputo de viewport ao revelar. Ao f
 ```
 
 **Checklist**:
-- [ ] 3 modos implementados e alternáveis (botão + duplo-clique + Hub)
-- [ ] `fixed`/`compact` reflowam; revelação de `compact` e `auto` são overlay **sem reflow**
-- [ ] Clique/drag/zoom sem desvio nos 3 modos (base grande carregada)
-- [ ] `auto` não dispara recomputo de viewport ao revelar
-- [ ] QAT + ⚙ visíveis nos 3 modos
-- [ ] `ribbonMode` persistido (bump de schema, restore defensivo)
-- [ ] `npm test` verde; app funcional
+- [x] 3 modos implementados e alternáveis (botão + duplo-clique + Hub)
+- [x] `fixed`/`compact` reflowam; revelação de `compact` e `auto` são overlay **sem reflow**
+- [x] Clique/drag/zoom sem desvio nos 3 modos (base grande carregada)
+- [x] `auto` não dispara recomputo de viewport ao revelar
+- [x] QAT + ⚙ visíveis nos 3 modos
+- [x] `ribbonMode` persistido (bump de schema, restore defensivo)
+- [x] `npm test` verde; app funcional
+
+> **Entregue (2026-07-20).** Estado de topo `ribbonMode: 'fixed' | 'compact' | 'auto'`
+> (init de `sessionStorage['ribbon_mode_v1']`, default `'fixed'`) + `cycleRibbonMode`
+> (fixed→compact→auto→fixed). O componente `Ribbon` recebe `mode`/`onCycleMode` e ramifica:
+> **fixed** = flex child (tab strip + grupos) → canvas reflowa; **compact** = só a faixa de
+> abas ocupa altura, hover/clique numa aba abre os grupos como overlay `position:absolute`
+> (`top:100%`, sem reflow); **auto** = wrapper `position:relative` de 6px (hotzone) ocupa a
+> única altura constante, hover revela o Ribbon inteiro como overlay `position:absolute`
+> (`top:0`), e um cluster flutuante mantém QAT+ciclo+⚙ visíveis quando recolhido. Revelação
+> com fecho atrasado (160 ms) para o mouse transitar faixa→overlay. Overlays em `z-index`
+> 450+ (vencem a paleta de cor em 400). QAT e ⚙ visíveis nos 3 modos. Alternância por botão
+> de ciclo na faixa de abas, duplo-clique na aba ativa e cartões na seção 🗔 Interface do
+> Hub. **Invariante de posicionamento**: `getBR` já lê `getBoundingClientRect()` ao vivo a
+> cada gesto (não há cache de rect a invalidar — confirmado); os overlays de revelação não
+> alteram o `rect` do SVG → zero recomputo de viewport ao revelar (modo `auto` inclusive).
+> Persistido em `sessionStorage` + `.credito.json` com bump `schemaVersion 2.8 → 2.9` e
+> restore defensivo.
 
 ---
 
@@ -723,7 +740,7 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 - [x] **Sessão 1** — Registro de Comandos + casca do Ribbon (fixed) 🏷️ `Opus 4.8`
 - [x] **Sessão 2** — Abas contextuais + fim das toolbars flutuantes 🏷️ `Opus 4.8`
 - [x] **Sessão 3** — ⚙ Hub de Configurações 🏷️ `Opus 4.8`
-- [ ] **Sessão 4** — Colapso em 3 estados 🏷️ `Opus 4.8`
+- [x] **Sessão 4** — Colapso em 3 estados 🏷️ `Opus 4.8`
 - [ ] **Sessão 5** — Status Bar + realocação de badges 🏷️ `Sonnet 5`
 - [ ] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
 - [ ] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
@@ -775,7 +792,8 @@ Cada sessão segue o mesmo template:
 
 **Última atualização**: 2026-07-20 (v2 — reavaliação completa pós-Épicos FR/GS/H4–H8:
 inventário de 12 superfícies, abas Analisar/Otimizar separadas, Hub de Configurações,
-Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1 e 2 entregues**
+Busca de comandos e painel Ativos/Inspetor/Copiloto. **Sessões 1–4 entregues**
 (registro `COMMANDS` + Ribbon fixed; abas contextuais + aposentadoria das 6 toolbars
-flutuantes); Sessões 3–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
+flutuantes; ⚙ Hub de Configurações; colapso do Ribbon em 3 estados — `ribbonMode`,
+schema 2.9); Sessões 5–8 aguardando desenvolvimento. A v1, de 2026-07-09, nunca foi
 executada e está substituída por esta.)
