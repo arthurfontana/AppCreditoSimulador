@@ -76,7 +76,7 @@ imediatamente. Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, 
 `csvStoreR`, `activeCellR`, `panelDragR`, `editConnR`, `axisModalR`, `multiSelR`,
 `selRectR`, `selR`, `undoStackR`, `redoStackR`, `lensModalR`, `johnnyModalR`,
 `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`, `rangeModalR`,
-`rangeVarModalR`.
+`rangeVarModalR`, `cmdPaletteR`.
 
 ## ⚠️ Regra para novas features — o que o usuário cria/ajusta PRECISA ser salvo
 

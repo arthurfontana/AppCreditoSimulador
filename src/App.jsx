@@ -1759,7 +1759,7 @@ const RIBBON_MODE_META = {
   auto:    { icon: '⌄', label: 'Automático', hint: 'Ribbon oculto (hover no topo revela) — clique para modo Fixo' },
 };
 
-function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, onCtxTab, onOpenSettings, mode, onCycleMode }) {
+function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, onCtxTab, onOpenSettings, onOpenSearch, mode, onCycleMode }) {
   // Aba contextual em foco? Então o conteúdo vem de `contextCommands` (já filtrado por
   // contextWhen no App); senão, das abas fixas por `c.tab`.
   const isCtx = !!contextTab && activeTab === contextTab.id;
@@ -1812,6 +1812,16 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
           cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', flexShrink: 0, fontWeight: 600 }}>
         <span style={{ fontSize: 13, lineHeight: 1 }}>{modeMeta.icon}</span>
         <span className="wbl">{modeMeta.label}</span>
+      </button>
+      {/* 🔎 Busca de comandos — campo compacto, à esquerda do ⚙ (UX 2.0 Sessão 7). Abre o
+          popover Ctrl+K; digitar aqui só foca o campo real dentro do popover. */}
+      <button className="wbt" onClick={onOpenSearch} title="Pesquisar comando… (Ctrl+K)"
+        style={{ display: 'flex', alignItems: 'center', gap: 6, height: 28, padding: '0 8px 0 9px', marginLeft: 6,
+          borderRadius: 8, border: '1px solid #e2e8f0', background: '#fafbfc', color: '#94a3b8',
+          cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', flexShrink: 0, minWidth: 0 }}>
+        <span style={{ fontSize: 12 }}>🔎</span>
+        <span className="wbl" style={{ whiteSpace: 'nowrap' }}>Pesquisar comando…</span>
+        <span className="wbl" style={{ fontSize: 9.5, fontWeight: 600, border: '1px solid #e2e8f0', borderRadius: 4, padding: '1px 4px', marginLeft: 2 }}>Ctrl+K</span>
       </button>
       {/* ⚙ Hub de Configurações — visível nos 3 modos de colapso (UX 2.0 Sessão 3/4). */}
       <button className="wbt" onClick={onOpenSettings} title="Configurações (Ctrl+,)"
@@ -2039,6 +2049,83 @@ function StatusBar({ indicators, values, onToggleIndicator, computeSidecar, comp
   );
 }
 
+// ═══ Busca de comandos — Ctrl+K (UX 2.0 — Sessão 7) ════════════════════════════
+// Popover num portal (padrão dos dropdowns/modais existentes) consumindo `COMMANDS` por
+// completo (fixas + contextuais). App já entrega `results` filtrados/ranqueados por
+// contextWhen/enabledWhen — este componente só navega (setas), executa (Enter) e fecha
+// (Esc / clique fora). Estado efêmero — nada a persistir.
+function CommandPalette({ query, activeIndex, results, onQueryChange, onActiveIndex, onRun, onClose }) {
+  const inputRef = useRef(null);
+  const listRef = useRef(null);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => {
+    listRef.current?.querySelector(`[data-idx="${activeIndex}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex]);
+
+  const clampedIndex = results.length === 0 ? -1 : Math.min(activeIndex, results.length - 1);
+
+  const onKeyDown = (e) => {
+    // Captura tudo aqui dentro (stopPropagation) para o listener global de teclado do App
+    // (Delete/Backspace/Escape sobre o canvas) nunca ver estas teclas enquanto o popover
+    // está aberto — evita deletar shape selecionado ao editar a query.
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); onClose(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); if (results.length) onActiveIndex(Math.min(clampedIndex + 1, results.length - 1)); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); if (results.length) onActiveIndex(Math.max(clampedIndex - 1, 0)); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const r = results[clampedIndex];
+      if (r && r.enabled) onRun(r.cmd);
+      return;
+    }
+  };
+
+  return createPortal(
+    <>
+      <div style={{ position: 'fixed', inset: 0, zIndex: 4600, background: 'rgba(15,23,42,.35)' }} onMouseDown={onClose} />
+      <div onMouseDown={e => e.stopPropagation()}
+        style={{ position: 'fixed', top: '14vh', left: '50%', transform: 'translateX(-50%)', width: 560, maxWidth: '92vw',
+          maxHeight: '64vh', display: 'flex', flexDirection: 'column', background: '#fff', borderRadius: 14,
+          boxShadow: '0 20px 60px rgba(0,0,0,.28)', overflow: 'hidden', zIndex: 4601,
+          fontFamily: "'DM Sans',system-ui,sans-serif" }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px', borderBottom: '1px solid #f1f5f9', flexShrink: 0 }}>
+          <span style={{ fontSize: 15, color: '#94a3b8' }}>🔎</span>
+          <input ref={inputRef} value={query} onChange={e => onQueryChange(e.target.value)} onKeyDown={onKeyDown}
+            placeholder="Pesquisar comando…"
+            style={{ flex: 1, border: 'none', outline: 'none', fontSize: 14, fontFamily: 'inherit', color: '#1e293b', background: 'transparent' }} />
+          <span style={{ fontSize: 10, color: '#cbd5e1', fontWeight: 600, border: '1px solid #e2e8f0', borderRadius: 5, padding: '1px 5px', flexShrink: 0 }}>Esc</span>
+        </div>
+        <div ref={listRef} style={{ overflowY: 'auto', padding: 6 }}>
+          {results.length === 0 ? (
+            <div style={{ padding: '20px 14px', fontSize: 12.5, color: '#94a3b8', textAlign: 'center' }}>Nenhum comando encontrado</div>
+          ) : results.map((r, i) => {
+            const c = r.cmd;
+            const active = i === clampedIndex;
+            const reason = !r.enabled && c.disabledReason ? (typeof c.disabledReason === 'function' ? c.disabledReason() : c.disabledReason) : null;
+            return (
+              <div key={c.id} data-idx={i}
+                onMouseEnter={() => onActiveIndex(i)}
+                onMouseDown={e => { e.preventDefault(); if (r.enabled) onRun(c); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 9,
+                  cursor: r.enabled ? 'pointer' : 'default', background: active ? '#eff6ff' : 'transparent' }}>
+                <span style={{ fontSize: 15, width: 20, textAlign: 'center', flexShrink: 0, opacity: r.enabled ? 1 : .5 }}>{c.icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: r.enabled ? '#1e293b' : '#94a3b8',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</div>
+                  {reason && <div style={{ fontSize: 10.5, color: '#cbd5e1', marginTop: 1 }}>{reason}</div>}
+                </div>
+                {c.shortcut && <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, flexShrink: 0 }}>{c.shortcut}</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </>,
+    document.body
+  );
+}
+
 // ═══ REGIÃO: Estado Principal do Componente ═══
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -2167,6 +2254,15 @@ export default function App() {
   // openSettings('motor-python'). A seção aberta por último NÃO persiste.
   const [settingsModal, setSettingsModal] = useState(null);
   const openSettings = useCallback((sectionId) => setSettingsModal({ section: sectionId || 'motor-python' }), []);
+  // 🔎 Busca de comandos (UX 2.0 — Sessão 7). Popover efêmero (nunca persistido) — Ctrl+K
+  // ou o campo compacto da faixa de abas do Ribbon. `cmdPalette` = null | { query,
+  // activeIndex }. Ref espelho (padrão de refs do CLAUDE.md) porque é lido pelo listener
+  // global de teclado (guarda Delete/Backspace/Escape do canvas enquanto o popover está
+  // aberto — ver useEffect de Keyboard abaixo).
+  const [cmdPalette, setCmdPalette] = useState(null);
+  const cmdPaletteR = useRef(cmdPalette); useEffect(() => { cmdPaletteR.current = cmdPalette; }, [cmdPalette]);
+  const openCmdPalette  = useCallback(() => setCmdPalette({ query: '', activeIndex: 0 }), []);
+  const closeCmdPalette = useCallback(() => setCmdPalette(null), []);
   // Teste ponta a ponta (echo_stats) — smoke test do round-trip Browser⇄Python (§17
   // Fase 1: "sidecar opt-in funcionando ponta a ponta com uma tarefa de eco/benchmark").
   // null | {step:'uploading'|'running'|'result'|'error', progress, via, fellBack, result, error}
@@ -3370,6 +3466,10 @@ export default function App() {
   useEffect(()=>{
     const h=(e)=>{
       if (editR.current) return;
+      // Busca de comandos aberta: o próprio popover captura (stopPropagation) Escape/setas/
+      // Enter/Ctrl+K no seu input; esta guarda é defesa extra para nunca deixar Delete/
+      // Backspace/Escape vazarem pro canvas enquanto o usuário digita a query.
+      if (cmdPaletteR.current) return;
       const ac=activeCellR.current;
       if (ac) {
         const arrows=["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"];
@@ -3392,6 +3492,7 @@ export default function App() {
         if (e.key==="z"||e.key==="Z") { e.preventDefault(); undo(); return; }
         if (e.key==="y"||e.key==="Y") { e.preventDefault(); redo(); return; }
         if (e.key===",") { e.preventDefault(); openSettings(); return; }
+        if (e.key==="k"||e.key==="K") { e.preventDefault(); openCmdPalette(); return; }
       }
       if (e.key==="Delete"||e.key==="Backspace") {
         const ms=multiSelR.current;
@@ -3400,7 +3501,7 @@ export default function App() {
       if (e.key==="Escape"){setFromId(null);setSel(null);}
     };
     window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h);
-  },[undo, redo, deleteSelected, openSettings]);
+  },[undo, redo, deleteSelected, openSettings, openCmdPalette]);
 
   const zoomCenter=(f)=>{const r=getBR();doZoom(r.width/2,r.height/2,f);};
 
@@ -7429,13 +7530,18 @@ export default function App() {
 
   // ═══ REGIÃO: Registro Declarativo de Comandos (COMMANDS — FONTE ÚNICA) ═══
   // Descritores {id, label, icon, tab, group, keywords, shortcut, contextWhen, enabledWhen,
-  // activeWhen, onRun}. Um comando = um descritor. A Ribbon (7 abas fixas), as abas
-  // contextuais (Sessão 2) e a Busca de comandos (Sessão 7) renderizam TODAS deste array.
-  // Cobre as 12 superfícies do inventário (docs/wiki/Ribbon-Prompts-Sessoes.md):
+  // disabledReason, activeWhen, onRun}. Um comando = um descritor. A Ribbon (7 abas fixas),
+  // as abas contextuais (Sessão 2) e a Busca de comandos — Ctrl+K (Sessão 7) renderizam
+  // TODAS deste array. Cobre as 12 superfícies do inventário
+  // (docs/wiki/Ribbon-Prompts-Sessoes.md):
   //   - tab ∈ {inicio,inserir,dados,analisar,otimizar,politica,projeto}: renderizadas AGORA.
   //   - tab `ctx-*`: descritores nascem agora, renderizados quando a superfície migrar
   //     (abas contextuais Matriz/Decisão/Lens/Terminal/Porta/Seleção — Sessão 2).
-  // `contextWhen(shape)` = predicado por tipo de shape selecionado (null = global).
+  // `contextWhen(shape)` = predicado por tipo de shape selecionado (null = global). Um
+  // comando cujo contextWhen não bate com a seleção atual não aparece nem na Ribbon nem na
+  // Busca. `disabledReason` (string | () => string) = motivo curto mostrado acinzentado na
+  // Busca quando `enabledWhen` é falso (a Ribbon já mostra o botão desabilitado sem motivo,
+  // via `title`) — só precisa existir em descritores que têm `enabledWhen`.
   // Os comandos escopados "Descobrir/Clusterizar/Faixas aqui" são UM descritor cada, com
   // contextWhen aceitando os tipos aplicáveis — sem triplicação por tipo.
   const _hasSel        = !!sel || multiSel.size > 0;
@@ -7444,54 +7550,54 @@ export default function App() {
   const _scopeNode     = (t) => ['decision', 'cineminha', 'decision_lens'].includes(t);
   const COMMANDS = [
     // ─── INÍCIO / Edição (toolbar de topo #1) ───
-    { id: 'tool.select', label: 'Selecionar', icon: '↖', tab: 'inicio', group: 'Edição', keywords: ['selecionar', 'seta', 'mover shapes'], activeWhen: () => tool === 'select', onRun: () => { setTool('select'); setFromId(null); } },
-    { id: 'tool.hand', label: 'Mover', icon: '✋', tab: 'inicio', group: 'Edição', keywords: ['mão', 'pan', 'arrastar canvas', 'navegar'], activeWhen: () => tool === 'hand', onRun: () => { setTool('hand'); setFromId(null); } },
-    { id: 'tool.connect', label: 'Conectar', icon: '⟶', tab: 'inicio', group: 'Edição', keywords: ['conexão', 'aresta', 'ligar', 'seta'], activeWhen: () => tool === 'connect', onRun: () => { setTool('connect'); setFromId(null); } },
-    { id: 'edit.undo', label: 'Desfazer', icon: '↩', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Z', keywords: ['undo', 'voltar', 'desfazer'], enabledWhen: () => undoStack.length > 0, onRun: undo },
-    { id: 'edit.redo', label: 'Refazer', icon: '↪', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Y', keywords: ['redo', 'avançar', 'refazer'], enabledWhen: () => redoStack.length > 0, onRun: redo },
-    { id: 'edit.delete', label: 'Deletar', icon: '🗑', tab: 'inicio', group: 'Edição', shortcut: 'Del', keywords: ['excluir', 'remover', 'apagar', 'deletar'], enabledWhen: () => _hasSel, onRun: deleteSelected },
+    { id: 'tool.select', label: 'Selecionar', icon: '↖', tab: 'inicio', group: 'Edição', keywords: ['selecionar', 'seta', 'mover shapes', 'ponteiro', 'cursor'], activeWhen: () => tool === 'select', onRun: () => { setTool('select'); setFromId(null); } },
+    { id: 'tool.hand', label: 'Mover', icon: '✋', tab: 'inicio', group: 'Edição', keywords: ['mão', 'pan', 'arrastar canvas', 'navegar', 'panorâmica'], activeWhen: () => tool === 'hand', onRun: () => { setTool('hand'); setFromId(null); } },
+    { id: 'tool.connect', label: 'Conectar', icon: '⟶', tab: 'inicio', group: 'Edição', keywords: ['conexão', 'aresta', 'ligar', 'seta', 'fluxo', 'linha'], activeWhen: () => tool === 'connect', onRun: () => { setTool('connect'); setFromId(null); } },
+    { id: 'edit.undo', label: 'Desfazer', icon: '↩', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Z', keywords: ['undo', 'voltar', 'desfazer'], enabledWhen: () => undoStack.length > 0, disabledReason: 'nada para desfazer', onRun: undo },
+    { id: 'edit.redo', label: 'Refazer', icon: '↪', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Y', keywords: ['redo', 'avançar', 'refazer'], enabledWhen: () => redoStack.length > 0, disabledReason: 'nada para refazer', onRun: redo },
+    { id: 'edit.delete', label: 'Deletar', icon: '🗑', tab: 'inicio', group: 'Edição', shortcut: 'Del', keywords: ['excluir', 'remover', 'apagar', 'deletar'], enabledWhen: () => _hasSel, disabledReason: 'selecione algo para deletar', onRun: deleteSelected },
     // ─── INÍCIO / Organizar ───
-    { id: 'org.reorganize', label: 'Reorganizar', icon: '⊹', tab: 'inicio', group: 'Organizar', keywords: ['auto layout', 'organizar', 'arrumar', 'camadas', 'reorganizar'], onRun: autoLayout },
-    { id: 'org.color', label: 'Cor', icon: '🎨', tab: 'inicio', group: 'Organizar', keywords: ['cor', 'paleta', 'pintar'], enabledWhen: () => !!selShape && selShape.type !== 'csv', onRun: () => setPalette(v => !v) },
+    { id: 'org.reorganize', label: 'Reorganizar', icon: '⊹', tab: 'inicio', group: 'Organizar', keywords: ['auto layout', 'organizar', 'arrumar', 'camadas', 'reorganizar', 'sugiyama'], onRun: autoLayout },
+    { id: 'org.color', label: 'Cor', icon: '🎨', tab: 'inicio', group: 'Organizar', keywords: ['cor', 'paleta', 'pintar'], enabledWhen: () => !!selShape && selShape.type !== 'csv', disabledReason: 'selecione um shape para colorir', onRun: () => setPalette(v => !v) },
     // ─── INÍCIO / Ver (zoom, canto do canvas #10) ───
     { id: 'view.zoomIn', label: 'Zoom +', icon: '➕', tab: 'inicio', group: 'Ver', keywords: ['aproximar', 'ampliar', 'zoom in'], onRun: () => zoomCenter(1.2) },
     { id: 'view.zoomOut', label: 'Zoom −', icon: '➖', tab: 'inicio', group: 'Ver', keywords: ['afastar', 'reduzir', 'zoom out'], onRun: () => zoomCenter(1 / 1.2) },
     { id: 'view.zoomReset', label: 'Centralizar', icon: '⌂', tab: 'inicio', group: 'Ver', keywords: ['reset', 'início', 'home', 'centralizar', 'enquadrar'], onRun: () => setVp({ x: 20, y: 40, s: 1 }) },
 
     // ─── INSERIR / Nós ───
-    { id: 'insert.decision', label: 'Losango', icon: '▭', tab: 'inserir', group: 'Nós', keywords: ['losango', 'decisão', 'retângulo', 'nó'], activeWhen: () => tool === 'rect', onRun: () => { setTool('rect'); setFromId(null); } },
-    { id: 'insert.cineminha', label: 'Cineminha', icon: '⊞', tab: 'inserir', group: 'Nós', keywords: ['matriz', 'cineminha', 'cruzada', 'cinema'], activeWhen: () => tool === 'cineminha', onRun: () => { setTool('cineminha'); setFromId(null); } },
+    { id: 'insert.decision', label: 'Losango', icon: '▭', tab: 'inserir', group: 'Nós', keywords: ['losango', 'decisão', 'retângulo', 'nó', 'regra', 'diamante'], activeWhen: () => tool === 'rect', onRun: () => { setTool('rect'); setFromId(null); } },
+    { id: 'insert.cineminha', label: 'Cineminha', icon: '⊞', tab: 'inserir', group: 'Nós', keywords: ['matriz', 'cineminha', 'cruzada', 'cinema', 'tabela cruzada'], activeWhen: () => tool === 'cineminha', onRun: () => { setTool('cineminha'); setFromId(null); } },
     { id: 'insert.cineminhaLibrary', label: 'Cineminha da Biblioteca', icon: '📥', tab: 'inserir', group: 'Nós', keywords: ['importar cineminha', 'biblioteca', 'modelos salvos'], onRun: () => openCinemaLibrary(null, 'browse') },
-    { id: 'insert.lensTool', label: 'Decision Lens', icon: '🔎', tab: 'inserir', group: 'Nós', keywords: ['lens', 'segmentação', 'regras', 'ferramenta lens'], activeWhen: () => tool === 'decision_lens', onRun: () => { setTool('decision_lens'); setFromId(null); } },
-    { id: 'insert.lensAdd', label: 'Adicionar Lens', icon: '🛢', tab: 'inserir', group: 'Nós', keywords: ['decision lens', 'segmentação', 'adicionar lens'], enabledWhen: () => Object.keys(csvStore).length > 0, onRun: addDecisionLens },
+    { id: 'insert.lensTool', label: 'Decision Lens', icon: '🔎', tab: 'inserir', group: 'Nós', keywords: ['lens', 'segmentação', 'regras', 'ferramenta lens', 'população'], activeWhen: () => tool === 'decision_lens', onRun: () => { setTool('decision_lens'); setFromId(null); } },
+    { id: 'insert.lensAdd', label: 'Adicionar Lens', icon: '🛢', tab: 'inserir', group: 'Nós', keywords: ['decision lens', 'segmentação', 'adicionar lens'], enabledWhen: () => Object.keys(csvStore).length > 0, disabledReason: 'carregue uma base primeiro', onRun: addDecisionLens },
     { id: 'insert.frame', label: 'Frame', icon: '⬚', tab: 'inserir', group: 'Nós', keywords: ['moldura', 'grupo', 'área', 'frame'], activeWhen: () => tool === 'frame', onRun: () => { setTool('frame'); setFromId(null); } },
     // ─── INSERIR / Terminais ───
     { id: 'insert.approved', label: 'Aprovado', icon: '✅', tab: 'inserir', group: 'Terminais', keywords: ['aprovar', 'terminal aprovado'], activeWhen: () => tool === 'approved', onRun: () => { setTool('approved'); setFromId(null); } },
     { id: 'insert.rejected', label: 'Reprovado', icon: '❌', tab: 'inserir', group: 'Terminais', keywords: ['reprovar', 'recusar', 'terminal reprovado'], activeWhen: () => tool === 'rejected', onRun: () => { setTool('rejected'); setFromId(null); } },
     { id: 'insert.asIs', label: 'AS IS', icon: '⟳', tab: 'inserir', group: 'Terminais', keywords: ['as is', 'política atual', 'baseline'], activeWhen: () => tool === 'as_is', onRun: () => { setTool('as_is'); setFromId(null); } },
     // ─── INSERIR / Painéis ───
-    { id: 'insert.simPanel', label: _simPanelExists ? 'Painel ativo' : 'Painel de Simulação', icon: '📊', tab: 'inserir', group: 'Painéis', keywords: ['simulação', 'painel', 'indicadores', 'kpi', 'taxa de aprovação'], enabledWhen: () => !_simPanelExists, onRun: addSimPanel },
-    { id: 'insert.businessImpact', label: businessWidget.visible ? 'Widget ativo' : 'Business Impact', icon: '⬡', tab: 'inserir', group: 'Painéis', keywords: ['business impact', 'widget', 'impacto', 'negócio'], enabledWhen: () => !businessWidget.visible, onRun: () => setBusinessWidget(p => ({ ...p, visible: true })) },
+    { id: 'insert.simPanel', label: _simPanelExists ? 'Painel ativo' : 'Painel de Simulação', icon: '📊', tab: 'inserir', group: 'Painéis', keywords: ['simulação', 'painel', 'indicadores', 'kpi', 'taxa de aprovação'], enabledWhen: () => !_simPanelExists, disabledReason: 'painel já ativo no canvas', onRun: addSimPanel },
+    { id: 'insert.businessImpact', label: businessWidget.visible ? 'Widget ativo' : 'Business Impact', icon: '⬡', tab: 'inserir', group: 'Painéis', keywords: ['business impact', 'widget', 'impacto', 'negócio'], enabledWhen: () => !businessWidget.visible, disabledReason: 'widget já ativo no canvas', onRun: () => setBusinessWidget(p => ({ ...p, visible: true })) },
 
     // ─── DADOS ───
-    { id: 'data.importCsv', label: 'Importar CSV', icon: '📂', tab: 'dados', group: 'Bases', keywords: ['csv', 'importar', 'carregar base', 'dados'], onRun: () => fileInputRef.current?.click() },
+    { id: 'data.importCsv', label: 'Importar CSV', icon: '📂', tab: 'dados', group: 'Bases', keywords: ['csv', 'importar', 'carregar base', 'dados', 'planilha'], onRun: () => fileInputRef.current?.click() },
 
     // ─── ANALISAR ───
-    { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura'], onRun: () => openSegmentDiscoveryModal(null) },
-    { id: 'analyze.cluster', label: 'Clusterizar Segmentos', icon: '🧩', tab: 'analisar', group: 'Descoberta', keywords: ['cluster', 'clusterizar', 'k-means', 'agrupar'], onRun: () => openClusterModal(null) },
-    { id: 'analyze.range', label: 'Criar Faixas por Risco', icon: '📐', tab: 'analisar', group: 'Descoberta', keywords: ['faixas', 'binning', 'risco', 'iv', 'woe', 'bandas'], onRun: () => openRangeModal() },
-    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
+    { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura', 'oportunidade'], onRun: () => openSegmentDiscoveryModal(null) },
+    { id: 'analyze.cluster', label: 'Clusterizar Segmentos', icon: '🧩', tab: 'analisar', group: 'Descoberta', keywords: ['cluster', 'clusterizar', 'k-means', 'agrupar', 'agrupamento'], onRun: () => openClusterModal(null) },
+    { id: 'analyze.range', label: 'Criar Faixas por Risco', icon: '📐', tab: 'analisar', group: 'Descoberta', keywords: ['faixas', 'binning', 'risco', 'iv', 'woe', 'bandas', 'faixa etária', 'faixa de renda', 'cortes'], onRun: () => openRangeModal() },
+    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico', 'assistente'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
 
     // ─── OTIMIZAR ───
     { id: 'optimize.goalSeek', label: 'Atingir Objetivo', icon: '🎯', tab: 'otimizar', group: 'Política', keywords: ['goal seek', 'objetivo', 'meta', 'milp', 'profundo'], onRun: openGoalSeekModal },
-    { id: 'optimize.simplify', label: 'Simplificar', icon: '🧹', tab: 'otimizar', group: 'Política', keywords: ['simplificar', 'reduzir', 'equivalência', 'limpar'], onRun: openSimplifyModal },
-    { id: 'optimize.johnny', label: 'Otimização Johnny', icon: '⚡', tab: 'otimizar', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha'], enabledWhen: () => _allCinemas, onRun: () => openJohnnyModal([...multiSel]) },
+    { id: 'optimize.simplify', label: 'Simplificar', icon: '🧹', tab: 'otimizar', group: 'Política', keywords: ['simplificar', 'reduzir', 'equivalência', 'limpar', 'enxugar política'], onRun: openSimplifyModal },
+    { id: 'optimize.johnny', label: 'Otimização Johnny', icon: '⚡', tab: 'otimizar', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha', 'pareto'], enabledWhen: () => _allCinemas, disabledReason: 'requer 2+ Cineminhas selecionadas', onRun: () => openJohnnyModal([...multiSel]) },
 
     // ─── POLÍTICA ───
-    { id: 'policy.library', label: 'Biblioteca de Políticas', icon: '📚', tab: 'politica', group: 'Biblioteca', keywords: ['políticas', 'biblioteca', 'templates', 'policy'], onRun: () => openPolicyLibrary('browse') },
-    { id: 'policy.doc', label: 'Documentar Política', icon: '📄', tab: 'politica', group: 'Documento', keywords: ['documentar', 'documentação', 'relatório', 'executivo'], onRun: openDocModal },
-    { id: 'policy.export', label: 'Exportar Fluxo', icon: '⬇', tab: 'politica', group: 'Fluxo', keywords: ['exportar', 'policyir', 'json', 'fluxo'], onRun: exportFlow },
-    { id: 'policy.import', label: 'Importar Fluxo', icon: '⬆', tab: 'politica', group: 'Fluxo', keywords: ['importar', 'fluxo', 'carregar política'], onRun: () => flowImportRef.current?.click() },
+    { id: 'policy.library', label: 'Biblioteca de Políticas', icon: '📚', tab: 'politica', group: 'Biblioteca', keywords: ['políticas', 'biblioteca', 'templates', 'policy', 'político', 'regra', 'modelos de política'], onRun: () => openPolicyLibrary('browse') },
+    { id: 'policy.doc', label: 'Documentar Política', icon: '📄', tab: 'politica', group: 'Documento', keywords: ['documentar', 'documentação', 'relatório', 'executivo', 'político', 'regra'], onRun: openDocModal },
+    { id: 'policy.export', label: 'Exportar Fluxo', icon: '⬇', tab: 'politica', group: 'Fluxo', keywords: ['exportar', 'policyir', 'json', 'fluxo', 'política', 'regra'], onRun: exportFlow },
+    { id: 'policy.import', label: 'Importar Fluxo', icon: '⬆', tab: 'politica', group: 'Fluxo', keywords: ['importar', 'fluxo', 'carregar política', 'regra'], onRun: () => flowImportRef.current?.click() },
 
     // ─── PROJETO ───
     { id: 'project.save', label: 'Salvar Projeto', icon: '💾', tab: 'projeto', group: 'Arquivo', shortcut: '', keywords: ['salvar', 'projeto', 'credito', 'gravar'], onRun: saveProject },
@@ -7525,14 +7631,14 @@ export default function App() {
     // Trava (Goal Seek) — losango/Cineminha/Lens.
     { id: 'ctx.node.lock', label: 'Travar / Destravar', icon: '🔒', tab: 'ctx-analisar', group: 'Trava', keywords: ['travar', 'destravar', 'goal seek', 'lock'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => toggleShapeLock(sel) },
     // Porta solta: sugerir próximo passo (só faz sentido em porta sem conexão de saída).
-    { id: 'ctx.port.suggest', label: 'Sugerir próximo passo', icon: '💡', tab: 'ctx-porta', group: 'Sugestão', keywords: ['sugerir', 'próximo passo', 'ranking de variáveis'], contextWhen: (s) => s?.type === 'port', enabledWhen: () => conns.filter(c => c.from === sel).length === 0, onRun: () => openVariableRanking(sel) },
+    { id: 'ctx.port.suggest', label: 'Sugerir próximo passo', icon: '💡', tab: 'ctx-porta', group: 'Sugestão', keywords: ['sugerir', 'próximo passo', 'ranking de variáveis'], contextWhen: (s) => s?.type === 'port', enabledWhen: () => conns.filter(c => c.from === sel).length === 0, disabledReason: 'porta já conectada', onRun: () => openVariableRanking(sel) },
     // Seleção múltipla: alinhar/distribuir (8). Mesmo grupo da toolbar flutuante #2.
     ...[['left', 'Alinhar à esquerda', '⊢'], ['right', 'Alinhar à direita', '⊣'], ['top', 'Alinhar ao topo', '⊤'], ['bottom', 'Alinhar à base', '⊥'], ['centerH', 'Centralizar H', '↔'], ['centerV', 'Centralizar V', '↕'], ['distH', 'Distribuir H', '⇹'], ['distV', 'Distribuir V', '⤡']].map(([d, l, ic]) => ({
-      id: `ctx.align.${d}`, label: l, icon: ic, tab: 'ctx-selecao', group: 'Alinhar', keywords: ['alinhar', 'distribuir', l], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, onRun: () => applyAlign(d),
+      id: `ctx.align.${d}`, label: l, icon: ic, tab: 'ctx-selecao', group: 'Alinhar', keywords: ['alinhar', 'distribuir', l], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, disabledReason: 'selecione 2+ shapes', onRun: () => applyAlign(d),
     })),
     // Otimização Johnny em massa (habilita só com todos Cineminhas) + Deletar em massa.
-    { id: 'ctx.sel.johnny', label: `Otimização Johnny (${multiSel.size})`, icon: '⚡', tab: 'ctx-selecao', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha'], contextWhen: () => multiSel.size > 1, enabledWhen: () => _allCinemas, onRun: () => openJohnnyModal([...multiSel]) },
-    { id: 'ctx.sel.delete', label: `Deletar (${multiSel.size})`, icon: '🗑', tab: 'ctx-selecao', group: 'Ações', keywords: ['deletar', 'excluir', 'remover em massa'], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, onRun: deleteSelected },
+    { id: 'ctx.sel.johnny', label: `Otimização Johnny (${multiSel.size})`, icon: '⚡', tab: 'ctx-selecao', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha'], contextWhen: () => multiSel.size > 1, enabledWhen: () => _allCinemas, disabledReason: 'requer 2+ Cineminhas selecionadas', onRun: () => openJohnnyModal([...multiSel]) },
+    { id: 'ctx.sel.delete', label: `Deletar (${multiSel.size})`, icon: '🗑', tab: 'ctx-selecao', group: 'Ações', keywords: ['deletar', 'excluir', 'remover em massa'], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, disabledReason: 'selecione 2+ shapes', onRun: deleteSelected },
   ];
 
   // ═══ REGIÃO: Abas contextuais do Ribbon (UX 2.0 — Sessão 2) ═══
@@ -7555,6 +7661,31 @@ export default function App() {
   // shape único vazar para a aba Seleção.
   const _ctxSelArg = multiSel.size > 1 ? null : selShape;
   const contextCommands = activeContextTab ? COMMANDS.filter(c => c.contextWhen && c.contextWhen(_ctxSelArg)) : [];
+
+  // ═══ REGIÃO: Busca de comandos — Ctrl+K (UX 2.0 — Sessão 7) ═══
+  // Consome COMMANDS por completo (fixas + `ctx-*`), independente da aba/aba contextual em
+  // foco no Ribbon. Um comando cujo contextWhen não bate com a seleção atual (mesmo
+  // `_ctxSelArg` da aba contextual acima) não aparece na lista. Fuzzy simples: normalização
+  // de acentos + substring, mesmo padrão da busca de Variáveis de Decisão do painel
+  // (`norm(col).includes(q)`), sobre label+keywords. Ranking: match exato > label começa
+  // com a query > label contém > só bateu via keyword.
+  const _cmdNorm = (s) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const cmdPaletteResults = !cmdPalette ? [] : (() => {
+    const q = _cmdNorm(cmdPalette.query);
+    return COMMANDS
+      .filter(c => !c.contextWhen || c.contextWhen(_ctxSelArg))
+      .reduce((acc, c) => {
+        const label = _cmdNorm(c.label);
+        const hay = _cmdNorm([c.label, ...(c.keywords || [])].join(' '));
+        if (q && !hay.includes(q)) return acc;
+        const rank = !q ? 0 : label === q ? 0 : label.startsWith(q) ? 1 : label.includes(q) ? 2 : 3;
+        acc.push({ cmd: c, enabled: c.enabledWhen ? !!c.enabledWhen() : true, rank });
+        return acc;
+      }, [])
+      .sort((a, b) => a.rank - b.rank);
+  })();
+  const runCmdPaletteCommand = (cmd) => { closeCmdPalette(); cmd.onRun(); };
+
   // Auto-ativação ao selecionar; retorno à aba fixa anterior ao desselecionar (ou quando a
   // seleção muda para outro tipo → foca a nova aba contextual). Efeito só reage à troca do
   // tipo de contexto, não a cada render.
@@ -7776,6 +7907,7 @@ export default function App() {
           contextCommands={contextCommands}
           onCtxTab={() => setCtxTabShown(true)}
           onOpenSettings={() => openSettings()}
+          onOpenSearch={openCmdPalette}
           mode={ribbonMode}
           onCycleMode={cycleRibbonMode}
           qat={{
@@ -8546,6 +8678,21 @@ export default function App() {
         </div>
       )}
 
+      {/* ═══════════════ 🔎 BUSCA DE COMANDOS — Ctrl+K (UX 2.0 — Sessão 7) ═══════════════ */}
+      {/* Popover efêmero (nunca persistido); funciona em qualquer aba do app (Canvas ou
+          Dashboard) — não só quando o Ribbon está montado. */}
+      {cmdPalette && (
+        <CommandPalette
+          query={cmdPalette.query}
+          activeIndex={cmdPalette.activeIndex}
+          results={cmdPaletteResults}
+          onQueryChange={(q) => setCmdPalette(p => ({ ...p, query: q, activeIndex: 0 }))}
+          onActiveIndex={(i) => setCmdPalette(p => ({ ...p, activeIndex: i }))}
+          onRun={runCmdPaletteCommand}
+          onClose={closeCmdPalette}
+        />
+      )}
+
       {/* ═══════════════ ⚙ HUB DE CONFIGURAÇÕES (UX 2.0 — Sessão 3) ═══════════════ */}
       {/* Modal com navegação lateral (mesmo padrão visual dos modais existentes). Endereço
           único de toda preferência do app. Efêmero (`settingsModal`) — as preferências que
@@ -8566,6 +8713,7 @@ export default function App() {
           { keys:'Del / Backspace',  desc:'Deletar seleção' },
           { keys:'Esc',              desc:'Cancelar conexão / limpar seleção' },
           { keys:'Ctrl+,',           desc:'Abrir Configurações' },
+          { keys:'Ctrl+K',           desc:'Busca de comandos' },
         ];
         return (
           <div onMouseDown={()=>setSettingsModal(null)}
