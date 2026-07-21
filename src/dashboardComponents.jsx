@@ -23,6 +23,8 @@ import {
 } from "./analytics.js";
 import { buildDefaultExploreLayout } from "./explore.js";
 import { describeFinding, describeSection, describeHowToRead, howToReadTopic } from "./exploreInsights.js";
+import { isClusterVar } from "./clusterVar.js";
+import { isRangeVar } from "./rangeVar.js";
 import { fmtQty, fmtPct, uid, escHtml, LENS_OPERATORS, exportAnalyticsDatasetCSV } from "./App.jsx";
 
 // MIME do drag de campos (dimensões/métricas) no FieldPanel/FieldWell (estilo Power BI).
@@ -199,7 +201,11 @@ function AWEmptyState({ icon, title, hint }) {
 }
 
 // ── FieldPanel — campos arrastáveis (dimensões + métricas), estilo Power BI ───
-function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGrouping, onDeleteGrouping, pageFilters = [], onPageFiltersChange }) {
+// `csvStore`/`csvId`/`onEditVar` são OPCIONAIS (só a aba Explorar os passa — está sempre
+// escopada a UMA base; o Dashboard mistura dimensões de várias bases/canvases e não tem
+// um csvId único para checar isClusterVar/isRangeVar). Sem eles, comportamento idêntico
+// a antes (nenhum ✏️ nas dimensões).
+function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGrouping, onDeleteGrouping, pageFilters = [], onPageFiltersChange, csvStore, csvId, onEditVar }) {
   const dims = analyticsDataset?.dimensions || [];
   const temporalCols = new Set(analyticsDataset?.temporalColumns || []);
   const groupedSet = new Set(analyticsDataset?.groupedDimensions || []);
@@ -227,6 +233,37 @@ function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGro
       <span style={{ fontSize: 13, opacity: 0.45 }}>⠿</span>
     </div>
   );
+
+  // Dimensão que é uma Variável de Cluster/Faixas materializada nesta base (`clusterDefs`/
+  // `rangeDefs`) — só checável quando o painel está escopado a UMA base (`csvId` presente,
+  // caso da aba Explorar; o Dashboard mistura bases e não passa `csvId`).
+  const derivedVarKind = (d) => {
+    if (!csvStore || !csvId) return null;
+    if (isClusterVar(csvStore, csvId, d)) return "cluster";
+    if (isRangeVar(csvStore, csvId, d)) return "range";
+    return null;
+  };
+
+  // Chip de dimensão derivada (Variável de Cluster/Faixas): mesmo visual do chip normal +
+  // ✏️ para abrir o MESMO editor (clusterVarModal/rangeVarModal) do painel de variáveis do
+  // canvas — antes só dava para editar indo até lá.
+  const derivedDimChip = (d, kind) => {
+    const meta = kind === "cluster"
+      ? { icon: "🧩", border: "#ddd6fe", bg: "#f5f3ff", color: "#6d28d9", title: "Editar variável de cluster (renomear, mover públicos entre clusters)" }
+      : { icon: "📐", border: "#99f6e4", bg: "#f0fdfa", color: "#0f766e", title: "Editar variável de faixas (renomear, mover cortes)" };
+    return (
+      <div key={`dim-${d}`} draggable onDragStart={(e) => startDrag(e, "dim", d)}
+        style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 9px", borderRadius: 8,
+          border: `1.5px solid ${meta.border}`, background: meta.bg, marginBottom: 4, cursor: "grab", userSelect: "none",
+          fontSize: 12, fontWeight: 500, color: meta.color }}>
+        <span style={{ fontSize: 12 }}>{meta.icon}</span>
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d}</span>
+        <button onClick={(e) => { e.stopPropagation(); onEditVar && onEditVar(d, csvId); }} title={meta.title}
+          style={{ border: "none", background: "transparent", color: meta.color, cursor: "pointer", fontSize: 12, padding: "0 2px", lineHeight: 1 }}>✎</button>
+        <span style={{ fontSize: 13, opacity: 0.45 }}>⠿</span>
+      </div>
+    );
+  };
 
   // Chip de agrupamento (derivado): arrastável + botões editar/remover.
   const groupingChip = (g) => (
@@ -259,11 +296,13 @@ function FieldPanel({ analyticsDataset, groupings = [], onNewGrouping, onEditGro
 
       <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Dimensões</p>
       {chip("Cenários (abas)", "🎬", "#fff7ed", "#fed7aa", "#c2410c", "dim", XDIM_CENARIO)}
-      {orderedDims.length > 0 ? orderedDims.map(d =>
-        temporalCols.has(d)
+      {orderedDims.length > 0 ? orderedDims.map(d => {
+        const derivedKind = derivedVarKind(d);
+        if (derivedKind) return derivedDimChip(d, derivedKind);
+        return temporalCols.has(d)
           ? chip(d, "⏱", "#eef2ff", "#c7d2fe", "#4338ca", "dim", d)
-          : chip(d, "▦", "#f1f5f9", "#e2e8f0", "#475569", "dim", d)
-      ) : <div style={{ fontSize: 11.5, color: "#cbd5e1", padding: "4px 2px" }}>—</div>}
+          : chip(d, "▦", "#f1f5f9", "#e2e8f0", "#475569", "dim", d);
+      }) : <div style={{ fontSize: 11.5, color: "#cbd5e1", padding: "4px 2px" }}>—</div>}
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "16px 0 8px" }}>
         <p style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Agrupamentos</p>
@@ -2134,10 +2173,13 @@ function ExploreTab({ profile, csvStore, csvId, onCsvIdChange, riskMetric, onRis
         </div>
       </div>
 
-      {/* Painel de campos (builder livre, DEC-EB-011) — MESMO chassi do Dashboard. */}
+      {/* Painel de campos (builder livre, DEC-EB-011) — MESMO chassi do Dashboard. `csvStore`/
+          `csvId`/`onEditVar` ligam o ✏️ das dimensões de Cluster/Faixas ao mesmo editor do
+          canvas — a aba Explorar está sempre escopada a UMA base, então dá pra checar. */}
       {hasData && <FieldPanel analyticsDataset={datasetGrouped} groupings={groupings}
         onNewGrouping={newGrouping} onEditGrouping={editGrouping} onDeleteGrouping={deleteGrouping}
-        pageFilters={pageFilters} onPageFiltersChange={setPageFilters} />}
+        pageFilters={pageFilters} onPageFiltersChange={setPageFilters}
+        csvStore={csvStore} csvId={csvId} onEditVar={actions?.onEditVar} />}
 
       {editingGrouping && (
         <GroupingModal draft={editingGrouping} baseDataset={datasetRaw} existingNames={existingNames}
