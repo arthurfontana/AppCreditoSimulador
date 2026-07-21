@@ -41,6 +41,8 @@ describe('M3 · buildProjectJSONChunks', () => {
       // Explorar a Base — builder livre (Épico EB, EB4) — agrupamentos/filtro de página por base, schema 3.3.
       exploreGroupings: { base: [{ id: 'g1', name: 'Faixa Score', source: 'score', buckets: [{ id: 'b1', label: 'Baixo', values: ['R1'] }], unmatched: 'other', otherLabel: 'Outros' }] },
       explorePageFilters: { base: [{ id: 'f1', dim: 'score', mode: 'basic', values: ['R1'] }] },
+      // Feed de Próxima Melhor Ação (Épico NB, Sessão NB2) — descarte/adiamento por card, schema 3.4.
+      nextActionsPrefs: { dismissed: ['connect_port::pY'], snoozed: ['document::doc'], autoScanIdle: false },
       cinemaLibrary: [],
       businessWidget: { visible: false, x: 0, y: 0, w: 0, h: 0 },
       preferences: { enableDynThickness: true, showEdgeVol: false, showEdgeInadReal: false, showEdgeInadInf: false },
@@ -70,6 +72,13 @@ describe('M3 · buildProjectJSONChunks', () => {
     const parsed = JSON.parse(chunks.join(''));
     expect(parsed.exploreGroupings).toEqual(payload.exploreGroupings);
     expect(parsed.explorePageFilters).toEqual(payload.explorePageFilters);
+  });
+
+  it('nextActionsPrefs (Épico NB, Sessão NB2, DEC-NB-006) sobrevive ao round-trip via chunks, byte a byte', () => {
+    const payload = makePayload();
+    const chunks = buildProjectJSONChunks(payload);
+    const parsed = JSON.parse(chunks.join(''));
+    expect(parsed.nextActionsPrefs).toEqual(payload.nextActionsPrefs);
   });
 
   it('cada chunk de coluna é individualmente pequeno (não monta o csvStore inteiro de uma vez)', () => {

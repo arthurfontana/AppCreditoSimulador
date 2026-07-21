@@ -84,6 +84,11 @@ import {
   ClusterQuadrant, GoalSeekFrontierChart, ClusterCard, clusterColor, fmtPP, newFilterCard,
 } from "./dashboardComponents.jsx";
 export { newFilterCard };
+// Feed de Próxima Melhor Ação (Jornada NB, Sessão NB2) — templates de prosa pt-BR sobre o
+// NextActionsModel do worker (mesmo contrato de src/exploreInsights.js, DEC-NB-007).
+import {
+  describeAction, describeWhyItMatters, severityLabel, ctaLabel, formatActionDelta,
+} from "./nextActionInsights.js";
 
 // ═══ REGIÃO: Constantes e Helpers Globais ═══
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
@@ -93,8 +98,11 @@ export { newFilterCard };
 // schema real para "3.1" sem atualizar aquele texto). 3.2 (Épico EB, EB2) — novo campo de
 // topo `exploreLayouts` (layout da aba Explorar, por csvId). 3.3 (Épico EB, EB4) — novos
 // campos de topo `exploreGroupings`/`explorePageFilters` (builder livre da aba Explorar,
-// por csvId).
-export const PROJECT_SCHEMA_VERSION = "3.3";
+// por csvId). 3.4 (Épico NB, Sessão NB2) — novo campo de topo `nextActionsPrefs`
+// (descartados/adiados do Feed de Próxima Melhor Ação, DEC-NB-006); a wiki (Jornada-
+// Prompts-Sessoes.md) previa "3.3" para esta sessão, mas o Épico EB (EB4) já havia
+// consumido "3.3" antes desta sessão rodar — bump real é sequencial sobre o schema atual.
+export const PROJECT_SCHEMA_VERSION = "3.4";
 export const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
 const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   : new Date().toISOString();
 export const BUILD_HASH   = typeof __BUILD_HASH__   !== "undefined" ? __BUILD_HASH__   : "local";
@@ -358,6 +366,7 @@ const PERF_REQUEST_TO_RESULT = {
   COMPUTE_SEGMENT_DISCOVERY: 'SEGMENT_DISCOVERY_RESULT',
   COMPUTE_SEGMENT_COMBINED:  'SEGMENT_COMBINED_RESULT',
   COMPUTE_POLICY_INSIGHTS:   'POLICY_INSIGHTS_RESULT',
+  COMPUTE_NEXT_ACTIONS:      'NEXT_ACTIONS_RESULT',
   COMPUTE_VARIABLE_RANKING:  'VARIABLE_RANKING_RESULT',
   COMPUTE_BASE_PROFILE:      'BASE_PROFILE_RESULT',
   COMPUTE_EXPLORE_DATASET:   'EXPLORE_DATASET_RESULT',
@@ -1402,12 +1411,15 @@ function goalSeekResolveMinimize(target, minimize) {
 const GOAL_SEEK_FRONTIER_POINTS = 13;
 const GOAL_SEEK_TIME_LIMIT_SEC = 20;
 
-// Copiloto — lint estrutural (Sessão 1, DEC-IA-006). Estilo por severidade do achado
-// (findings vêm de COMPUTE_POLICY_INSIGHTS, sempre {severity, code, nodeId, msg, fix?}).
-const COPILOT_SEV_META = {
-  error:   { emoji: "🔴", color: "#b91c1c", bg: "#fef2f2", border: "#fecaca" },
-  warning: { emoji: "🟡", color: "#92400e", bg: "#fffbeb", border: "#fde68a" },
-  info:    { emoji: "🔵", color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
+// Copiloto — Feed de Próxima Melhor Ação (Jornada NB, Sessão NB2, DEC-NB-005). Estilo por
+// classe de severidade do card (`action.severity` do NextActionsModel — DEC-NB-004: blocker
+// > opportunity > hygiene > journey). Substitui o antigo COPILOT_SEV_META (lint isolado,
+// Sessão 1) — o lint agora entra no feed como cards `fix_lint_*`/`connect_port`.
+const NEXT_ACTION_SEV_META = {
+  blocker:     { emoji: "🔴", color: "#b91c1c", bg: "#fef2f2", border: "#fecaca" },
+  opportunity: { emoji: "🟢", color: "#15803d", bg: "#f0fdf4", border: "#bbf7d0" },
+  hygiene:     { emoji: "🟡", color: "#92400e", bg: "#fffbeb", border: "#fde68a" },
+  journey:     { emoji: "🔵", color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
 };
 
 // Simplificação com prova de equivalência (Copiloto Sessão 5, DEC-IA-005/006) — metadados
@@ -2182,6 +2194,58 @@ export default function App() {
       return [...kept, ...buildDefaultExploreLayout(baseProfileResult).filter(w => !keptIds.has(w.id))];
     });
   }, [baseProfileResult, setExploreLayoutForCsv]);
+
+  // ── Feed de Próxima Melhor Ação (Jornada NB, Sessão NB2) ──────────────────────
+  // `nextActionsModel`: NextActionsModel DERIVADO (não persiste — recomputado no mesmo
+  // debounce do lint, mesmo padrão de `baseProfileResult`/`copilotFindings`).
+  const [nextActionsModel, setNextActionsModel] = useState(null);
+  const nextActionsModelRef = useRef(null);
+  // `nextActionsPrefs`: DESCARTE/ADIAMENTO POR CARD É CRIAÇÃO DO USUÁRIO (regra inviolável
+  // do CLAUDE.md, DEC-NB-006) — persiste em .credito.json (buildProjectPayload/loadProject,
+  // schema 3.4) + sessionStorage. `dismissed`/`snoozed`: fingerprints estáveis (kind+alvo) de
+  // cards descartados/adiados — nunca ressuscitam sozinhos na regeneração do feed.
+  // `autoScanIdle`: opt-in da NB3 (Buscar oportunidades em idle), já reservado no contêiner.
+  const [nextActionsPrefs, setNextActionsPrefs] = useState(() => {
+    try {
+      const s = sessionStorage.getItem('next_actions_prefs_v1');
+      const v = s ? JSON.parse(s) : null;
+      return (v && typeof v === 'object' && !Array.isArray(v))
+        ? { dismissed: Array.isArray(v.dismissed) ? v.dismissed : [], snoozed: Array.isArray(v.snoozed) ? v.snoozed : [], autoScanIdle: v.autoScanIdle === true }
+        : { dismissed: [], snoozed: [], autoScanIdle: false };
+    } catch { return { dismissed: [], snoozed: [], autoScanIdle: false }; }
+  });
+  const dismissNextAction = useCallback((fingerprint) => {
+    if (!fingerprint) return;
+    setNextActionsPrefs(prev => prev.dismissed.includes(fingerprint) ? prev : { ...prev, dismissed: [...prev.dismissed, fingerprint] });
+  }, []);
+  const snoozeNextAction = useCallback((fingerprint) => {
+    if (!fingerprint) return;
+    setNextActionsPrefs(prev => prev.snoozed.includes(fingerprint) ? prev : { ...prev, snoozed: [...prev.snoozed, fingerprint] });
+  }, []);
+  const restoreNextAction = useCallback((fingerprint) => {
+    setNextActionsPrefs(prev => ({
+      ...prev,
+      dismissed: prev.dismissed.filter(fp => fp !== fingerprint),
+      snoozed: prev.snoozed.filter(fp => fp !== fingerprint),
+    }));
+  }, []);
+  // "ⓘ Por que isso importa" expansível por card — efêmero (não persiste, mesmo padrão de
+  // `panelDrag`/`activeCell`); "ver descartados" também efêmero (toggle de visualização).
+  const [expandedActionWhy, setExpandedActionWhy] = useState(() => new Set());
+  const [showDiscardedActions, setShowDiscardedActions] = useState(false);
+  const toggleActionWhy = useCallback((id) => {
+    setExpandedActionWhy(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  // Fingerprint do PolicyIR no momento da última Documentação gerada com sucesso (DEC-NB-002)
+  // — DERIVADO (não persiste; o próprio docModal também não persiste hoje). Snapshot do
+  // `policyFingerprint` já computado pelo worker no NEXT_ACTIONS_RESULT mais recente (mesmo
+  // algoritmo de fingerprint usado internamente por `computeNextActions` para comparar).
+  const [lastDocFingerprint, setLastDocFingerprint] = useState(null);
+
   // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
   const [canvases, setCanvases] = useState(() => _initCanvasStore().canvases);
   const [activeCanvasId, setActiveCanvasId] = useState(() => _initCanvasStore().activeCanvasId);
@@ -2562,6 +2626,10 @@ export default function App() {
         }));
       } else if (msgType === 'POLICY_INSIGHTS_RESULT') {
         setCopilotFindings(e.data.findings || []);
+      } else if (msgType === 'NEXT_ACTIONS_RESULT') {
+        // Feed de Próxima Melhor Ação (Jornada NB, Sessão NB1/NB2) — DERIVADO, não persiste.
+        nextActionsModelRef.current = e.data.model || null;
+        setNextActionsModel(e.data.model || null);
       } else if (msgType === 'GOAL_SEEK_RESULT') {
         // GS6 (DEC-GS-001/007): COMPUTE_GOAL_SEEK_VALIDATE pode responder {error:'stale'|
         // 'invalid_solution', detail} na MESMA `*_RESULT` — nunca produzido pelo caminho
@@ -2600,6 +2668,11 @@ export default function App() {
           }
           return { ...m, step: 'result', docModel: { ...docModel, changelog } };
         });
+        // Feed de Próxima Melhor Ação (DEC-NB-002): carimba o fingerprint do PolicyIR no
+        // momento desta geração — mesmo algoritmo do `policyFingerprint` já calculado pelo
+        // último NEXT_ACTIONS_RESULT (ambos partem de shapesR.current/connsR.current do
+        // mesmo instante); o card "document" compara este valor contra o fingerprint atual.
+        setLastDocFingerprint(nextActionsModelRef.current?.policyFingerprint ?? null);
       } else if (msgType === 'SEGMENT_DISCOVERY_RESULT') {
         const { segmentModel } = e.data;
         setSegmentDiscoveryModal(m => (m ? { ...m, step: 'result', segmentModel, deepRun: null, varFilter: null,
@@ -2851,6 +2924,57 @@ export default function App() {
     return () => clearTimeout(copilotDebounceRef.current);
   }, [shapes, conns, csvStore]);
 
+  // ── Feed de Próxima Melhor Ação — COMPUTE_NEXT_ACTIONS (Jornada NB, Sessão NB1/NB2) ──
+  // Orquestrador do worker SOBRE as fontes já computadas nesta thread (lint acima,
+  // nodeArrivals/lensCounts da própria simulação, PolicyIR) — mesmo debounce barato do
+  // lint (DEC-NB-001). Tier 2 (Descoberta/Simplificação) ainda não é costurado (sob demanda,
+  // "🔎 Buscar oportunidades" — Sessão NB3): `tier2: {}` por enquanto.
+  const nextActionsDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(nextActionsDebounceRef.current);
+    nextActionsDebounceRef.current = setTimeout(() => {
+      // Variável pendente de mapeamento (Biblioteca de Políticas, DEC-NB-002): losango
+      // materializado sem variável mapeada — `applyPolicyVarMapping` deixa `variableCol`
+      // null mas preserva o `label` original do template. Dedup por nome (1 card por var).
+      const pendingVars = [];
+      const seenPending = new Set();
+      for (const s of shapesR.current) {
+        if (s.type === 'decision' && !s.variableCol && s.label && !seenPending.has(s.label)) {
+          seenPending.add(s.label);
+          pendingVars.push({ name: s.label });
+        }
+      }
+      const hasAsIs = Object.values(csvStoreR.current).some(c => !!c?.asIsConfig);
+      // "Madura" (heurística v1 — o detector real é o Épico EP/policyJourney, ainda não
+      // construído): tem terminal Aprovado E Reprovado, e nenhum achado bloqueante do lint.
+      const policyMature = shapesR.current.some(s => s.type === 'approved')
+        && shapesR.current.some(s => s.type === 'rejected')
+        && !copilotFindings.some(f => f.severity === 'error');
+      const activeName = canvasesR.current[activeCanvasIdR.current]?.name ?? null;
+      const hasLibraryTemplate = policyLibraryR.current.some(it => it.name === activeName);
+      const lockedNodeIds = shapesR.current.filter(s => s.locked).map(s => s.id);
+      // `ir` construído aqui (buildPolicyIR só existe em App.jsx); o worker lê nodeArrivals/
+      // lensCounts do próprio cache do tick (getTickResult) e `workerCsvStore` já sincronizado
+      // via UPDATE_CSV_STORE — nenhum dos dois viaja nesta mensagem (mesmo padrão de
+      // COMPUTE_POLICY_INSIGHTS, que também só envia shapes/conns).
+      const ir = buildPolicyIR(shapesR.current, connsR.current, csvStoreR.current, { name: activeName });
+      workerRef.current?.postMessage({
+        type: 'COMPUTE_NEXT_ACTIONS',
+        shapes: shapesR.current, conns: connsR.current, ir,
+        context: {
+          canvasId: activeCanvasIdR.current,
+          baseLoaded: Object.keys(csvStoreR.current).length > 0,
+          baseExplored: !!baseProfileResult && !baseProfileResult.error,
+          riskMetric: exploreRiskMetric,
+          hasAsIs, pendingVars, policyMature, hasLibraryTemplate, lockedNodeIds,
+          lastDocFingerprint,
+        },
+        tier2: {},
+      });
+    }, 300);
+    return () => clearTimeout(nextActionsDebounceRef.current);
+  }, [shapes, conns, csvStore, activeCanvasId, canvases, exploreRiskMetric, baseProfileResult, policyLibrary, copilotFindings, lastDocFingerprint]);
+
   // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
   // Recomputado pelo worker quando a simulação muda; cacheado em analyticsDataset.
   // 5B: monta as abas marcadas (includeInDashboard) como cenários — working copy para o
@@ -2921,6 +3045,8 @@ export default function App() {
   // Explorar a Base — builder livre (Épico EB, EB4, DEC-EB-011): agrupamentos/filtro de página por base.
   useEffect(() => { try { sessionStorage.setItem('explore_groupings_v1', JSON.stringify(exploreGroupings)); } catch { /* quota/privacidade — não bloqueia */ } }, [exploreGroupings]);
   useEffect(() => { try { sessionStorage.setItem('explore_page_filters_v1', JSON.stringify(explorePageFilters)); } catch { /* quota/privacidade — não bloqueia */ } }, [explorePageFilters]);
+  // Feed de Próxima Melhor Ação (Jornada NB, Sessão NB2, DEC-NB-006): persiste descarte/adiamento.
+  useEffect(() => { try { sessionStorage.setItem('next_actions_prefs_v1', JSON.stringify(nextActionsPrefs)); } catch { /* quota/privacidade — não bloqueia */ } }, [nextActionsPrefs]);
   // Ribbon (UX 2.0 — Sessão 1): persiste a aba ativa do Ribbon na sessionStorage.
   useEffect(() => { try { sessionStorage.setItem('ribbon_active_tab_v1', ribbonActiveTab); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonActiveTab]);
   useEffect(() => { try { sessionStorage.setItem('ribbon_mode_v1', ribbonMode); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonMode]);
@@ -4174,6 +4300,10 @@ export default function App() {
       // de página do builder livre, por base (o dataset largo em si é DERIVADO e não persiste).
       exploreGroupings,
       explorePageFilters,
+      // Feed de Próxima Melhor Ação (Épico NB, Sessão NB2, DEC-NB-006) — descarte/adiamento
+      // por card é CRIAÇÃO DO USUÁRIO (regra inviolável do CLAUDE.md); o NextActionsModel em
+      // si é DERIVADO (recomputável) e não persiste, mesmo padrão do BaseProfileModel.
+      nextActionsPrefs,
       cinemaLibrary,
       // Biblioteca de Políticas (Copiloto Sessão 2) — array de templates de PolicyIR
       // (JSON puro: ir/requiredVars não têm Map/typed array, sem serialize dedicado).
@@ -4278,6 +4408,16 @@ export default function App() {
     // default defensivo, projeto antigo não quebra.
     setExploreGroupings((data.exploreGroupings && typeof data.exploreGroupings === 'object' && !Array.isArray(data.exploreGroupings)) ? data.exploreGroupings : {});
     setExplorePageFilters((data.explorePageFilters && typeof data.explorePageFilters === 'object' && !Array.isArray(data.explorePageFilters)) ? data.explorePageFilters : {});
+    // schema < 3.4 não tinha nextActionsPrefs (Feed de Próxima Melhor Ação, NB2) — default
+    // defensivo por campo (arquivo pode ter só parte do contêiner), projeto antigo não quebra.
+    {
+      const p = (data.nextActionsPrefs && typeof data.nextActionsPrefs === 'object') ? data.nextActionsPrefs : {};
+      setNextActionsPrefs({
+        dismissed: Array.isArray(p.dismissed) ? p.dismissed : [],
+        snoozed: Array.isArray(p.snoozed) ? p.snoozed : [],
+        autoScanIdle: p.autoScanIdle === true,
+      });
+    }
     setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
     // schema ≤ 2.3 não tinha policyLibrary — default defensivo, projeto antigo não quebra.
     setPolicyLibrary(Array.isArray(data.policyLibrary) ? data.policyLibrary : []);
@@ -7691,7 +7831,34 @@ export default function App() {
     { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura', 'oportunidade'], onRun: () => openSegmentDiscoveryModal(null) },
     { id: 'analyze.cluster', label: 'Clusterizar Segmentos', icon: '🧩', tab: 'analisar', group: 'Descoberta', keywords: ['cluster', 'clusterizar', 'k-means', 'agrupar', 'agrupamento'], onRun: () => openClusterModal(null) },
     { id: 'analyze.range', label: 'Criar Faixas por Risco', icon: '📐', tab: 'analisar', group: 'Descoberta', keywords: ['faixas', 'binning', 'risco', 'iv', 'woe', 'bandas', 'faixa etária', 'faixa de renda', 'cortes'], onRun: () => openRangeModal() },
-    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico', 'assistente'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
+    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico', 'assistente', 'feed', 'próxima melhor ação'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
+    // "Buscar oportunidades" (DEC-NB-005/008): v1 abre a Descoberta de Segmentos (a fonte
+    // Tier 2 mais rica hoje) — a injeção automática dos achados como cards Tier 2 carimbados
+    // no feed é da Sessão NB3 (sob demanda, com staleness). Já registrado agora para não
+    // faltar no Ctrl+K/Ribbon quando a costura chegar.
+    { id: 'analyze.copilotSearch', label: 'Buscar oportunidades', icon: '🔎', tab: 'analisar', group: 'Copiloto', keywords: ['buscar oportunidades', 'descoberta', 'feed', 'próxima melhor ação'], onRun: () => openSegmentDiscoveryModal(null) },
+    { id: 'analyze.copilotDiscarded', label: 'Ver descartados', icon: '🗂', tab: 'analisar', group: 'Copiloto', keywords: ['descartados', 'adiados', 'feed', 'copiloto'], activeWhen: () => showDiscardedActions, onRun: () => setShowDiscardedActions(v => !v) },
+    // CTAs do feed do Copiloto (DEC-NB-008): descritores do registro, invocados com `args`
+    // pelo card (`runNextActionCTA`). `tab:'feed'` (sem Ribbon correspondente) + contextWhen
+    // sempre falso: nunca aparecem na Ribbon nem no Ctrl+K — só existem para os appliers
+    // JÁ EXISTENTES ficarem centralizados num único ponto de disparo (nenhum aplicador novo).
+    { id: 'copilot.connectTerminal', label: 'Conectar terminal', icon: '⚡', tab: 'feed', contextWhen: () => false, onRun: (args = {}) => applyCopilotConnectTerminal(args.nodeId, args.terminal || 'rejected') },
+    { id: 'copilot.openDomainModal', label: 'Configurar nó', icon: '⚙', tab: 'feed', contextWhen: () => false, onRun: (args = {}) => openDomainModal(args.nodeId) },
+    // v1: remover um valor específico do domínio ainda não tem applier dedicado — abre o
+    // mesmo modal "Configurar nó" (Domínio Exibido) já usado pelo lint, onde o usuário
+    // confirma a exclusão. Ver docs/claude/Dominio-Exibido.md.
+    { id: 'copilot.removeFromDomain', label: 'Remover do domínio', icon: '🗑', tab: 'feed', contextWhen: () => false, onRun: (args = {}) => openDomainModal(args.nodeId) },
+    { id: 'copilot.exploreBase', label: 'Explorar a base', icon: '🔎', tab: 'feed', contextWhen: () => false, onRun: () => setActiveTab('explore') },
+    { id: 'copilot.firstBranch', label: 'Criar primeira decisão', icon: '🌱', tab: 'feed', contextWhen: () => false, onRun: (args = {}) => { if (args.col && args.csvId) createDecisionNode(args.col, args.csvId, 80, 80); } },
+    { id: 'copilot.mapPendingVar', label: 'Mapear variável', icon: '🔗', tab: 'feed', contextWhen: () => false, onRun: (args = {}) => { setPanelCollapsed(false); setRightPanelMode('assets'); if (args.name) setVarSearch(args.name); } },
+    { id: 'copilot.configureAsIs', label: 'Configurar AS IS', icon: '⟳', tab: 'feed', contextWhen: () => false, onRun: () => { setTool('as_is'); setFromId(null); } },
+    { id: 'copilot.generateDoc', label: 'Documentar política', icon: '📄', tab: 'feed', contextWhen: () => false, onRun: () => openDocModal() },
+    { id: 'copilot.saveLibrary', label: 'Salvar na Biblioteca', icon: '📚', tab: 'feed', contextWhen: () => false, onRun: () => openPolicyLibrary('save') },
+    // Tier 2 (Descoberta/Simplificação): a aplicação em si já existe dentro dos modais
+    // respectivos — a CTA do feed navega até lá (a materialização acontece na UI existente,
+    // sob os aplicadores `applySegmentRecommendation`/`applySimplifyCandidates` já em uso).
+    { id: 'copilot.applyOpportunity', label: 'Ver na Descoberta', icon: '🔍', tab: 'feed', contextWhen: () => false, onRun: () => openSegmentDiscoveryModal(null) },
+    { id: 'copilot.applySimplify', label: 'Ver Simplificação', icon: '🧹', tab: 'feed', contextWhen: () => false, onRun: () => openSimplifyModal() },
 
     // ─── OTIMIZAR ───
     { id: 'optimize.goalSeek', label: 'Atingir Objetivo', icon: '🎯', tab: 'otimizar', group: 'Política', keywords: ['goal seek', 'objetivo', 'meta', 'milp', 'profundo'], onRun: openGoalSeekModal },
@@ -7745,6 +7912,14 @@ export default function App() {
     { id: 'ctx.sel.johnny', label: `Otimização Johnny (${multiSel.size})`, icon: '⚡', tab: 'ctx-selecao', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha'], contextWhen: () => multiSel.size > 1, enabledWhen: () => _allCinemas, disabledReason: 'requer 2+ Cineminhas selecionadas', onRun: () => openJohnnyModal([...multiSel]) },
     { id: 'ctx.sel.delete', label: `Deletar (${multiSel.size})`, icon: '🗑', tab: 'ctx-selecao', group: 'Ações', keywords: ['deletar', 'excluir', 'remover em massa'], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, disabledReason: 'selecione 2+ shapes', onRun: deleteSelected },
   ];
+
+  // Dispara a CTA de um card do feed (DEC-NB-008) — resolve o commandId no registro acima
+  // e chama `onRun(args)` do card. Nenhum aplicador novo: sempre um dos `copilot.*`/comandos
+  // já existentes acima, que por sua vez chamam os aplicadores originais.
+  const runNextActionCTA = (cta) => {
+    const cmd = COMMANDS.find(c => c.id === cta?.commandId);
+    if (cmd) cmd.onRun(cta.args || {});
+  };
 
   // ═══ REGIÃO: Abas contextuais do Ribbon (UX 2.0 — Sessão 2) ═══
   // Uma aba contextual (padrão "Contextual Tabs" do Office) surge destacada só quando a
@@ -8495,7 +8670,7 @@ export default function App() {
           {[
             { id:'assets',    label:'Ativos' },
             { id:'inspector', label:'Inspetor' },
-            { id:'copilot',   label:'Copiloto', icon:'🧭', badge: copilotFindings.length },
+            { id:'copilot',   label:'Copiloto', icon:'🧭', badge: (nextActionsModel?.actions || []).filter(a => a.severity !== 'journey' && !nextActionsPrefs.dismissed.includes(a.fingerprint) && !nextActionsPrefs.snoozed.includes(a.fingerprint)).length },
           ].map(tab => {
             const on = rightPanelMode === tab.id;
             return (
@@ -8719,87 +8894,150 @@ export default function App() {
         {/* ═══ Aba INSPETOR: propriedades do objeto selecionado (sem comandos) ═══ */}
         {rightPanelMode === 'inspector' && renderInspector()}
 
-        {/* ═══ Aba COPILOTO: lint estrutural + card da Descoberta ═══ */}
-        {/* Copiloto — lint estrutural (Sessão 1, DEC-IA-006): achados por severidade,
-            "ir até o nó" e quick-fixes não-destrutivos. Efêmero (não persiste). */}
-        {rightPanelMode === 'copilot' && shapes.length === 0 && (
-          <div style={{padding:"18px 16px",fontSize:12,color:"#94a3b8",lineHeight:1.6,textAlign:"center"}}>
-            🧭 O Copiloto analisa a estrutura do fluxo. Adicione nós ao canvas para ver os achados aqui.
-          </div>
-        )}
-        {rightPanelMode === 'copilot' && shapes.length > 0 && (
-          <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-              <p style={{fontSize:11,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.6,margin:0}}>🧭 Copiloto</p>
-              {copilotFindings.length>0 && (
-                <span style={{fontSize:10.5,fontWeight:700,color:"#64748b",background:"#f1f5f9",borderRadius:20,padding:"2px 8px"}}>
-                  {copilotFindings.length}
-                </span>
+        {/* ═══ Aba COPILOTO: Feed de Próxima Melhor Ação (Jornada NB, Sessão NB1/NB2, DEC-NB-005) ═══ */}
+        {/* Substitui o antigo painel de lint isolado (Sessão 1) — o lint entra no feed como
+            cards `connect_port`/`fix_lint_*` (MESMA fonte, computePolicyInsights, um único
+            lugar). NextActionsModel DERIVADO (não persiste); descarte/adiamento por card É
+            criação do usuário e persiste em `nextActionsPrefs` (DEC-NB-006). */}
+        {rightPanelMode === 'copilot' && (() => {
+          const model = nextActionsModel;
+          const dismissedSet = new Set(nextActionsPrefs.dismissed);
+          const snoozedSet = new Set(nextActionsPrefs.snoozed);
+          const allActions = model?.actions || [];
+          const isOut = (a) => dismissedSet.has(a.fingerprint) || snoozedSet.has(a.fingerprint);
+          const visibleActions = allActions.filter(a => !isOut(a));
+          const discardedActions = allActions.filter(isOut);
+          const shown = showDiscardedActions ? discardedActions : visibleActions;
+          return (
+            <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,gap:6}}>
+                <p style={{fontSize:11,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.6,margin:0}}>
+                  🧭 Copiloto{showDiscardedActions ? ' — Descartados' : ''}
+                </p>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  {!showDiscardedActions && visibleActions.length > 0 && (
+                    <span style={{fontSize:10.5,fontWeight:700,color:"#64748b",background:"#f1f5f9",borderRadius:20,padding:"2px 8px"}}>
+                      {visibleActions.length}
+                    </span>
+                  )}
+                  {(discardedActions.length > 0 || showDiscardedActions) && (
+                    <button onClick={()=>setShowDiscardedActions(v=>!v)}
+                      title={showDiscardedActions ? "Voltar ao feed" : "Ver cards descartados/adiados"}
+                      style={{padding:"2px 8px",borderRadius:20,border:"1px solid #e2e8f0",background:showDiscardedActions?"#eff6ff":"#fff",color:showDiscardedActions?"#2563eb":"#94a3b8",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                      {showDiscardedActions ? '← Feed' : `🗂 Descartados (${discardedActions.length})`}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!model && (
+                <div style={{padding:"18px 4px",fontSize:12,color:"#94a3b8",lineHeight:1.6,textAlign:"center"}}>
+                  🧭 Calculando o feed…
+                </div>
+              )}
+              {model && shown.length === 0 && (
+                <div style={{padding:"9px 10px",borderRadius:8,background: showDiscardedActions ? "#f8fafc" : "#f0fdf4",border:`1px solid ${showDiscardedActions?"#e2e8f0":"#bbf7d0"}`,fontSize:11.5,color: showDiscardedActions ? "#94a3b8" : "#15803d",lineHeight:1.5,display:"flex",gap:6,alignItems:"center"}}>
+                  <span>{showDiscardedActions ? '🗂' : '✅'}</span>
+                  <span>{showDiscardedActions ? 'Nenhum card descartado ou adiado.' : 'Nenhuma pendência no momento.'}</span>
+                </div>
+              )}
+              {model && shown.length > 0 && (
+                <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:460,overflowY:"auto"}}>
+                  {shown.map(action => {
+                    const meta = NEXT_ACTION_SEV_META[action.severity] || NEXT_ACTION_SEV_META.journey;
+                    const facts = action.title?.facts || {};
+                    const nodeId = facts.nodeId ?? null;
+                    const nodeExists = nodeId != null && shapes.some(s => s.id === nodeId);
+                    const whyOpen = expandedActionWhy.has(action.id);
+                    const discarded = isOut(action);
+                    return (
+                      <div key={action.id} style={{padding:"8px 10px",borderRadius:8,background:meta.bg,border:`1px solid ${meta.border}`,fontSize:11.5,color:meta.color,lineHeight:1.45,opacity: action.actionable === false ? .75 : 1}}>
+                        <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
+                          <span style={{flexShrink:0}}>{meta.emoji}</span>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2,flexWrap:"wrap"}}>
+                              <span style={{fontSize:9.5,fontWeight:700,textTransform:"uppercase",letterSpacing:.4,opacity:.7}}>{severityLabel(action.severity)}</span>
+                              {action.staleness?.stale && (
+                                <span style={{fontSize:9.5,fontWeight:700,color:"#92400e",background:"#fffbeb",border:"1px solid #fde68a",borderRadius:20,padding:"0 6px"}}>⏳ desatualizado</span>
+                              )}
+                            </div>
+                            <span>{describeAction(action)}</span>
+                            {action.actionable === false && (
+                              <div style={{marginTop:4,fontSize:10.5,color:"#92400e"}}>
+                                🔒 {action.reason === 'node_locked' ? 'Nó travado — destrave para agir.' : (action.reason || 'Não acionável no momento.')}
+                              </div>
+                            )}
+                            {action.delta != null && (
+                              <div style={{marginTop:4,fontSize:10.5,fontWeight:600}}>{formatActionDelta(action.delta)}</div>
+                            )}
+                            <button onClick={()=>toggleActionWhy(action.id)}
+                              style={{display:"block",marginTop:4,background:"none",border:"none",padding:0,cursor:"pointer",fontSize:10.5,color:meta.color,opacity:.75,fontFamily:"inherit",textDecoration:"underline"}}>
+                              {whyOpen ? 'ⓘ Ocultar' : 'ⓘ Por que isso importa'}
+                            </button>
+                            {whyOpen && (
+                              <div style={{marginTop:4,padding:"6px 8px",borderRadius:6,background:"rgba(255,255,255,.6)",fontSize:10.5,color:"#475569",lineHeight:1.5}}>
+                                {describeWhyItMatters(action)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap",alignItems:"center"}}>
+                          {nodeExists && (
+                            <button onClick={()=>goToCopilotNode(nodeId)}
+                              title="Selecionar e centralizar este nó no canvas"
+                              style={{padding:"3px 9px",borderRadius:6,border:`1px solid ${meta.border}`,background:"#fff",color:meta.color,cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                              🎯 Ir até o nó
+                            </button>
+                          )}
+                          {action.actionable !== false && !discarded && (action.cta || []).map((cta, ci) => (
+                            cta.commandId === 'copilot.connectTerminal' ? [
+                              <button key={`${ci}-r`} onClick={()=>runNextActionCTA({ ...cta, args: { ...cta.args, terminal: 'rejected' } })}
+                                title="Conectar esta saída a um novo terminal Reprovado"
+                                style={{padding:"3px 9px",borderRadius:6,border:"1px solid #fecaca",background:"#fff1f2",color:"#b91c1c",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                                ❌ Reprovado
+                              </button>,
+                              <button key={`${ci}-a`} onClick={()=>runNextActionCTA({ ...cta, args: { ...cta.args, terminal: 'approved' } })}
+                                title="Conectar esta saída a um novo terminal Aprovado"
+                                style={{padding:"3px 9px",borderRadius:6,border:"1px solid #bbf7d0",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                                ✅ Aprovado
+                              </button>,
+                            ] : (
+                              <button key={ci} onClick={()=>runNextActionCTA(cta)}
+                                title={ctaLabel(cta.labelCode)}
+                                style={{padding:"3px 9px",borderRadius:6,border:`1px solid ${meta.border}`,background:"#fff",color:meta.color,cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                                {ctaLabel(cta.labelCode)}
+                              </button>
+                            )
+                          ))}
+                          {discarded ? (
+                            <button onClick={()=>restoreNextAction(action.fingerprint)}
+                              title="Restaurar este card ao feed"
+                              style={{marginLeft:"auto",padding:"3px 9px",borderRadius:6,border:"1px solid #bfdbfe",background:"#eff6ff",color:"#2563eb",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                              ↺ Restaurar
+                            </button>
+                          ) : (
+                            <div style={{marginLeft:"auto",display:"flex",gap:4}}>
+                              <button onClick={()=>snoozeNextAction(action.fingerprint)}
+                                title="Adiar — some do feed até ser revisto em 'Ver descartados'"
+                                style={{padding:"3px 7px",borderRadius:6,border:"1px solid #e2e8f0",background:"#fff",color:"#94a3b8",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>
+                                ⏰
+                              </button>
+                              <button onClick={()=>dismissNextAction(action.fingerprint)}
+                                title="Descartar — some do feed até ser revisto em 'Ver descartados'"
+                                style={{padding:"3px 7px",borderRadius:6,border:"1px solid #e2e8f0",background:"#fff",color:"#94a3b8",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>
+                                🗑
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
-            {copilotFindings.length === 0 ? (
-              <div style={{padding:"9px 10px",borderRadius:8,background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:11.5,color:"#15803d",lineHeight:1.5,display:"flex",gap:6,alignItems:"center"}}>
-                <span>✅</span><span>Nenhum achado estrutural — fluxo consistente.</span>
-              </div>
-            ) : (
-              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:300,overflowY:"auto"}}>
-                {copilotFindings.map((f,i) => {
-                  const meta = COPILOT_SEV_META[f.severity] || COPILOT_SEV_META.info;
-                  return (
-                    <div key={`${f.code}-${f.nodeId}-${i}`} style={{padding:"8px 10px",borderRadius:8,background:meta.bg,border:`1px solid ${meta.border}`,fontSize:11.5,color:meta.color,lineHeight:1.45}}>
-                      <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
-                        <span style={{flexShrink:0}}>{meta.emoji}</span>
-                        <span style={{flex:1}}>{f.msg}</span>
-                      </div>
-                      <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
-                        <button onClick={()=>goToCopilotNode(f.nodeId)}
-                          title="Selecionar e centralizar este nó no canvas"
-                          style={{padding:"3px 9px",borderRadius:6,border:`1px solid ${meta.border}`,background:"#fff",color:meta.color,cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
-                          🎯 Ir até o nó
-                        </button>
-                        {f.fix?.kind === 'connect_terminal' && (<>
-                          <button onClick={()=>applyCopilotConnectTerminal(f.fix.nodeId,'rejected')}
-                            title="Conectar esta saída a um novo terminal Reprovado"
-                            style={{padding:"3px 9px",borderRadius:6,border:"1px solid #fecaca",background:"#fff1f2",color:"#b91c1c",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
-                            ❌ Reprovado
-                          </button>
-                          <button onClick={()=>applyCopilotConnectTerminal(f.fix.nodeId,'approved')}
-                            title="Conectar esta saída a um novo terminal Aprovado"
-                            style={{padding:"3px 9px",borderRadius:6,border:"1px solid #bbf7d0",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
-                            ✅ Aprovado
-                          </button>
-                        </>)}
-                        {f.fix?.kind === 'open_domain_modal' && (
-                          <button onClick={()=>openDomainModal(f.fix.nodeId)}
-                            title="Abrir 'Configurar nó' para revisar/ocultar este valor"
-                            style={{padding:"3px 9px",borderRadius:6,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#4338ca",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
-                            ⚙ Configurar nó
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {/* Achado informativo 🔵 apontando pra Descoberta de Segmentos (Sessão 10/11) —
-                não duplica a lista (estatística, não estrutural): o painel só aponta, o
-                modal detalha. Sempre visível quando há fluxo — a varredura é on-demand. */}
-            <div style={{marginTop:6,padding:"8px 10px",borderRadius:8,background:COPILOT_SEV_META.info.bg,border:`1px solid ${COPILOT_SEV_META.info.border}`,fontSize:11.5,color:COPILOT_SEV_META.info.color,lineHeight:1.45}}>
-              <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
-                <span style={{flexShrink:0}}>{COPILOT_SEV_META.info.emoji}</span>
-                <span style={{flex:1}}>Descoberta de Segmentos disponível — varra a base procurando aprovação deixada na mesa, risco vazando ou blocos heterogêneos que a política atual não trata.</span>
-              </div>
-              <div style={{marginTop:6}}>
-                <button onClick={()=>openSegmentDiscoveryModal(null)}
-                  title="Abrir a Descoberta de Segmentos"
-                  style={{padding:"3px 9px",borderRadius:6,border:`1px solid ${COPILOT_SEV_META.info.border}`,background:"#fff",color:COPILOT_SEV_META.info.color,cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
-                  🔍 Abrir Descoberta
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
 
         {/* Visualização (Espessura Dinâmica + indicadores de aresta) MIGROU para o ⚙ Hub

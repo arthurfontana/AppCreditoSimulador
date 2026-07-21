@@ -99,7 +99,9 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"3.3"`** (Épico EB, Sessão EB4 — novos campos de topo
+   Versão atual: **`"3.4"`** (Épico NB, Sessão NB2 — novo campo de topo
+   `nextActionsPrefs`, descarte/adiamento por card do Feed de Próxima Melhor Ação,
+   DEC-NB-006); `3.3` foi o Épico EB, Sessão EB4 — novos campos de topo
    `exploreGroupings`/`explorePageFilters`, agrupamentos e filtro de página do builder
    livre da aba Explorar, por base; `3.2` foi a Sessão EB2 — `exploreLayouts`, layout por
    base da aba Explorar; `3.1` foi a UX 2.0/Ribbon Sessão 6 — `rightPanelMode`,
@@ -122,7 +124,8 @@ terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados comp
 (`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · layout, agrupamentos e
 filtro de página do builder livre da aba Explorar, por base (`exploreLayouts`,
 `exploreGroupings`, `explorePageFilters`) · biblioteca de
-Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
+Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · descarte/
+adiamento do Feed de Próxima Melhor Ação (`nextActionsPrefs`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`) ·
 viewport · aba ativa · aba do Ribbon (`ribbonActiveTab`) · modo de colapso do Ribbon
 (`ribbonMode`) · indicadores da Status Bar (`statusBarIndicators`) · aba interna do painel
@@ -204,7 +207,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Base de Testes Oficial — inventário, dicionário, matriz de cobertura, gerador de CSV; **feature nova/ajustada ⇒ atualizar docs + regras do gerador na mesma sessão; NUNCA regenerar o CSV sem pedido do usuário** | `docs/wiki/Dados_Teste/README.md` (§ Contrato de manutenção) |
 | UX 2.0 — Ribbon, registro de comandos, ⚙ Hub de Configurações, Busca Ctrl+K, Status Bar, painel Ativos/Inspetor/Copiloto, mini-flutuante de seleção, touch/mobile (8 sessões, entregue) | `docs/wiki/Ribbon-Prompts-Sessoes.md` |
 | Explorar a Base — motor do perfil (EB1) + aba/layout automático (EB2) + camada interpretativa (EB3) + pontes para o fluxo/builder livre/convite pós-import (EB4) entregues; EB5 (sincronização documental) planejada (Épico EB, DEC-EB-001..012) | `docs/claude/Explorar-Base.md` (implementação) + `docs/wiki/Epicos-ExplorarBase.md` (normativo) |
-| Jornada de Construção peças 2–3 — Feed de Próxima Melhor Ação (Épico NB: NB1 motor entregue — `computeNextActions`/`policyIRFingerprint`/lint consciente de tráfego DEC-NB-009; NB2–NB4 planejadas) + Etapas/Prontidão (Épico EP, planejado) | `docs/wiki/Jornada-Prompts-Sessoes.md` + `docs/claude/Worker-Protocolo.md` (mensagens) |
+| Jornada de Construção peças 2–3 — Feed de Próxima Melhor Ação (Épico NB: NB1 motor + NB2 feed na aba Copiloto/`nextActionInsights.js`/descarte-adiamento entregues; NB3–NB4 planejadas) + Etapas/Prontidão (Épico EP, planejado) | `docs/claude/Jornada-Feed.md` (implementação) + `docs/wiki/Jornada-Prompts-Sessoes.md` (normativo) |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
 | Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
 
