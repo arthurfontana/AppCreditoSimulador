@@ -1664,6 +1664,9 @@ function ExploreVarActions({ col, csvId, continuous, actions, compact }) {
     : { display: "flex", alignItems: "center", gap: 5, padding: "4px 9px", borderRadius: 7, border: "1px solid #e2e8f0",
         background: "#fff", color: "#475569", cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit" };
   const label = (key) => compact ? null : <span>{EXPLORE_CTA_META[key].title.split(" — ")[0]}</span>;
+  // No modo compacto (linhas do `ivrank`), o botão de Faixas só se aplica a variáveis
+  // contínuas — mas o slot fica reservado (visibility:hidden, não `return null`) para
+  // o botão de Clusterizar nunca mudar de posição entre linhas (bug de alinhamento).
   return (
     <span style={{ display: "flex", gap: compact ? 2 : 6, flexShrink: 0 }}>
       {onUseAsFirstBranch && (
@@ -1671,11 +1674,16 @@ function ExploreVarActions({ col, csvId, continuous, actions, compact }) {
           {EXPLORE_CTA_META.firstBranch.icon}{label("firstBranch")}
         </button>
       )}
-      {continuous && onCreateRanges && (
+      {onCreateRanges && (compact ? (
+        <button onClick={() => continuous && onCreateRanges(col, csvId)} title={continuous ? EXPLORE_CTA_META.ranges.title : undefined}
+          style={{ ...btnStyle, visibility: continuous ? "visible" : "hidden", cursor: continuous ? "pointer" : "default" }}>
+          {EXPLORE_CTA_META.ranges.icon}
+        </button>
+      ) : continuous && (
         <button onClick={() => onCreateRanges(col, csvId)} title={EXPLORE_CTA_META.ranges.title} style={btnStyle}>
           {EXPLORE_CTA_META.ranges.icon}{label("ranges")}
         </button>
-      )}
+      ))}
       {onClusterize && (
         <button onClick={() => onClusterize(col, csvId)} title={EXPLORE_CTA_META.cluster.title} style={btnStyle}>
           {EXPLORE_CTA_META.cluster.icon}{label("cluster")}
@@ -1701,9 +1709,12 @@ function ExploreIvRankBody({ profile, csvId, actions }) {
               background: v.iv >= 0.3 ? "#16a34a" : v.iv >= 0.1 ? "#2563eb" : "#94a3b8", borderRadius: 4 }} />
           </div>
           <span style={{ width: 42, flexShrink: 0, fontSize: 11, color: "#64748b", textAlign: "right" }}>{v.iv != null ? v.iv.toFixed(2) : "—"}</span>
-          <span style={{ display: "flex", gap: 3, flexShrink: 0, minWidth: 60 }}>
+          {/* Largura FIXA (não minWidth) — reserva o mesmo espaço em toda linha, senão
+              o cluster de ações à direita muda de posição conforme o nº de flags da
+              variável (bug de alinhamento reportado). */}
+          <span style={{ display: "flex", gap: 3, flexShrink: 0, width: 58, overflow: "hidden" }}>
             {v.flags.filter(f => EXPLORE_FLAG_META[f]).map(f => (
-              <span key={f} title={EXPLORE_FLAG_META[f].title} style={{ fontSize: 11.5 }}>{EXPLORE_FLAG_META[f].icon}</span>
+              <span key={f} title={EXPLORE_FLAG_META[f].title} style={{ fontSize: 11.5, flexShrink: 0 }}>{EXPLORE_FLAG_META[f].icon}</span>
             ))}
           </span>
           <ExploreVarActions col={v.col} csvId={csvId} continuous={v.continuous} actions={actions} compact />
