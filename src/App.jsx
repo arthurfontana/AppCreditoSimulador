@@ -20,6 +20,8 @@ import { suggestRangeVarName, buildRangeDefFromModel, formatBandLabel, isRangeVa
 // re-exportado abaixo para os consumidores que ainda o importam de App.jsx (analytics.js).
 import { segVarDefaultReason, parseTemporalKey } from "./segVar.js";
 export { parseTemporalKey };
+// Explorar a Base (Épico EB, EB2) — layout default da aba, puro (buildDefaultExploreLayout).
+import { buildDefaultExploreLayout } from "./explore.js";
 // Execução Híbrida H4/H6 — ComputeRouter (fronteira única worker/sidecar, DEC-HX-002)
 // + funções puras de UX do motor (badge, degradação declarada, aviso de fallback).
 import { createComputeRouter, createWorkerProvider, createSidecarProvider, describeComputeBadge, describeCapabilitiesDetail, ceilingNotice, fallbackNoticeText, hashChunks } from "./computeRouter.js";
@@ -78,7 +80,7 @@ import { computeAutoLayout } from "./autoLayout.js";
 // App.jsx ⇄ dashboardComponents.jsx: o módulo só usa fmtQty/fmtPct/uid/escHtml/LENS_OPERATORS/
 // exportAnalyticsDatasetCSV (exportados por App.jsx) em corpos de função/render — resolve em runtime.
 import {
-  AnalysisTab, SegmentFindingCard, DiagnosticsStrip, SegmentQuadrant,
+  AnalysisTab, ExploreTab, SegmentFindingCard, DiagnosticsStrip, SegmentQuadrant,
   ClusterQuadrant, GoalSeekFrontierChart, ClusterCard, clusterColor, fmtPP, newFilterCard,
 } from "./dashboardComponents.jsx";
 export { newFilterCard };
@@ -88,8 +90,9 @@ export { newFilterCard };
 // Versão do schema de Projeto (.credito.json) — fonte única para buildProjectPayload e para
 // a tabela "Versão do schema" da seção ℹ️ Sobre do Hub (evita os dois textos divergirem,
 // como aconteceu entre a Sessão 5, que fixou "3.0" na Sobre, e a Sessão 6, que bumpou o
-// schema real para "3.1" sem atualizar aquele texto).
-export const PROJECT_SCHEMA_VERSION = "3.1";
+// schema real para "3.1" sem atualizar aquele texto). 3.2 (Épico EB, EB2) — novo campo de
+// topo `exploreLayouts` (layout da aba Explorar, por csvId).
+export const PROJECT_SCHEMA_VERSION = "3.2";
 export const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
 const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   : new Date().toISOString();
 export const BUILD_HASH   = typeof __BUILD_HASH__   !== "undefined" ? __BUILD_HASH__   : "local";
@@ -354,6 +357,7 @@ const PERF_REQUEST_TO_RESULT = {
   COMPUTE_SEGMENT_COMBINED:  'SEGMENT_COMBINED_RESULT',
   COMPUTE_POLICY_INSIGHTS:   'POLICY_INSIGHTS_RESULT',
   COMPUTE_VARIABLE_RANKING:  'VARIABLE_RANKING_RESULT',
+  COMPUTE_BASE_PROFILE:      'BASE_PROFILE_RESULT',
 };
 const PERF_RESULT_TO_REQUEST = Object.fromEntries(
   Object.entries(PERF_REQUEST_TO_RESULT).map(([req, res]) => [res, req])
@@ -2016,7 +2020,7 @@ export default function App() {
   const [importLoading, setImportLoading] = useState(null); // null | {phase:'reading'|'parsing', pct, filename} — progresso de carga/parse de CSV
   const [csvImportError, setCsvImportError] = useState(null); // string | null — erro ao carregar/processar uma base CSV
   // Analytics Workspace
-  const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas"
+  const [activeTab,  setActiveTab]  = useState("canvas"); // "analysis" | "canvas" | "explore"
   // Ribbon (UX 2.0 — Sessão 1): aba ativa do Ribbon fixo. Persistida em sessionStorage
   // (sobrevive a reload na mesma sessão) e no .credito.json (buildProjectPayload/loadProject).
   const [ribbonActiveTab, setRibbonActiveTab] = useState(() => {
@@ -2084,6 +2088,47 @@ export default function App() {
   const [analyticsScopeNotice, setAnalyticsScopeNotice] = useState(null);
   // Dataset enriquecido com as dimensões derivadas (agrupamentos) — consumido pela aba Dashboard.
   const groupedDataset = useMemo(() => applyGroupingsToDataset(analyticsDataset, analyticsGroupings), [analyticsDataset, analyticsGroupings]);
+
+  // ── Explorar a Base (Épico EB, EB2 — docs/wiki/Epicos-ExplorarBase.md) ──────
+  // Pipeline PRÓPRIO (DEC-EB-002): `BaseProfileModel` é DERIVADO (nunca persiste — só o
+  // layout, criação do usuário, persiste). `exploreCsvId`/`exploreRiskMetric` controlam o
+  // header da aba; `null` em exploreCsvId ⇒ o worker escolhe o csv de maior população
+  // (mesmo critério de "winner" de computeVariableRanking) e ecoa o csvId escolhido de volta.
+  const [exploreCsvId, setExploreCsvId] = useState(null);
+  const [exploreRiskMetric, setExploreRiskMetric] = useState("inadReal");
+  const [baseProfileResult, setBaseProfileResult] = useState(null); // BaseProfileModel | null — derivado, não persiste
+  // exploreLayouts: {[csvId]: WidgetConfig[]} — CRIAÇÃO DO USUÁRIO (regra inviolável do
+  // CLAUDE.md): persiste em .credito.json (buildProjectPayload/loadProject) + sessionStorage.
+  const [exploreLayouts, setExploreLayouts] = useState(() => {
+    try {
+      const s = sessionStorage.getItem('explore_layouts_v1');
+      const v = s ? JSON.parse(s) : {};
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    } catch { return {}; }
+  });
+  const setExploreLayoutForCsv = useCallback((csvId, updater) => {
+    if (!csvId) return;
+    setExploreLayouts(prev => {
+      const cur = prev[csvId] || [];
+      const next = typeof updater === 'function' ? updater(cur) : updater;
+      return next === cur ? prev : { ...prev, [csvId]: next };
+    });
+  }, []);
+  // ↻ Regenerar análise (DEC-EB-005): recria só os widgets `origin:'auto'` desta base,
+  // preservando os `origin:'user'` (criados/editados pelo usuário) — nunca sobrescrita
+  // silenciosa (confirmação explícita antes de descartar os cards automáticos atuais).
+  const regenerateExploreLayout = useCallback(() => {
+    if (!baseProfileResult || baseProfileResult.error) return;
+    const csvId = baseProfileResult.csvId;
+    if (!window.confirm('Regenerar recria os cards automáticos desta análise (os cards que você criou ou editou são preservados). Continuar?')) return;
+    setExploreLayoutForCsv(csvId, (prev) => {
+      const kept = prev.filter(w => w.origin === 'user');
+      // ids são "slots" estáveis (ex.: auto_insight_asis) — um slot promovido a `user`
+      // (editado) não deve ganhar um irmão automático duplicado com o mesmo id.
+      const keptIds = new Set(kept.map(w => w.id));
+      return [...kept, ...buildDefaultExploreLayout(baseProfileResult).filter(w => !keptIds.has(w.id))];
+    });
+  }, [baseProfileResult, setExploreLayoutForCsv]);
   // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
   const [canvases, setCanvases] = useState(() => _initCanvasStore().canvases);
   const [activeCanvasId, setActiveCanvasId] = useState(() => _initCanvasStore().activeCanvasId);
@@ -2379,6 +2424,15 @@ export default function App() {
         setLensCounts(e.data.lensCounts || {});
       } else if (msgType === 'ANALYTICS_RESULT') {
         setAnalyticsDataset(e.data.dataset);
+      } else if (msgType === 'BASE_PROFILE_RESULT') {
+        // Explorar a Base (Épico EB, EB2) — `profile.csvId` ecoa a base efetiva (o worker
+        // escolhe o winner por população quando exploreCsvId ainda é null); sincroniza o
+        // seletor da aba com o que realmente foi calculado.
+        const { profile } = e.data;
+        setBaseProfileResult(profile);
+        if (profile && !profile.error && profile.csvId) {
+          setExploreCsvId(cur => cur || profile.csvId);
+        }
       } else if (msgType === 'ASIS_PREVIEW_RESULT') {
         // Prévia AS IS contextualizada ao nó (respeita filtros a montante) — chega
         // async do worker após assignCinemaVar. Aplica só se o token ainda for o mais
@@ -2772,10 +2826,27 @@ export default function App() {
     return () => clearTimeout(analyticsDebounceRef.current);
   }, [shapes, conns, csvStore, canvases, activeCanvasId, buildAnalyticsCanvasInputs, activeTab]);
 
+  // ── Explorar a Base — COMPUTE_BASE_PROFILE (Épico EB, EB2, DEC-EB-002) ──────
+  // Pipeline PRÓPRIO, fora do cache do tick: recomputa só quando a base ou a métrica-alvo
+  // mudam (debounced), NUNCA a cada edição de canvas (shapes/conns não entram nas deps) —
+  // Classe A absoluta, roda inteiro no worker (DEC-HX-007). Só computa enquanto a aba
+  // Explorar está aberta (mesmo racional de custo de COMPUTE_ANALYTICS_DATASET acima).
+  const baseProfileDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(baseProfileDebounceRef.current);
+    if (activeTab !== 'explore') return;
+    baseProfileDebounceRef.current = setTimeout(() => {
+      workerRef.current?.postMessage({ type: 'COMPUTE_BASE_PROFILE', params: { csvId: exploreCsvId || undefined, riskMetric: exploreRiskMetric } });
+    }, 300);
+    return () => clearTimeout(baseProfileDebounceRef.current);
+  }, [csvStore, exploreCsvId, exploreRiskMetric, activeTab]);
+
   // Persiste layout do dashboard na sessionStorage para sobreviver a reloads dentro da mesma sessão.
   useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
   useEffect(() => { sessionStorage.setItem('aw_groupings_v1', JSON.stringify(analyticsGroupings)); }, [analyticsGroupings]);
   useEffect(() => { sessionStorage.setItem('aw_page_filters_v1', JSON.stringify(analyticsPageFilters)); }, [analyticsPageFilters]);
+  // Explorar a Base (Épico EB, EB2, DEC-EB-007): persiste o layout por base na sessionStorage.
+  useEffect(() => { try { sessionStorage.setItem('explore_layouts_v1', JSON.stringify(exploreLayouts)); } catch { /* quota/privacidade — não bloqueia */ } }, [exploreLayouts]);
   // Ribbon (UX 2.0 — Sessão 1): persiste a aba ativa do Ribbon na sessionStorage.
   useEffect(() => { try { sessionStorage.setItem('ribbon_active_tab_v1', ribbonActiveTab); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonActiveTab]);
   useEffect(() => { try { sessionStorage.setItem('ribbon_mode_v1', ribbonMode); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonMode]);
@@ -4018,6 +4089,9 @@ export default function App() {
       analyticsLayout,
       analyticsGroupings,
       analyticsPageFilters,
+      // Explorar a Base (Épico EB, EB2, DEC-EB-007) — layout por base; o BaseProfileModel
+      // em si é DERIVADO (recomputável) e não persiste.
+      exploreLayouts,
       cinemaLibrary,
       // Biblioteca de Políticas (Copiloto Sessão 2) — array de templates de PolicyIR
       // (JSON puro: ir/requiredVars não têm Map/typed array, sem serialize dedicado).
@@ -4116,6 +4190,8 @@ export default function App() {
     setAnalyticsLayout(Array.isArray(data.analyticsLayout) ? data.analyticsLayout : []);
     setAnalyticsGroupings(Array.isArray(data.analyticsGroupings) ? data.analyticsGroupings : []);
     setAnalyticsPageFilters(Array.isArray(data.analyticsPageFilters) ? data.analyticsPageFilters : []);
+    // schema < 3.2 não tinha exploreLayouts — default defensivo, projeto antigo não quebra.
+    setExploreLayouts((data.exploreLayouts && typeof data.exploreLayouts === 'object' && !Array.isArray(data.exploreLayouts)) ? data.exploreLayouts : {});
     setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
     // schema ≤ 2.3 não tinha policyLibrary — default defensivo, projeto antigo não quebra.
     setPolicyLibrary(Array.isArray(data.policyLibrary) ? data.policyLibrary : []);
@@ -7482,6 +7558,9 @@ export default function App() {
 
     // ─── DADOS ───
     { id: 'data.importCsv', label: 'Importar CSV', icon: '📂', tab: 'dados', group: 'Bases', keywords: ['csv', 'importar', 'carregar base', 'dados', 'planilha'], onRun: () => fileInputRef.current?.click() },
+    // Explorar a Base (Épico EB, EB2) — DEC-EB-001 (aba) + DEC-EB-005 (regenerar layout).
+    { id: 'data.openExplore', label: 'Abrir Explorar', icon: '🔎', tab: 'dados', group: 'Explorar', keywords: ['explorar', 'explorar a base', 'análise exploratória', 'perfil da base', 'conhecer a base'], onRun: () => setActiveTab('explore') },
+    { id: 'data.regenerateExplore', label: 'Regenerar análise da base', icon: '↻', tab: 'dados', group: 'Explorar', keywords: ['regenerar', 'explorar', 'atualizar análise', 'perfil da base'], enabledWhen: () => !!baseProfileResult && !baseProfileResult.error, disabledReason: 'carregue uma base para gerar a análise', onRun: regenerateExploreLayout },
 
     // ─── ANALISAR ───
     { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura', 'oportunidade'], onRun: () => openSegmentDiscoveryModal(null) },
@@ -7825,6 +7904,13 @@ export default function App() {
 
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
       {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} pageFilters={analyticsPageFilters} setPageFilters={setAnalyticsPageFilters} scopeNotice={analyticsScopeNotice} onDismissScopeNotice={()=>setAnalyticsScopeNotice(null)} />}
+
+      {/* ═══════════════ EXPLORE PANE (Épico EB, EB2) ═══════════════ */}
+      {activeTab==="explore" && <ExploreTab profile={baseProfileResult} csvStore={csvStore}
+        csvId={exploreCsvId} onCsvIdChange={setExploreCsvId}
+        riskMetric={exploreRiskMetric} onRiskMetricChange={setExploreRiskMetric}
+        layout={exploreLayouts[exploreCsvId] || []} setLayout={(updater) => setExploreLayoutForCsv(exploreCsvId, updater)}
+        onRegenerate={regenerateExploreLayout} />}
 
       {/* ═══════════════ CANVAS PANE ═══════════════ */}
       <div style={{display:activeTab==="canvas"?"flex":"none",flex:1,minHeight:0,width:"100%",overflow:"hidden",position:"relative"}}>
@@ -14082,6 +14168,22 @@ export default function App() {
 
       {/* ═══════════════ TAB BAR (BOTTOM LEFT) — multi-canvas ═══════════════ */}
       <div style={{display:"flex",alignItems:"flex-start",gap:2,background:"#e2e8f0",borderTop:"1px solid #cbd5e1",padding:"0 8px 0",flexShrink:0,alignSelf:"flex-start",overflowX:"auto",maxWidth:"100%"}}>
+
+        {/* Explorar tab — fixed (Épico EB, EB2/DEC-EB-001). Leftmost: "conhecer a matéria-
+            prima" abre a jornada (Explorar → Canvas → Dashboard). Funciona com canvas vazio. */}
+        {(()=>{
+          const active=activeTab==="explore";
+          return (
+            <button onClick={()=>setActiveTab("explore")}
+              style={{display:"flex",alignItems:"center",gap:6,padding:"7px 16px",border:"1px solid",flexShrink:0,
+                borderColor:active?"#cbd5e1":"transparent",borderTop:active?"1px solid #e2e8f0":"1px solid transparent",
+                background:active?"#fff":"transparent",color:active?"#1e293b":"#64748b",
+                borderBottomLeftRadius:9,borderBottomRightRadius:9,cursor:"pointer",fontSize:13,
+                fontWeight:active?600:500,fontFamily:"inherit",marginTop:-1,transition:"all .12s"}}>
+              <span style={{fontSize:14}}>🔎</span>Explorar
+            </button>
+          );
+        })()}
 
         {/* Dashboard tab — fixed */}
         {(()=>{

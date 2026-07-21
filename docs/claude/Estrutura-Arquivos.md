@@ -17,6 +17,8 @@ AppCreditoSimulador/
 │   ├── rangeVar.js                # Variável de Faixas (Épico FR) — espelho de clusterVar.js: sugestões de nome, def a partir do RangeModel, rótulos pt-BR canônicos, descrição das regras (docs) e edição de cortes/rótulos (compartilhado main/worker/teste; materialização deriveRangeColumn em columnar.js; propagação de refs reusa clusterVar.js)
 │   ├── computeRouter.js           # Execução Híbrida H4 — ComputeRouter + contrato ComputeProvider (worker default / sidecar Python opt-in)
 │   ├── segVar.js                  # Heurística de variável (segVarDefaultReason temporal/score por nome) + parseTemporalKey/MONTH_ABBR — módulo folha compartilhado main/worker/teste (Explorar a Base, DEC-EB-008/009)
+│   ├── explore.js                 # buildDefaultExploreLayout — layout automático puro da aba Explorar (Explorar a Base, EB2, DEC-EB-005/006)
+│   ├── exploreInsights.js         # Camada interpretativa da aba Explorar — describeFinding/describeSection (STUB EB2, DEC-EB-004; templates completos na EB3)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom)
 │   ├── analytics.test.js         # autoBuckets, distinctDimValues, applyGroupingsToDataset, pivotWidget

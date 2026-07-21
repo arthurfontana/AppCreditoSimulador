@@ -36,6 +36,8 @@ describe('M3 · buildProjectJSONChunks', () => {
       analyticsLayout: [],
       analyticsGroupings: [],
       analyticsPageFilters: [],
+      // Explorar a Base (Épico EB, EB2) — layout por base, schema 3.2.
+      exploreLayouts: { base: [{ id: 'auto_insight_asis', type: 'insight', origin: 'auto', x: 24, y: 24, w: 1100, h: 130, config: { title: 'Retrato da Operação (AS IS)', preset: 'asis' } }] },
       cinemaLibrary: [],
       businessWidget: { visible: false, x: 0, y: 0, w: 0, h: 0 },
       preferences: { enableDynThickness: true, showEdgeVol: false, showEdgeInadReal: false, showEdgeInadInf: false },
@@ -50,6 +52,13 @@ describe('M3 · buildProjectJSONChunks', () => {
     const joined = chunks.join('');
     const parsed = JSON.parse(joined); // lança se o JSON produzido for inválido
     expect(parsed).toEqual(JSON.parse(JSON.stringify(payload)));
+  });
+
+  it('exploreLayouts (Épico EB, EB2) sobrevive ao round-trip via chunks, byte a byte', () => {
+    const payload = makePayload();
+    const chunks = buildProjectJSONChunks(payload);
+    const parsed = JSON.parse(chunks.join(''));
+    expect(parsed.exploreLayouts).toEqual(payload.exploreLayouts);
   });
 
   it('cada chunk de coluna é individualmente pequeno (não monta o csvStore inteiro de uma vez)', () => {

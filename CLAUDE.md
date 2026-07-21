@@ -48,6 +48,7 @@ AppCreditoSimulador/
 │   ├── dashboardComponents.jsx   # Componentes React da aba Dashboard e dos cards do Copiloto (AnalysisTab, AnalyticsWidget, KpiCard, FieldPanel, Filtros, Segment*/Cluster*, GoalSeekFrontierChart); importados/re-exportados por App.jsx
 │   ├── policyDocRender.js        # Renderers puros da Documentação Automática — renderDocMarkdown/renderDocHTML sobre o docModel/PolicyIR já montado (re-exportados por App.jsx)
 │   ├── autoLayout.js             # computeAutoLayout — cálculo puro da Reorganização Automática do canvas (camadas Sugiyama + portas + parking); App.jsx anima o resultado por RAF
+│   ├── explore.js                # buildDefaultExploreLayout — layout automático puro da aba Explorar (Épico EB, EB2)
 │   └── main.jsx                  # Entry point React
 ├── tests/                        # Vitest (jsdom) — ver tabela de GATEs abaixo
 │   └── fixtures/, fixtures/golden/  # fixtures de teste + fixtures douradas cross-runtime
@@ -98,13 +99,13 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"3.1"`** (bumped na UX 2.0/Ribbon Sessão 6 — novo campo de topo
-   `rightPanelMode`, aba interna do painel direito Ativos/Inspetor/Copiloto; `3.0` foi a
+   Versão atual: **`"3.2"`** (Épico EB, Sessão EB2 — novo campo de topo `exploreLayouts`,
+   layout por base da aba Explorar; `3.1` foi a UX 2.0/Ribbon Sessão 6 — `rightPanelMode`,
+   aba interna do painel direito Ativos/Inspetor/Copiloto; `3.0` foi a
    Sessão 5 — `statusBarIndicators`, indicadores configuráveis da Status Bar; `2.9` foi a
    Sessão 4 — `ribbonMode`, colapso do Ribbon em 3 estados; `2.8` foi a Ribbon Sessão 1 —
    campo de topo `ribbonActiveTab`; `2.7` foi a Variável de Faixas —
-   `csvStore[csvId].rangeDefs`, Épico FR/Sessão FR5; `2.6` foi a Variável de Cluster —
-   `clusterDefs`).
+   `csvStore[csvId].rangeDefs`, Épico FR/Sessão FR5).
 4. Se o estado for um `Map`/`Set`/tipo não-JSON (ou typed arrays como `Float64Array`/`Int32Array`),
    adicionar serialize/deserialize dedicados (padrão de
    `serializeCsvStore`/`deserializeCsvStore`) e cobrir o round-trip em teste.
@@ -116,7 +117,8 @@ de **todas** as abas (losangos, Cineminhas, Decision Lens e suas `rules`, frames
 terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados completas
 (`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `clusterDefs`,
 `rangeDefs`) · Dashboard
-(`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
+(`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · layout da aba
+Explorar por base (`exploreLayouts`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`) ·
 viewport · aba ativa · aba do Ribbon (`ribbonActiveTab`) · modo de colapso do Ribbon
@@ -157,6 +159,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 | `tests/riskBands.test.js` | Criar Faixas por Risco (`computeRiskBands`, Épico FR) — cortes plantados via DP exata ≡ IV ótimo, monotonia default/toggle livre, `minShare`, banda "Sem valor", auto-k, escopo por nó, determinismo |
 | `tests/rangeVar.test.js` | Variável de Faixas — materialização (`deriveRangeColumn`, fronteiras `[min,max)`/±∞/unmatched/ordinal), rótulos pt-BR, edição de cortes, round-trip de persistência, integração `computeRiskBands` real → def → coluna |
 | `tests/baseProfile.test.js` | Perfil da Base (Explorar a Base, EB1) — agregados/IV ≡ manual; ranking global ≡ porta-100% (DEC-EB-008); PSI (ε e null); `immature_vintage`/`unstable_psi`/`dominant_value`/`low_coverage` disparam plantados e não limpos; degradações `no_temporal_column`/`no_asis`; determinismo |
+| `tests/explore.test.js` | Layout automático da aba Explorar (`buildDefaultExploreLayout`, EB2) — 6 seções na ordem da DEC-EB-006; teto de top-N; ids únicos/`origin:'auto'`; determinismo; layout vazio sem perfil válido |
 | `tests/workerPool.test.js` | Pool de Workers (H3) — pool ≡ single-worker número a número; determinismo; fallback |
 | `tests/computeRouter.test.js` | ComputeRouter (H4) — Classe A jamais roteia; detecção silenciosa; fallback transparente Classe B |
 | `tests_python/*.py` | Protocolo do sidecar (health/token/caps/dataset/job) + paridade número a número dos motores numpy (Descoberta H7, Clusterização H8) |
@@ -196,7 +199,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Epics/decisões/roadmap de produto (histórico completo) | `docs/wiki/Decisoes.md`, `docs/wiki/Roadmap.md`, `docs/wiki/Epicos-*.md` |
 | Base de Testes Oficial — inventário, dicionário, matriz de cobertura, gerador de CSV; **feature nova/ajustada ⇒ atualizar docs + regras do gerador na mesma sessão; NUNCA regenerar o CSV sem pedido do usuário** | `docs/wiki/Dados_Teste/README.md` (§ Contrato de manutenção) |
 | UX 2.0 — Ribbon, registro de comandos, ⚙ Hub de Configurações, Busca Ctrl+K, Status Bar, painel Ativos/Inspetor/Copiloto, mini-flutuante de seleção, touch/mobile (8 sessões, entregue) | `docs/wiki/Ribbon-Prompts-Sessoes.md` |
-| Explorar a Base — aba de análise exploratória assistida da Jornada de Construção (Épico EB, DEC-EB-001..012, planejado — EB1–EB5 não iniciadas) | `docs/wiki/Epicos-ExplorarBase.md` |
+| Explorar a Base — motor do perfil (EB1) + aba/layout automático (EB2) entregues; EB3–EB5 planejadas (Épico EB, DEC-EB-001..012) | `docs/claude/Explorar-Base.md` (implementação) + `docs/wiki/Epicos-ExplorarBase.md` (normativo) |
 | Jornada de Construção peças 2–3 — Feed de Próxima Melhor Ação (Épico NB) + Etapas/Prontidão (Épico EP), planejados, prompts por sessão | `docs/wiki/Jornada-Prompts-Sessoes.md` |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
 | Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
