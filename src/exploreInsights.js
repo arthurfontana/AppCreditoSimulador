@@ -23,14 +23,14 @@ const str = (v) => (v == null || v === "") ? "—" : v; // texto livre (nome de 
 // interpolado cru — para que `facts` incompleto (ex.: fixture de teste, achado futuro sem
 // todos os campos) nunca vaze "undefined"/"NaN" para a tela.
 const FINDING_TEMPLATES = {
-  high_iv: (f) => `Variável promissora: IV ${iv2(f.iv)} (forte poder discriminante).`,
-  suspect_score: (f) => `🎯 Parece um score/rating já em uso — risco de circularidade na política${f.iv != null ? ` (IV ${iv2(f.iv)})` : ""}.`,
-  suspect_temporal: () => `🕐 Parece uma coluna de safra/cohort — não é característica do cliente.`,
-  low_coverage: (f) => `Cobertura de ${pct((f.coveragePct ?? 0) / 100)} — vazios demais para o topo da árvore.`,
-  dominant_value: (f) => `A categoria "${str(f.value)}" concentra ${pct((f.sharePct ?? 0) / 100)} do volume — pouco poder de corte.`,
-  high_cardinality: (f) => `${qty(f.distinct)} valores distintos — candidata a Agrupamento${f.continuous ? " ou Faixas por Risco" : ""}.`,
-  immature_vintage: (f) => `A safra ${str(f.lastBucket)} está com inadimplência de ${pct(f.lastRate)}, bem abaixo da média da base (${pct(f.overallRate)}) — maturação provavelmente incompleta.`,
-  unstable_psi: (f) => `PSI ${f.psi != null && isFinite(f.psi) ? f.psi.toFixed(2) : "—"} entre as janelas ${str(f.refWindow?.from)}–${str(f.refWindow?.to)} e ${str(f.curWindow?.from)}–${str(f.curWindow?.to)} — a distribuição mudou, o corte pode envelhecer.`,
+  high_iv: (f) => `${str(f.col)}: variável promissora — IV ${iv2(f.iv)} (forte poder discriminante).`,
+  suspect_score: (f) => `🎯 ${str(f.col)} parece um score/rating já em uso — risco de circularidade na política${f.iv != null ? ` (IV ${iv2(f.iv)})` : ""}.`,
+  suspect_temporal: (f) => `🕐 ${str(f.col)} parece uma coluna de safra/cohort — não é característica do cliente.`,
+  low_coverage: (f) => `${str(f.col)}: cobertura de ${pct((f.coveragePct ?? 0) / 100)} — vazios demais para o topo da árvore.`,
+  dominant_value: (f) => `${str(f.col)}: a categoria "${str(f.value)}" concentra ${pct((f.sharePct ?? 0) / 100)} do volume — pouco poder de corte.`,
+  high_cardinality: (f) => `${str(f.col)}: ${qty(f.distinct)} valores distintos — candidata a Agrupamento${f.continuous ? " ou Faixas por Risco" : ""}.`,
+  immature_vintage: (f) => `${str(f.col)}: a safra ${str(f.lastBucket)} está com inadimplência de ${pct(f.lastRate)}, bem abaixo da média da base (${pct(f.overallRate)}) — maturação provavelmente incompleta.`,
+  unstable_psi: (f) => `${str(f.col)}: PSI ${f.psi != null && isFinite(f.psi) ? f.psi.toFixed(2) : "—"} entre as janelas ${str(f.refWindow?.from)}–${str(f.refWindow?.to)} e ${str(f.curWindow?.from)}–${str(f.curWindow?.to)} — a distribuição mudou, o corte pode envelhecer.`,
   no_temporal_column: () => `Marque uma coluna como ⏱ Temporal no passo 2 do wizard de importação para habilitar a análise de estabilidade.`,
   no_asis: () => `Esta base não tem uma decisão AS IS configurada — o retrato da operação atual não pode ser calculado.`,
 };
