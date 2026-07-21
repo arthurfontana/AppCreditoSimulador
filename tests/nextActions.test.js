@@ -4,6 +4,10 @@ import {
   computePolicyInsights,
   policyIRFingerprint,
   computeVariableRanking,
+  computeSegmentDiscovery,
+  computeSimplify,
+  computeNodeArrivals,
+  buildFeedTier2,
 } from '../src/simulation.worker.js';
 import { buildColumnar } from '../src/columnar.js';
 
@@ -348,5 +352,207 @@ describe('computeNextActions · feed nunca vazio', () => {
     expect(fb).toBeTruthy();
     expect(fb.severity).toBe('journey');
     expect(fb.title.facts.top).toBeTruthy(); // ranking global tem um topo
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// (C) Sessão NB3 — fontes caras sob demanda ("🔎 Buscar oportunidades")
+// docs/wiki/Jornada-Prompts-Sessoes.md (DEC-NB-002/003). buildFeedTier2 embrulha os achados
+// JÁ calculados pela Descoberta/Simplificação (motores originais, intocados) com o carimbo de
+// frescor; computeNextActions os costura como cards Tier 2. Aqui provamos: (1) paridade número
+// a número — os cards saem exatamente dos findings/proposal dos motores; (2) staleness no
+// momento certo; (3) o fingerprint do card é estável sob rebusca (dismissed não ressuscita).
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// Fixture de Descoberta (mesma da segmentDiscovery.test.js): política "reprova tudo" +
+// interação 2D plantada (SCORE=R08 × CANAL=Digital com inad baixa) ⇒ findings acionáveis.
+const discCsv = {
+  headers: ['SCORE', 'CANAL', 'qty', 'qtdAltas', 'inadReal'],
+  columnTypes: { SCORE: 'decision', CANAL: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', inadReal: 'inadReal' },
+  rows: [
+    ['R08', 'Digital', '1000', '1000', '20'],
+    ['R08', 'Fisico', '1000', '1000', '380'],
+    ['R05', 'Digital', '1000', '1000', '380'],
+    ['R05', 'Fisico', '1000', '1000', '20'],
+  ],
+};
+const discStore = { seg: discCsv };
+const discShapes = [
+  { id: 'L', type: 'decision_lens', label: 'Todos', rules: [] },
+  { id: 'REJ', type: 'rejected', label: 'Reprovado' },
+];
+const discConns = [{ id: 'c1', from: 'L', to: 'REJ' }];
+const discIr = { nodes: [{ id: 'L', kind: 'lens' }, { id: 'REJ', kind: 'terminal', terminal: 'rejected' }], entry: ['L'] };
+
+// Réplica EXATA da regra de costura Tier 2 do worker (computeNextActions) — o oráculo da
+// paridade: dado os findings crus, quais cards devem existir e com que delta.
+function expectedDiscoveryCards(findings, stampFp, curFp) {
+  const stale = stampFp !== curFp;
+  const out = [];
+  for (const f of findings) {
+    if (f.code === 'asis_divergence' || f.code === 'anomaly') continue;
+    const kind = f.code === 'heterogeneous_block' ? 'add_break' : 'apply_opportunity';
+    const rec = f.recommendation || null;
+    const delta = (rec && rec.delta) ? {
+      approvalDelta: rec.delta.approvalDelta ?? null,
+      inadRealDelta: rec.delta.inadRealDelta ?? null,
+      inadInfDelta: rec.delta.inadInfDelta ?? null,
+      movedQty: rec.delta.movedQty ?? null,
+    } : null;
+    out.push({ id: `${kind}::${f.id}`, kind, delta, stale });
+  }
+  return out;
+}
+
+describe('NB3 · buildFeedTier2 embrulha os motores sem refazer matemática', () => {
+  it('discovery/simplify carregam os MESMOS objetos dos motores + carimbo de frescor', () => {
+    const segmentModel = computeSegmentDiscovery(discShapes, discConns, discStore, null, { minQty: 1 });
+    const na = computeNodeArrivals(discShapes, discConns, discStore, {});
+    const simplify = computeSimplify(discShapes, discConns, discStore, na);
+    const t2 = buildFeedTier2(segmentModel, simplify, 'FP', 12345);
+    // findings/proposal são os do motor (mesma referência) — nenhuma cópia/recomputo.
+    expect(t2.discovery.findings).toBe(segmentModel.findings);
+    expect(t2.discovery.policyFingerprint).toBe('FP');
+    expect(t2.discovery.computedAt).toBe(12345);
+    expect(t2.simplify.proposal).toBe(simplify.proposal);
+    expect(t2.simplify.equivalence).toBe(simplify.equivalence);
+    expect(t2.simplify.policyFingerprint).toBe('FP');
+  });
+
+  it('sem achados ⇒ blob mínimo, sem chaves inventadas', () => {
+    const t2 = buildFeedTier2({ findings: [] }, { proposal: null, equivalence: null }, 'FP', 1);
+    expect(t2.discovery.findings).toEqual([]);
+    expect(t2.simplify).toBeUndefined(); // proposal null ⇒ nenhuma seção simplify
+  });
+});
+
+describe('NB3 · paridade número a número — cards Tier 2 ≡ motores originais', () => {
+  it('cada finding acionável da Descoberta vira exatamente um card, com o mesmo delta', () => {
+    const segmentModel = computeSegmentDiscovery(discShapes, discConns, discStore, null, { minQty: 1 });
+    const na = computeNodeArrivals(discShapes, discConns, discStore, {});
+    const simplify = computeSimplify(discShapes, discConns, discStore, na);
+    const stampFp = policyIRFingerprint(discIr);
+    const t2 = buildFeedTier2(segmentModel, simplify, stampFp, 1);
+
+    const model = computeNextActions(discShapes, discConns, discStore, discIr, {}, {}, cleanCtx, t2);
+    const t2Cards = model.actions
+      .filter((a) => a.tier === 2 && (a.kind === 'apply_opportunity' || a.kind === 'add_break'))
+      .map((a) => ({ id: a.id, kind: a.kind, delta: a.delta, stale: a.staleness.stale }));
+
+    const expected = expectedDiscoveryCards(segmentModel.findings, stampFp, policyIRFingerprint(discIr));
+    expect(expected.length).toBeGreaterThan(0); // a fixture planta achados de verdade
+    // Mesma quantidade, mesmos ids, mesmos deltas (ordenação estável por id).
+    const byId = (arr) => [...arr].sort((x, y) => (x.id < y.id ? -1 : 1));
+    expect(byId(t2Cards)).toEqual(byId(expected));
+  });
+
+  it('o card apunta pro finding correto (findingId nos facts) e delta = recommendation validada', () => {
+    const segmentModel = computeSegmentDiscovery(discShapes, discConns, discStore, null, { minQty: 1 });
+    const t2 = buildFeedTier2(segmentModel, null, policyIRFingerprint(discIr), 1);
+    const model = computeNextActions(discShapes, discConns, discStore, discIr, {}, {}, cleanCtx, t2);
+    for (const card of model.actions.filter((a) => a.tier === 2)) {
+      const f = segmentModel.findings.find((x) => x.id === card.title.facts.findingId);
+      expect(f).toBeTruthy();
+      if (f.recommendation && f.recommendation.delta) {
+        expect(card.delta.movedQty).toBe(f.recommendation.delta.movedQty ?? null);
+        expect(card.delta.approvalDelta).toBe(f.recommendation.delta.approvalDelta ?? null);
+      } else {
+        expect(card.delta).toBeNull();
+      }
+    }
+  });
+
+  it('Simplificação: candidato colapsável ⇒ 1 card simplify com delta PROVADO (identical)', () => {
+    // Fixture da policySimplify.test.js: losango D colapsável atrás de uma raiz U.
+    const csvStore = {
+      base: {
+        name: 'base',
+        headers: ['COLZ', 'COLX', 'qty', 'qtdAltas', 'qtdAltasInfer', 'inadReal', 'inadInferida'],
+        rows: [
+          ['X', 'A', '100', '40', '38', '4', '3.5'],
+          ['X', 'B', '50', '20', '18', '2', '1.8'],
+          ['Y', 'A', '30', '10', '9', '1', '0.9'],
+        ],
+        columnTypes: { COLZ: 'decision', COLX: 'decision', qty: 'qty', qtdAltas: 'qtdAltas', qtdAltasInfer: 'qtdAltasInfer', inadReal: 'inadReal', inadInferida: 'inadInferida' },
+        varTypes: {}, asIsConfig: null,
+      },
+    };
+    const shapes = [
+      { id: 'U', type: 'decision', variableCol: 'COLZ', csvId: 'base' },
+      { id: 'pX', type: 'port', label: 'X' }, { id: 'pY', type: 'port', label: 'Y' },
+      { id: 'D', type: 'decision', variableCol: 'COLX', csvId: 'base' },
+      { id: 'pA', type: 'port', label: 'A' }, { id: 'pB', type: 'port', label: 'B' },
+      { id: 'AP', type: 'approved' }, { id: 'RJ2', type: 'rejected' },
+    ];
+    const conns = [
+      { id: 'c1', from: 'U', to: 'pX', label: 'X' }, { id: 'c2', from: 'U', to: 'pY', label: 'Y' },
+      { id: 'c3', from: 'pX', to: 'D' }, { id: 'c4', from: 'pY', to: 'RJ2' },
+      { id: 'c5', from: 'D', to: 'pA', label: 'A' }, { id: 'c6', from: 'D', to: 'pB', label: 'B' },
+      { id: 'c7', from: 'pA', to: 'AP' }, { id: 'c8', from: 'pB', to: 'AP' },
+    ];
+    const ir = { nodes: [{ id: 'U', kind: 'decision' }, { id: 'D', kind: 'decision' }], entry: ['U'] };
+
+    const na = computeNodeArrivals(shapes, conns, csvStore, {});
+    const simplify = computeSimplify(shapes, conns, csvStore, na);
+    // Sanidade: o motor original acha o colapsável e prova identidade.
+    expect(simplify.proposal.candidates.length).toBe(1);
+    expect(simplify.equivalence.identical).toBe(true);
+
+    const t2 = buildFeedTier2({ findings: [] }, simplify, policyIRFingerprint(ir), 1);
+    const model = computeNextActions(shapes, conns, csvStore, ir, na, {}, cleanCtx, t2);
+    const card = model.actions.find((a) => a.kind === 'simplify');
+    expect(card).toBeTruthy();
+    expect(card.tier).toBe(2);
+    expect(card.title.facts.candidateCount).toBe(simplify.proposal.candidates.length);
+    expect(card.title.facts.removedNodeCount).toBe(simplify.proposal.removedNodeCount);
+    expect(card.delta).toEqual({ proven: true, approvalDelta: 0 }); // diff=0 PROVADO
+    expect(card.staleness.stale).toBe(false);
+  });
+});
+
+describe('NB3 · staleness no momento certo (DEC-NB-003)', () => {
+  const segmentModel = computeSegmentDiscovery(discShapes, discConns, discStore, null, { minQty: 1 });
+  const stampFp = policyIRFingerprint(discIr);
+  const t2 = buildFeedTier2(segmentModel, null, stampFp, 10);
+  // IR alterado (nova entrada de nó) ⇒ fingerprint diferente.
+  const irChanged = { nodes: [...discIr.nodes, { id: 'D2', kind: 'decision', label: 'novo', variable: { col: 'SCORE', csvId: 'seg' }, routes: [] }], entry: ['L'] };
+
+  it('carimbo == IR atual ⇒ nenhum card Tier 2 desatualizado', () => {
+    const model = computeNextActions(discShapes, discConns, discStore, discIr, {}, {}, cleanCtx, t2);
+    const t2Cards = model.actions.filter((a) => a.tier === 2);
+    expect(t2Cards.length).toBeGreaterThan(0);
+    expect(t2Cards.every((a) => a.staleness.stale === false)).toBe(true);
+  });
+
+  it('IR mudou desde o carimbo ⇒ TODOS os cards Tier 2 desatualizados (nunca removidos)', () => {
+    expect(policyIRFingerprint(irChanged)).not.toBe(stampFp);
+    const model = computeNextActions(discShapes, discConns, discStore, irChanged, {}, {}, cleanCtx, t2);
+    const t2Cards = model.actions.filter((a) => a.tier === 2);
+    expect(t2Cards.length).toBeGreaterThan(0); // continuam presentes
+    expect(t2Cards.every((a) => a.staleness.stale === true)).toBe(true);
+    expect(t2Cards.every((a) => a.staleness.policyFingerprint === stampFp)).toBe(true); // carimbo preservado
+  });
+});
+
+describe('NB3 · dismissed não ressuscita após rebusca (fingerprint estável)', () => {
+  it('duas buscas do mesmo estado ⇒ MESMOS fingerprints de card', () => {
+    const scan = () => {
+      const sm = computeSegmentDiscovery(discShapes, discConns, discStore, null, { minQty: 1 });
+      const na = computeNodeArrivals(discShapes, discConns, discStore, {});
+      const sp = computeSimplify(discShapes, discConns, discStore, na);
+      const t2 = buildFeedTier2(sm, sp, policyIRFingerprint(discIr), Date.now());
+      return computeNextActions(discShapes, discConns, discStore, discIr, na, {}, cleanCtx, t2);
+    };
+    const fps1 = scan().actions.filter((a) => a.tier === 2).map((a) => a.fingerprint).sort();
+    const fps2 = scan().actions.filter((a) => a.tier === 2).map((a) => a.fingerprint).sort();
+    expect(fps1.length).toBeGreaterThan(0);
+    expect(fps2).toEqual(fps1); // rebusca reproduz os mesmos ids ⇒ dismissed[] segue filtrando
+
+    // Simula o filtro do feed: um fingerprint descartado some das duas gerações.
+    const dismissed = new Set([fps1[0]]);
+    const visible1 = scan().actions.filter((a) => a.tier === 2 && !dismissed.has(a.fingerprint)).map((a) => a.fingerprint);
+    const visible2 = scan().actions.filter((a) => a.tier === 2 && !dismissed.has(a.fingerprint)).map((a) => a.fingerprint);
+    expect(visible1).not.toContain(fps1[0]);
+    expect(visible2).not.toContain(fps1[0]); // não ressuscitou
   });
 });

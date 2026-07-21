@@ -6688,6 +6688,27 @@ function computeNextActions(shapes, conns, csvStore, ir, nodeArrivals = {}, lens
   };
 }
 
+// ── Fontes caras do feed (Jornada NB, Sessão NB3, DEC-NB-002/003) ─────────────────
+// "🔎 Buscar oportunidades" roda a Descoberta de Segmentos (escopo GLOBAL) + a Simplificação
+// FORA do caminho do tick e devolve o blob `tier2` PRONTO para o orquestrador COSTURAR na
+// próxima regeneração (computeNextActions). `buildFeedTier2` só embrulha os achados JÁ
+// calculados com o carimbo de frescor (DEC-NB-003): `policyFingerprint` do IR + `computedAt`
+// do momento do cálculo. NÃO refaz matemática — a Descoberta/Simplificação continuam
+// single-sourced (paridade número a número com os motores originais é o contrato do GATE).
+// O staleness é DERIVADO na costura: computeNextActions compara este carimbo com o
+// fingerprint do IR atual a cada feed — política mudou ⇒ cards Tier 2 "⏳ desatualizado"
+// (nunca removidos nem recalculados sozinhos; recálculo é sempre gesto explícito do usuário).
+function buildFeedTier2(segmentModel, simplify, policyFingerprint, computedAt) {
+  const tier2 = {};
+  if (segmentModel && Array.isArray(segmentModel.findings)) {
+    tier2.discovery = { computedAt, policyFingerprint, findings: segmentModel.findings };
+  }
+  if (simplify && simplify.proposal) {
+    tier2.simplify = { computedAt, policyFingerprint, proposal: simplify.proposal, equivalence: simplify.equivalence };
+  }
+  return tier2;
+}
+
 // ── COMPUTE_SIMPLIFY — Copiloto Sessão 5 (simplificação com prova de equivalência) ──
 // Generaliza o padrão de detecção estrutural da Sessão 1 (computePolicyInsights) para
 // PROPOR uma política reduzida — não só apontar o achado, mas religar o roteamento e
@@ -7824,6 +7845,31 @@ function handleMessage(e) {
     return;
   }
 
+  // Fontes caras do feed sob demanda (Jornada NB, Sessão NB3, DEC-NB-002/003). "🔎 Buscar
+  // oportunidades" (e o opt-in autoScanIdle em idle real): Descoberta de Segmentos (escopo
+  // GLOBAL, params default do modal enviados pela main) + Simplificação, FORA do caminho do
+  // tick — NUNCA disparadas pelo tick de edição (regra de ouro DEC-NB-002). O blob `tier2`
+  // volta carimbado com o `policyFingerprint` do IR no cálculo; a main o guarda e o repassa
+  // nos COMPUTE_NEXT_ACTIONS seguintes, onde o orquestrador deriva o staleness. Classe A:
+  // usa o mesmo caminho browser do modal (Descoberta pooled com fallback inline; depth ≤ 2),
+  // jamais sidecar. A Simplificação reusa o nodeArrivals do tick (leitura de cache barata).
+  if (type === 'COMPUTE_FEED_OPPORTUNITIES') {
+    const { shapes = [], conns = [], ir = null, params = {} } = e.data;
+    const policyFingerprint = policyIRFingerprint(ir);
+    const computedAt = Date.now();
+    const { nodeArrivals } = getTickResult(shapes, conns);
+    const simplify = computeSimplify(shapes, conns, workerCsvStore, nodeArrivals);
+    const finish = (segmentModel) => self.postMessage({
+      type: 'FEED_OPPORTUNITIES_RESULT',
+      tier2: buildFeedTier2(segmentModel, simplify, policyFingerprint, computedAt),
+      policyFingerprint, computedAt,
+    });
+    computeSegmentDiscoveryPooled(shapes, conns, workerCsvStore, null, params, getSimPool())
+      .then(finish)
+      .catch(() => finish(computeSegmentDiscovery(shapes, conns, workerCsvStore, null, params)));
+    return;
+  }
+
   // Simplificação com prova de equivalência (Copiloto Sessão 5) — busca on-demand, como o
   // Goal Seek; reusa o `nodeArrivals` do tick (normalmente uma leitura de cache) para os
   // candidatos de chegada zero de losango/Cineminha.
@@ -8087,6 +8133,7 @@ export {
   computeLensPopulations,
   computePolicyInsights,
   computeNextActions,
+  buildFeedTier2,
   policyIRFingerprint,
   computeVariableRanking,
   computeBaseProfile,
