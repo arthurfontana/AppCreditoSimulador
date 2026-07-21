@@ -33,11 +33,13 @@ Duas camadas de fonte (DEC-NB-002):
   ranking da porta, estado estrutural (canvas vazio, AS IS ausente, variável pendente,
   documentação nunca gerada/desatualizada).
 - **Tier 2** (caro, NUNCA rodado pelo orquestrador): Descoberta de Segmentos e
-  Simplificação — o orquestrador só COSTURA achados já calculados via `tier2`. A NB2
-  ainda envia `tier2: {}` (a fonte "🔎 Buscar oportunidades" que popula `tier2` de
-  verdade é a **Sessão NB3**, ainda não implementada); os kinds `apply_opportunity`/
-  `add_break`/`simplify` já têm template completo (`nextActionInsights.js`) e comando
-  no registro, prontos para quando a NB3 injetar os achados.
+  Simplificação — o orquestrador só COSTURA achados já calculados via `tier2`. A fonte
+  que popula `tier2` é **"🔎 Buscar oportunidades"** (Sessão NB3): a main dispara
+  `COMPUTE_FEED_OPPORTUNITIES` (worker roda Descoberta global + Simplificação FORA do
+  tick, embrulha em `buildFeedTier2` com o carimbo de frescor), guarda o blob em
+  `nextActionsTier2` (ref + state) e o repassa em todo `COMPUTE_NEXT_ACTIONS` seguinte.
+  Os kinds `apply_opportunity`/`add_break`/`simplify` têm template completo
+  (`nextActionInsights.js`) e comando no registro.
 
 O `context` (montado em `App.jsx`, efeito `nextActionsDebounceRef`) inclui heurísticas
 v1 que **não são** o detector definitivo do Épico EP (`policyJourney.js`, ainda não
@@ -91,7 +93,36 @@ ressuscita um card descartado). `dismissNextAction`/`snoozeNextAction`/
 !snoozed`. Botão "🗂 Descartados" no cabeçalho da aba (e comando
 `analyze.copilotDiscarded`, "Ver descartados") alterna `showDiscardedActions`
 (efêmero) para a visão secundária, com botão "↺ Restaurar" por card. `autoScanIdle`
-já reservado no contêiner — opt-in da Sessão NB3 (ainda sem UI/efeito).
+(opt-in OFF por default, Hub de Configurações → 🗔 Interface → "Copiloto — Buscar
+oportunidades") reroda a busca cara em idle real — ver "Fontes caras" abaixo.
+
+## Fontes caras sob demanda + staleness (Sessão NB3, DEC-NB-002/003)
+
+"🔎 Buscar oportunidades" (botão no topo do feed + comando `analyze.copilotSearch`)
+chama `runOpportunityScan`: monta os params default do modal de Descoberta (global,
+`riskMetric:'inadReal'`, `maxDepth:2`, `excludedCols` da heurística
+`segVarDefaultReason` — mesma réplica do `openSegmentDiscoveryModal`) e posta
+`COMPUTE_FEED_OPPORTUNITIES {shapes, conns, ir, params}`. O worker roda a Descoberta
+(`computeSegmentDiscoveryPooled`, escopo global) + a Simplificação (`computeSimplify`,
+reusando o `nodeArrivals` do tick) FORA do caminho do tick, embrulha os achados em
+`buildFeedTier2(segmentModel, simplify, policyFingerprint, computedAt)` (só embrulha —
+findings/proposal são os MESMOS objetos dos motores, sem refazer matemática) e devolve
+`FEED_OPPORTUNITIES_RESULT {tier2, policyFingerprint, computedAt}`. A regra de ouro
+vale: nada caro no tick — este é o ÚNICO disparo (mais o `autoScanIdle`, mesmo caminho).
+
+- **Armazenamento**: `nextActionsTier2` (state + `nextActionsTier2Ref` p/ leitura sem
+  stale). O efeito do feed inclui `nextActionsTier2` nas deps ⇒ guardar o blob dispara
+  um `COMPUTE_NEXT_ACTIONS` que costura os cards. DERIVADO (não persiste).
+- **Staleness (DEC-NB-003)**: derivado a CADA feed pelo worker — `computeNextActions`
+  compara o `policyFingerprint` carimbado no blob com o do IR atual. Política mudou ⇒
+  cards Tier 2 com `staleness.stale === true` (badge "⏳ desatualizado" + CTA
+  "🔄 Recalcular", que rechama `runOpportunityScan`). NUNCA removidos nem recalculados
+  sozinhos — recálculo é sempre gesto explícito.
+- **`autoScanIdle`** (opt-in OFF): efeito que, quando ligado, reroda `runOpportunityScan`
+  em idle real (`requestIdleCallback` com fallback a `setTimeout`, debounce longo) só
+  quando a política mudou desde a última busca (`autoScanLastFpRef` ≠ fingerprint atual)
+  e há base + política para varrer. Jamais no tick; a marcação de staleness é a mesma da
+  busca manual.
 
 **Persistência (regra inviolável do CLAUDE.md)**: `nextActionsPrefs` é criação do
 usuário (o que ele decidiu não ver mais) — entra em `buildProjectPayload`/`loadProject`
@@ -99,10 +130,8 @@ usuário (o que ele decidiu não ver mais) — entra em `buildProjectPayload`/`l
 (`next_actions_prefs_v1`). O `NextActionsModel` em si é DERIVADO (recomputável) e
 **não** persiste — mesmo padrão do `BaseProfileModel`/`copilotFindings`.
 
-## O que falta (Sessões NB3/NB4)
+## O que falta (Sessão NB4)
 
-- NB3: "🔎 Buscar oportunidades" roda Descoberta + Simplificação sob demanda, injeta os
-  achados em `tier2`, staleness real quando o IR muda, `autoScanIdle` funcional.
 - NB4: sincronização documental (wiki, roadmap) contra o que foi de fato entregue em
   NB1–NB3.
 
@@ -111,5 +140,9 @@ usuário (o que ele decidiu não ver mais) — entra em `buildProjectPayload`/`l
 `describeAction`/`describeWhyItMatters`, nenhum placeholder vazado, `describeWhyItMatters`
 independente de `facts`, determinismo. `tests/projectSave.test.js` cobre o round-trip de
 `nextActionsPrefs` via `buildProjectJSONChunks`. O motor (`computeNextActions`,
-DEC-NB-009) é travado por `tests/nextActions.test.js` (Sessão NB1) — inalterado nesta
-sessão.
+DEC-NB-009) é travado por `tests/nextActions.test.js` (Sessão NB1), estendido na NB3 com:
+`buildFeedTier2` embrulha os motores sem refazer matemática (mesma referência de
+findings/proposal); paridade número a número — cards Tier 2 ≡ findings da Descoberta +
+proposal da Simplificação (mesmos ids, mesmos deltas); staleness `false`/`true` no momento
+certo (carimbo vs. IR atual); fingerprint de card estável sob rebusca (dismissed não
+ressuscita).

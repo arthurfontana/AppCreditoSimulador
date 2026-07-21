@@ -367,6 +367,7 @@ const PERF_REQUEST_TO_RESULT = {
   COMPUTE_SEGMENT_COMBINED:  'SEGMENT_COMBINED_RESULT',
   COMPUTE_POLICY_INSIGHTS:   'POLICY_INSIGHTS_RESULT',
   COMPUTE_NEXT_ACTIONS:      'NEXT_ACTIONS_RESULT',
+  COMPUTE_FEED_OPPORTUNITIES:'FEED_OPPORTUNITIES_RESULT',
   COMPUTE_VARIABLE_RANKING:  'VARIABLE_RANKING_RESULT',
   COMPUTE_BASE_PROFILE:      'BASE_PROFILE_RESULT',
   COMPUTE_EXPLORE_DATASET:   'EXPLORE_DATASET_RESULT',
@@ -2200,6 +2201,20 @@ export default function App() {
   // debounce do lint, mesmo padrão de `baseProfileResult`/`copilotFindings`).
   const [nextActionsModel, setNextActionsModel] = useState(null);
   const nextActionsModelRef = useRef(null);
+  // `nextActionsTier2`: achados CAROS (Descoberta + Simplificação) da última "🔎 Buscar
+  // oportunidades" (Sessão NB3), carimbados com o `policyFingerprint` do momento do cálculo.
+  // DERIVADO (não persiste — recomputável sob demanda, mesmo padrão do NextActionsModel); vive
+  // como blob `{discovery?, simplify?}` que a main REPASSA em todo COMPUTE_NEXT_ACTIONS. O
+  // orquestrador do worker deriva o staleness (carimbo vs. IR atual) — nunca some/recalcula
+  // sozinho (DEC-NB-002/003). Vazio (`{}`) enquanto o usuário não buscou.
+  const [nextActionsTier2, setNextActionsTier2] = useState({});
+  const nextActionsTier2Ref = useRef({});
+  // `nextActionsScanning`: a busca cara está em andamento (loading do botão/feed). Efêmero.
+  const [nextActionsScanning, setNextActionsScanning] = useState(false);
+  // `autoScanLastFpRef`: fingerprint do PolicyIR da última busca cara (manual ou em idle) —
+  // o opt-in `autoScanIdle` (NB3) só reroda quando a política mudou desde então, evitando
+  // rebuscar o mesmo estado. Efêmero (o próprio tier2 não persiste).
+  const autoScanLastFpRef = useRef(null);
   // `nextActionsPrefs`: DESCARTE/ADIAMENTO POR CARD É CRIAÇÃO DO USUÁRIO (regra inviolável
   // do CLAUDE.md, DEC-NB-006) — persiste em .credito.json (buildProjectPayload/loadProject,
   // schema 3.4) + sessionStorage. `dismissed`/`snoozed`: fingerprints estáveis (kind+alvo) de
@@ -2630,6 +2645,15 @@ export default function App() {
         // Feed de Próxima Melhor Ação (Jornada NB, Sessão NB1/NB2) — DERIVADO, não persiste.
         nextActionsModelRef.current = e.data.model || null;
         setNextActionsModel(e.data.model || null);
+      } else if (msgType === 'FEED_OPPORTUNITIES_RESULT') {
+        // Fontes caras do feed (Jornada NB, Sessão NB3) — Descoberta + Simplificação prontas e
+        // carimbadas. Guarda o blob `tier2` (ref p/ leitura sem stale + state p/ disparar o
+        // efeito que repassa em COMPUTE_NEXT_ACTIONS) e encerra o "buscando…". A costura e o
+        // staleness são do worker no próximo feed — aqui só armazenamos.
+        nextActionsTier2Ref.current = e.data.tier2 || {};
+        setNextActionsTier2(e.data.tier2 || {});
+        autoScanLastFpRef.current = e.data.policyFingerprint ?? null;
+        setNextActionsScanning(false);
       } else if (msgType === 'GOAL_SEEK_RESULT') {
         // GS6 (DEC-GS-001/007): COMPUTE_GOAL_SEEK_VALIDATE pode responder {error:'stale'|
         // 'invalid_solution', detail} na MESMA `*_RESULT` — nunca produzido pelo caminho
@@ -2927,8 +2951,9 @@ export default function App() {
   // ── Feed de Próxima Melhor Ação — COMPUTE_NEXT_ACTIONS (Jornada NB, Sessão NB1/NB2) ──
   // Orquestrador do worker SOBRE as fontes já computadas nesta thread (lint acima,
   // nodeArrivals/lensCounts da própria simulação, PolicyIR) — mesmo debounce barato do
-  // lint (DEC-NB-001). Tier 2 (Descoberta/Simplificação) ainda não é costurado (sob demanda,
-  // "🔎 Buscar oportunidades" — Sessão NB3): `tier2: {}` por enquanto.
+  // lint (DEC-NB-001). Tier 2 (Descoberta/Simplificação) chega PRONTO da última "🔎 Buscar
+  // oportunidades" (Sessão NB3) via `nextActionsTier2` — o worker só COSTURA e deriva o
+  // staleness; o disparo caro é sob demanda/idle, NUNCA neste debounce do tick.
   const nextActionsDebounceRef = useRef(null);
   useEffect(() => {
     clearTimeout(nextActionsDebounceRef.current);
@@ -2969,11 +2994,14 @@ export default function App() {
           hasAsIs, pendingVars, policyMature, hasLibraryTemplate, lockedNodeIds,
           lastDocFingerprint,
         },
-        tier2: {},
+        tier2: nextActionsTier2Ref.current,
       });
     }, 300);
     return () => clearTimeout(nextActionsDebounceRef.current);
-  }, [shapes, conns, csvStore, activeCanvasId, canvases, exploreRiskMetric, baseProfileResult, policyLibrary, copilotFindings, lastDocFingerprint]);
+  }, [shapes, conns, csvStore, activeCanvasId, canvases, exploreRiskMetric, baseProfileResult, policyLibrary, copilotFindings, lastDocFingerprint, nextActionsTier2]);
+
+  // autoScanIdle (Sessão NB3): o efeito de rebusca em idle vive JUNTO de `runOpportunityScan`
+  // (definido bem depois no corpo do componente) para não referenciá-lo antes da inicialização.
 
   // ── Analytics Workspace — dataset analítico canônico (DEC-AW-002) ──
   // Recomputado pelo worker quando a simulação muda; cacheado em analyticsDataset.
@@ -6643,6 +6671,81 @@ export default function App() {
     });
   };
 
+  // ── "🔎 Buscar oportunidades" — fontes caras do feed (Jornada NB, Sessão NB3) ─────
+  // Roda a Descoberta de Segmentos (escopo GLOBAL, MESMOS params default do modal — inclusive
+  // os `excludedCols` temporais/score da heurística segVarDefaultReason) + a Simplificação,
+  // FORA do caminho do tick (DEC-NB-002). O worker devolve o blob `tier2` carimbado; a costura
+  // e o staleness são derivados no próximo COMPUTE_NEXT_ACTIONS. Nenhum motor caro no tick de
+  // edição — este é o único disparo (mais o autoScanIdle em idle real, mesmo caminho).
+  const feedScanDefaultParams = useCallback(() => {
+    // Réplica dos defaults do openSegmentDiscoveryModal (escopo global): temporal/score saem
+    // marcados por segVarDefaultReason; o resto entra na busca.
+    const seen = new Set();
+    const excludedCols = [];
+    for (const csv of Object.values(csvStoreR.current)) {
+      for (const [col, t] of Object.entries(csv.columnTypes || {})) {
+        if (t !== 'decision' || seen.has(col)) continue;
+        seen.add(col);
+        if (segVarDefaultReason(col)) excludedCols.push(col);
+      }
+    }
+    return { riskMetric: 'inadReal', maxDepth: 2, ...(excludedCols.length ? { excludedCols } : {}) };
+  }, []);
+
+  const runOpportunityScan = useCallback(() => {
+    if (!workerRef.current) return;
+    setNextActionsScanning(true);
+    const activeName = canvasesR.current[activeCanvasIdR.current]?.name ?? null;
+    const ir = buildPolicyIR(shapesR.current, connsR.current, csvStoreR.current, { name: activeName });
+    workerRef.current.postMessage({
+      type: 'COMPUTE_FEED_OPPORTUNITIES',
+      shapes: shapesR.current,
+      conns: connsR.current,
+      ir,
+      params: feedScanDefaultParams(),
+    });
+  }, [feedScanDefaultParams]);
+
+  // ── autoScanIdle — rebusca das fontes caras em idle REAL (Jornada NB, Sessão NB3) ──
+  // Opt-in OFF por default (Hub de Configurações → nextActionsPrefs.autoScanIdle). Quando ON,
+  // reroda "🔎 Buscar oportunidades" em ociosidade — NUNCA no tick (regra de ouro DEC-NB-002) —
+  // só quando a política MUDOU desde a última busca (fingerprint ≠ autoScanLastFpRef) e há
+  // política com base para varrer. requestIdleCallback (com fallback a setTimeout) garante que
+  // só dispara quando a main está de fato ociosa; a marcação de staleness é a mesma da busca
+  // manual (o carimbo vem do worker). Não faz nada sem opt-in. Fica AQUI (e não junto dos
+  // outros efeitos do feed) por depender de `runOpportunityScan`, definido logo acima.
+  const autoScanIdleHandleRef = useRef(null);
+  useEffect(() => {
+    const cancelIdle = () => {
+      const h = autoScanIdleHandleRef.current;
+      if (!h) return;
+      if (h.type === 'idle' && typeof cancelIdleCallback === 'function') cancelIdleCallback(h.id);
+      else clearTimeout(h.id);
+      autoScanIdleHandleRef.current = null;
+    };
+    if (!nextActionsPrefs.autoScanIdle) { cancelIdle(); return; }
+    const model = nextActionsModel;
+    if (!model || nextActionsScanning) return;
+    const hasBase = Object.keys(csvStoreR.current).length > 0;
+    const hasPolicy = shapesR.current.some(s => s.type === 'decision' || s.type === 'cineminha' || s.type === 'decision_lens');
+    if (!hasBase || !hasPolicy) return;
+    // Só rebusca se a política mudou desde o último carimbo (evita rebuscar o mesmo estado).
+    if (model.policyFingerprint == null || model.policyFingerprint === autoScanLastFpRef.current) return;
+    cancelIdle();
+    const fire = () => { autoScanIdleHandleRef.current = null; runOpportunityScan(); };
+    // Debounce longo + idle: "ociosidade real", nunca a cada edição.
+    const schedule = () => {
+      if (typeof requestIdleCallback === 'function') {
+        autoScanIdleHandleRef.current = { type: 'idle', id: requestIdleCallback(fire, { timeout: 3000 }) };
+      } else {
+        autoScanIdleHandleRef.current = { type: 'timeout', id: setTimeout(fire, 1500) };
+      }
+    };
+    const t = setTimeout(schedule, 1200);
+    autoScanIdleHandleRef.current = { type: 'timeout', id: t };
+    return cancelIdle;
+  }, [nextActionsPrefs.autoScanIdle, nextActionsModel, nextActionsScanning, runOpportunityScan]);
+
   // Materializa os candidatos aceitos numa aba de canvas NOVA (mesmo padrão não-destrutivo
   // de applyGoalSeekResult) — aplica no CLONE via applySimplifyCandidates (mesmo helper
   // usado internamente pelo worker para a validação incremental por equivalência).
@@ -7832,11 +7935,12 @@ export default function App() {
     { id: 'analyze.cluster', label: 'Clusterizar Segmentos', icon: '🧩', tab: 'analisar', group: 'Descoberta', keywords: ['cluster', 'clusterizar', 'k-means', 'agrupar', 'agrupamento'], onRun: () => openClusterModal(null) },
     { id: 'analyze.range', label: 'Criar Faixas por Risco', icon: '📐', tab: 'analisar', group: 'Descoberta', keywords: ['faixas', 'binning', 'risco', 'iv', 'woe', 'bandas', 'faixa etária', 'faixa de renda', 'cortes'], onRun: () => openRangeModal() },
     { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico', 'assistente', 'feed', 'próxima melhor ação'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
-    // "Buscar oportunidades" (DEC-NB-005/008): v1 abre a Descoberta de Segmentos (a fonte
-    // Tier 2 mais rica hoje) — a injeção automática dos achados como cards Tier 2 carimbados
-    // no feed é da Sessão NB3 (sob demanda, com staleness). Já registrado agora para não
-    // faltar no Ctrl+K/Ribbon quando a costura chegar.
-    { id: 'analyze.copilotSearch', label: 'Buscar oportunidades', icon: '🔎', tab: 'analisar', group: 'Copiloto', keywords: ['buscar oportunidades', 'descoberta', 'feed', 'próxima melhor ação'], onRun: () => openSegmentDiscoveryModal(null) },
+    // "Buscar oportunidades" (DEC-NB-002/003, Sessão NB3): roda a Descoberta de Segmentos
+    // (global, params default do modal) + a Simplificação FORA do tick e injeta os achados
+    // como cards Tier 2 carimbados no feed do Copiloto (staleness derivado quando o IR muda).
+    { id: 'analyze.copilotSearch', label: 'Buscar oportunidades', icon: '🔎', tab: 'analisar', group: 'Copiloto', keywords: ['buscar oportunidades', 'descoberta', 'simplificação', 'feed', 'próxima melhor ação'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); runOpportunityScan(); } },
+    // Recalcular as fontes caras (CTA dos cards Tier 2 desatualizados) — mesmo disparo, sem navegar.
+    { id: 'copilot.rescanOpportunities', label: 'Recalcular oportunidades', icon: '🔄', tab: 'feed', contextWhen: () => false, onRun: () => runOpportunityScan() },
     { id: 'analyze.copilotDiscarded', label: 'Ver descartados', icon: '🗂', tab: 'analisar', group: 'Copiloto', keywords: ['descartados', 'adiados', 'feed', 'copiloto'], activeWhen: () => showDiscardedActions, onRun: () => setShowDiscardedActions(v => !v) },
     // CTAs do feed do Copiloto (DEC-NB-008): descritores do registro, invocados com `args`
     // pelo card (`runNextActionCTA`). `tab:'feed'` (sem Ribbon correspondente) + contextWhen
@@ -8930,6 +9034,20 @@ export default function App() {
                 </div>
               </div>
 
+              {/* 🔎 Buscar oportunidades (Sessão NB3): roda Descoberta + Simplificação fora do
+                  tick e injeta os achados como cards Tier 2 carimbados. Fica no feed, não no
+                  Ribbon — é a ação do Copiloto que popula as fontes caras sob demanda. */}
+              {!showDiscardedActions && (
+                <button onClick={runOpportunityScan} disabled={nextActionsScanning}
+                  title="Descobrir segmentos e simplificações acionáveis (fora do tick de edição)"
+                  style={{width:"100%",marginBottom:8,padding:"7px 10px",borderRadius:8,border:"1px solid #ddd6fe",
+                    background: nextActionsScanning ? "#f5f3ff" : "#faf5ff", color:"#7c3aed",
+                    cursor: nextActionsScanning ? "default" : "pointer", fontSize:11.5,fontWeight:600,fontFamily:"inherit",
+                    display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+                  {nextActionsScanning ? '🔎 Buscando oportunidades…' : '🔎 Buscar oportunidades'}
+                </button>
+              )}
+
               {!model && (
                 <div style={{padding:"18px 4px",fontSize:12,color:"#94a3b8",lineHeight:1.6,textAlign:"center"}}>
                   🧭 Calculando o feed…
@@ -8987,6 +9105,15 @@ export default function App() {
                               title="Selecionar e centralizar este nó no canvas"
                               style={{padding:"3px 9px",borderRadius:6,border:`1px solid ${meta.border}`,background:"#fff",color:meta.color,cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
                               🎯 Ir até o nó
+                            </button>
+                          )}
+                          {/* Tier 2 desatualizado (Sessão NB3, DEC-NB-003): recalcular é gesto
+                              explícito — o card nunca some nem se atualiza sozinho. */}
+                          {action.staleness?.stale && !discarded && (
+                            <button onClick={runOpportunityScan} disabled={nextActionsScanning}
+                              title="A política mudou desde a última busca — recalcular as oportunidades"
+                              style={{padding:"3px 9px",borderRadius:6,border:"1px solid #fde68a",background:"#fffbeb",color:"#92400e",cursor:nextActionsScanning?"default":"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                              {nextActionsScanning ? '🔄 Recalculando…' : '🔄 Recalcular'}
                             </button>
                           )}
                           {action.actionable !== false && !discarded && (action.cta || []).map((cta, ci) => (
@@ -9310,6 +9437,24 @@ export default function App() {
                           Faixa fina acima das abas de canvas — Taxa de Aprovação/Inad. espelham a
                           simulação atual; também alternável pela engrenagem ou clique-direito na
                           própria barra.
+                        </div>
+                      </div>
+                      {/* Copiloto — Feed de Próxima Melhor Ação (Jornada NB, Sessão NB3).
+                          Opt-in autoScanIdle: rebusca as fontes caras em ociosidade. Persiste
+                          em nextActionsPrefs (mesmo contêiner do descarte/adiamento). */}
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,margin:0}}>Copiloto — Buscar oportunidades</p>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                          <input type="checkbox" checked={nextActionsPrefs.autoScanIdle}
+                            onChange={()=>setNextActionsPrefs(p=>({...p,autoScanIdle:!p.autoScanIdle}))}
+                            style={{width:15,height:15,accentColor:"#7c3aed"}}/>
+                          Buscar oportunidades automaticamente em ociosidade
+                        </label>
+                        <div style={{fontSize:10.5,color:"#94a3b8",marginLeft:23,lineHeight:1.5}}>
+                          Reroda a Descoberta de Segmentos e a Simplificação em idle quando a política
+                          muda — nunca durante a edição. Os cards continuam marcados “desatualizado”
+                          quando a política muda de novo; recalcular é sempre uma ação sua. Desligado
+                          por padrão: a busca só acontece pelo botão <b>🔎 Buscar oportunidades</b> do feed.
                         </div>
                       </div>
                     </div>
