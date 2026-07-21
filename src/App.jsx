@@ -89,6 +89,13 @@ export { newFilterCard };
 import {
   describeAction, describeWhyItMatters, severityLabel, ctaLabel, formatActionDelta,
 } from "./nextActionInsights.js";
+// Etapas da Política + Checklist de Prontidão (Jornada EP, Sessão EP1/EP2) — motor puro
+// compartilhado main/worker/teste (DEC-EP-001..006). A main chama os detectores direto
+// (custo estrutural barato, mesmo debounce do feed NB) — não precisa de round-trip ao worker.
+import {
+  detectJourneyStages, computeReadiness, STAGE_IDS, READINESS_CRITERIA_IDS,
+  ACTION_KIND_STAGE, stageForActionKind,
+} from "./policyJourney.js";
 
 // ═══ REGIÃO: Constantes e Helpers Globais ═══
 // ── Build metadata (injected by Vite at build time) ──────────────────────────
@@ -102,7 +109,10 @@ import {
 // (descartados/adiados do Feed de Próxima Melhor Ação, DEC-NB-006); a wiki (Jornada-
 // Prompts-Sessoes.md) previa "3.3" para esta sessão, mas o Épico EB (EB4) já havia
 // consumido "3.3" antes desta sessão rodar — bump real é sequencial sobre o schema atual.
-export const PROJECT_SCHEMA_VERSION = "3.4";
+// 3.5 (Épico EP, Sessão EP2) — novo campo de topo `journeyState` (override manual por etapa
+// do trilho + config do Checklist de Prontidão + colapso do trilho, DEC-EP-006); a wiki
+// previa "3.4" para esta sessão, mas o Épico NB (NB2) já havia consumido "3.4".
+export const PROJECT_SCHEMA_VERSION = "3.5";
 export const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
 const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   : new Date().toISOString();
 export const BUILD_HASH   = typeof __BUILD_HASH__   !== "undefined" ? __BUILD_HASH__   : "local";
@@ -1423,6 +1433,70 @@ const NEXT_ACTION_SEV_META = {
   journey:     { emoji: "🔵", color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
 };
 
+// Etapas da Política (Jornada EP, Sessão EP2, DEC-EP-001/004) — metadados de apresentação do
+// trilho no topo da aba 🧭 Copiloto. Ordem == STAGE_IDS (policyJourney.js); "why" vem de
+// `stage.facts` (declarado pelo detector), nunca hardcoded aqui.
+const JOURNEY_STAGE_META = {
+  know_base:    { short: "Base",         label: "1 · Conhecer a base" },
+  eligibility:  { short: "Elegibil.",    label: "2 · Elegibilidade" },
+  segmentation: { short: "Segmentação",  label: "3 · Segmentação" },
+  risk:         { short: "Risco",        label: "4 · Risco e cortes" },
+  calibration:  { short: "Calibração",   label: "5 · Calibração" },
+  validation:   { short: "Validação",    label: "6 · Validação e entrega" },
+};
+
+// "Por que isso importa" de cada etapa — texto pedagógico FIXO (mesmo padrão de
+// describeWhyItMatters do feed NB), não usa `facts` (é o conceito, não o resultado específico).
+const JOURNEY_STAGE_WHY = {
+  know_base: "Conhecer a base (carregada + AS IS configurado) dá o baseline de comparação antes de qualquer corte.",
+  eligibility: "Um caminho curto de reprovação automática (knock-out) filtra os casos claramente inelegíveis antes de entrar no mérito de risco.",
+  segmentation: "Segmentar por uma variável categórica ou cluster antes de aplicar cortes de risco evita tratar populações heterogêneas como se fossem uma só.",
+  risk: "Uma variável ordinal, de faixas ou de score roteada a terminais distintos é o corte de risco propriamente dito — o coração da política.",
+  calibration: "Calibrar (Goal Seek/otimizador, ou uma meta de negócio batida) ajusta os cortes para o resultado desejado, não só para o que parece razoável.",
+  validation: "O Checklist de Prontidão reúne os critérios objetivos de \"pronta para o comitê\" — governança igual para qualquer autor da política.",
+};
+
+// Checklist de Prontidão (DEC-EP-003) — rótulo curto + descrição por critério, na ordem de
+// READINESS_CRITERIA_IDS. `facts` de cada critério vem de computeReadiness (policyJourney.js).
+export const READINESS_CRITERIA_META = {
+  lint_no_blockers:      { label: "Lint sem bloqueantes", desc: "Nenhum achado de severidade erro (porta solta com tráfego, nó inalcançável, ciclo, etc.)." },
+  full_coverage:         { label: "100% da população decidida", desc: "Todo o volume da base chega a um terminal Aprovado ou Reprovado — nada se perde no funil." },
+  no_pending_vars:       { label: "Nenhuma variável pendente", desc: "Nenhum losango da Biblioteca de Políticas ficou sem mapear para uma coluna da base atual." },
+  asis_delta:            { label: "AS IS configurado e delta simulado", desc: "Existe uma decisão AS IS configurada e o delta contra a política simulada foi calculado." },
+  doc_current:           { label: "Documentação gerada e atual", desc: "A Documentação Automática foi gerada e reflete a política atual (sem mudanças desde então)." },
+  no_lossless_simplify:  { label: "Sem simplificação lossless pendente", desc: "Nenhum candidato de simplificação com equivalência PROVADA (diff = 0) ainda não aplicado." },
+  stable_vars:           { label: "Variáveis usadas são estáveis", desc: "Nenhuma variável em uso tem a flag de instabilidade temporal (PSI) do Perfil da Base." },
+};
+
+// Leitura curta do "por quê" de cada etapa a partir de `stage.facts` (declarado por
+// detectJourneyStages, policyJourney.js — DEC-EP-002: os detectores NUNCA fingem certeza,
+// sempre expõem o que detectaram). Determinístico, sem prosa gerada.
+function describeJourneyStageFacts(stage) {
+  const f = stage?.facts || {};
+  switch (stage?.id) {
+    case 'know_base':
+      if (!f.baseLoaded) return 'Nenhuma base carregada ainda.';
+      if (!f.asIsConfigured) return 'Base carregada, mas a decisão AS IS ainda não foi configurada.';
+      return f.hasProfile ? 'Base carregada, AS IS configurado e Perfil da Base calculado.' : 'Base carregada e AS IS configurado.';
+    case 'eligibility':
+      return f.knockoutFound ? `Caminho de reprovação automática (knock-out) encontrado em ${f.minNodes} nó(s).` : 'Nenhum caminho de reprovação automática em até 2 nós foi encontrado ainda.';
+    case 'segmentation':
+      if (f.segmented) return `Variável de segmentação em uso perto da raiz (nível ${f.level}, ${f.subtreeCount} sub-árvores).`;
+      return f.subtreeCount > 0 ? `Melhor candidato encontrado tem só ${f.subtreeCount} sub-árvore(s) — ainda não segmenta.` : 'Nenhuma variável categórica/cluster testada perto da raiz ainda.';
+    case 'risk':
+      if (f.routed) return `Variável de risco roteada a ${f.terminalCount} terminais distintos.`;
+      return f.terminalCount > 0 ? `Melhor candidato roteia a só ${f.terminalCount} terminal — ainda não corta risco.` : 'Nenhuma variável ordinal/faixas/score em uso ainda.';
+    case 'calibration':
+      if (f.calibrationApplied) return 'Um otimizador (Goal Seek/Cineminha/Johnny) já foi aplicado neste canvas.';
+      if (f.goalMet) return 'O delta contra o AS IS está dentro da meta declarada.';
+      return 'Nenhum otimizador aplicado ainda neste canvas.';
+    case 'validation':
+      return f.ready ? 'Todos os critérios ativos do Checklist de Prontidão passam.' : `${f.passCount ?? 0}/${f.activeCount ?? 0} critérios ativos do Checklist de Prontidão passam.`;
+    default:
+      return '';
+  }
+}
+
 // Simplificação com prova de equivalência (Copiloto Sessão 5, DEC-IA-005/006) — metadados
 // de UI por tipo de candidato do catálogo (findings vêm de COMPUTE_SIMPLIFY/SIMPLIFY_RESULT).
 const SIMPLIFY_CODE_META = {
@@ -2261,6 +2335,40 @@ export default function App() {
   // algoritmo de fingerprint usado internamente por `computeNextActions` para comparar).
   const [lastDocFingerprint, setLastDocFingerprint] = useState(null);
 
+  // ── Etapas da Política + Checklist de Prontidão (Jornada EP, Sessão EP2) ──────────────
+  // `journeyState`: OVERRIDE MANUAL POR ETAPA + CONFIG DO CHECKLIST + COLAPSO DO TRILHO SÃO
+  // CRIAÇÃO/CONFIGURAÇÃO DO USUÁRIO (regra inviolável do CLAUDE.md, DEC-EP-006) — persiste em
+  // .credito.json (buildProjectPayload/loadProject, schema 3.5) + sessionStorage. O ESTADO
+  // DETECTADO (journeyStages/journeyReadiness, abaixo) é DERIVADO e NÃO persiste (mesmo padrão
+  // de nextActionsModel/baseProfileResult) — só o que o usuário decidiu persiste.
+  const [journeyState, setJourneyState] = useState(() => {
+    try {
+      const s = sessionStorage.getItem('journey_state_v1');
+      const v = s ? JSON.parse(s) : null;
+      return (v && typeof v === 'object' && !Array.isArray(v))
+        ? {
+            stageOverrides: (v.stageOverrides && typeof v.stageOverrides === 'object') ? v.stageOverrides : {},
+            readinessConfig: (v.readinessConfig && typeof v.readinessConfig === 'object') ? v.readinessConfig : {},
+            railCollapsed: v.railCollapsed === true,
+          }
+        : { stageOverrides: {}, readinessConfig: {}, railCollapsed: false };
+    } catch { return { stageOverrides: {}, readinessConfig: {}, railCollapsed: false }; }
+  });
+  const setStageOverride = useCallback((stageId, value) => {
+    setJourneyState(prev => ({ ...prev, stageOverrides: { ...prev.stageOverrides, [stageId]: value } }));
+  }, []);
+  const setReadinessCriterionEnabled = useCallback((critId, enabled) => {
+    setJourneyState(prev => ({ ...prev, readinessConfig: { ...prev.readinessConfig, [critId]: enabled } }));
+  }, []);
+  // `journeyStages`/`journeyReadiness`: DERIVADO — recomputado no mesmo debounce barato do
+  // feed NB (efeito mais abaixo), nunca persiste. `journeyStageFilter`: qual etapa o clique no
+  // trilho está usando para filtrar o feed — efêmero, `null` = sem filtro (mesmo padrão de
+  // `showDiscardedActions`).
+  const [journeyStages, setJourneyStages] = useState(null);
+  const [journeyReadiness, setJourneyReadiness] = useState(null);
+  const [journeyStageFilter, setJourneyStageFilter] = useState(null);
+  const [readinessModalOpen, setReadinessModalOpen] = useState(false);
+
   // Multi-canvas store (DEC-AW-007) — shapes/conns above are the working copy of the active canvas
   const [canvases, setCanvases] = useState(() => _initCanvasStore().canvases);
   const [activeCanvasId, setActiveCanvasId] = useState(() => _initCanvasStore().activeCanvasId);
@@ -2996,9 +3104,35 @@ export default function App() {
         },
         tier2: nextActionsTier2Ref.current,
       });
+
+      // ── Etapas da Política + Checklist de Prontidão (Jornada EP, Sessão EP2) ───────────
+      // Motor PURO (policyJourney.js) — roda direto na main, sem round-trip ao worker (custo
+      // estrutural, não varredura de base); reusa exatamente os mesmos insumos do feed acima
+      // (ir/pendingVars/hasAsIs/lastDocFingerprint) + coverage do último tick de simulação +
+      // o Perfil da Base (EB) + a Simplificação Tier 2 (mesmo blob do feed, sem recomputar).
+      const sim = simResultR.current;
+      const coverage = sim && sim.totalQty > 0
+        ? { totalQty: sim.totalQty, decidedQty: (sim.approvedQty || 0) + (sim.rejectedQty || 0) }
+        : null;
+      const journeyArtifacts = {
+        ir,
+        lint: copilotFindings,
+        coverage,
+        pendingVars,
+        hasAsIs,
+        docFingerprint: lastDocFingerprint,
+        baseProfile: baseProfileResult,
+        simplify: nextActionsTier2Ref.current?.simplify ?? null,
+        calibrationApplied: !!canvasesR.current[activeCanvasIdR.current]?.calibrationApplied,
+        goalMet: false, // metas de negócio persistentes por projeto: fora de escopo (roadmap)
+        overrides: journeyState.stageOverrides,
+        readinessConfig: journeyState.readinessConfig,
+      };
+      setJourneyStages(detectJourneyStages(shapesR.current, connsR.current, csvStoreR.current, journeyArtifacts));
+      setJourneyReadiness(computeReadiness(shapesR.current, connsR.current, csvStoreR.current, journeyArtifacts, journeyState.readinessConfig));
     }, 300);
     return () => clearTimeout(nextActionsDebounceRef.current);
-  }, [shapes, conns, csvStore, activeCanvasId, canvases, exploreRiskMetric, baseProfileResult, policyLibrary, copilotFindings, lastDocFingerprint, nextActionsTier2]);
+  }, [shapes, conns, csvStore, activeCanvasId, canvases, exploreRiskMetric, baseProfileResult, policyLibrary, copilotFindings, lastDocFingerprint, nextActionsTier2, journeyState]);
 
   // autoScanIdle (Sessão NB3): o efeito de rebusca em idle vive JUNTO de `runOpportunityScan`
   // (definido bem depois no corpo do componente) para não referenciá-lo antes da inicialização.
@@ -3075,6 +3209,9 @@ export default function App() {
   useEffect(() => { try { sessionStorage.setItem('explore_page_filters_v1', JSON.stringify(explorePageFilters)); } catch { /* quota/privacidade — não bloqueia */ } }, [explorePageFilters]);
   // Feed de Próxima Melhor Ação (Jornada NB, Sessão NB2, DEC-NB-006): persiste descarte/adiamento.
   useEffect(() => { try { sessionStorage.setItem('next_actions_prefs_v1', JSON.stringify(nextActionsPrefs)); } catch { /* quota/privacidade — não bloqueia */ } }, [nextActionsPrefs]);
+  // journeyState (Jornada EP, Sessão EP2, DEC-EP-006) — mesmo padrão de auto-persistência de
+  // sessão do nextActionsPrefs acima.
+  useEffect(() => { try { sessionStorage.setItem('journey_state_v1', JSON.stringify(journeyState)); } catch { /* quota/privacidade — não bloqueia */ } }, [journeyState]);
   // Ribbon (UX 2.0 — Sessão 1): persiste a aba ativa do Ribbon na sessionStorage.
   useEffect(() => { try { sessionStorage.setItem('ribbon_active_tab_v1', ribbonActiveTab); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonActiveTab]);
   useEffect(() => { try { sessionStorage.setItem('ribbon_mode_v1', ribbonMode); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonMode]);
@@ -4332,6 +4469,10 @@ export default function App() {
       // por card é CRIAÇÃO DO USUÁRIO (regra inviolável do CLAUDE.md); o NextActionsModel em
       // si é DERIVADO (recomputável) e não persiste, mesmo padrão do BaseProfileModel.
       nextActionsPrefs,
+      // Etapas da Política + Checklist de Prontidão (Épico EP, Sessão EP2, DEC-EP-006) —
+      // override manual por etapa + config do checklist + colapso do trilho são CRIAÇÃO DO
+      // USUÁRIO; o estado detectado (journeyStages/journeyReadiness) é DERIVADO e não persiste.
+      journeyState,
       cinemaLibrary,
       // Biblioteca de Políticas (Copiloto Sessão 2) — array de templates de PolicyIR
       // (JSON puro: ir/requiredVars não têm Map/typed array, sem serialize dedicado).
@@ -4444,6 +4585,16 @@ export default function App() {
         dismissed: Array.isArray(p.dismissed) ? p.dismissed : [],
         snoozed: Array.isArray(p.snoozed) ? p.snoozed : [],
         autoScanIdle: p.autoScanIdle === true,
+      });
+    }
+    // schema < 3.5 não tinha journeyState (Etapas + Checklist de Prontidão, EP2) — default
+    // defensivo por campo, projeto antigo não quebra.
+    {
+      const j = (data.journeyState && typeof data.journeyState === 'object') ? data.journeyState : {};
+      setJourneyState({
+        stageOverrides: (j.stageOverrides && typeof j.stageOverrides === 'object') ? j.stageOverrides : {},
+        readinessConfig: (j.readinessConfig && typeof j.readinessConfig === 'object') ? j.readinessConfig : {},
+        railCollapsed: j.railCollapsed === true,
       });
     }
     setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
@@ -6441,9 +6592,18 @@ export default function App() {
     workerRef.current?.postMessage({ type: 'COMPUTE_OPTIM', shape });
   };
 
+  // Marca o canvas como tendo passado por um otimizador (Goal Seek/Cineminha/Johnny) — sinal
+  // estrutural de E5 Calibração (Jornada EP, `artifacts.calibrationApplied`, DEC-EP-002). Vive
+  // DENTRO de `canvases[canvasId]`, contêiner já persistido (buildProjectPayload/loadProject) —
+  // nenhum trabalho extra de schema (regra do CLAUDE.md: campo novo dentro de contêiner já salvo).
+  const markCalibrationApplied = (canvasId) => {
+    setCanvases(prev => prev[canvasId] ? { ...prev, [canvasId]: { ...prev[canvasId], calibrationApplied: true } } : prev);
+  };
+
   const applyOptimResult = (shapeId, proposedCells) => {
     pushHistory();
     setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, cellsUserEdited: true, cells: proposedCells } : s));
+    markCalibrationApplied(activeCanvasIdR.current);
     setOptimModal(null);
   };
 
@@ -6484,6 +6644,7 @@ export default function App() {
     setShapes(prev => prev.map(s =>
       proposedByShape[s.id] ? { ...s, cellsUserEdited: true, cells: proposedByShape[s.id] } : s
     ));
+    markCalibrationApplied(activeCanvasIdR.current);
     setJohnnyModal(null);
   };
 
@@ -6648,7 +6809,7 @@ export default function App() {
     setCanvases(prev => ({
       ...prev,
       [curCanvasId]: { ...prev[curCanvasId], shapes: srcShapes, conns: srcConns },
-      [id]: { id, name: `${source?.name || 'Canvas'} · ${label}`, shapes: patchedShapes, conns: patchedConns, includeInDashboard: true },
+      [id]: { id, name: `${source?.name || 'Canvas'} · ${label}`, shapes: patchedShapes, conns: patchedConns, includeInDashboard: true, calibrationApplied: true },
     }));
     setShapes(patchedShapes); setConns(patchedConns);
     setUndoStack([]); setRedoStack([]);
@@ -7646,6 +7807,13 @@ export default function App() {
       includeDomains: !!cur.includeDomains,
       activeCanvasId: activeId,
       activeCanvasName: canvasesR.current[activeId]?.name ?? null,
+      // "Prontidão da Política" (Jornada EP, Sessão EP2, DEC-EP-005) — o worker recomputa
+      // lint/coverage/pendingVars/hasAsIs no mesmo passe (varre a base de qualquer forma);
+      // só o que é estado-só-da-main viaja aqui, mesmo padrão de COMPUTE_NEXT_ACTIONS.
+      docFingerprint: lastDocFingerprint,
+      baseProfile: baseProfileResult,
+      simplify: nextActionsTier2Ref.current?.simplify ?? null,
+      readinessConfig: journeyState.readinessConfig,
     };
     let compareIr = null, compareName = null;
     if (cur.compareCanvasId && canvasesR.current[cur.compareCanvasId]) {
@@ -7963,6 +8131,11 @@ export default function App() {
     // sob os aplicadores `applySegmentRecommendation`/`applySimplifyCandidates` já em uso).
     { id: 'copilot.applyOpportunity', label: 'Ver na Descoberta', icon: '🔍', tab: 'feed', contextWhen: () => false, onRun: () => openSegmentDiscoveryModal(null) },
     { id: 'copilot.applySimplify', label: 'Ver Simplificação', icon: '🧹', tab: 'feed', contextWhen: () => false, onRun: () => openSimplifyModal() },
+    // fixCommandId do Checklist de Prontidão (Jornada EP, Sessão EP2, DEC-EP-003): critérios
+    // sem um applier dedicado navegam até o feed do Copiloto, onde os cards já resolvem (o
+    // lint sem bloqueantes e o funil vêm da MESMA fonte do feed — nenhum aplicador novo).
+    { id: 'copilot.reviewBlockers', label: 'Revisar bloqueantes', icon: '🔴', tab: 'feed', contextWhen: () => false, onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); setJourneyStageFilter(null); } },
+    { id: 'copilot.reviewCoverage', label: 'Revisar cobertura', icon: '🕳', tab: 'feed', contextWhen: () => false, onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); setJourneyStageFilter(null); } },
 
     // ─── OTIMIZAR ───
     { id: 'optimize.goalSeek', label: 'Atingir Objetivo', icon: '🎯', tab: 'otimizar', group: 'Política', keywords: ['goal seek', 'objetivo', 'meta', 'milp', 'profundo'], onRun: openGoalSeekModal },
@@ -9011,7 +9184,15 @@ export default function App() {
           const isOut = (a) => dismissedSet.has(a.fingerprint) || snoozedSet.has(a.fingerprint);
           const visibleActions = allActions.filter(a => !isOut(a));
           const discardedActions = allActions.filter(isOut);
-          const shown = showDiscardedActions ? discardedActions : visibleActions;
+          const byStage = journeyStageFilter
+            ? (arr) => arr.filter(a => stageForActionKind(a.kind) === journeyStageFilter)
+            : (arr) => arr;
+          const shown = byStage(showDiscardedActions ? discardedActions : visibleActions);
+          const activeStage = journeyStages ? journeyStages.find(s => s.id === journeyStageFilter) : null;
+          const readinessPassCount = journeyReadiness
+            ? journeyReadiness.criteria.filter(c => c.state === 'pass').length : 0;
+          const readinessActiveCount = journeyReadiness
+            ? journeyReadiness.criteria.filter(c => c.state !== 'na').length : 0;
           return (
             <div style={{padding:"12px 16px",borderBottom:"1px solid #f1f5f9"}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,gap:6}}>
@@ -9034,6 +9215,90 @@ export default function App() {
                 </div>
               </div>
 
+              {/* ── Trilho de Etapas (Jornada EP, Sessão EP2, DEC-EP-001/004) ─────────────
+                  6 etapas canônicas — GUIA, nunca wizard bloqueante (tudo continua acessível
+                  em qualquer ordem). Clique numa etapa filtra o feed abaixo pelos cards
+                  daquela etapa (ACTION_KIND_STAGE); colapso persiste em journeyState. */}
+              {!showDiscardedActions && (
+                <div style={{marginBottom:8,padding:"8px 8px 6px",borderRadius:8,background:"#f8fafc",border:"1px solid #e2e8f0"}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom: journeyState.railCollapsed ? 0 : 6}}>
+                    <span style={{fontSize:10,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:.5}}>🧭 Etapas da política</span>
+                    <button onClick={()=>setJourneyState(p=>({...p,railCollapsed:!p.railCollapsed}))}
+                      title={journeyState.railCollapsed ? "Expandir trilho" : "Recolher trilho"}
+                      style={{background:"none",border:"none",padding:0,cursor:"pointer",fontSize:11,color:"#94a3b8",fontFamily:"inherit"}}>
+                      {journeyState.railCollapsed ? '▸ Expandir' : '▾ Recolher'}
+                    </button>
+                  </div>
+                  {!journeyState.railCollapsed && (
+                    <>
+                      <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                        {(journeyStages || STAGE_IDS.map(id => ({ id, state:'todo', override:null, facts:{} }))).map(st => {
+                          const meta = JOURNEY_STAGE_META[st.id];
+                          const done = st.state === 'done';
+                          const active = journeyStageFilter === st.id;
+                          return (
+                            <button key={st.id}
+                              onClick={()=>setJourneyStageFilter(f => f === st.id ? null : st.id)}
+                              title={meta.label}
+                              style={{padding:"3px 8px",borderRadius:20,cursor:"pointer",fontFamily:"inherit",fontSize:10.5,fontWeight:600,
+                                border: active ? "1.5px solid #2563eb" : `1px solid ${done ? "#bbf7d0" : "#e2e8f0"}`,
+                                background: active ? "#eff6ff" : (done ? "#f0fdf4" : "#fff"),
+                                color: active ? "#2563eb" : (done ? "#15803d" : "#94a3b8"),
+                                display:"flex",alignItems:"center",gap:4}}>
+                              <span>{done ? '✓' : (st.index + 1)}</span>
+                              <span>{meta.short}</span>
+                              {st.override && <span title={st.override === 'done' ? "Marcada manualmente" : "Reaberta manualmente"} style={{opacity:.7}}>✎</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {activeStage && (
+                        <div style={{marginTop:6,padding:"6px 8px",borderRadius:6,background:"#fff",border:"1px solid #e2e8f0",fontSize:10.5,color:"#475569",lineHeight:1.5}}>
+                          <div style={{fontWeight:700,color:"#334155",marginBottom:2}}>{JOURNEY_STAGE_META[activeStage.id].label} — {activeStage.state === 'done' ? 'Concluída' : 'Pendente'}{activeStage.override ? ' (override manual)' : ''}</div>
+                          <div>{describeJourneyStageFacts(activeStage)}</div>
+                          <div style={{marginTop:4,opacity:.85}}>ⓘ {JOURNEY_STAGE_WHY[activeStage.id]}</div>
+                          <div style={{display:"flex",gap:6,marginTop:6}}>
+                            {activeStage.override !== 'done' && (
+                              <button onClick={()=>setStageOverride(activeStage.id, 'done')}
+                                style={{padding:"2px 8px",borderRadius:6,border:"1px solid #bbf7d0",background:"#f0fdf4",color:"#15803d",cursor:"pointer",fontSize:10,fontWeight:600,fontFamily:"inherit"}}>
+                                ✓ Marcar concluída
+                              </button>
+                            )}
+                            {activeStage.override !== 'reopened' && (
+                              <button onClick={()=>setStageOverride(activeStage.id, 'reopened')}
+                                style={{padding:"2px 8px",borderRadius:6,border:"1px solid #fde68a",background:"#fffbeb",color:"#92400e",cursor:"pointer",fontSize:10,fontWeight:600,fontFamily:"inherit"}}>
+                                ↺ Reabrir
+                              </button>
+                            )}
+                            {activeStage.override && (
+                              <button onClick={()=>setStageOverride(activeStage.id, null)}
+                                style={{padding:"2px 8px",borderRadius:6,border:"1px solid #e2e8f0",background:"#fff",color:"#94a3b8",cursor:"pointer",fontSize:10,fontWeight:600,fontFamily:"inherit"}}>
+                                Usar detecção automática
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* ── Checklist de Prontidão (card fixo, DEC-EP-003/004) — modal expandido abre
+                  tests/policyJourney.test.js abaixo. */}
+              {!showDiscardedActions && journeyReadiness && (
+                <button onClick={()=>setReadinessModalOpen(true)}
+                  title="Ver o Checklist de Prontidão completo"
+                  style={{width:"100%",marginBottom:8,padding:"7px 10px",borderRadius:8,border:"1px solid #e2e8f0",
+                    background:"#fff",cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"space-between",gap:6}}>
+                  <span style={{fontSize:11.5,fontWeight:600,color:"#334155"}}>✅ Checklist de Prontidão</span>
+                  <span style={{fontSize:10.5,fontWeight:700,color: readinessPassCount === readinessActiveCount && readinessActiveCount > 0 ? "#15803d" : "#64748b",
+                    background: readinessPassCount === readinessActiveCount && readinessActiveCount > 0 ? "#f0fdf4" : "#f1f5f9", borderRadius:20,padding:"2px 8px"}}>
+                    {readinessPassCount}/{readinessActiveCount}
+                  </span>
+                </button>
+              )}
+
               {/* 🔎 Buscar oportunidades (Sessão NB3): roda Descoberta + Simplificação fora do
                   tick e injeta os achados como cards Tier 2 carimbados. Fica no feed, não no
                   Ribbon — é a ação do Copiloto que popula as fontes caras sob demanda. */}
@@ -9054,9 +9319,24 @@ export default function App() {
                 </div>
               )}
               {model && shown.length === 0 && (
-                <div style={{padding:"9px 10px",borderRadius:8,background: showDiscardedActions ? "#f8fafc" : "#f0fdf4",border:`1px solid ${showDiscardedActions?"#e2e8f0":"#bbf7d0"}`,fontSize:11.5,color: showDiscardedActions ? "#94a3b8" : "#15803d",lineHeight:1.5,display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{padding:"9px 10px",borderRadius:8,background: showDiscardedActions ? "#f8fafc" : "#f0fdf4",border:`1px solid ${showDiscardedActions?"#e2e8f0":"#bbf7d0"}`,fontSize:11.5,color: showDiscardedActions ? "#94a3b8" : "#15803d",lineHeight:1.5,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
                   <span>{showDiscardedActions ? '🗂' : '✅'}</span>
-                  <span>{showDiscardedActions ? 'Nenhum card descartado ou adiado.' : 'Nenhuma pendência no momento.'}</span>
+                  <span>{showDiscardedActions ? 'Nenhum card descartado ou adiado.' : (journeyStageFilter ? 'Nenhuma pendência para esta etapa.' : 'Nenhuma pendência no momento.')}</span>
+                  {journeyStageFilter && !showDiscardedActions && (
+                    <button onClick={()=>setJourneyStageFilter(null)}
+                      style={{marginLeft:"auto",background:"none",border:"none",padding:0,cursor:"pointer",fontSize:10.5,color:"#15803d",textDecoration:"underline",fontFamily:"inherit"}}>
+                      Limpar filtro
+                    </button>
+                  )}
+                </div>
+              )}
+              {model && shown.length > 0 && journeyStageFilter && !showDiscardedActions && (
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,fontSize:10.5,color:"#64748b"}}>
+                  <span>Filtrado por: <b>{JOURNEY_STAGE_META[journeyStageFilter]?.label}</b></span>
+                  <button onClick={()=>setJourneyStageFilter(null)}
+                    style={{background:"none",border:"none",padding:0,cursor:"pointer",fontSize:10.5,color:"#2563eb",textDecoration:"underline",fontFamily:"inherit"}}>
+                    Limpar
+                  </button>
                 </div>
               )}
               {model && shown.length > 0 && (
@@ -9455,6 +9735,28 @@ export default function App() {
                           muda — nunca durante a edição. Os cards continuam marcados “desatualizado”
                           quando a política muda de novo; recalcular é sempre uma ação sua. Desligado
                           por padrão: a busca só acontece pelo botão <b>🔎 Buscar oportunidades</b> do feed.
+                        </div>
+                      </div>
+                      {/* Jornada — Checklist de Prontidão (Épico EP, Sessão EP2, DEC-EP-003) —
+                          ativa/desativa critérios do checklist. Persiste em journeyState
+                          (schema 3.5); critério desativado vira 'na' e sai da conta de E6. */}
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,margin:0}}>Jornada — Checklist de Prontidão</p>
+                        {READINESS_CRITERIA_IDS.map(critId => {
+                          const meta = READINESS_CRITERIA_META[critId] || { label: critId, desc: '' };
+                          const enabled = journeyState.readinessConfig[critId] !== false;
+                          return (
+                            <label key={critId} style={{display:"flex",alignItems:"flex-start",gap:8,cursor:"pointer",fontSize:12.5,color:"#475569",fontWeight:500}}>
+                              <input type="checkbox" checked={enabled}
+                                onChange={()=>setReadinessCriterionEnabled(critId, !enabled)}
+                                style={{width:15,height:15,accentColor:"#16a34a",marginTop:2}}/>
+                              <span>{meta.label}<span style={{display:"block",fontSize:10.5,color:"#94a3b8",fontWeight:400,marginTop:1}}>{meta.desc}</span></span>
+                            </label>
+                          );
+                        })}
+                        <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5}}>
+                          Critério desativado sai da conta do Checklist de Prontidão (card fixo/modal da
+                          aba 🧭 Copiloto) e da etapa 6 · Validação e entrega do trilho.
                         </div>
                       </div>
                     </div>
@@ -13182,6 +13484,69 @@ export default function App() {
       })()}
 
       {/* ═══════════════ DOCUMENTAÇÃO AUTOMÁTICA — Copiloto Sessão 6 (DEC-IA-006) ═══════════════ */}
+      {/* ═══ Modal do Checklist de Prontidão (Jornada EP, Sessão EP2, DEC-EP-003/004) ═══ */}
+      {readinessModalOpen && journeyReadiness && (() => {
+        const passCount = journeyReadiness.criteria.filter(c => c.state === 'pass').length;
+        const activeCount = journeyReadiness.criteria.filter(c => c.state !== 'na').length;
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.6)",backdropFilter:"blur(4px)",
+            zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+            onClick={()=>setReadinessModalOpen(false)}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:560,maxHeight:"88vh",
+              boxShadow:"0 32px 100px rgba(0,0,0,.28)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                padding:"14px 24px",borderBottom:"1px solid #e2e8f0",flexShrink:0,
+                background:"linear-gradient(135deg,#f0fdf4 0%,#dcfce7 100%)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:38,height:38,borderRadius:10,background:"#bbf7d0",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>✅</div>
+                  <div>
+                    <h2 style={{fontSize:15,fontWeight:700,color:"#1e293b",marginBottom:1}}>Checklist de Prontidão</h2>
+                    <p style={{fontSize:11,color:"#15803d"}}>{passCount}/{activeCount} critérios ativos passam — "pronta para o comitê?"</p>
+                  </div>
+                </div>
+                <button onClick={()=>setReadinessModalOpen(false)}
+                  style={{width:32,height:32,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",
+                    cursor:"pointer",fontSize:15,color:"#64748b",display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"inherit"}}>✕</button>
+              </div>
+              <div style={{padding:"14px 24px",overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:8}}>
+                {READINESS_CRITERIA_IDS.map(critId => {
+                  const c = journeyReadiness.criteria.find(x => x.id === critId);
+                  if (!c) return null;
+                  const meta = READINESS_CRITERIA_META[critId] || { label: critId, desc: '' };
+                  const tone = c.state === 'pass' ? { icon:'✅', color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0' }
+                    : c.state === 'fail' ? { icon:'❌', color:'#b91c1c', bg:'#fef2f2', border:'#fecaca' }
+                    : { icon:'—', color:'#94a3b8', bg:'#f8fafc', border:'#e2e8f0' };
+                  return (
+                    <div key={critId} style={{padding:"9px 10px",borderRadius:8,background:tone.bg,border:`1px solid ${tone.border}`}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span>{tone.icon}</span>
+                        <span style={{flex:1,fontSize:12,fontWeight:700,color:tone.color}}>{meta.label}</span>
+                        {c.state === 'na' && <span style={{fontSize:10,color:"#94a3b8"}}>desativado</span>}
+                      </div>
+                      <div style={{fontSize:10.5,color:"#64748b",marginTop:3,lineHeight:1.45,marginLeft:22}}>{meta.desc}</div>
+                      {c.state === 'fail' && c.fixCommandId && (
+                        <div style={{marginLeft:22,marginTop:6}}>
+                          <button onClick={()=>{ runNextActionCTA({ commandId: c.fixCommandId, args: {} }); setReadinessModalOpen(false); }}
+                            style={{padding:"3px 10px",borderRadius:6,border:"1px solid #fecaca",background:"#fff",color:"#b91c1c",cursor:"pointer",fontSize:10.5,fontWeight:600,fontFamily:"inherit"}}>
+                            Resolver
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <div style={{fontSize:10.5,color:"#94a3b8",lineHeight:1.5,marginTop:4}}>
+                  Critérios podem ser ativados/desativados no ⚙ Hub de Configurações → 🗔 Interface →
+                  "Jornada — Checklist de Prontidão".
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {docModal&&(()=>{
         const { step, includeDomains, compareCanvasId, docModel } = docModal;
         const canvasOptions = Object.values(canvases).filter(c => c.id !== activeCanvasId);

@@ -6,8 +6,10 @@ import {
   computeLensPopulations,
   computeSimulatedDecisions,
   computeIncrementalResult,
+  computePolicyInsights,
 } from '../src/simulation.worker.js';
 import { buildColumnar } from '../src/columnar.js';
+import { computeReadiness, READINESS_CRITERIA_IDS } from '../src/policyJourney.js';
 
 // ── GATE Sessão 6 do Copiloto (Documentação Automática — DEC-IA-006) ─────────────
 // docModel = dados crus do motor (sem prosa) montados por computePolicyDoc (worker);
@@ -363,5 +365,105 @@ describe('Documentação Automática · Regras das Faixas (Variável de Faixas n
     const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: true });
     expect(renderDocMarkdown(docModel)).not.toContain('Regras das Faixas');
     expect(renderDocHTML(docModel)).not.toContain('Regras das Faixas');
+  });
+});
+
+// ── Seção "Prontidão da Política" (Jornada EP, Sessão EP2, DEC-EP-005) ───────────────
+// docModel.readiness = computeReadiness (policyJourney.js) sobre os MESMOS insumos já
+// varridos por computePolicyDoc no mesmo passe (lint/coverage) + o que só a main tem pronto
+// (docFingerprint/baseProfile/simplify, via options) — nunca recomputa a matemática.
+describe('Documentação Automática · Prontidão da Política (docModel.readiness)', () => {
+  it('docModel.readiness.criteria ≡ computeReadiness chamado com os MESMOS insumos, número a número', () => {
+    const csvStore = toColumnarStore(STORE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: true });
+
+    // Réplica manual dos artifacts que computePolicyDoc monta internamente.
+    const { populations, counts: lensCounts } = computeLensPopulations(shapes, csvStore);
+    const tick = computeSimulationTick(shapes, conns, csvStore, populations);
+    const lint = computePolicyInsights(shapes, conns, tick.nodeArrivals, lensCounts);
+    const coverage = { totalQty: tick.simResult.totalQty, decidedQty: tick.simResult.approvedQty + tick.simResult.rejectedQty };
+    const expected = computeReadiness(shapes, conns, csvStore, {
+      ir, lint, coverage, pendingVars: [], hasAsIs: true,
+      docFingerprint: null, baseProfile: null, simplify: null,
+    }, {});
+
+    expect(docModel.readiness).toEqual(expected);
+    expect(docModel.readiness.criteria.map(c => c.id)).toEqual(READINESS_CRITERIA_IDS);
+  });
+
+  it('respeita readinessConfig (critério desativado ⇒ na, sai da conta de pass/fail)', () => {
+    const csvStore = toColumnarStore(STORE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], {
+      includeDomains: true,
+      readinessConfig: { doc_current: false },
+    });
+    const crit = docModel.readiness.criteria.find(c => c.id === 'doc_current');
+    expect(crit.state).toBe('na');
+  });
+
+  it('Markdown/HTML mostram "Prontidão da Política" com a contagem pass/ativos e o rótulo de cada critério', () => {
+    const csvStore = toColumnarStore(STORE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: true });
+    const passCount = docModel.readiness.criteria.filter(c => c.state === 'pass').length;
+    const activeCount = docModel.readiness.criteria.filter(c => c.state !== 'na').length;
+
+    for (const text of [renderDocMarkdown(docModel), renderDocHTML(docModel)]) {
+      expect(text).toContain('Prontidão da Política');
+      expect(text).toContain(`${passCount}/${activeCount}`);
+      expect(text).toContain('100% da população decidida');
+      expect(text).toContain('AS IS configurado e delta simulado');
+    }
+  });
+
+  it('degradação: doc nunca gerada (docFingerprint null) ⇒ critério "doc_current" falha, declarado no texto', () => {
+    const csvStore = toColumnarStore(STORE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: true });
+    const crit = docModel.readiness.criteria.find(c => c.id === 'doc_current');
+    expect(crit.state).toBe('fail');
+    expect(crit.facts.generated).toBe(false);
+
+    const md = renderDocMarkdown(docModel);
+    expect(md).toContain('| Documentação gerada e atual | Falha |');
+  });
+
+  it('degradação: sem AS IS configurado (asIsConfig null) ⇒ critério "asis_delta" falha', () => {
+    const csvStore = toColumnarStore({ base: { ...STORE.base, asIsConfig: null } });
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: true });
+    const crit = docModel.readiness.criteria.find(c => c.id === 'asis_delta');
+    expect(crit.state).toBe('fail');
+    expect(crit.facts.asIsConfigured).toBe(false);
+  });
+
+  it('privacidade (N2): com domínios desligados, a seção de Prontidão não vaza nenhum valor de domínio da fixture', () => {
+    const csvStore = toColumnarStore(STORE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const docModel = computePolicyDoc(shapes, conns, csvStore, ir, [], { includeDomains: false });
+    for (const text of [renderDocMarkdown(docModel), renderDocHTML(docModel)]) {
+      expect(text).toContain('Prontidão da Política');
+      for (const forbidden of ['G1', 'G2', 'G3', 'F1', 'F2', 'LOJA', 'PAP', 'APP']) {
+        expect(text).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it('determinismo: duas gerações consecutivas com a mesma entrada produzem o mesmo readiness, byte a byte', () => {
+    const csvStore = toColumnarStore(STORE);
+    const { shapes, conns } = integratedFlow();
+    const ir = buildPolicyIR(shapes, conns, csvStore, {});
+    const options = { includeDomains: true };
+    const d1 = computePolicyDoc(shapes, conns, csvStore, ir, [], options);
+    const d2 = computePolicyDoc(shapes, conns, csvStore, ir, [], options);
+    expect(JSON.stringify(d1.readiness)).toBe(JSON.stringify(d2.readiness));
   });
 });

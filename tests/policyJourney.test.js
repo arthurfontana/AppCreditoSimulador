@@ -4,6 +4,8 @@ import {
   computeReadiness,
   STAGE_IDS,
   READINESS_CRITERIA_IDS,
+  ACTION_KIND_STAGE,
+  stageForActionKind,
 } from '../src/policyJourney.js';
 import { policyIRFingerprint } from '../src/policyFingerprint.js';
 import {
@@ -537,5 +539,34 @@ describe('detectJourneyStages · E6 Validação = checklist 100% nos critérios 
     const st = byId(detectJourneyStages(shapes, [], csvStore, art), 'validation');
     expect(st.state).toBe('done'); // o único que falhava foi desativado
     expect(st.facts.activeCount).toBe(6); // 7 critérios − full_coverage desativado
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// (D) ACTION_KIND_STAGE — mapeamento kind (Épico NB) → etapa (DEC-EP-004, Sessão EP2)
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+describe('ACTION_KIND_STAGE · todo kind do catálogo v1 mapeia para uma etapa válida', () => {
+  // Catálogo v1 do NextActionsModel (docs/claude/Jornada-Feed.md) — mesmos 18 kinds cobertos
+  // por tests/nextActionInsights.test.js (ACTION_TEMPLATES de src/nextActionInsights.js).
+  const NB_ACTION_KINDS = [
+    'connect_port', 'fix_lint_dead_branch', 'fix_lint_unreachable_node', 'fix_lint_cycle',
+    'fix_lint_zero_arrival', 'fix_lint_lens_empty', 'fix_lint_duplicate_variable_path',
+    'fix_lint_path_without_terminal', 'first_branch', 'explore_base', 'map_pending_var',
+    'configure_asis', 'document', 'save_library', 'journey_next', 'apply_opportunity',
+    'add_break', 'simplify',
+  ];
+
+  it('cada kind do catálogo v1 tem entrada em ACTION_KIND_STAGE apontando para um STAGE_ID', () => {
+    for (const kind of NB_ACTION_KINDS) {
+      expect(Object.prototype.hasOwnProperty.call(ACTION_KIND_STAGE, kind)).toBe(true);
+      expect(STAGE_IDS).toContain(ACTION_KIND_STAGE[kind]);
+      expect(stageForActionKind(kind)).toBe(ACTION_KIND_STAGE[kind]);
+    }
+  });
+
+  it('kind desconhecido degrada para null (nunca esconde um card por lacuna de mapeamento)', () => {
+    expect(stageForActionKind('kind_futuro_sem_entrada')).toBeNull();
+    expect(stageForActionKind(undefined)).toBeNull();
   });
 });
