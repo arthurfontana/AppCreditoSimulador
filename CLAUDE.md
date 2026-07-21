@@ -79,6 +79,17 @@ imediatamente. Refs existentes: `vpR`, `shapesR`, `connsR`, `toolR`, `fromIdR`, 
 `businessWidgetR`, `cinemaLibraryR`, `canvasesR`, `activeCanvasIdR`, `rangeModalR`,
 `rangeVarModalR`, `cmdPaletteR`.
 
+## Convenção de UI — indicadores estatísticos sempre com "ⓘ"
+Esta app atende do estagiário (que está aprendendo o vocabulário de política de crédito)
+ao analista sênior (que quer o número sem ruído) — a mesma tela serve os dois. **Toda vez
+que a UI exibir um indicador estatístico/técnico** (IV, WoE, p-value, FDR, PSI, silhueta,
+variância explicada, lift, lower bound, etc.), ele ganha um selo **`ⓘ`** (componente
+`InfoDot`, `src/App.jsx`, perto de `BuildBadge`) com `title` explicando em português simples
+o que o indicador significa e como interpretá-lo — nunca só a fórmula. O selo é pequeno
+(14px, tooltip nativo do navegador) e não aparece a menos que o usuário passe o mouse: não
+polui a tela do sênior, mas está lá para o júnior. Exemplo: `rangeModal` ("Criar Faixas por
+Risco") — IV e WoE da tabela de resultado.
+
 ## ⚠️ Regra para novas features — o que o usuário cria/ajusta PRECISA ser salvo
 
 Esta regra é **inviolável** — persistida aqui na íntegra (o resto da mecânica de

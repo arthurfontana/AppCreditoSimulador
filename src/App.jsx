@@ -135,6 +135,23 @@ function formatBuildTime(iso) {
   } catch { return { short: "—", full: "—" }; }
 }
 
+// ── InfoDot — "ⓘ" pedagógico para indicadores estatísticos (WoE, IV, p-value, PSI, …) ──
+// Convenção do app (CLAUDE.md § Indicadores estatísticos): todo indicador estatístico
+// exibido na UI ganha este selo com uma explicação em português simples de como
+// interpretá-lo — o estagiário lê o texto no hover, o analista sênior ignora o selo de
+// 14px e segue direto para o número. Tooltip nativo (`title`) — mesmo padrão já usado no
+// Goal Seek (📍 Ponto de partida), agora extraído para reuso.
+function InfoDot({ text }) {
+  return (
+    <span title={text} tabIndex={0}
+      style={{fontSize:10,color:"#94a3b8",cursor:"help",border:"1px solid #cbd5e1",borderRadius:"50%",
+        width:14,height:14,display:"inline-flex",alignItems:"center",justifyContent:"center",flexShrink:0,
+        lineHeight:1,fontFamily:"inherit"}}>
+      ⓘ
+    </span>
+  );
+}
+
 function BuildBadge() {
   const [tip, setTip] = useState(false);
   const { short, full } = formatBuildTime(BUILD_TIME);
@@ -7607,6 +7624,15 @@ export default function App() {
     openClusterModal(null);
     setClusterModal(m => m ? { ...m, csvId, dims: [col] } : m);
   }, []);
+  // "✏️ Editar variável": mesmo editor (clusterVarModal/rangeVarModal) do painel de
+  // variáveis do canvas — reusa openClusterVarEdit/openRangeVarEdit sem caminho novo.
+  // Precisa navegar para o Canvas primeiro (mesmo motivo do Faixas/Clusterizar acima:
+  // os modais vivem no JSX do CANVAS PANE, display:none fora de activeTab==='canvas').
+  const exploreEditVar = useCallback((col, csvId) => {
+    setActiveTab('canvas');
+    if (isClusterVar(csvStoreR.current, csvId, col)) openClusterVarEdit(csvId, col);
+    else if (isRangeVar(csvStoreR.current, csvId, col)) openRangeVarEdit(csvId, col);
+  }, []);
 
   // Classe A (DEC-FR-004): SEMPRE no worker, JAMAIS roteia ao sidecar — sem
   // ComputeRouter/deep run, ao contrário da Clusterização.
@@ -8496,7 +8522,7 @@ export default function App() {
         riskMetric={exploreRiskMetric} onRiskMetricChange={setExploreRiskMetric}
         layout={exploreLayouts[exploreCsvId] || []} setLayout={(updater) => setExploreLayoutForCsv(exploreCsvId, updater)}
         onRegenerate={regenerateExploreLayout}
-        actions={{ onUseAsFirstBranch: exploreUseAsFirstBranch, onCreateRanges: exploreCreateRangesFor, onClusterize: exploreClusterizeFrom }}
+        actions={{ onUseAsFirstBranch: exploreUseAsFirstBranch, onCreateRanges: exploreCreateRangesFor, onClusterize: exploreClusterizeFrom, onEditVar: exploreEditVar }}
         datasetGrouped={groupedExploreDataset} datasetRaw={exploreAnalyticsDataset}
         groupings={exploreGroupings[exploreCsvId] || []} setGroupings={(updater) => setExploreGroupingsForCsv(exploreCsvId, updater)}
         pageFilters={explorePageFilters[exploreCsvId] || []} setPageFilters={(updater) => setExplorePageFiltersForCsv(exploreCsvId, updater)}
@@ -13117,12 +13143,7 @@ export default function App() {
                           📍 Ponto de partida
                         </span>
                         <span style={{fontSize:10.5,color:"#94a3b8",fontWeight:500}}>(população decidida pela política)</span>
-                        <span
-                          title="Medido sobre a população que a política decide (chega a um terminal), não sobre a base inteira — por isso pode diferir do painel de simulação."
-                          style={{fontSize:10,color:"#94a3b8",cursor:"help",border:"1px solid #cbd5e1",borderRadius:"50%",
-                            width:14,height:14,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,lineHeight:1}}>
-                          ⓘ
-                        </span>
+                        <InfoDot text="Medido sobre a população que a política decide (chega a um terminal), não sobre a base inteira — por isso pode diferir do painel de simulação." />
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
                         {GOAL_SEEK_CONTEXT_CARDS.map(({k,label})=>{
@@ -14592,8 +14613,9 @@ export default function App() {
                         {model.quality.monotonic==='dec' && '📉 monotônico decrescente'}
                         {!model.quality.monotonic && '⚠ não monotônico (permitido pelo usuário)'}
                       </span>
-                      <span style={{fontSize:11.5,color:"#0f766e",fontWeight:600}}>
+                      <span style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11.5,color:"#0f766e",fontWeight:600}}>
                         IV: {model.quality.iv?.toFixed(3)} <span style={{color:"#94a3b8",fontWeight:400}}>(corte uniforme com o mesmo k: {model.quality.ivUniform?.toFixed(3)})</span>
+                        <InfoDot text="IV (Information Value) mede o quanto essas faixas separam bons de maus pagadores — quanto maior, mais discriminante a variável. Referência de mercado: <0,02 sem poder preditivo · 0,02–0,10 fraco · 0,10–0,30 médio · 0,30–0,50 forte · >0,50 suspeito (investigue vazamento de dado). 'Corte uniforme' é o IV se as faixas tivessem o mesmo k mas cortes por quantil cego (sem otimizar) — mostra o quanto o binning supervisionado ganhou sobre um corte ingênuo." />
                       </span>
                       {!monotonic && compareMonotonicIv!=null && (
                         <span style={{fontSize:11.5,color:"#92400e",fontWeight:600}}>
@@ -14625,7 +14647,12 @@ export default function App() {
                             <th style={{textAlign:"right",padding:"6px 8px",color:"#94a3b8",fontWeight:600}}>Volume</th>
                             <th style={{textAlign:"left",padding:"6px 8px",color:"#94a3b8",fontWeight:600,width:120}}>Share</th>
                             <th style={{textAlign:"left",padding:"6px 8px",color:"#94a3b8",fontWeight:600,width:120}}>Taxa</th>
-                            <th style={{textAlign:"right",padding:"6px 10px",color:"#94a3b8",fontWeight:600}}>WoE</th>
+                            <th style={{textAlign:"right",padding:"6px 10px",color:"#94a3b8",fontWeight:600}}>
+                              <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
+                                WoE
+                                <InfoDot text="WoE (Weight of Evidence) compara, nesta faixa, a proporção de pagadores bons vs. maus frente à base toda. Positivo = faixa mais segura que a média (menos inadimplência); negativo = faixa mais arriscada que a média; perto de zero = parecida com a média. Quanto mais distante de zero, mais essa faixa se destaca do padrão geral — é o indicador por faixa que, somado, compõe o IV da variável inteira." />
+                              </span>
+                            </th>
                           </tr>
                         </thead>
                         <tbody>
