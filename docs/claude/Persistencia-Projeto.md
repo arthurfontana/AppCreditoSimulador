@@ -11,14 +11,17 @@ painel direito). Persistência completa do estudo num único arquivo
 parou.
 
 - **`buildProjectPayload()`** — **FONTE ÚNICA DA VERDADE do que é persistido.**
-  Monta o snapshot `{schemaVersion:"3.1", kind:"credito-project", generatedAt,
+  Monta o snapshot `{schemaVersion:"3.2", kind:"credito-project", generatedAt,
   activeTab, ribbonActiveTab, ribbonMode, statusBarIndicators, rightPanelMode, viewport, panelCollapsed,
   canvases, activeCanvasId, csvStore,
-  analyticsLayout, analyticsGroupings, analyticsPageFilters,
+  analyticsLayout, analyticsGroupings, analyticsPageFilters, exploreLayouts,
   cinemaLibrary, policyLibrary, businessWidget, preferences}`.
   (`ribbonActiveTab` desde 2.8; `ribbonMode` — colapso do Ribbon em 3 estados — desde 2.9;
   `statusBarIndicators` — quais indicadores aparecem na Status Bar, UX 2.0 Sessão 5 — desde 3.0;
-  `rightPanelMode` — aba interna do painel direito Ativos/Inspetor/Copiloto, UX 2.0 Sessão 6 — desde 3.1.)
+  `rightPanelMode` — aba interna do painel direito Ativos/Inspetor/Copiloto, UX 2.0 Sessão 6 — desde 3.1;
+  `exploreLayouts` — layout por base da aba Explorar (Épico EB, EB2, `{[csvId]: WidgetConfig[]}`)
+  — desde 3.2. O `BaseProfileModel` consumido pela aba é DERIVADO e não entra no payload —
+  ver `docs/claude/Explorar-Base.md`.)
   `preferences` = `{enableDynThickness, showEdgeVol, showEdgeInadReal, showEdgeInadInf}`.
   Mescla a working copy do canvas ativo (`shapes`/`conns`) de volta em `canvases`
   (igual ao effect da `sessionStorage`) — **sem isso, edições no canvas ativo (ex.:
@@ -74,7 +77,8 @@ bases, inferência, dashboard, biblioteca e preferências).
 de **todas** as abas (losangos, Cineminhas, Decision Lens e suas `rules`, frames,
 terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados completas
 (`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `clusterDefs`) · Dashboard
-(`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · biblioteca de
+(`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · layout da aba Explorar
+por base (`exploreLayouts`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`, H4/H6) ·
 viewport · aba ativa · indicadores da Status Bar (`statusBarIndicators`) · painel colapsado.

@@ -12,7 +12,7 @@
 // de ./analytics.js.
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  LineChart, Line, BarChart, Bar, ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, LabelList, ScatterChart, Scatter, ZAxis, Cell,
 } from "recharts";
 import {
@@ -21,6 +21,8 @@ import {
   CHART_TYPES, GOOD_WHEN_LOWER, MAX_SERIES, SERIE_COLORS,
   SERIE_CENARIO, SERIE_NONE, XDIM_CENARIO, GROUPING_OTHER_DEFAULT,
 } from "./analytics.js";
+import { buildDefaultExploreLayout } from "./explore.js";
+import { describeFinding, describeSection } from "./exploreInsights.js";
 import { fmtQty, fmtPct, uid, escHtml, LENS_OPERATORS, exportAnalyticsDatasetCSV } from "./App.jsx";
 
 // MIME do drag de campos (dimensões/métricas) no FieldPanel/FieldWell (estilo Power BI).
@@ -1420,6 +1422,412 @@ function TextWidget({ widget, onConfigChange, onDelete, onDuplicate, onDragStart
   );
 }
 
+// ── Explorar a Base — widgets do layout default (Épico EB, EB2) ───────────────
+// docs/wiki/Epicos-ExplorarBase.md (DEC-EB-001..012). Consomem o BaseProfileModel
+// (não o analyticsDataset — pipeline próprio, DEC-EB-002/003). Mesmo chassi de widget
+// do Dashboard (título editável + duplicar + remover + arrastar + redimensionar,
+// DEC-EB-005), corpo próprio por tipo: insight/ivrank/varprofile/quality/stability.
+
+const EXPLORE_SEVERITY_META = {
+  good:   { bg: "#f0fdf4", border: "#bbf7d0", icon: "✅" },
+  warn:   { bg: "#fffbeb", border: "#fde68a", icon: "⚠️" },
+  info:   { bg: "#f1f5f9", border: "#e2e8f0", icon: "ℹ️" },
+  danger: { bg: "#fef2f2", border: "#fecaca", icon: "🔥" },
+};
+const EXPLORE_FLAG_META = {
+  suspect_score:    { icon: "🎯", title: "Parece score/rating já em uso" },
+  suspect_temporal: { icon: "🕐", title: "Parece coluna de safra/cohort" },
+  low_coverage:     { icon: "⚠️", title: "Cobertura baixa" },
+  dominant_value:   { icon: "🏔", title: "Categoria dominante" },
+  high_cardinality: { icon: "🔀", title: "Alta cardinalidade" },
+  unstable_psi:     { icon: "📉", title: "Instável no tempo (PSI)" },
+};
+
+// Casca comum (título editável + AUTO badge + duplicar/remover/arrastar/redimensionar) —
+// mesmo padrão de AnalyticsWidget/TextWidget. `data-explore-capture` marca o corpo para
+// a exportação em PDF (captura genérica de DOM, sem branch por tipo).
+function ExploreWidgetShell({ widget, accent, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart, children }) {
+  const cfg = widget.config || {};
+  const set = (patch) => onConfigChange(widget.id, patch);
+  return (
+    <div style={{ position: "relative", background: "#fff", borderRadius: 14, border: `1px solid ${accent || "#e2e8f0"}`,
+      boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "14px 16px 12px", display: "flex", flexDirection: "column",
+      height: "100%", boxSizing: "border-box" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexShrink: 0 }}>
+        {onDragStart && <div onMouseDown={(e) => { e.stopPropagation(); onDragStart(e); }} style={{ cursor: "grab", color: "#cbd5e1", fontSize: 15, userSelect: "none", flexShrink: 0, lineHeight: 1 }}>⠿</div>}
+        <input value={cfg.title || ""} onChange={(e) => set({ title: e.target.value })} placeholder="Título"
+          style={{ flex: 1, fontSize: 14, fontWeight: 600, color: "#1e293b", border: "1px solid transparent",
+            borderRadius: 7, padding: "4px 7px", background: "transparent", fontFamily: "inherit", outline: "none", minWidth: 0 }}
+          onFocus={(e) => { e.target.style.borderColor = "#e2e8f0"; e.target.style.background = "#f8fafc"; }}
+          onBlur={(e) => { e.target.style.borderColor = "transparent"; e.target.style.background = "transparent"; }} />
+        {widget.origin === "auto" && (
+          <span title="Gerado automaticamente pela análise — editar promove este card a seu (não é recriado ao Regenerar)"
+            style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 700, color: "#94a3b8", background: "#f1f5f9", borderRadius: 6, padding: "2px 6px", letterSpacing: 0.3 }}>AUTO</span>
+        )}
+        {onDuplicate && (
+          <button onClick={() => onDuplicate(widget.id)} title="Duplicar"
+            style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff",
+              color: "#64748b", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>⧉</button>
+        )}
+        <button onClick={() => onDelete(widget.id)} title="Remover"
+          style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
+            color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+      </div>
+      <div data-explore-capture style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "auto" }}>
+        {children}
+      </div>
+      {onResizeStart && ['n','s','e','w','ne','nw','se','sw'].map(dir => {
+        const H = 8, C = 16;
+        const cur = { n:'n-resize', s:'s-resize', e:'e-resize', w:'w-resize', ne:'ne-resize', nw:'nw-resize', se:'se-resize', sw:'sw-resize' };
+        const pos = { n:{top:0,left:C,right:C,height:H}, s:{bottom:0,left:C,right:C,height:H}, e:{right:0,top:C,bottom:C,width:H}, w:{left:0,top:C,bottom:C,width:H}, ne:{top:0,right:0,width:C,height:C}, nw:{top:0,left:0,width:C,height:C}, se:{bottom:0,right:0,width:C,height:C}, sw:{bottom:0,left:0,width:C,height:C} }[dir];
+        return <div key={dir} onMouseDown={(e) => { e.stopPropagation(); onResizeStart(e, dir); }} style={{ position:"absolute", zIndex:10, cursor:cur[dir], ...pos }} />;
+      })}
+    </div>
+  );
+}
+
+// `insight` — card de leitura (DEC-EB-004/EB-006). `preset` abre uma seção (leitura sobre
+// o BaseProfileModel inteiro); `preset:'warnings'` lista TODOS os achados (insights[]).
+function ExploreInsightBody({ widget, profile }) {
+  const preset = widget.config?.preset;
+  if (preset === "warnings") {
+    const insights = profile?.insights || [];
+    if (insights.length === 0) return <div style={{ fontSize: 12.5, color: "#94a3b8" }}>Nenhum aviso encontrado nesta base.</div>;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        {insights.map((f, i) => {
+          const meta = EXPLORE_SEVERITY_META[f.severity] || EXPLORE_SEVERITY_META.info;
+          return (
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "7px 10px", borderRadius: 9, background: meta.bg, border: `1px solid ${meta.border}` }}>
+              <span style={{ fontSize: 12.5, flexShrink: 0, marginTop: 1 }}>{meta.icon}</span>
+              <span style={{ fontSize: 12, color: "#334155", lineHeight: 1.5 }}>{describeFinding(f)}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center" }}>
+      <p style={{ fontSize: 13.5, color: "#334155", lineHeight: 1.6, margin: 0 }}>{describeSection(preset, profile)}</p>
+    </div>
+  );
+}
+
+// `ivrank` — barra horizontal (div-based, controle total sobre os badges de flag) do
+// ranking global de variáveis (já ordenado por IV desc — DEC-EB-008).
+function ExploreIvRankBody({ profile }) {
+  const vars = profile?.variables || [];
+  if (vars.length === 0) return <AWEmptyState icon="📊" title="Sem variáveis" hint="Nenhuma coluna marcada como Variável de Decisão nesta base." />;
+  const maxIv = Math.max(0.01, ...vars.map(v => v.iv || 0));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      {vars.map(v => (
+        <div key={v.col} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 140, flexShrink: 0, fontSize: 11.5, color: "#334155", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={v.col}>{v.col}</span>
+          <div style={{ flex: 1, height: 15, background: "#f1f5f9", borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ width: `${v.iv != null ? Math.max(2, (v.iv / maxIv) * 100) : 0}%`, height: "100%",
+              background: v.iv >= 0.3 ? "#16a34a" : v.iv >= 0.1 ? "#2563eb" : "#94a3b8", borderRadius: 4 }} />
+          </div>
+          <span style={{ width: 42, flexShrink: 0, fontSize: 11, color: "#64748b", textAlign: "right" }}>{v.iv != null ? v.iv.toFixed(2) : "—"}</span>
+          <span style={{ display: "flex", gap: 3, flexShrink: 0, minWidth: 60 }}>
+            {v.flags.filter(f => EXPLORE_FLAG_META[f]).map(f => (
+              <span key={f} title={EXPLORE_FLAG_META[f].title} style={{ fontSize: 11.5 }}>{EXPLORE_FLAG_META[f].icon}</span>
+            ))}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// `varprofile` — volume (barras) + taxa da métrica-alvo (linha) por valor, eixo duplo
+// (Recharts ComposedChart, exceção DEC-AW-001 estendida à aba Explorar).
+function ExploreVarProfileBody({ widget, profile }) {
+  const col = widget.config?.col;
+  const v = (profile?.variables || []).find(x => x.col === col);
+  if (!v) return <AWEmptyState icon="📊" title="Variável não encontrada" hint="Esta variável pode não existir mais nesta base." />;
+  const data = (v.profile || []).map(p => ({ x: String(p.value), qty: p.qty, rate: p.rate != null ? p.rate * 100 : null }));
+  const metricLabel = profile?.metric?.label || "Taxa";
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 6, flexShrink: 0 }}>
+        IV {v.iv != null ? v.iv.toFixed(2) : "—"} · {v.distinct} valores · cobertura {v.coveragePct.toFixed(1)}%
+        {v.continuous && <span style={{ marginLeft: 6, color: "#2563eb" }}>· contínua</span>}
+      </div>
+      <div style={{ flex: 1, minHeight: 180 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+            <XAxis dataKey="x" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" />
+            <YAxis yAxisId="qty" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" />
+            <YAxis yAxisId="rate" orientation="right" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" unit="%" />
+            <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Bar yAxisId="qty" dataKey="qty" name="Volume" fill="#94a3b8" radius={[3, 3, 0, 0]} />
+            <Line yAxisId="rate" type="monotone" dataKey="rate" name={`${metricLabel} (%)`} stroke="#dc2626" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      {v.profileTruncated && <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 4, flexShrink: 0 }}>Mostrando os valores de maior volume.</div>}
+    </div>
+  );
+}
+
+// `quality` — tabela de cobertura/valores não-numéricos/categoria dominante por variável.
+function ExploreQualityBody({ profile }) {
+  const rows = profile?.quality || [];
+  if (rows.length === 0) return <AWEmptyState icon="🧪" title="Sem variáveis" hint="Nenhuma coluna marcada como Variável de Decisão nesta base." />;
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+      <thead>
+        <tr style={{ textAlign: "left", color: "#94a3b8", fontSize: 10, textTransform: "uppercase", letterSpacing: 0.4 }}>
+          <th style={{ padding: "4px 8px" }}>Variável</th>
+          <th style={{ padding: "4px 8px" }}>Cobertura</th>
+          <th style={{ padding: "4px 8px" }}>Não numérico</th>
+          <th style={{ padding: "4px 8px" }}>Categoria dominante</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(q => (
+          <tr key={q.col} style={{ borderTop: "1px solid #f1f5f9" }}>
+            <td style={{ padding: "5px 8px", fontWeight: 600, color: "#1e293b" }}>{q.col}</td>
+            <td style={{ padding: "5px 8px", color: q.coveragePct < 85 ? "#b45309" : "#334155" }}>{q.coveragePct.toFixed(1)}%</td>
+            <td style={{ padding: "5px 8px", color: "#64748b" }}>{q.unparseablePct != null ? `${q.unparseablePct.toFixed(1)}%` : "—"}</td>
+            <td style={{ padding: "5px 8px", color: q.dominantValue && q.dominantValue.sharePct >= 80 ? "#b45309" : "#64748b" }}>
+              {q.dominantValue ? `${q.dominantValue.value} (${q.dominantValue.sharePct.toFixed(0)}%)` : "—"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// `stability` — série por safra (volume + aprovação + inad., DEC-EB-009) + selo de PSI
+// por variável. Sem coluna ⏱ Temporal, declara a degradação (nunca inventa série).
+function ExploreStabilityBody({ profile }) {
+  if (!profile?.temporal) {
+    return <AWEmptyState icon="⏱" title="Sem coluna temporal"
+      hint='Marque uma coluna como "⏱ Temporal" no passo 2 do wizard de importação para habilitar esta análise.' />;
+  }
+  const series = profile.temporal.series.map(s => ({
+    x: s.bucket, qty: s.qty,
+    approvalRate: s.approvalRate != null ? s.approvalRate * 100 : null,
+    inadRate: s.inadRate != null ? s.inadRate * 100 : null,
+  }));
+  const psiRows = (profile.variables || []).filter(v => v.psi).sort((a, b) => b.psi.value - a.psi.value).slice(0, 8);
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, gap: 10 }}>
+      <div style={{ flex: 1, minHeight: 160 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={series} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+            <XAxis dataKey="x" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" />
+            <YAxis yAxisId="qty" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" />
+            <YAxis yAxisId="rate" orientation="right" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" unit="%" />
+            <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Bar yAxisId="qty" dataKey="qty" name="Volume" fill="#cbd5e1" radius={[3, 3, 0, 0]} />
+            <Line yAxisId="rate" type="monotone" dataKey="approvalRate" name="Aprovação (%)" stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+            <Line yAxisId="rate" type="monotone" dataKey="inadRate" name="Inadimplência (%)" stroke="#dc2626" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      {psiRows.length > 0 && (
+        <div style={{ flexShrink: 0 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 5, letterSpacing: 0.4 }}>
+            PSI por variável (janela referência → atual)
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {psiRows.map(v => {
+              const val = v.psi.value;
+              const color = val > 0.25 ? "#dc2626" : val > 0.1 ? "#b45309" : "#16a34a";
+              const bg = val > 0.25 ? "#fef2f2" : val > 0.1 ? "#fffbeb" : "#f0fdf4";
+              return (
+                <span key={v.col} title={`${v.psi.refWindow.from}–${v.psi.refWindow.to} → ${v.psi.curWindow.from}–${v.psi.curWindow.to}`}
+                  style={{ fontSize: 11, padding: "3px 8px", borderRadius: 12, background: bg, color, fontWeight: 600 }}>
+                  {v.col}: {val.toFixed(2)}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Dispatcher por tipo — a casca (shell) é sempre a mesma, só o corpo muda.
+function ExploreWidget({ widget, profile, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart }) {
+  const body = widget.type === "ivrank" ? <ExploreIvRankBody profile={profile} />
+    : widget.type === "varprofile" ? <ExploreVarProfileBody widget={widget} profile={profile} />
+    : widget.type === "quality" ? <ExploreQualityBody profile={profile} />
+    : widget.type === "stability" ? <ExploreStabilityBody profile={profile} />
+    : <ExploreInsightBody widget={widget} profile={profile} />;
+  const accent = widget.type === "insight" ? "#ddd6fe" : "#e2e8f0";
+  return (
+    <ExploreWidgetShell widget={widget} accent={accent} onConfigChange={onConfigChange} onDelete={onDelete}
+      onDuplicate={onDuplicate} onDragStart={onDragStart} onResizeStart={onResizeStart}>
+      {body}
+    </ExploreWidgetShell>
+  );
+}
+
+// ── ExploreTab — página da aba Explorar ────────────────────────────────────────
+// Header: seletor de base + seletor de métrica-alvo + ↻ Regenerar análise + Exportar PDF.
+// Canvas: mesma mecânica de posicionamento livre (drag/resize) do Dashboard, sem o
+// FieldPanel/Filtros/Agrupamentos (builder livre é da EB4, DEC-EB-011) — a EB2 entrega só
+// o layout default gerado automaticamente (DEC-EB-005/006).
+function ExploreTab({ profile, csvStore, csvId, onCsvIdChange, riskMetric, onRiskMetricChange, layout, setLayout, onRegenerate }) {
+  // Auto-init: primeiro perfil desta base com layout vazio ⇒ gera o default (DEC-EB-005).
+  useEffect(() => {
+    if (!profile || profile.error) return;
+    setLayout(prev => (prev && prev.length > 0) ? prev : buildDefaultExploreLayout(profile));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile]);
+
+  const changeConfig = (id, patch) => setLayout(prev => prev.map(w => w.id === id ? { ...w, config: { ...w.config, ...patch }, origin: "user" } : w));
+  const removeWidget = (id) => setLayout(prev => prev.filter(w => w.id !== id));
+  const duplicateWidget = (id) => setLayout(prev => {
+    const src = prev.find(w => w.id === id);
+    if (!src) return prev;
+    const clonedConfig = JSON.parse(JSON.stringify(src.config || {}));
+    clonedConfig.title = `${clonedConfig.title || "Card"} (cópia)`;
+    const copy = { ...src, id: uid(), origin: "user", config: clonedConfig, x: (src.x ?? 24) + 28, y: (src.y ?? 24) + 28 };
+    const idx = prev.findIndex(w => w.id === id);
+    return [...prev.slice(0, idx + 1), copy, ...prev.slice(idx + 1)];
+  });
+
+  const layoutRef = useRef(layout);
+  useEffect(() => { layoutRef.current = layout; }, [layout]);
+  const dragRef = useRef(null);
+  const startWidgetInteract = (id, e, type, dir) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const wgt = layoutRef.current.find(w => w.id === id);
+    if (!wgt) return;
+    dragRef.current = { id, type, dir, startX: e.clientX, startY: e.clientY, startWx: wgt.x ?? 24, startWy: wgt.y ?? 24, startW: wgt.w ?? 520, startH: wgt.h ?? 360, minW: 340, minH: 160 };
+    const onMove = (ev) => {
+      const dr = dragRef.current; if (!dr) return;
+      const dx = ev.clientX - dr.startX, dy = ev.clientY - dr.startY;
+      if (dr.type === "move") {
+        setLayout(prev => prev.map(w => w.id === dr.id ? { ...w, x: Math.max(0, dr.startWx + dx), y: Math.max(0, dr.startWy + dy) } : w));
+      } else {
+        const d = dr.dir;
+        let nx = dr.startWx, ny = dr.startWy, nw = dr.startW, nh = dr.startH;
+        if (d.includes('e')) nw = Math.max(dr.minW, dr.startW + dx);
+        if (d.includes('s')) nh = Math.max(dr.minH, dr.startH + dy);
+        if (d.includes('w')) { nw = Math.max(dr.minW, dr.startW - dx); nx = Math.max(0, dr.startWx + dr.startW - nw); }
+        if (d.includes('n')) { nh = Math.max(dr.minH, dr.startH - dy); ny = Math.max(0, dr.startWy + dr.startH - nh); }
+        setLayout(prev => prev.map(w => w.id === dr.id ? { ...w, x: nx, y: ny, w: nw, h: nh } : w));
+      }
+    };
+    const onUp = () => { dragRef.current = null; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // ── Exportar Explorar como PDF — mesmo padrão de exportDashboardPDF (janela + print),
+  // captura genérica via [data-explore-capture] (sem branch por tipo de widget).
+  const exportExplorePDF = () => {
+    if (!profile || layout.length === 0) return;
+    const ordered = [...layout].sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0));
+    const cards = ordered.map(w => {
+      const node = typeof document !== "undefined" ? document.querySelector(`[data-explore-widget-id="${w.id}"] [data-explore-capture]`) : null;
+      const body = node ? node.outerHTML : '<p class="muted">(sem conteúdo)</p>';
+      return `<section class="card"><h3>${escHtml(w.config?.title || "Componente")}</h3><div class="visual">${body}</div></section>`;
+    }).join("");
+    const style = `<style>
+      *{box-sizing:border-box;} body{font-family:system-ui,-apple-system,sans-serif;color:#1e293b;margin:0;padding:28px 32px;background:#fff;}
+      h1{font-size:22px;margin:0 0 4px;} .sub{color:#94a3b8;font-size:12px;margin:0 0 20px;}
+      h3{font-size:15px;margin:0 0 8px;color:#0f172a;} .muted{color:#94a3b8;}
+      .card{border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px 14px;margin:0 0 18px;page-break-inside:avoid;break-inside:avoid;}
+      table{width:100%;border-collapse:collapse;font-size:12px;} th,td{padding:4px 8px;text-align:left;}
+      @media print{body{padding:0;} .card{box-shadow:none;}}
+    </style>`;
+    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Explorar a Base — Exportação</title>${style}</head><body>
+      <h1>Explorar a Base — ${escHtml(csvStore?.[csvId]?.name || csvId || "")}</h1>
+      <p class="sub">Exportado em ${escHtml(new Date().toLocaleString("pt-BR"))} · ${ordered.length} componente(s)</p>
+      ${cards}
+    </body></html>`;
+    const win = typeof window !== "undefined" ? window.open("", "_blank") : null;
+    if (!win) return;
+    win.document.open(); win.document.write(html); win.document.close(); win.focus();
+    setTimeout(() => { try { win.print(); } catch { /* ignore */ } }, 400);
+  };
+
+  const csvOptions = Object.entries(csvStore || {});
+  const hasData = csvOptions.length > 0;
+  const canvasH = layout.reduce((acc, w) => Math.max(acc, (w.y ?? 24) + (w.h ?? 360) + 80), 600);
+  const canvasW = layout.reduce((acc, w) => Math.max(acc, (w.x ?? 24) + (w.w ?? 1100) + 40), 1160);
+
+  const selStyle = { padding: "7px 10px", borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff",
+    fontSize: 12.5, color: "#1e293b", fontFamily: "inherit", outline: "none", cursor: "pointer" };
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", background: "#f8fafc" }}>
+      <div style={{ flexShrink: 0, padding: "20px 28px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+        <div>
+          <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>🔎 Explorar a Base</h1>
+          <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
+            A análise que um analista sênior faria antes do primeiro galho — funciona com o canvas vazio.
+          </p>
+        </div>
+        {hasData && (
+          <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <select value={csvId || ""} onChange={(e) => onCsvIdChange(e.target.value)} style={selStyle} title="Base analisada">
+              {csvOptions.map(([id, c]) => <option key={id} value={id}>{c.name || id}</option>)}
+            </select>
+            <select value={riskMetric} onChange={(e) => onRiskMetricChange(e.target.value)} style={selStyle} title="Métrica-alvo">
+              <option value="inadReal">Inad. Real</option>
+              <option value="inadInferida">Inad. Inferida</option>
+            </select>
+            <button onClick={onRegenerate}
+              title="Recria os cards gerados automaticamente (origin AUTO), preservando os que você criou ou editou"
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+              <span style={{ fontSize: 14, lineHeight: 1 }}>↻</span> Regenerar análise
+            </button>
+            <button onClick={exportExplorePDF} disabled={layout.length === 0}
+              title="Exporta os componentes desta análise como PDF (via impressão do navegador)"
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                border: "1px solid #cbd5e1", background: "#fff", color: layout.length === 0 ? "#cbd5e1" : "#475569",
+                cursor: layout.length === 0 ? "not-allowed" : "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+              <span style={{ fontSize: 14, lineHeight: 1 }}>📄</span> Exportar PDF
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "auto" }}>
+        {!hasData ? (
+          <AWEmptyState icon="🔎" title="Nenhuma base carregada"
+            hint="Importe um CSV para a análise exploratória aparecer aqui automaticamente." />
+        ) : !profile ? (
+          <AWEmptyState icon="⏳" title="Calculando o perfil da base…" hint="Isso é rápido — só agregação exata sobre a base." />
+        ) : profile.error ? (
+          <AWEmptyState icon="⚠️" title="Não foi possível calcular o perfil" hint={`Erro: ${profile.error}`} />
+        ) : layout.length === 0 ? (
+          <AWEmptyState icon="⏳" title="Gerando a análise…" hint="O layout automático aparece assim que o perfil da base terminar de calcular." />
+        ) : (
+          <div style={{ position: "relative", minHeight: canvasH, minWidth: canvasW }}>
+            {layout.map(w => (
+              <div key={w.id} data-explore-widget-id={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 1100, height: w.h ?? 360 }}>
+                <ExploreWidget widget={w} profile={profile}
+                  onConfigChange={changeConfig} onDelete={removeWidget} onDuplicate={duplicateWidget}
+                  onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
+                  onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── GroupingModal — editor de agrupamento (dimensão derivada) ─────────────────
 function GroupingModal({ draft, baseDataset, existingNames, onSave, onClose }) {
   const [name, setName]           = useState(draft.name || "");
@@ -1939,7 +2347,7 @@ function AnalysisTab({ analyticsDataset, baseDataset, analyticsLayout, setAnalyt
 
 // Re-exportados para App.jsx (uso na árvore JSX do Shell e nos modais do Copiloto).
 export {
-  AnalysisTab, SegmentFindingCard, DiagnosticsStrip, SegmentQuadrant,
+  AnalysisTab, ExploreTab, SegmentFindingCard, DiagnosticsStrip, SegmentQuadrant,
   ClusterQuadrant, GoalSeekFrontierChart, ClusterCard, clusterColor, fmtPP,
 };
 
