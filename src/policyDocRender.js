@@ -12,9 +12,22 @@
 // App.jsx) dentro de corpos de função, então resolvem em runtime (mesmo padrão de
 // analytics.js/policyIR.js). App.jsx importa renderDocMarkdown/renderDocHTML daqui e os
 // re-exporta para os testes que ainda importam de App.jsx (tests/policyDoc.test.js).
-import { fmtQty, fmtPct, BUILD_NUMBER, BUILD_HASH, COL_TYPES, LENS_OP_LABEL, escHtml } from "./App.jsx";
+import { fmtQty, fmtPct, BUILD_NUMBER, BUILD_HASH, COL_TYPES, LENS_OP_LABEL, escHtml, READINESS_CRITERIA_META } from "./App.jsx";
 import { POLICY_TERMINAL_LABELS } from "./policyIR.js";
 import { formatBandLabel } from "./rangeVar.js";
+import { READINESS_CRITERIA_IDS } from "./policyJourney.js";
+
+// "Prontidão da Política" (Jornada EP, Sessão EP2, DEC-EP-005) — leitura do
+// `docModel.readiness.criteria` (computeReadiness, policyJourney.js, mesmo motor do trilho
+// de etapas). Fatos crus (state/facts) → prosa aqui, mesmo contrato do resto deste módulo.
+const READINESS_STATE_LABEL = { pass: 'Passa', fail: 'Falha', na: 'Desativado' };
+function readinessRows(readiness) {
+  return READINESS_CRITERIA_IDS.map(id => {
+    const c = (readiness?.criteria || []).find(x => x.id === id);
+    const meta = READINESS_CRITERIA_META[id] || { label: id };
+    return [meta.label, c ? (READINESS_STATE_LABEL[c.state] || c.state) : '—'];
+  });
+}
 
 // Hash não-criptográfico curto (FNV-1a 32-bit) — só para o carimbo de rastreabilidade
 // do documento ("hash da política"), nunca para integridade/segurança.
@@ -109,7 +122,7 @@ function htmlTable(headers, rows) {
 // mesmo docModel ⇒ mesma string (exceto `generatedAt`, carimbado à parte).
 export function renderDocMarkdown(docModel) {
   if (!docModel) return '';
-  const { meta, ir, flowNodes, paths, kpis, funnel, reliability, scenarios, glossary, changelog, options } = docModel;
+  const { meta, ir, flowNodes, paths, kpis, funnel, reliability, scenarios, glossary, changelog, options, readiness } = docModel;
   const L = [];
   const p = (s = '') => L.push(s);
 
@@ -144,6 +157,19 @@ export function renderDocMarkdown(docModel) {
   } else {
     p('');
     p('_Baseline AS IS não configurada — sem comparativo disponível._');
+  }
+  p('');
+
+  p('## Prontidão da Política');
+  p('');
+  if (!readiness || !Array.isArray(readiness.criteria) || readiness.criteria.length === 0) {
+    p('_Checklist de Prontidão indisponível para esta geração._');
+  } else {
+    const passCount = readiness.criteria.filter(c => c.state === 'pass').length;
+    const activeCount = readiness.criteria.filter(c => c.state !== 'na').length;
+    p(`**${passCount}/${activeCount}** critérios ativos passam (estado no momento desta geração — ${new Date(docModel.generatedAt).toLocaleString('pt-BR')}).`);
+    p('');
+    p(mdTable(['Critério', 'Estado'], readinessRows(readiness)));
   }
   p('');
 
@@ -298,7 +324,7 @@ export function renderDocMarkdown(docModel) {
 // nova janela e `window.print()` (→ PDF via navegador). Mesmo conteúdo/números do Markdown.
 export function renderDocHTML(docModel) {
   if (!docModel) return '<html><body>Sem documento.</body></html>';
-  const { meta, ir, flowNodes, paths, kpis, funnel, reliability, scenarios, glossary, changelog, options } = docModel;
+  const { meta, ir, flowNodes, paths, kpis, funnel, reliability, scenarios, glossary, changelog, options, readiness } = docModel;
   const S = [];
   const h = (level, text) => S.push(`<h${level} style="font-family:system-ui,sans-serif;color:#1e293b;">${mdBoldToHtml(text)}</h${level}>`);
   const para = (text) => S.push(`<p style="font-family:system-ui,sans-serif;color:#334155;line-height:1.6;">${mdBoldToHtml(text)}</p>`);
@@ -335,6 +361,16 @@ export function renderDocHTML(docModel) {
     para(`População impactada: ${fmtQty(incrementalResult.impacted.qty)} (${fmtPct100(incrementalResult.impacted.pct)}) — ${fmtQty(incrementalResult.impacted.rToA)} promovida(s) (Reprovado→Aprovado), ${fmtQty(incrementalResult.impacted.aToR)} rejeitada(s) a mais (Aprovado→Reprovado).`);
   } else {
     para('_Baseline AS IS não configurada — sem comparativo disponível._');
+  }
+
+  h(2, 'Prontidão da Política');
+  if (!readiness || !Array.isArray(readiness.criteria) || readiness.criteria.length === 0) {
+    para('_Checklist de Prontidão indisponível para esta geração._');
+  } else {
+    const passCount = readiness.criteria.filter(c => c.state === 'pass').length;
+    const activeCount = readiness.criteria.filter(c => c.state !== 'na').length;
+    para(`<strong>${passCount}/${activeCount}</strong> critérios ativos passam (estado no momento desta geração — ${escHtml(new Date(docModel.generatedAt).toLocaleString('pt-BR'))}).`);
+    S.push(htmlTable(['Critério', 'Estado'], readinessRows(readiness)));
   }
 
   h(2, 'Fluxo da Política');

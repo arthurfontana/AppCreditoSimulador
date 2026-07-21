@@ -18,6 +18,10 @@ import { segVarDefaultReason, parseTemporalKey } from './segVar.js';
 // DEC-NB-003). O worker NÃO pode importar policyIR.js (que importa App.jsx), então o hash
 // vive num leaf próprio; os dois lados computam o mesmo valor para o staleness do feed.
 import { policyIRFingerprint } from './policyFingerprint.js';
+// computeReadiness (Jornada EP, Sessão EP2, DEC-EP-005) — módulo folha compartilhado com a
+// main (mesmo motor do trilho de etapas na aba 🧭 Copiloto); a Documentação Automática anexa
+// a MESMA leitura do Checklist de Prontidão ao docModel, nunca recomputa a matemática.
+import { computeReadiness } from './policyJourney.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -7567,8 +7571,8 @@ function buildGlossary(ir, csvStore, includeDomains) {
 // changelog ficam a cargo da main (só ela tem o IR da comparação pronto e a função de diff).
 function computePolicyDoc(shapes, conns, csvStore, ir, canvasInputs, options = {}) {
   const includeDomains = !!options.includeDomains;
-  const { populations } = computeLensPopulations(shapes, csvStore);
-  const { simResult, incrementalResult } = computeSimulationTick(shapes, conns, csvStore, populations);
+  const { populations, counts: lensCounts } = computeLensPopulations(shapes, csvStore);
+  const { simResult, incrementalResult, nodeArrivals } = computeSimulationTick(shapes, conns, csvStore, populations);
 
   const funnel = redactFunnel(computeFunnelByNode(shapes, conns, csvStore), includeDomains);
   const reliability = computeReliability(funnel.rows);
@@ -7581,6 +7585,33 @@ function computePolicyDoc(shapes, conns, csvStore, ir, canvasInputs, options = {
   const { list: rawPaths, truncated: pathsTruncated } = buildPolicyPaths(ir);
   const paths = redactPathConditions(rawPaths, includeDomains);
   const flowNodes = buildFlowNodes(ir, includeDomains);
+
+  // ── "Prontidão da Política" (Jornada EP, Sessão EP2, DEC-EP-005) ─────────────────────
+  // MESMO motor do trilho de etapas (computeReadiness, policyJourney.js) — nunca recomputa a
+  // matemática, só monta os `artifacts` que dependem de varrer a base (lint/coverage, JÁ
+  // calculados acima neste passe) + os que só a main tem prontos (docFingerprint da última
+  // geração, Perfil da Base, Simplificação Tier 2 — chegam via `options`, mesmo padrão do
+  // COMPUTE_NEXT_ACTIONS). Fatos crus + códigos (state/facts), nunca prosa — o renderer
+  // (policyDocRender.js) monta a leitura.
+  const lint = computePolicyInsights(shapes, conns, nodeArrivals, lensCounts);
+  const coverage = simResult && simResult.totalQty > 0
+    ? { totalQty: simResult.totalQty, decidedQty: (simResult.approvedQty || 0) + (simResult.rejectedQty || 0) }
+    : null;
+  const pendingVars = [];
+  const seenPending = new Set();
+  for (const s of shapes) {
+    if (s.type === 'decision' && !s.variableCol && s.label && !seenPending.has(s.label)) {
+      seenPending.add(s.label);
+      pendingVars.push({ name: s.label });
+    }
+  }
+  const hasAsIs = Object.values(csvStore).some(c => !!c?.asIsConfig);
+  const readiness = computeReadiness(shapes, conns, csvStore, {
+    ir, lint, coverage, pendingVars, hasAsIs,
+    docFingerprint: options.docFingerprint ?? null,
+    baseProfile: options.baseProfile ?? null,
+    simplify: options.simplify ?? null,
+  }, options.readinessConfig || {});
 
   const docModel = {
     version: '1.0',
@@ -7599,6 +7630,7 @@ function computePolicyDoc(shapes, conns, csvStore, ir, canvasInputs, options = {
     reliability,
     scenarios,
     glossary,
+    readiness,
   };
 
   if (options.compare && options.compare.shapes) {

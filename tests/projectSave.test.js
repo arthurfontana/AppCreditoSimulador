@@ -43,6 +43,9 @@ describe('M3 · buildProjectJSONChunks', () => {
       explorePageFilters: { base: [{ id: 'f1', dim: 'score', mode: 'basic', values: ['R1'] }] },
       // Feed de Próxima Melhor Ação (Épico NB, Sessão NB2) — descarte/adiamento por card, schema 3.4.
       nextActionsPrefs: { dismissed: ['connect_port::pY'], snoozed: ['document::doc'], autoScanIdle: false },
+      // Etapas da Política + Checklist de Prontidão (Épico EP, Sessão EP2) — override manual
+      // por etapa + config do checklist + colapso do trilho, schema 3.5.
+      journeyState: { stageOverrides: { eligibility: 'done', calibration: 'reopened' }, readinessConfig: { doc_current: false }, railCollapsed: true },
       cinemaLibrary: [],
       businessWidget: { visible: false, x: 0, y: 0, w: 0, h: 0 },
       preferences: { enableDynThickness: true, showEdgeVol: false, showEdgeInadReal: false, showEdgeInadInf: false },
@@ -79,6 +82,13 @@ describe('M3 · buildProjectJSONChunks', () => {
     const chunks = buildProjectJSONChunks(payload);
     const parsed = JSON.parse(chunks.join(''));
     expect(parsed.nextActionsPrefs).toEqual(payload.nextActionsPrefs);
+  });
+
+  it('journeyState (Épico EP, Sessão EP2, DEC-EP-006) sobrevive ao round-trip via chunks, byte a byte', () => {
+    const payload = makePayload();
+    const chunks = buildProjectJSONChunks(payload);
+    const parsed = JSON.parse(chunks.join(''));
+    expect(parsed.journeyState).toEqual(payload.journeyState);
   });
 
   it('cada chunk de coluna é individualmente pequeno (não monta o csvStore inteiro de uma vez)', () => {

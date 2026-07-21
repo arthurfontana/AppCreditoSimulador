@@ -48,6 +48,44 @@ export const READINESS_CRITERIA_IDS = [
   'doc_current', 'no_lossless_simplify', 'stable_vars',
 ];
 
+// Mapeamento kind (NextActionsModel, Épico NB) → etapa (STAGE_IDS) — DEC-EP-004: "todo kind
+// mapeia para uma etapa" para o clique no trilho filtrar o feed. Heurística DECLARADA (mesmo
+// espírito dos detectores acima — nunca finge precisão cirúrgica por card): agrupa por ONDE no
+// método aquele tipo de card normalmente surge, não pelo nó específico do card.
+//   - know_base: preparar a base (explorar, configurar AS IS).
+//   - eligibility: fazer o fluxo existir e rotear de ponta a ponta (primeira decisão, variável
+//     pendente, portas soltas, achados do lint) — pré-requisito de qualquer etapa seguinte.
+//   - segmentation: a Descoberta sugere um corte novo (bloco heterogêneo).
+//   - risk: a Descoberta encontra um segmento onde a taxa diverge do que os dados sugerem.
+//   - calibration: reduzir/ajustar a política mantendo (ou declarando) o resultado.
+//   - validation: fechar e formalizar (documentar, salvar na biblioteca, próximo passo padrão).
+// kind desconhecido (catálogo futuro sem entrada aqui) ⇒ `null`: a UI trata como "não filtrar
+// por etapa" (nunca esconde um card por lacuna de mapeamento).
+export const ACTION_KIND_STAGE = {
+  explore_base: 'know_base',
+  configure_asis: 'know_base',
+  first_branch: 'eligibility',
+  map_pending_var: 'eligibility',
+  connect_port: 'eligibility',
+  fix_lint_dead_branch: 'eligibility',
+  fix_lint_unreachable_node: 'eligibility',
+  fix_lint_cycle: 'eligibility',
+  fix_lint_zero_arrival: 'eligibility',
+  fix_lint_lens_empty: 'eligibility',
+  fix_lint_duplicate_variable_path: 'eligibility',
+  fix_lint_path_without_terminal: 'eligibility',
+  add_break: 'segmentation',
+  apply_opportunity: 'risk',
+  simplify: 'calibration',
+  document: 'validation',
+  save_library: 'validation',
+  journey_next: 'validation',
+};
+
+export function stageForActionKind(kind) {
+  return ACTION_KIND_STAGE[kind] ?? null;
+}
+
 // ═══ Leitura estrutural do fluxo (adjacência/roteamento — não é matemática de motor) ═══
 
 function buildGraph(shapes, conns) {
