@@ -15,6 +15,17 @@
 - Header sticky; lista de colunas com scroll interno (`maxHeight: 340px`)
 - Seletor de varType por coluna: `categorical` | `ordinal`
 - Sugestão automática via `suggestVarType` e `suggestMetricColumns`
+- **Variáveis de Filtro — botão de tipo cicla `categorical → ordinal → temporal → ignore →
+  categorical`.** `ignore` é um `columnTypes[col]` explícito (como `temporal`), não um
+  `varType` — sobrescreve o default `decision` que `buildFinalTypes` (`onImportConfirm`,
+  `App.jsx`) atribui a toda coluna sem tipo. Existe porque **todo** processo de
+  inteligência do app (ranking de IV/`computeBaseProfile`, candidatos de Clusterização,
+  candidatos de Descoberta de Segmentos, painel de variáveis do canvas/losango) já
+  filtra estritamente por `columnTypes[col] === 'decision'` — marcar `ignore` basta para
+  a coluna nunca mais aparecer em nenhum desses lugares, sem precisar tocar cada um
+  (ex.: um contador de linha/ID de proposta, ou uma variável só apurada depois da
+  decisão de crédito, como faturamento pós-venda). Editável a qualquer momento reabrindo
+  o passo 2 (`onEditDataset`, que preserva `columnTypes` existente).
 
 ## Passo 3 — Variável de Decisão AS IS
 - Modal 680px; etapa obrigatória para configurar a baseline histórica

@@ -11576,12 +11576,14 @@ export default function App() {
                     </div>
 
                     {/* ── Filtros ── */}
-                    {filterCols.length > 0 && (
+                    {filterCols.length > 0 && (()=>{
+                      const ignoredCount = filterCols.filter(h => (wizard.columnTypes||{})[h] === 'ignore').length;
+                      return (
                       <div>
                         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
                           <span style={{fontSize:10.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.7}}>Variáveis de Filtro</span>
                           <div style={{flex:1,height:1,background:"#f1f5f9"}}/>
-                          <span style={{fontSize:10,color:"#94a3b8"}}>{filterCols.length} coluna(s) — disponíveis no canvas</span>
+                          <span style={{fontSize:10,color:"#94a3b8"}}>{filterCols.length} coluna(s){ignoredCount>0?` · ${ignoredCount} ignorada(s)`:''} — disponíveis no canvas</span>
                         </div>
                         <div style={{border:"1px solid #e2e8f0",borderRadius:9,overflow:"hidden"}}>
                           <div style={{display:"grid",gridTemplateColumns:"1fr 120px",padding:"7px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>
@@ -11590,28 +11592,38 @@ export default function App() {
                           </div>
                           <div style={{maxHeight:220,overflowY:"auto"}}>
                             {filterCols.map((colName,i)=>{
-                              const isTemporal = (wizard.columnTypes||{})[colName] === 'temporal';
-                              const varType = isTemporal ? 'temporal' : ((wizard.varTypes||{})[colName] || "categorical");
-                              const cycle = { categorical:'ordinal', ordinal:'temporal', temporal:'categorical' };
+                              const colType = (wizard.columnTypes||{})[colName];
+                              const isIgnored = colType === 'ignore';
+                              const isTemporal = colType === 'temporal';
+                              const varType = isIgnored ? 'ignore' : isTemporal ? 'temporal' : ((wizard.varTypes||{})[colName] || "categorical");
+                              // categorical → ordinal → temporal → ignore → categorical.
+                              // 'ignore' é um columnType (como 'temporal'), não um varType: sobrescreve
+                              // o default 'decision' do buildFinalTypes — a coluna nunca mais entra em
+                              // ranking/cluster/segmentação/canvas em NENHUM lugar do app, porque todos
+                              // esses caminhos já filtram por `columnTypes[col] === 'decision'`.
+                              const cycle = { categorical:'ordinal', ordinal:'temporal', temporal:'ignore', ignore:'categorical' };
                               const cycleType = () => setWizard(w=>{
                                 const next = cycle[varType];
                                 const newCols = {...(w.columnTypes||{})};
                                 const newVars = {...(w.varTypes||{})};
-                                if (next === 'temporal') { newCols[colName] = 'temporal'; }
-                                else { if (newCols[colName] === 'temporal') delete newCols[colName]; newVars[colName] = next; }
+                                if (next === 'temporal' || next === 'ignore') { newCols[colName] = next; }
+                                else { delete newCols[colName]; newVars[colName] = next; }
                                 return {...w, columnTypes:newCols, varTypes:newVars};
                               });
-                              const st = varType==='temporal'
+                              const st = varType==='ignore'
+                                ? {border:'#cbd5e1',bg:'#f1f5f9',color:'#94a3b8',label:'🚫 Ignorar'}
+                                : varType==='temporal'
                                 ? {border:'#0891b2',bg:'#ecfeff',color:'#0e7490',label:'⏱ Temporal'}
                                 : varType==='ordinal'
                                 ? {border:'#7c3aed',bg:'#f5f3ff',color:'#7c3aed',label:'📶 Ordinal'}
                                 : {border:'#e2e8f0',bg:'#f8fafc',color:'#64748b',label:'🏷️ Categ.'};
                               return (
-                                <div key={colName} style={{display:"grid",gridTemplateColumns:"1fr 120px",alignItems:"center",padding:"8px 14px",borderBottom:i<filterCols.length-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa"}}>
-                                  <span style={{fontSize:12.5,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",paddingRight:8}} title={colName}>{colName}</span>
+                                <div key={colName} style={{display:"grid",gridTemplateColumns:"1fr 120px",alignItems:"center",padding:"8px 14px",borderBottom:i<filterCols.length-1?"1px solid #f1f5f9":"none",background:i%2===0?"#fff":"#fafafa",opacity:isIgnored?0.6:1}}>
+                                  <span style={{fontSize:12.5,fontWeight:500,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",paddingRight:8,textDecoration:isIgnored?"line-through":"none"}} title={colName}>{colName}</span>
                                   <div style={{display:"flex",justifyContent:"center"}}>
                                     <button
                                       onClick={cycleType}
+                                      title="Clique para alternar o tipo — Ignorar remove esta coluna de todos os processos de inteligência (ranking, clusterização, segmentação, canvas)"
                                       style={{padding:"4px 14px",borderRadius:20,border:`1.5px solid ${st.border}`,background:st.bg,color:st.color,fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",transition:"all .12s"}}>
                                       {st.label}
                                     </button>
@@ -11622,10 +11634,11 @@ export default function App() {
                           </div>
                         </div>
                         <p style={{fontSize:10.5,color:"#94a3b8",marginTop:8,lineHeight:1.5}}>
-                          <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco (ex: score, faixa) · <strong>Categórica</strong> = sem ordem definida · <strong style={{color:"#0e7490"}}>⏱ Temporal</strong> = data/tempo (eixo cronológico na Análise)
+                          <strong style={{color:"#7c3aed"}}>Ordinal</strong> = hierarquia natural de risco (ex: score, faixa) · <strong>Categórica</strong> = sem ordem definida · <strong style={{color:"#0e7490"}}>⏱ Temporal</strong> = data/tempo (eixo cronológico na Análise) · <strong style={{color:"#94a3b8"}}>🚫 Ignorar</strong> = nunca usada em ranking, canvas, clusterização, segmentação ou recomendações (ex.: ID de proposta, variável apurada só depois da decisão de crédito)
                         </p>
                       </div>
-                    )}
+                      );
+                    })()}
                   </>
                 );
               })() : null}
