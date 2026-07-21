@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildDefaultExploreLayout, EXPLORE_TOP_N_VARS } from '../src/explore.js';
+import { buildDefaultExploreLayout, EXPLORE_TOP_N_VARS, computeFirstBranchPosition } from '../src/explore.js';
 
 // ── GATE Explorar a Base — Sessão EB2 (layout default da aba — DEC-EB-005/006) ──
 // buildDefaultExploreLayout(profile) é pura: monta os widgets reais do chassi (origin
@@ -75,5 +75,43 @@ describe('explore · buildDefaultExploreLayout', () => {
   it('sem AS IS / sem coluna temporal: layout continua completo (degradação fica no widget, não no layout)', () => {
     const layout = buildDefaultExploreLayout(makeProfile(2, { temporal: false, asIs: false }));
     expect(layout.filter(w => w.type === 'insight').length).toBe(6);
+  });
+});
+
+// ── GATE Explorar a Base — Sessão EB4 (DEC-EB-010) ──────────────────────────────
+// computeFirstBranchPosition é pura: decide onde nasce o losango de "➕ Usar como 1º
+// galho" — mesma função em ambos os ramos (canvas vazio/não-vazio), só a posição muda.
+describe('explore · computeFirstBranchPosition', () => {
+  it('canvas vazio ⇒ centro do viewport atual (mundo), empty:true', () => {
+    const pos = computeFirstBranchPosition([], { x: 0, y: 0, s: 1 }, { width: 800, height: 600 });
+    expect(pos).toEqual({ wx: 400, wy: 300, empty: true });
+  });
+
+  it('canvas vazio com viewport deslocado/zoom ⇒ desfaz pan e escala antes de centralizar', () => {
+    const pos = computeFirstBranchPosition([], { x: 100, y: 50, s: 2 }, { width: 800, height: 600 });
+    expect(pos).toEqual({ wx: (400 - 100) / 2, wy: (300 - 50) / 2, empty: true });
+  });
+
+  it('canvas não-vazio ⇒ nó solto à direita/acima da bounding box existente, empty:false', () => {
+    const shapes = [
+      { x: 0, y: 100, w: 140, h: 70 },
+      { x: 300, y: 20, w: 140, h: 70 },
+    ];
+    const pos = computeFirstBranchPosition(shapes, { x: 0, y: 0, s: 1 }, { width: 800, height: 600 });
+    // maxX = 300+140=440 · minY = 20
+    expect(pos).toEqual({ wx: 440 + 220, wy: 20 + 80, empty: false });
+  });
+
+  it('nunca sobrepõe um shape existente (wx sempre à direita da borda direita mais extrema)', () => {
+    const shapes = [{ x: 50, y: 50, w: 160, h: 88 }];
+    const pos = computeFirstBranchPosition(shapes, { x: 0, y: 0, s: 1 }, { width: 800, height: 600 });
+    expect(pos.wx).toBeGreaterThan(50 + 160);
+  });
+
+  it('determinismo: mesmos argumentos ⇒ mesmo resultado', () => {
+    const shapes = [{ x: 10, y: 10, w: 100, h: 50 }];
+    const vp = { x: 5, y: 5, s: 1.5 };
+    const size = { width: 1000, height: 700 };
+    expect(computeFirstBranchPosition(shapes, vp, size)).toEqual(computeFirstBranchPosition(shapes, vp, size));
   });
 });

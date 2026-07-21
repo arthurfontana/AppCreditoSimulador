@@ -1,9 +1,9 @@
-# Explorar a Base (Épico EB, EB1+EB2+EB3 — DEC-EB-001..012)
+# Explorar a Base (Épico EB, EB1+EB2+EB3+EB4 — DEC-EB-001..012)
 
 > Ponteiro a partir de: `CLAUDE.md` § "Onde vive o quê". Leia antes de mexer na aba
 > **Explorar** (3ª aba da barra inferior), no `BaseProfileModel` (worker), no layout
 > automático ou na camada interpretativa (`src/exploreInsights.js`). Referência
-> normativa completa (DEC-EB-001..012, filosofia, sessões planejadas EB4–EB5):
+> normativa completa (DEC-EB-001..012, filosofia, sessão EB5 planejada):
 > `docs/wiki/Epicos-ExplorarBase.md`.
 
 Terceira aba da aplicação (`activeTab:'explore'`, label "Explorar", leftmost na barra —
@@ -99,8 +99,9 @@ sem o AUTO badge, e a contagem total NÃO duplica o slot editado).
 
 Todos compartilham a casca `ExploreWidgetShell` (título editável + badge `AUTO` +
 duplicar/remover/arrastar/redimensionar — mesmo mecanismo de posicionamento livre do
-Dashboard, sem `FieldPanel`/filtros/agrupamentos, que ficam para o builder livre da EB4,
-DEC-EB-011). Editar qualquer `config` promove `origin` para `'user'`
+Dashboard). São os widgets do layout AUTOMÁTICO — o `FieldPanel`/filtros/agrupamentos do
+builder livre (EB4, DEC-EB-011, ver seção própria abaixo) usam a casca do Dashboard
+(`AnalyticsWidget`/`TextWidget`), não esta. Editar qualquer `config` promove `origin` para `'user'`
 (`ExploreTab.changeConfig`).
 
 | Tipo | Corpo | Fonte |
@@ -161,15 +162,93 @@ preset/tópico→template; nenhum placeholder vazado (`undefined`/`NaN`/`[object
 mesmo com `facts` ausente/incompleto; determinismo byte a byte; resolução
 widget→tópico para os 4 tipos dedicados + os 6 presets do `insight`.
 
-## Persistência (DEC-EB-007, schema 3.2)
+## Pontes para o fluxo (EB4 — `src/dashboardComponents.jsx`, DEC-EB-010)
 
-`exploreLayouts: {[csvId]: WidgetConfig[]}` é **criação do usuário** ⇒ regra inviolável
-do `CLAUDE.md`: entra em `buildProjectPayload()`/`loadProject()` (default defensivo
-`{}` para projetos < 3.2) + `sessionStorage` (`explore_layouts_v1`). O
-`BaseProfileModel` (`baseProfileResult`) é **derivado** (recomputável da base) e NÃO
-persiste — mesmo contrato de `analyticsDataset`. Round-trip coberto em
-`tests/projectSave.test.js`. `exploreCsvId`/`exploreRiskMetric` são estado de UI
-efêmero (não persistem — reabrir o projeto reseleciona o winner por população).
+3 CTAs nos cards `varprofile` (botões rotulados no rodapé, ao lado das métricas) e
+`ivrank` (ícones compactos por linha) — componente compartilhado `ExploreVarActions`.
+REUSAM os aplicadores já existentes do resto do app — **nenhum caminho novo de
+materialização** (DEC-IA-002):
+
+| CTA | Aplicador reusado | Comportamento |
+|---|---|---|
+| ➕ Usar como 1º galho | `createDecisionNode` (App.jsx — o mesmo do drag-and-drop do painel de variáveis) | Posição via `computeFirstBranchPosition` (`src/explore.js`, pura/testável): canvas ativo vazio ⇒ centro do viewport (losango raiz); não-vazio ⇒ ao lado da bounding box existente (nó SOLTO, nunca sobrepõe). Sempre navega para `activeTab='canvas'`, seleciona e centraliza no novo nó (`requestAnimationFrame` + `setVp`). Canvas não-vazio ⇒ mostra `exploreActionNotice` (aviso dispensável dentro da própria aba Explorar) avisando que o nó precisa ser conectado |
+| 📐 Criar faixas | `openRangeModal({csvId, col})` | Só aparece quando `v.continuous` (o motor já classifica isso no `BaseProfileModel`). Pré-preenche a coluna no passo 1 do modal |
+| 🧩 Clusterizar | `openClusterModal(null)` + patch (`setClusterModal(m => ({...m, csvId, dims:[col]}))`) | `openClusterModal` não recebe pré-seleção de dimensão diretamente (só escopo de nó) — o patch roda logo em seguida, no mesmo gesto (updaters funcionais, o React aplica em ordem) |
+
+**Armadilha corrigida nesta sessão**: `rangeModal`/`clusterModal` (e os demais modais
+globais do app) vivem no JSX do **CANVAS PANE**, cujo wrapper é
+`display:activeTab==='canvas'?'flex':'none'`. Um `display:none` em CSS remove a
+subárvore inteira do render (mesmo descendentes `position:fixed;inset:0` colapsam para
+`0×0`) — abrir esses modais a partir da aba Explorar SEM primeiro `setActiveTab('canvas')`
+monta o modal invisível (nenhum erro no console). Por isso `exploreCreateRangesFor`/
+`exploreClusterizeFrom` chamam `setActiveTab('canvas')` antes de abrir o modal (o
+`exploreUseAsFirstBranch` já navegava para lá por natureza).
+
+## Builder livre (EB4 — DEC-EB-011)
+
+`ExploreTab` ganha o MESMO `FieldPanel`/`FilterCardsEditor`/`GroupingModal` do Dashboard
+(`AnalysisTab`), operando sobre um dataset largo **escopado à base selecionada**, com
+**cenário FIXO `as_is`** (sem canvases — a aba analisa a base observada, nunca a política
+simulada):
+
+- **Pipeline dedicado**: `COMPUTE_EXPLORE_DATASET` → `EXPLORE_DATASET_RESULT` (worker),
+  MESMO motor `computeAnalyticsDataset(canvasInputs, csvStore, options)` do Dashboard,
+  chamado com `canvasInputs=[]` e o novo `options.csvId` (aditivo — sem `csvId`,
+  comportamento idêntico ao pré-EB4, usado pelo Dashboard). Debounce 300ms, só enquanto
+  `activeTab==='explore'` e há `exploreCsvId` — mesmo racional de custo do perfil (EB2).
+- **Estado em `App.jsx`**: `exploreAnalyticsDataset` (dataset cru — **DERIVADO, não
+  persiste**), `exploreGroupings`/`explorePageFilters` (`{[csvId]: [...]}` — **CRIAÇÃO DO
+  USUÁRIO, persiste**, mesmo padrão per-csvId de `exploreLayouts`).
+  `groupedExploreDataset = applyGroupingsToDataset(exploreAnalyticsDataset,
+  exploreGroupings[exploreCsvId])` é o dataset efetivamente passado ao `FieldPanel`/
+  `AnalyticsWidget`.
+- **Widgets livres reusam os tipos do Dashboard** (`line`/`bar`/`bar100`/`kpi` via
+  `AnalyticsWidget`, `text` via `TextWidget`) — nascem `origin:'user'` direto (não há
+  "AUTO" para algo que o próprio usuário pediu) e entram no MESMO array `layout`
+  (`exploreLayouts[csvId]`) dos widgets automáticos da aba; `EXPLORE_FREE_TYPES` (Set de
+  tipos livres) decide, por widget, se o dispatcher de render usa `AnalyticsWidget`/
+  `TextWidget` ou `ExploreWidget` (cascas diferentes: a livre tem `FieldPanel`/filtros
+  arrastáveis, a automática tem "ⓘ Como ler"/badge AUTO).
+- **Rótulo da série declara AS IS** (DEC-EB-011 in fine): `pivotWidget` (`analytics.js`)
+  tinha o rótulo `"Simulado"` HARDCODED para a série implícita sem eixo de cenário — correto
+  no Dashboard (2+ cenários, o único sem nome "AS IS" é mesmo uma política simulada), mas
+  enganoso com dataset de UM cenário só (`scenarios.length===1`, o caso do builder livre —
+  mostraria "Simulado" sobre dado que é literalmente AS IS). Fix: com um único cenário, o
+  rótulo vira o `nome` real desse cenário (`"AS IS"`); com 2+, mantém `"Simulado"` (sem
+  mudança de comportamento do Dashboard).
+- **"+ Adicionar gráfico"/"📝 Adicionar texto"** no header — mesmos `makeChartWidget`/
+  `makeTextWidget` do Dashboard (`AnalysisTab`), adaptados para nascer sobre `layout`
+  (`exploreLayouts[csvId]`) em vez de `analyticsLayout`.
+- Exportação em PDF (`exportExplorePDF`) captura os widgets livres também: eles ganham um
+  wrapper `<div data-explore-capture>` (mesmo marcador genérico dos widgets automáticos),
+  então a captura de DOM funciona sem branch por tipo — a diferença é que o "capture" do
+  livre inclui a casca inteira do widget (título/seletores), não só o gráfico (o
+  `exportDashboardPDF` do Dashboard tem uma extração mais cirúrgica —
+  `widgetVisualHTML`/`.recharts-wrapper` — que não foi replicada aqui nesta sessão).
+
+## Convite pós-import (EB4 — DEC-EB-012)
+
+Ao final do `confirm` do wizard de importação (só para **NOVA** base — o modo de edição
+de dataset existente retorna antes desse ponto), `App.jsx` seta
+`postImportInvite = {csvId, filename}`: banner dispensável no topo do Canvas
+("🔎 Análise da base "{filename}" pronta" + botão "Abrir Explorar" que navega e seleciona
+a base) — nunca bloqueante, nunca autofechado sozinho. Canvas vazio + alguma base
+carregada ⇒ a 1ª linha do card "Dicas" do canto do canvas (mesma fonte `CANVAS_TIPS`
+usada também na seção Sobre do Hub em telas estreitas) vira
+"🔎 Base carregada — comece pela aba Explorar para conhecer os dados" — `canvasTips`
+(computado em `App.jsx`, antes do JSX principal) prefixa isso sem alterar `CANVAS_TIPS`.
+
+## Persistência (DEC-EB-007/011, schema 3.3)
+
+`exploreLayouts`/`exploreGroupings`/`explorePageFilters`, todos `{[csvId]: [...]}`, são
+**criação do usuário** ⇒ regra inviolável do `CLAUDE.md`: entram em
+`buildProjectPayload()`/`loadProject()` (default defensivo `{}` para projetos < 3.2/3.3)
++ `sessionStorage` (`explore_layouts_v1`/`explore_groupings_v1`/`explore_page_filters_v1`).
+O `BaseProfileModel` (`baseProfileResult`) e o dataset largo do builder livre
+(`exploreAnalyticsDataset`) são **derivados** (recomputáveis da base) e NÃO persistem —
+mesmo contrato de `analyticsDataset`. Round-trip coberto em `tests/projectSave.test.js`.
+`exploreCsvId`/`exploreRiskMetric`/`exploreActionNotice`/`postImportInvite` são estado de
+UI efêmero (não persistem).
 
 ## Comandos (registro declarativo, `App.jsx` § COMMANDS)
 
@@ -179,24 +258,33 @@ efêmero (não persistem — reabrir o projeto reseleciona o winner por populaç
 aba `dados`/grupo "Explorar". Aparecem automaticamente na Busca Ctrl+K (não filtrada por
 aba ativa) e na Ribbon (só quando `activeTab==='canvas'`, já que a Ribbon só monta
 nesse caso — mesma limitação estrutural que já existia para qualquer comando de aba
-fixa antes desta sessão).
+fixa antes desta sessão). **As 3 pontes para o fluxo (EB4) NÃO entraram no registro
+COMMANDS** — são parametrizadas por `(col, csvId)` de um card específico, e todo
+descritor hoje é global ou escopado a UM shape selecionado (`contextWhen(shape)`); não
+há hoje um conceito de "variável focada" fora do canvas para um comando genérico mirar.
+Ficam como callbacks de widget (mesmo padrão de "👁 Ver no Dashboard"/"🎯 Ver no fluxo"
+dos cards de Segmento/Cluster, que também nunca entraram no registro).
 
 ## Testes
 
 - `tests/explore.test.js` — `buildDefaultExploreLayout`: 6 seções na ordem certa, teto
   de top-N (`EXPLORE_TOP_N_VARS`), ids únicos, `origin:'auto'`, determinismo byte a
-  byte, layout vazio sem perfil válido.
-- `tests/projectSave.test.js` — round-trip de `exploreLayouts` via
-  `buildProjectJSONChunks`.
+  byte, layout vazio sem perfil válido; `computeFirstBranchPosition` (EB4): canvas
+  vazio ⇒ centro do viewport (desfazendo pan/zoom), não-vazio ⇒ ao lado da bounding box
+  sem sobrepor, determinismo.
+- `tests/analytics.test.js` — `computeAnalyticsDataset` com `options.csvId` (EB4): escopa
+  a UMA base (dimensões/linhas só dessa base, cenário só `as_is`); sem `options.csvId`,
+  comportamento idêntico ao caminho original (regressão).
+- `tests/projectSave.test.js` — round-trip de `exploreLayouts`/`exploreGroupings`/
+  `explorePageFilters` via `buildProjectJSONChunks`.
 - `tests/baseProfile.test.js` (EB1, sem mudança) — GATE do `BaseProfileModel`.
 - `tests/exploreInsights.test.js` (EB3) — cobertura total código/preset/tópico→template,
   nenhum placeholder vazado, determinismo, resolução widget→tópico do "ⓘ Como ler".
 
-## Fora de escopo desta sessão (EB3)
+## Fora de escopo (EB5 — sincronização documental)
 
-- Pontes para o fluxo ("➕ Usar como 1º galho", "📐 Criar faixas", "🧩 Clusterizar") e
-  builder livre (`FieldPanel`/filtros/agrupamentos) sobre o dataset largo (EB4).
-- Convite pós-import (toast "🔎 Análise da base pronta") e card de Dicas do canvas vazio
-  apontando para Explorar (EB4, DEC-EB-012).
-- Convite pós-import (toast "🔎 Análise da base pronta") e card de Dicas do canvas vazio
-  apontando para Explorar (EB4, DEC-EB-012).
+- Skill `base-testes`: avaliar se a Base de Testes Oficial cobre os cenários novos
+  (variável instável entre safras p/ PSI, categoria dominante, coluna de baixa
+  cobertura) — nunca regenerar o CSV sem pedido do usuário.
+- Wiki: `Decisoes`/`Roadmap`/`Home`/`_Sidebar`; revisão final deste documento contra o
+  implementado.

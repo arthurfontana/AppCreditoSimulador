@@ -21,7 +21,7 @@ import { suggestRangeVarName, buildRangeDefFromModel, formatBandLabel, isRangeVa
 import { segVarDefaultReason, parseTemporalKey } from "./segVar.js";
 export { parseTemporalKey };
 // Explorar a Base (Épico EB, EB2) — layout default da aba, puro (buildDefaultExploreLayout).
-import { buildDefaultExploreLayout } from "./explore.js";
+import { buildDefaultExploreLayout, computeFirstBranchPosition } from "./explore.js";
 // Execução Híbrida H4/H6 — ComputeRouter (fronteira única worker/sidecar, DEC-HX-002)
 // + funções puras de UX do motor (badge, degradação declarada, aviso de fallback).
 import { createComputeRouter, createWorkerProvider, createSidecarProvider, describeComputeBadge, describeCapabilitiesDetail, ceilingNotice, fallbackNoticeText, hashChunks } from "./computeRouter.js";
@@ -91,8 +91,10 @@ export { newFilterCard };
 // a tabela "Versão do schema" da seção ℹ️ Sobre do Hub (evita os dois textos divergirem,
 // como aconteceu entre a Sessão 5, que fixou "3.0" na Sobre, e a Sessão 6, que bumpou o
 // schema real para "3.1" sem atualizar aquele texto). 3.2 (Épico EB, EB2) — novo campo de
-// topo `exploreLayouts` (layout da aba Explorar, por csvId).
-export const PROJECT_SCHEMA_VERSION = "3.2";
+// topo `exploreLayouts` (layout da aba Explorar, por csvId). 3.3 (Épico EB, EB4) — novos
+// campos de topo `exploreGroupings`/`explorePageFilters` (builder livre da aba Explorar,
+// por csvId).
+export const PROJECT_SCHEMA_VERSION = "3.3";
 export const BUILD_NUMBER = typeof __BUILD_NUMBER__ !== "undefined" ? __BUILD_NUMBER__ : "dev";
 const BUILD_TIME   = typeof __BUILD_TIME__   !== "undefined" ? __BUILD_TIME__   : new Date().toISOString();
 export const BUILD_HASH   = typeof __BUILD_HASH__   !== "undefined" ? __BUILD_HASH__   : "local";
@@ -358,6 +360,7 @@ const PERF_REQUEST_TO_RESULT = {
   COMPUTE_POLICY_INSIGHTS:   'POLICY_INSIGHTS_RESULT',
   COMPUTE_VARIABLE_RANKING:  'VARIABLE_RANKING_RESULT',
   COMPUTE_BASE_PROFILE:      'BASE_PROFILE_RESULT',
+  COMPUTE_EXPLORE_DATASET:   'EXPLORE_DATASET_RESULT',
 };
 const PERF_RESULT_TO_REQUEST = Object.fromEntries(
   Object.entries(PERF_REQUEST_TO_RESULT).map(([req, res]) => [res, req])
@@ -2114,6 +2117,56 @@ export default function App() {
       return next === cur ? prev : { ...prev, [csvId]: next };
     });
   }, []);
+  // Builder livre (Épico EB, EB4 — DEC-EB-011): MESMO FieldPanel/FilterCardsEditor/
+  // GroupingModal do Dashboard, operando sobre um dataset largo escopado à base
+  // selecionada (cenário fixo AS IS — sem canvases, `exploreAnalyticsDataset` abaixo).
+  // Agrupamentos e filtro de página são CRIAÇÃO DO USUÁRIO ⇒ persistem por base (mesmo
+  // padrão per-csvId de `exploreLayouts`), separados dos do Dashboard (`analyticsGroupings`/
+  // `analyticsPageFilters`, globais e sobre a simulação).
+  const [exploreGroupings, setExploreGroupings] = useState(() => {
+    try {
+      const s = sessionStorage.getItem('explore_groupings_v1');
+      const v = s ? JSON.parse(s) : {};
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    } catch { return {}; }
+  });
+  const [explorePageFilters, setExplorePageFilters] = useState(() => {
+    try {
+      const s = sessionStorage.getItem('explore_page_filters_v1');
+      const v = s ? JSON.parse(s) : {};
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    } catch { return {}; }
+  });
+  const setExploreGroupingsForCsv = useCallback((csvId, updater) => {
+    if (!csvId) return;
+    setExploreGroupings(prev => {
+      const cur = prev[csvId] || [];
+      const next = typeof updater === 'function' ? updater(cur) : updater;
+      return next === cur ? prev : { ...prev, [csvId]: next };
+    });
+  }, []);
+  const setExplorePageFiltersForCsv = useCallback((csvId, updater) => {
+    if (!csvId) return;
+    setExplorePageFilters(prev => {
+      const cur = prev[csvId] || [];
+      const next = typeof updater === 'function' ? updater(cur) : updater;
+      return next === cur ? prev : { ...prev, [csvId]: next };
+    });
+  }, []);
+  // Dataset largo do builder livre — DERIVADO (recomputado pelo worker, não persiste),
+  // mesmo contrato de `analyticsDataset`. Ver COMPUTE_EXPLORE_DATASET (Worker-Protocolo.md).
+  const [exploreAnalyticsDataset, setExploreAnalyticsDataset] = useState(null);
+  const groupedExploreDataset = useMemo(
+    () => applyGroupingsToDataset(exploreAnalyticsDataset, exploreGroupings[exploreCsvId] || []),
+    [exploreAnalyticsDataset, exploreGroupings, exploreCsvId]
+  );
+  // Aviso efêmero (não persiste) para o CTA "➕ Usar como 1º galho" quando o canvas ativo
+  // já não está vazio (nó criado SOLTO, precisa ser conectado ao fluxo — DEC-EB-010).
+  const [exploreActionNotice, setExploreActionNotice] = useState(null);
+  // Convite pós-import (Épico EB, EB4, DEC-EB-012) — efêmero (não persiste), dispensável;
+  // null | {csvId, filename}. Setado ao final do confirm do wizard de importação (só para
+  // NOVAS bases — o modo de edição de dataset existente retorna antes desse ponto).
+  const [postImportInvite, setPostImportInvite] = useState(null);
   // ↻ Regenerar análise (DEC-EB-005): recria só os widgets `origin:'auto'` desta base,
   // preservando os `origin:'user'` (criados/editados pelo usuário) — nunca sobrescrita
   // silenciosa (confirmação explícita antes de descartar os cards automáticos atuais).
@@ -2433,6 +2486,10 @@ export default function App() {
         if (profile && !profile.error && profile.csvId) {
           setExploreCsvId(cur => cur || profile.csvId);
         }
+      } else if (msgType === 'EXPLORE_DATASET_RESULT') {
+        // Explorar a Base — builder livre (Épico EB, EB4): dataset largo escopado à base
+        // selecionada, cenário fixo AS IS (DEC-EB-011).
+        setExploreAnalyticsDataset(e.data.dataset);
       } else if (msgType === 'ASIS_PREVIEW_RESULT') {
         // Prévia AS IS contextualizada ao nó (respeita filtros a montante) — chega
         // async do worker após assignCinemaVar. Aplica só se o token ainda for o mais
@@ -2841,12 +2898,29 @@ export default function App() {
     return () => clearTimeout(baseProfileDebounceRef.current);
   }, [csvStore, exploreCsvId, exploreRiskMetric, activeTab]);
 
+  // ── Explorar a Base — builder livre (Épico EB, EB4, DEC-EB-011) ─────────────────
+  // COMPUTE_EXPLORE_DATASET: MESMO racional de custo/debounce do perfil acima — só computa
+  // com a aba Explorar aberta e uma base selecionada; nunca depende de shapes/conns (não é
+  // o tick de edição, é análise sobre a base observada).
+  const exploreDatasetDebounceRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(exploreDatasetDebounceRef.current);
+    if (activeTab !== 'explore' || !exploreCsvId) return;
+    exploreDatasetDebounceRef.current = setTimeout(() => {
+      workerRef.current?.postMessage({ type: 'COMPUTE_EXPLORE_DATASET', csvId: exploreCsvId });
+    }, 300);
+    return () => clearTimeout(exploreDatasetDebounceRef.current);
+  }, [csvStore, exploreCsvId, activeTab]);
+
   // Persiste layout do dashboard na sessionStorage para sobreviver a reloads dentro da mesma sessão.
   useEffect(() => { sessionStorage.setItem('aw_layout_v1', JSON.stringify(analyticsLayout)); }, [analyticsLayout]);
   useEffect(() => { sessionStorage.setItem('aw_groupings_v1', JSON.stringify(analyticsGroupings)); }, [analyticsGroupings]);
   useEffect(() => { sessionStorage.setItem('aw_page_filters_v1', JSON.stringify(analyticsPageFilters)); }, [analyticsPageFilters]);
   // Explorar a Base (Épico EB, EB2, DEC-EB-007): persiste o layout por base na sessionStorage.
   useEffect(() => { try { sessionStorage.setItem('explore_layouts_v1', JSON.stringify(exploreLayouts)); } catch { /* quota/privacidade — não bloqueia */ } }, [exploreLayouts]);
+  // Explorar a Base — builder livre (Épico EB, EB4, DEC-EB-011): agrupamentos/filtro de página por base.
+  useEffect(() => { try { sessionStorage.setItem('explore_groupings_v1', JSON.stringify(exploreGroupings)); } catch { /* quota/privacidade — não bloqueia */ } }, [exploreGroupings]);
+  useEffect(() => { try { sessionStorage.setItem('explore_page_filters_v1', JSON.stringify(explorePageFilters)); } catch { /* quota/privacidade — não bloqueia */ } }, [explorePageFilters]);
   // Ribbon (UX 2.0 — Sessão 1): persiste a aba ativa do Ribbon na sessionStorage.
   useEffect(() => { try { sessionStorage.setItem('ribbon_active_tab_v1', ribbonActiveTab); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonActiveTab]);
   useEffect(() => { try { sessionStorage.setItem('ribbon_mode_v1', ribbonMode); } catch { /* quota/privacidade — não bloqueia */ } }, [ribbonMode]);
@@ -3899,6 +3973,10 @@ export default function App() {
     }
 
     setSel(nodeId); setWizard(null); setImportWarn(null);
+    // Convite pós-import (Épico EB, EB4, DEC-EB-012) — nunca bloqueante: aponta para a
+    // aba Explorar, onde a análise da base já nasce pronta assim que o worker terminar
+    // o perfil (COMPUTE_BASE_PROFILE). Dispensável a qualquer momento.
+    setPostImportInvite({ csvId, filename });
   };
 
   // ── onEditDataset: reopen wizard step 2 for an existing dataset ──
@@ -4092,6 +4170,10 @@ export default function App() {
       // Explorar a Base (Épico EB, EB2, DEC-EB-007) — layout por base; o BaseProfileModel
       // em si é DERIVADO (recomputável) e não persiste.
       exploreLayouts,
+      // Explorar a Base — builder livre (Épico EB, EB4, DEC-EB-011) — agrupamentos e filtro
+      // de página do builder livre, por base (o dataset largo em si é DERIVADO e não persiste).
+      exploreGroupings,
+      explorePageFilters,
       cinemaLibrary,
       // Biblioteca de Políticas (Copiloto Sessão 2) — array de templates de PolicyIR
       // (JSON puro: ir/requiredVars não têm Map/typed array, sem serialize dedicado).
@@ -4192,6 +4274,10 @@ export default function App() {
     setAnalyticsPageFilters(Array.isArray(data.analyticsPageFilters) ? data.analyticsPageFilters : []);
     // schema < 3.2 não tinha exploreLayouts — default defensivo, projeto antigo não quebra.
     setExploreLayouts((data.exploreLayouts && typeof data.exploreLayouts === 'object' && !Array.isArray(data.exploreLayouts)) ? data.exploreLayouts : {});
+    // schema < 3.3 não tinha exploreGroupings/explorePageFilters (builder livre, EB4) —
+    // default defensivo, projeto antigo não quebra.
+    setExploreGroupings((data.exploreGroupings && typeof data.exploreGroupings === 'object' && !Array.isArray(data.exploreGroupings)) ? data.exploreGroupings : {});
+    setExplorePageFilters((data.explorePageFilters && typeof data.explorePageFilters === 'object' && !Array.isArray(data.explorePageFilters)) ? data.explorePageFilters : {});
     setCinemaLibrary(Array.isArray(data.cinemaLibrary) ? data.cinemaLibrary : []);
     // schema ≤ 2.3 não tinha policyLibrary — default defensivo, projeto antigo não quebra.
     setPolicyLibrary(Array.isArray(data.policyLibrary) ? data.policyLibrary : []);
@@ -7079,6 +7165,45 @@ export default function App() {
     });
   };
 
+  // ── Explorar a Base — Pontes para o fluxo (Épico EB, EB4, DEC-EB-010) ───────────
+  // Os 3 CTAs dos cards `varprofile`/`ivrank` REUSAM os aplicadores existentes — nenhum
+  // caminho novo de materialização (DEC-IA-002): createDecisionNode (drag-and-drop do
+  // painel), openRangeModal/openClusterModal (mesmos do canto "Analisar aqui" do canvas).
+  // "➕ Usar como 1º galho": canvas ativo vazio ⇒ cria o losango raiz e centraliza nele;
+  // canvas não-vazio ⇒ cria um nó SOLTO ao lado do que já existe (nunca reconecta sozinho)
+  // e avisa (exploreActionNotice) que ele precisa ser conectado ao fluxo.
+  const exploreUseAsFirstBranch = useCallback((col, csvId) => {
+    const svgEl = svgRef.current;
+    const svgSize = svgEl ? { width: svgEl.clientWidth, height: svgEl.clientHeight } : { width: 800, height: 600 };
+    const { wx, wy, empty } = computeFirstBranchPosition(shapesR.current, vpR.current, svgSize);
+    createDecisionNode(col, csvId, wx, wy);
+    setActiveTab('canvas');
+    setExploreActionNotice(empty ? null : `➕ "${col}" criado como nó solto no canvas — conecte-o ao fluxo.`);
+    requestAnimationFrame(() => {
+      const svg = svgRef.current;
+      if (!svg) return;
+      setVp(v => ({ s: v.s, x: svg.clientWidth / 2 - wx * v.s, y: svg.clientHeight / 2 - wy * v.s }));
+    });
+  }, []);
+  // "📐 Criar faixas": só variáveis contínuas (o card já esconde o botão quando
+  // `!v.continuous` — o gate aqui é defensivo, mesmo padrão do resto do app). Os modais de
+  // Faixas/Clusterização vivem no JSX do CANVAS PANE (display:none fora de
+  // activeTab==='canvas') — sem navegar para lá primeiro, o modal monta invisível
+  // (display:none em cascata, mesmo com position:fixed/inset:0/z-index alto).
+  const exploreCreateRangesFor = useCallback((col, csvId) => {
+    setActiveTab('canvas');
+    openRangeModal({ csvId, col });
+  }, []);
+  // "🧩 Clusterizar": abre o modal (mesmo default de base por população) e pré-seleciona
+  // a variável como 1ª dimensão — openClusterModal não recebe pré-seleção diretamente
+  // (seu único parâmetro é o escopo do nó), então o patch vem logo em seguida; como as duas
+  // chamadas são setState funcionais no mesmo gesto, o React aplica em ordem.
+  const exploreClusterizeFrom = useCallback((col, csvId) => {
+    setActiveTab('canvas');
+    openClusterModal(null);
+    setClusterModal(m => m ? { ...m, csvId, dims: [col] } : m);
+  }, []);
+
   // Classe A (DEC-FR-004): SEMPRE no worker, JAMAIS roteia ao sidecar — sem
   // ComputeRouter/deep run, ao contrário da Clusterização.
   const runRiskBands = () => {
@@ -7859,6 +7984,14 @@ export default function App() {
     );
   };
 
+  // Dicas do canvas vazio (Épico EB, EB4, DEC-EB-012): canvas ativo vazio + alguma base já
+  // carregada ⇒ 1ª dica aponta para a aba Explorar como primeiro passo da jornada. Mesma
+  // fonte única (CANVAS_TIPS) usada pelo card flutuante e pela seção Sobre do Hub — só
+  // prefixa, nunca substitui.
+  const canvasTips = (shapes.length === 0 && Object.keys(csvStore).length > 0)
+    ? ['🔎 Base carregada — comece pela aba Explorar para conhecer os dados', ...CANVAS_TIPS]
+    : CANVAS_TIPS;
+
   // ═══ REGIÃO: JSX — Shell da Aplicação (toolbar, abas, canvas) ═══
   // ────────────────────────────────────────────────────────────────────────────
   // JSX
@@ -7905,12 +8038,17 @@ export default function App() {
       {/* ═══════════════ ANALYSIS PANE ═══════════════ */}
       {activeTab==="analysis" && <AnalysisTab analyticsDataset={groupedDataset} baseDataset={analyticsDataset} analyticsLayout={analyticsLayout} setAnalyticsLayout={setAnalyticsLayout} groupings={analyticsGroupings} setGroupings={setAnalyticsGroupings} pageFilters={analyticsPageFilters} setPageFilters={setAnalyticsPageFilters} scopeNotice={analyticsScopeNotice} onDismissScopeNotice={()=>setAnalyticsScopeNotice(null)} />}
 
-      {/* ═══════════════ EXPLORE PANE (Épico EB, EB2) ═══════════════ */}
+      {/* ═══════════════ EXPLORE PANE (Épico EB, EB2 + EB4) ═══════════════ */}
       {activeTab==="explore" && <ExploreTab profile={baseProfileResult} csvStore={csvStore}
         csvId={exploreCsvId} onCsvIdChange={setExploreCsvId}
         riskMetric={exploreRiskMetric} onRiskMetricChange={setExploreRiskMetric}
         layout={exploreLayouts[exploreCsvId] || []} setLayout={(updater) => setExploreLayoutForCsv(exploreCsvId, updater)}
-        onRegenerate={regenerateExploreLayout} />}
+        onRegenerate={regenerateExploreLayout}
+        actions={{ onUseAsFirstBranch: exploreUseAsFirstBranch, onCreateRanges: exploreCreateRangesFor, onClusterize: exploreClusterizeFrom }}
+        datasetGrouped={groupedExploreDataset} datasetRaw={exploreAnalyticsDataset}
+        groupings={exploreGroupings[exploreCsvId] || []} setGroupings={(updater) => setExploreGroupingsForCsv(exploreCsvId, updater)}
+        pageFilters={explorePageFilters[exploreCsvId] || []} setPageFilters={(updater) => setExplorePageFiltersForCsv(exploreCsvId, updater)}
+        actionNotice={exploreActionNotice} onDismissActionNotice={()=>setExploreActionNotice(null)} />}
 
       {/* ═══════════════ CANVAS PANE ═══════════════ */}
       <div style={{display:activeTab==="canvas"?"flex":"none",flex:1,minHeight:0,width:"100%",overflow:"hidden",position:"relative"}}>
@@ -7962,13 +8100,28 @@ export default function App() {
           </div>
         )}
 
+        {/* Convite pós-import (Épico EB, EB4, DEC-EB-012) — nunca bloqueante, dispensável.
+            Só para a base que acabou de ser importada (postImportInvite.csvId). */}
+        {postImportInvite && (
+          <div style={{position:"absolute",top:16,left:"50%",transform:"translateX(-50%)",zIndex:200,display:"flex",alignItems:"center",gap:10,padding:"9px 12px 9px 16px",borderRadius:12,background:"#eff6ff",border:"1px solid #bfdbfe",color:"#1d4ed8",fontSize:12.5,fontFamily:"inherit",whiteSpace:"nowrap",boxShadow:"0 4px 14px rgba(0,0,0,.1)"}}>
+            <span>🔎 Análise da base "{postImportInvite.filename}" pronta</span>
+            <button onClick={()=>{setActiveTab('explore');setExploreCsvId(postImportInvite.csvId);setPostImportInvite(null);}}
+              style={{padding:"5px 12px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit"}}>
+              Abrir Explorar
+            </button>
+            <button onClick={()=>setPostImportInvite(null)} title="Dispensar"
+              style={{border:"none",background:"transparent",color:"#2563eb",cursor:"pointer",fontSize:13,padding:"0 2px",lineHeight:1}}>✕</button>
+          </div>
+        )}
+
         {/* Tips — em telas estreitas (touch/mobile) o card ocuparia espaço precioso do
             canvas; o mesmo conteúdo (CANVAS_TIPS) migra para a seção ℹ️ Sobre do Hub
-            (UX 2.0 — Sessão 8). */}
+            (UX 2.0 — Sessão 8). Canvas vazio + alguma base carregada (Épico EB, EB4,
+            DEC-EB-012): 1ª dica aponta para a aba Explorar como primeiro passo. */}
         {!isNarrowScreen && (
           <div style={{position:"absolute",bottom:16,left:16,zIndex:100,background:"#fff",border:"1px solid #e2e8f0",boxShadow:"0 1px 4px rgba(0,0,0,.06)",color:"#94a3b8",padding:"7px 11px",borderRadius:10,fontSize:10.5,fontFamily:"inherit",lineHeight:1.9}}>
             <span style={{color:"#64748b",fontWeight:600}}>Dicas</span><br/>
-            {CANVAS_TIPS.map((t, i) => <span key={i}>{t}<br/></span>)}
+            {canvasTips.map((t, i) => <span key={i}>{t}<br/></span>)}
           </div>
         )}
 
@@ -8953,7 +9106,7 @@ export default function App() {
                         <div>
                           <p style={{fontSize:10.5,color:"#94a3b8",fontWeight:500,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Dicas do canvas</p>
                           <ul style={{margin:0,paddingLeft:18,fontSize:12,color:"#475569",lineHeight:1.9}}>
-                            {CANVAS_TIPS.map((t, i) => <li key={i}>{t}</li>)}
+                            {canvasTips.map((t, i) => <li key={i}>{t}</li>)}
                           </ul>
                         </div>
                       )}

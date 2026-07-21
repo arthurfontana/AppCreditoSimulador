@@ -269,10 +269,16 @@ export function pivotWidget(ds, config) {
       return { key: s.id, label: s.nome, decisionCol: s.decisionCol, color: SCENARIO_COLORS[origIdx % SCENARIO_COLORS.length] };
     });
   } else {
-    // Quebra por dimensão categórica usando o cenário Simulado implícito.
-    const simCol = (scenarios.find(s => s.id === "simulado") || scenarios[scenarios.length - 1]).decisionCol;
+    // Quebra por dimensão categórica usando o cenário Simulado implícito. Com um ÚNICO
+    // cenário no dataset (Explorar a Base, Épico EB, EB4, DEC-EB-011 — builder livre sobre
+    // cenário FIXO AS IS, sem canvases) o rótulo genérico "Simulado" mentiria sobre a
+    // natureza do dado — usa o `nome` real do cenário nesse caso (o Dashboard, com 2+
+    // cenários, mantém o rótulo genérico "Simulado" de sempre).
+    const simScenario = scenarios.find(s => s.id === "simulado") || scenarios[scenarios.length - 1];
+    const simCol = simScenario.decisionCol;
+    const simLabel = scenarios.length === 1 ? simScenario.nome : "Simulado";
     if (serieBy === SERIE_NONE) {
-      seriesDefs = [{ key: "simulado", label: "Simulado", decisionCol: simCol, color: SCENARIO_COLORS[1] }];
+      seriesDefs = [{ key: "simulado", label: simLabel, decisionCol: simCol, color: SCENARIO_COLORS[1] }];
     } else {
       const distinct = distinctOf(serieBy).sort(makeCmp(serieBy));
       const capped = distinct.slice(0, MAX_SERIES);

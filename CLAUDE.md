@@ -99,8 +99,10 @@ inclua-o no salvamento do Projeto — senão ele se perde ao salvar/abrir. Passo
    (`Array.isArray(...) ? ... : []`, `typeof x === '...' ? ... : default`), para
    arquivos antigos (sem o campo) não quebrarem nem zerarem o resto.
 3. **Bump do `schemaVersion`** se a mudança for estrutural (ex.: `2.1` → `2.2`).
-   Versão atual: **`"3.2"`** (Épico EB, Sessão EB2 — novo campo de topo `exploreLayouts`,
-   layout por base da aba Explorar; `3.1` foi a UX 2.0/Ribbon Sessão 6 — `rightPanelMode`,
+   Versão atual: **`"3.3"`** (Épico EB, Sessão EB4 — novos campos de topo
+   `exploreGroupings`/`explorePageFilters`, agrupamentos e filtro de página do builder
+   livre da aba Explorar, por base; `3.2` foi a Sessão EB2 — `exploreLayouts`, layout por
+   base da aba Explorar; `3.1` foi a UX 2.0/Ribbon Sessão 6 — `rightPanelMode`,
    aba interna do painel direito Ativos/Inspetor/Copiloto; `3.0` foi a
    Sessão 5 — `statusBarIndicators`, indicadores configuráveis da Status Bar; `2.9` foi a
    Sessão 4 — `ribbonMode`, colapso do Ribbon em 3 estados; `2.8` foi a Ribbon Sessão 1 —
@@ -117,8 +119,9 @@ de **todas** as abas (losangos, Cineminhas, Decision Lens e suas `rules`, frames
 terminais, painéis) · `includeInDashboard`/nome por aba · bases de dados completas
 (`csvStore`: headers, rows, columnTypes, varTypes, `asIsConfig`, `clusterDefs`,
 `rangeDefs`) · Dashboard
-(`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · layout da aba
-Explorar por base (`exploreLayouts`) · biblioteca de
+(`analyticsLayout`, `analyticsGroupings`, `analyticsPageFilters`) · layout, agrupamentos e
+filtro de página do builder livre da aba Explorar, por base (`exploreLayouts`,
+`exploreGroupings`, `explorePageFilters`) · biblioteca de
 Cineminhas (`cinemaLibrary`) · biblioteca de Políticas (`policyLibrary`) · widget de
 negócio · preferências de aresta/espessura + Motor Python (`computeSidecar {enabled, url, token}`) ·
 viewport · aba ativa · aba do Ribbon (`ribbonActiveTab`) · modo de colapso do Ribbon
@@ -199,7 +202,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Epics/decisões/roadmap de produto (histórico completo) | `docs/wiki/Decisoes.md`, `docs/wiki/Roadmap.md`, `docs/wiki/Epicos-*.md` |
 | Base de Testes Oficial — inventário, dicionário, matriz de cobertura, gerador de CSV; **feature nova/ajustada ⇒ atualizar docs + regras do gerador na mesma sessão; NUNCA regenerar o CSV sem pedido do usuário** | `docs/wiki/Dados_Teste/README.md` (§ Contrato de manutenção) |
 | UX 2.0 — Ribbon, registro de comandos, ⚙ Hub de Configurações, Busca Ctrl+K, Status Bar, painel Ativos/Inspetor/Copiloto, mini-flutuante de seleção, touch/mobile (8 sessões, entregue) | `docs/wiki/Ribbon-Prompts-Sessoes.md` |
-| Explorar a Base — motor do perfil (EB1) + aba/layout automático (EB2) + camada interpretativa completa (EB3) entregues; EB4–EB5 planejadas (Épico EB, DEC-EB-001..012) | `docs/claude/Explorar-Base.md` (implementação) + `docs/wiki/Epicos-ExplorarBase.md` (normativo) |
+| Explorar a Base — motor do perfil (EB1) + aba/layout automático (EB2) + camada interpretativa (EB3) + pontes para o fluxo/builder livre/convite pós-import (EB4) entregues; EB5 (sincronização documental) planejada (Épico EB, DEC-EB-001..012) | `docs/claude/Explorar-Base.md` (implementação) + `docs/wiki/Epicos-ExplorarBase.md` (normativo) |
 | Jornada de Construção peças 2–3 — Feed de Próxima Melhor Ação (Épico NB) + Etapas/Prontidão (Épico EP), planejados, prompts por sessão | `docs/wiki/Jornada-Prompts-Sessoes.md` |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
 | Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
