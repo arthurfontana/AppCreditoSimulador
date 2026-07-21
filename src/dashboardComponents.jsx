@@ -148,6 +148,7 @@ function SeriesStylePanel({ series, isLine, seriesStyles, onChange }) {
       <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.7 }}>Personalizar séries</div>
       {series.map((sd) => {
         const st = seriesStyles[sd.key] || {};
+        const lineControls = sd.isLine ?? isLine;
         const curDash = st.strokeDasharray ?? "0";
         const curWidth = st.strokeWidth ?? 2.5;
         const btnBase = (active) => ({
@@ -165,7 +166,7 @@ function SeriesStylePanel({ series, isLine, seriesStyles, onChange }) {
             <input type="color" value={sd.color} title="Cor da série"
               onChange={(e) => onChange(sd.key, { color: e.target.value })}
               style={{ width: 26, height: 22, border: "1px solid #e2e8f0", borderRadius: 5, padding: "1px", cursor: "pointer", flexShrink: 0 }} />
-            {isLine && (
+            {lineControls && (
               <>
                 <div style={{ display: "flex", gap: 2 }}>
                   {DASH_OPTS.map(opt => (
@@ -1037,6 +1038,23 @@ function KpiCard({ analyticsDataset, metricId, kpiA, kpiB, onChange }) {
   );
 }
 
+// Domínio automático do Eixo Y (min/max reais + folga estilo Excel) — genérico o
+// bastante para servir tanto o eixo esquerdo (métrica principal) quanto o direito
+// (métrica secundária, DEC — Eixo Secundário), cada um com sua própria série/chave.
+function computeAutoYDomain(data, series, keyOf) {
+  let minVal = Infinity, maxVal = -Infinity;
+  for (const row of (data || [])) {
+    for (const sd of series) {
+      const v = row[keyOf(sd)];
+      if (typeof v === "number" && !isNaN(v)) { minVal = Math.min(minVal, v); maxVal = Math.max(maxVal, v); }
+    }
+  }
+  if (minVal === Infinity) return null;
+  const range = maxVal - minVal;
+  const pad = range === 0 ? Math.max(maxVal * 0.1, 1) : range * 0.1;
+  return [Math.max(0, Math.floor(minVal - pad)), Math.ceil(maxVal + pad)];
+}
+
 // ── AnalyticsWidget — um gráfico configurável ─────────────────────────────────
 function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigChange, onTypeChange, onDelete, onDuplicate, onDragStart, onResizeStart }) {
   const cfg = widget.config;
@@ -1095,6 +1113,10 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
     ...orderedDims.map(d => ({ value: d, label: dimLabel(d) })),
   ];
   const metricOptions = metrics.map(m => ({ value: m.id, label: m.label }));
+  // Métrica secundária (eixo direito) — só faz sentido em linha/barra (bar100 já normaliza
+  // tudo em %, KPI não tem eixo). "— nenhuma —" no topo permite limpar a seleção.
+  const allowMetric2 = !isKpi && type !== "bar100";
+  const metric2Options = [{ value: "", label: "— nenhuma —" }, ...metricOptions];
   const serieOptions = xIsCenario
     ? [
       { value: SERIE_NONE, label: "Nenhuma (linha única)" },
@@ -1133,6 +1155,48 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
     const fallback = autoYDomain || (isPct ? [0, 100] : ["auto", "auto"]);
     return [hasMin ? Number(cfg.yMin) : fallback[0], hasMax ? Number(cfg.yMax) : fallback[1]];
   })();
+
+  // Métrica secundária — mesmo pivô, só troca a métrica (xDimension/serieBy/filtros
+  // idênticos ⇒ MESMOS buckets/séries na MESMA ordem que o pivô principal, então dá pra
+  // mesclar linha a linha pelo `x`). Renderizada sempre como linha tracejada no eixo direito.
+  const metric2Id = allowMetric2 ? cfg.metric2 : null;
+  const pivot2 = useMemo(() => (metric2Id ? pivotWidget(filteredDataset, { ...cfg, metric: metric2Id }) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredDataset, metric2Id, cfg.xDimension, cfg.serieBy, cfg.activeScenarios]);
+  const hasSecondary = !!(pivot2 && pivot2.state === "ok" && pivot.state === "ok");
+  const secondarySeries = useMemo(() => {
+    if (!hasSecondary) return [];
+    return pivot2.series.map(sd => {
+      const key = `m2:${sd.key}`;
+      const ov = styles[key];
+      return { ...sd, key, dataKey: `m2:${sd.label}`, displayName: `${sd.label} · ${pivot2.metricDef.label}`, color: ov?.color || sd.color };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasSecondary, pivot2, styles]);
+  // Mescla os dados do pivô principal com os da métrica secundária pelo valor de `x`
+  // (mesmo bucket) — chaves prefixadas `m2:` para nunca colidir com as séries principais.
+  const chartData = useMemo(() => {
+    if (pivot.state !== "ok") return [];
+    if (!hasSecondary) return pivot.data;
+    const byX = new Map(pivot2.data.map(r => [r.x, r]));
+    return pivot.data.map(row => {
+      const srow = byX.get(row.x);
+      const extra = {};
+      for (const sd of pivot2.series) extra[`m2:${sd.label}`] = srow ? srow[sd.label] : null;
+      return { ...row, ...extra };
+    });
+  }, [pivot, pivot2, hasSecondary]);
+  const isPct2 = hasSecondary ? pivot2.metricDef?.unit !== "qty" : false;
+  const autoYDomain2 = useMemo(() => (hasSecondary ? computeAutoYDomain(chartData, secondarySeries, sd => sd.dataKey) : null),
+    [hasSecondary, chartData, secondarySeries]);
+  const yDomain2 = hasSecondary ? (autoYDomain2 || (isPct2 ? [0, 100] : ["auto", "auto"])) : null;
+  // Formatter do tooltip — decide a unidade pela chave (prefixo `m2:` ⇒ métrica secundária).
+  const tooltipFormatter = (value, name, entry) => {
+    const dk = entry?.dataKey ?? name;
+    const isM2 = typeof dk === "string" && dk.startsWith("m2:");
+    return fmtMetricVal(value, isM2 ? pivot2?.metricDef?.unit : pivot.metricDef?.unit);
+  };
+
   const setSeriesStyle = (key, patch) => {
     const current = cfg.seriesStyles || {};
     set({ seriesStyles: { ...current, [key]: { ...(current[key] || {}), ...patch } } });
@@ -1196,7 +1260,7 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
       </div>
 
       {/* Barra de configuração — poços de campo (KPI usa apenas a métrica) */}
-      <div style={{ display: "grid", gridTemplateColumns: isKpi ? "1fr" : "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9", flexShrink: 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isKpi ? "1fr" : allowMetric2 ? "1fr 1fr 1fr 1fr" : "1fr 1fr 1fr", gap: 10, marginBottom: 14, padding: "10px 12px", background: "#f8fafc", borderRadius: 10, border: "1px solid #f1f5f9", flexShrink: 0 }}>
         {!isKpi && (
           <FieldWell icon="📅" label="Eixo X" accept="dim" value={cfg.xDimension} displayValue={cfg.xDimension}
             options={xOptions} onChange={(v) => {
@@ -1212,6 +1276,10 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
         {!isKpi && (
           <FieldWell icon="🎨" label={type === "bar100" ? "Composição" : "Série"} accept="dim" value={cfg.serieBy} displayValue
             options={serieOptions} onChange={(v) => set({ serieBy: v || SERIE_CENARIO })} />
+        )}
+        {allowMetric2 && (
+          <FieldWell icon="Σ₂" label="Métrica 2 (eixo dir.)" accept="metric" value={cfg.metric2 || ""} displayValue={cfg.metric2}
+            options={metric2Options} onChange={(v) => set({ metric2: v || null })} />
         )}
       </div>
 
@@ -1274,9 +1342,14 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
         </div>
       )}
 
-      {/* Painel de personalização de séries */}
+      {/* Painel de personalização de séries — inclui a métrica secundária (sempre linha) */}
       {seriesStylesOpen && pivot.state === "ok" && (
-        <SeriesStylePanel series={effectiveSeries} isLine={type === "line"} seriesStyles={styles} onChange={setSeriesStyle} />
+        <SeriesStylePanel
+          series={[
+            ...effectiveSeries.map(sd => ({ ...sd, isLine: type === "line" })),
+            ...secondarySeries.map(sd => ({ ...sd, label: sd.displayName, isLine: true })),
+          ]}
+          isLine={type === "line"} seriesStyles={styles} onChange={setSeriesStyle} />
       )}
 
       {/* Painel de filtros do visual — recorta em cima do que já chega filtrado pela página */}
@@ -1302,7 +1375,54 @@ function AnalyticsWidget({ widget, analyticsDataset, pageFilters = [], onConfigC
           <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ width: "100%", flex: 1, minHeight: 200 }}>
               <ResponsiveContainer width="100%" height="100%">
-                {type === "line" ? (
+                {hasSecondary ? (
+                  <ComposedChart data={chartData} margin={{ top: showLabels ? 22 : 8, right: 24, bottom: 8, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
+                    <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
+                    <YAxis yAxisId="left" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
+                      unit={isPct ? "%" : ""} domain={yDomain} />
+                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1"
+                      unit={isPct2 ? "%" : ""} domain={yDomain2} />
+                    <Tooltip formatter={tooltipFormatter}
+                      contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {effectiveSeries.map((sd, si) => {
+                      const st = styles[sd.key] || {};
+                      if (type === "line") {
+                        const strokeW = st.strokeWidth ?? 2.5;
+                        const strokeDash = st.strokeDasharray && st.strokeDasharray !== "0" ? st.strokeDasharray : undefined;
+                        return (
+                          <Line key={sd.key} yAxisId="left" type="monotone" dataKey={sd.label} name={sd.label}
+                            stroke={sd.color} strokeWidth={strokeW} strokeDasharray={strokeDash}
+                            dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls>
+                            {showLabels && <LabelList dataKey={sd.label} content={(props) => <ChartLineLabel {...props} color={sd.color} metricDef={pivot.metricDef} seriesIndex={si} allData={chartData} seriesKey={sd.label} />} />}
+                          </Line>
+                        );
+                      }
+                      return (
+                        <Bar key={sd.key} yAxisId="left" dataKey={sd.label} name={sd.label} fill={sd.color} radius={[3, 3, 0, 0]}>
+                          {showLabels && <LabelList dataKey={sd.label} content={(props) => <ChartBarLabel {...props} color={sd.color} metricDef={pivot.metricDef} isBar100={false} />} />}
+                        </Bar>
+                      );
+                    })}
+                    {secondarySeries.map((sd, si) => {
+                      const st = styles[sd.key] || {};
+                      const hasCustomStyle = !!styles[sd.key];
+                      const strokeW = st.strokeWidth ?? 2;
+                      // Sem customização, nasce tracejada — sinaliza visualmente "isto é o eixo direito".
+                      const strokeDash = hasCustomStyle
+                        ? (st.strokeDasharray && st.strokeDasharray !== "0" ? st.strokeDasharray : undefined)
+                        : "6 3";
+                      return (
+                        <Line key={sd.key} yAxisId="right" type="monotone" dataKey={sd.dataKey} name={sd.displayName}
+                          stroke={sd.color} strokeWidth={strokeW} strokeDasharray={strokeDash}
+                          dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls>
+                          {showLabels && <LabelList dataKey={sd.dataKey} content={(props) => <ChartLineLabel {...props} color={sd.color} metricDef={pivot2.metricDef} seriesIndex={si} allData={chartData} seriesKey={sd.dataKey} />} />}
+                        </Line>
+                      );
+                    })}
+                  </ComposedChart>
+                ) : type === "line" ? (
                   <LineChart data={pivot.data} margin={{ top: showLabels ? 22 : 8, right: 24, bottom: 8, left: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                     <XAxis dataKey="x" tick={{ fontSize: 11, fill: "#64748b" }} stroke="#cbd5e1" />
@@ -1595,32 +1715,69 @@ function ExploreIvRankBody({ profile, csvId, actions }) {
 
 // `varprofile` — volume (barras) + taxa da métrica-alvo (linha) por valor, eixo duplo
 // (Recharts ComposedChart, exceção DEC-AW-001 estendida à aba Explorar).
-function ExploreVarProfileBody({ widget, profile, csvId, actions }) {
+function ExploreVarProfileBody({ widget, profile, csvId, actions, onConfigChange }) {
   const col = widget.config?.col;
-  const v = (profile?.variables || []).find(x => x.col === col);
-  if (!v) return <AWEmptyState icon="📊" title="Variável não encontrada" hint="Esta variável pode não existir mais nesta base." />;
+  const showLabels = widget.config?.showLabels ?? false;
+  const vars = profile?.variables || [];
+  const v = vars.find(x => x.col === col);
+  const set = (patch) => onConfigChange && onConfigChange(widget.id, patch);
+
+  // Troca a variável exibida — permite apontar o card para uma variável criada depois
+  // (ex.: uma Variável de Faixas), sem precisar recriar o widget.
+  const varSelector = onConfigChange && vars.length > 0 && (
+    <select value={col ?? ""} onChange={(e) => set({ col: e.target.value })} title="Trocar a variável exibida neste gráfico"
+      style={{ fontSize: 11.5, padding: "4px 7px", borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff",
+        color: "#334155", fontFamily: "inherit", outline: "none", cursor: "pointer", maxWidth: 180 }}>
+      {!col && <option value="">— escolher variável —</option>}
+      {vars.map(vv => <option key={vv.col} value={vv.col}>{vv.col}</option>)}
+    </select>
+  );
+  const labelsToggle = (
+    <button onClick={() => set({ showLabels: !showLabels })} title={showLabels ? "Ocultar rótulos" : "Mostrar rótulos nos pontos/barras"}
+      style={{ flexShrink: 0, width: 26, height: 26, borderRadius: 7, border: `1px solid ${showLabels ? "#0891b2" : "#e2e8f0"}`,
+        background: showLabels ? "#ecfeff" : "#fff", color: showLabels ? "#0891b2" : "#94a3b8",
+        cursor: "pointer", fontSize: 11, fontWeight: 700, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit" }}>Aa</button>
+  );
+
+  if (!v) {
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
+        {varSelector && <div>{varSelector}</div>}
+        <AWEmptyState icon="📊" title="Variável não encontrada"
+          hint={varSelector ? "Esta variável pode não existir mais nesta base. Escolha outra no seletor acima." : "Esta variável pode não existir mais nesta base."} />
+      </div>
+    );
+  }
   const data = (v.profile || []).map(p => ({ x: String(p.value), qty: p.qty, rate: p.rate != null ? p.rate * 100 : null }));
   const metricLabel = profile?.metric?.label || "Taxa";
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6, flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6, flexShrink: 0, flexWrap: "wrap" }}>
         <div style={{ fontSize: 11, color: "#94a3b8" }}>
           IV {v.iv != null ? v.iv.toFixed(2) : "—"} · {v.distinct} valores · cobertura {v.coveragePct.toFixed(1)}%
           {v.continuous && <span style={{ marginLeft: 6, color: "#2563eb" }}>· contínua</span>}
         </div>
-        <ExploreVarActions col={col} csvId={csvId} continuous={v.continuous} actions={actions} />
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {varSelector}
+          {labelsToggle}
+          <ExploreVarActions col={col} csvId={csvId} continuous={v.continuous} actions={actions} />
+        </div>
       </div>
       <div style={{ flex: 1, minHeight: 180 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+          <ComposedChart data={data} margin={{ top: showLabels ? 20 : 8, right: 24, bottom: 8, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
             <XAxis dataKey="x" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" />
             <YAxis yAxisId="qty" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" />
             <YAxis yAxisId="rate" orientation="right" tick={{ fontSize: 10.5, fill: "#64748b" }} stroke="#cbd5e1" unit="%" />
             <Tooltip contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12, fontFamily: "inherit" }} />
             <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Bar yAxisId="qty" dataKey="qty" name="Volume" fill="#94a3b8" radius={[3, 3, 0, 0]} />
-            <Line yAxisId="rate" type="monotone" dataKey="rate" name={`${metricLabel} (%)`} stroke="#dc2626" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
+            <Bar yAxisId="qty" dataKey="qty" name="Volume" fill="#94a3b8" radius={[3, 3, 0, 0]}>
+              {showLabels && <LabelList dataKey="qty" content={(props) => <ChartBarLabel {...props} color="#94a3b8" metricDef={{ unit: "qty" }} isBar100={false} />} />}
+            </Bar>
+            <Line yAxisId="rate" type="monotone" dataKey="rate" name={`${metricLabel} (%)`} stroke="#dc2626" strokeWidth={2.5} dot={{ r: 3 }} connectNulls>
+              {showLabels && <LabelList dataKey="rate" content={(props) => <ChartLineLabel {...props} color="#dc2626" metricDef={{ unit: "pct" }} seriesIndex={0} allData={data} seriesKey="rate" />} />}
+            </Line>
           </ComposedChart>
         </ResponsiveContainer>
       </div>
@@ -1716,7 +1873,7 @@ function ExploreStabilityBody({ profile }) {
 // Dispatcher por tipo — a casca (shell) é sempre a mesma, só o corpo muda.
 function ExploreWidget({ widget, profile, csvId, actions, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart }) {
   const body = widget.type === "ivrank" ? <ExploreIvRankBody profile={profile} csvId={csvId} actions={actions} />
-    : widget.type === "varprofile" ? <ExploreVarProfileBody widget={widget} profile={profile} csvId={csvId} actions={actions} />
+    : widget.type === "varprofile" ? <ExploreVarProfileBody widget={widget} profile={profile} csvId={csvId} actions={actions} onConfigChange={onConfigChange} />
     : widget.type === "quality" ? <ExploreQualityBody profile={profile} />
     : widget.type === "stability" ? <ExploreStabilityBody profile={profile} />
     : <ExploreInsightBody widget={widget} profile={profile} />;
