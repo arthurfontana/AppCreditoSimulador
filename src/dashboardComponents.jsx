@@ -1527,9 +1527,47 @@ function ExploreInsightBody({ widget, profile }) {
   );
 }
 
+// Pontes para o fluxo (Épico EB, EB4, DEC-EB-010) — 3 CTAs reusados nos cards `ivrank`
+// (ícones compactos por linha) e `varprofile` (botões rotulados no rodapé). REUSAM os
+// aplicadores existentes (App.jsx: createDecisionNode/openRangeModal/openClusterModal) —
+// este componente só repassa `col`/`csvId` aos callbacks, nenhuma lógica nova aqui.
+const EXPLORE_CTA_META = {
+  firstBranch: { icon: "➕", title: "Usar como 1º galho — cria este losango no Canvas" },
+  ranges:      { icon: "📐", title: "Criar Faixas por Risco a partir desta variável" },
+  cluster:     { icon: "🧩", title: "Clusterizar a partir desta variável" },
+};
+function ExploreVarActions({ col, csvId, continuous, actions, compact }) {
+  if (!actions) return null;
+  const { onUseAsFirstBranch, onCreateRanges, onClusterize } = actions;
+  const btnStyle = compact
+    ? { border: "none", background: "transparent", cursor: "pointer", fontSize: 12, padding: "1px 3px", lineHeight: 1, opacity: 0.7 }
+    : { display: "flex", alignItems: "center", gap: 5, padding: "4px 9px", borderRadius: 7, border: "1px solid #e2e8f0",
+        background: "#fff", color: "#475569", cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit" };
+  const label = (key) => compact ? null : <span>{EXPLORE_CTA_META[key].title.split(" — ")[0]}</span>;
+  return (
+    <span style={{ display: "flex", gap: compact ? 2 : 6, flexShrink: 0 }}>
+      {onUseAsFirstBranch && (
+        <button onClick={() => onUseAsFirstBranch(col, csvId)} title={EXPLORE_CTA_META.firstBranch.title} style={btnStyle}>
+          {EXPLORE_CTA_META.firstBranch.icon}{label("firstBranch")}
+        </button>
+      )}
+      {continuous && onCreateRanges && (
+        <button onClick={() => onCreateRanges(col, csvId)} title={EXPLORE_CTA_META.ranges.title} style={btnStyle}>
+          {EXPLORE_CTA_META.ranges.icon}{label("ranges")}
+        </button>
+      )}
+      {onClusterize && (
+        <button onClick={() => onClusterize(col, csvId)} title={EXPLORE_CTA_META.cluster.title} style={btnStyle}>
+          {EXPLORE_CTA_META.cluster.icon}{label("cluster")}
+        </button>
+      )}
+    </span>
+  );
+}
+
 // `ivrank` — barra horizontal (div-based, controle total sobre os badges de flag) do
 // ranking global de variáveis (já ordenado por IV desc — DEC-EB-008).
-function ExploreIvRankBody({ profile }) {
+function ExploreIvRankBody({ profile, csvId, actions }) {
   const vars = profile?.variables || [];
   if (vars.length === 0) return <AWEmptyState icon="📊" title="Sem variáveis" hint="Nenhuma coluna marcada como Variável de Decisão nesta base." />;
   const maxIv = Math.max(0.01, ...vars.map(v => v.iv || 0));
@@ -1548,6 +1586,7 @@ function ExploreIvRankBody({ profile }) {
               <span key={f} title={EXPLORE_FLAG_META[f].title} style={{ fontSize: 11.5 }}>{EXPLORE_FLAG_META[f].icon}</span>
             ))}
           </span>
+          <ExploreVarActions col={v.col} csvId={csvId} continuous={v.continuous} actions={actions} compact />
         </div>
       ))}
     </div>
@@ -1556,7 +1595,7 @@ function ExploreIvRankBody({ profile }) {
 
 // `varprofile` — volume (barras) + taxa da métrica-alvo (linha) por valor, eixo duplo
 // (Recharts ComposedChart, exceção DEC-AW-001 estendida à aba Explorar).
-function ExploreVarProfileBody({ widget, profile }) {
+function ExploreVarProfileBody({ widget, profile, csvId, actions }) {
   const col = widget.config?.col;
   const v = (profile?.variables || []).find(x => x.col === col);
   if (!v) return <AWEmptyState icon="📊" title="Variável não encontrada" hint="Esta variável pode não existir mais nesta base." />;
@@ -1564,9 +1603,12 @@ function ExploreVarProfileBody({ widget, profile }) {
   const metricLabel = profile?.metric?.label || "Taxa";
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 6, flexShrink: 0 }}>
-        IV {v.iv != null ? v.iv.toFixed(2) : "—"} · {v.distinct} valores · cobertura {v.coveragePct.toFixed(1)}%
-        {v.continuous && <span style={{ marginLeft: 6, color: "#2563eb" }}>· contínua</span>}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6, flexShrink: 0 }}>
+        <div style={{ fontSize: 11, color: "#94a3b8" }}>
+          IV {v.iv != null ? v.iv.toFixed(2) : "—"} · {v.distinct} valores · cobertura {v.coveragePct.toFixed(1)}%
+          {v.continuous && <span style={{ marginLeft: 6, color: "#2563eb" }}>· contínua</span>}
+        </div>
+        <ExploreVarActions col={col} csvId={csvId} continuous={v.continuous} actions={actions} />
       </div>
       <div style={{ flex: 1, minHeight: 180 }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -1672,9 +1714,9 @@ function ExploreStabilityBody({ profile }) {
 }
 
 // Dispatcher por tipo — a casca (shell) é sempre a mesma, só o corpo muda.
-function ExploreWidget({ widget, profile, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart }) {
-  const body = widget.type === "ivrank" ? <ExploreIvRankBody profile={profile} />
-    : widget.type === "varprofile" ? <ExploreVarProfileBody widget={widget} profile={profile} />
+function ExploreWidget({ widget, profile, csvId, actions, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart }) {
+  const body = widget.type === "ivrank" ? <ExploreIvRankBody profile={profile} csvId={csvId} actions={actions} />
+    : widget.type === "varprofile" ? <ExploreVarProfileBody widget={widget} profile={profile} csvId={csvId} actions={actions} />
     : widget.type === "quality" ? <ExploreQualityBody profile={profile} />
     : widget.type === "stability" ? <ExploreStabilityBody profile={profile} />
     : <ExploreInsightBody widget={widget} profile={profile} />;
@@ -1687,12 +1729,20 @@ function ExploreWidget({ widget, profile, onConfigChange, onDelete, onDuplicate,
   );
 }
 
+// Tipos "livres" do builder (DEC-EB-011) — MESMOS tipos do Dashboard (gráfico/KPI/texto),
+// dividindo o mesmo array `layout` com os widgets automáticos da aba (insight/ivrank/
+// varprofile/quality/stability). O dispatcher de render abaixo decide o componente pelo tipo.
+const EXPLORE_FREE_TYPES = new Set([...CHART_TYPES.map(ct => ct.id), "text"]);
+
 // ── ExploreTab — página da aba Explorar ────────────────────────────────────────
-// Header: seletor de base + seletor de métrica-alvo + ↻ Regenerar análise + Exportar PDF.
-// Canvas: mesma mecânica de posicionamento livre (drag/resize) do Dashboard, sem o
-// FieldPanel/Filtros/Agrupamentos (builder livre é da EB4, DEC-EB-011) — a EB2 entrega só
-// o layout default gerado automaticamente (DEC-EB-005/006).
-function ExploreTab({ profile, csvStore, csvId, onCsvIdChange, riskMetric, onRiskMetricChange, layout, setLayout, onRegenerate }) {
+// Header: seletor de base + seletor de métrica-alvo + ↻ Regenerar análise + Exportar PDF +
+// "+ Adicionar gráfico"/"📝 Adicionar texto" (builder livre, EB4). Canvas: mesma mecânica de
+// posicionamento livre (drag/resize) do Dashboard. Painel de campos (FieldPanel) à direita:
+// MESMO chassi do Dashboard, operando sobre `datasetGrouped`/`datasetRaw` — dataset largo
+// escopado à base selecionada, cenário FIXO AS IS (DEC-EB-011 — a aba analisa a base
+// observada, não a política simulada).
+function ExploreTab({ profile, csvStore, csvId, onCsvIdChange, riskMetric, onRiskMetricChange, layout, setLayout, onRegenerate,
+  actions, datasetGrouped, datasetRaw, groupings, setGroupings, pageFilters, setPageFilters, actionNotice, onDismissActionNotice }) {
   // Auto-init: primeiro perfil desta base com layout vazio ⇒ gera o default (DEC-EB-005).
   useEffect(() => {
     if (!profile || profile.error) return;
@@ -1701,6 +1751,7 @@ function ExploreTab({ profile, csvStore, csvId, onCsvIdChange, riskMetric, onRis
   }, [profile]);
 
   const changeConfig = (id, patch) => setLayout(prev => prev.map(w => w.id === id ? { ...w, config: { ...w.config, ...patch }, origin: "user" } : w));
+  const changeType = (id, type) => setLayout(prev => prev.map(w => w.id === id ? { ...w, type } : w));
   const removeWidget = (id) => setLayout(prev => prev.filter(w => w.id !== id));
   const duplicateWidget = (id) => setLayout(prev => {
     const src = prev.find(w => w.id === id);
@@ -1711,6 +1762,42 @@ function ExploreTab({ profile, csvStore, csvId, onCsvIdChange, riskMetric, onRis
     const idx = prev.findIndex(w => w.id === id);
     return [...prev.slice(0, idx + 1), copy, ...prev.slice(idx + 1)];
   });
+
+  // ── Builder livre (DEC-EB-011) — "+ Adicionar gráfico"/"📝 Adicionar texto", MESMOS
+  // WidgetConfig do Dashboard (AnalyticsWidget/TextWidget), nascem `origin:'user'` (não há
+  // "AUTO" para algo que o próprio usuário pediu).
+  const dims = datasetGrouped?.dimensions || [];
+  const temporalCols = datasetGrouped?.temporalColumns || [];
+  const makeChartWidget = () => {
+    const nextY = layout.reduce((acc, w) => Math.max(acc, (w.y ?? 0) + (w.h ?? 360)), 0);
+    return {
+      id: uid(), type: "line", origin: "user", x: 24, y: layout.length === 0 ? 24 : nextY + 24, w: 560, h: 420,
+      config: { title: "Novo gráfico", xDimension: temporalCols[0] || dims[0] || null, metric: "approvalRate", serieBy: SERIE_NONE, yMin: null, yMax: null, filters: [] },
+    };
+  };
+  const makeTextWidget = () => {
+    const nextY = layout.reduce((acc, w) => Math.max(acc, (w.y ?? 0) + (w.h ?? 360)), 0);
+    return { id: uid(), type: "text", origin: "user", x: 24, y: layout.length === 0 ? 24 : nextY + 24, w: 380, h: 220, config: { title: "Anotação", text: "", spellCheck: true } };
+  };
+  const addChartWidget = () => setLayout(prev => [...prev, makeChartWidget()]);
+  const addTextWidget = () => setLayout(prev => [...prev, makeTextWidget()]);
+
+  // ── Agrupamentos (dimensões derivadas), MESMO GroupingModal do Dashboard ───────────
+  const [editingGrouping, setEditingGrouping] = useState(null); // null | draft
+  const newGrouping = () => setEditingGrouping({ id: null, name: "", source: "", buckets: [], unmatched: "other", otherLabel: GROUPING_OTHER_DEFAULT });
+  const editGrouping = (id) => { const g = groupings.find(x => x.id === id); if (g) setEditingGrouping({ ...g }); };
+  const deleteGrouping = (id) => setGroupings(prev => prev.filter(g => g.id !== id));
+  const saveGrouping = (g) => {
+    const isNew = !g.id;
+    const withId = isNew ? { ...g, id: uid() } : g;
+    setGroupings(prev => isNew ? [...prev, withId] : prev.map(x => x.id === g.id ? withId : x));
+    setEditingGrouping(null);
+  };
+  const existingNames = useMemo(() => {
+    const real = (datasetRaw?.dimensions || []).filter(d => !(datasetRaw?.groupedDimensions || []).includes(d));
+    const others = groupings.filter(g => !editingGrouping || g.id !== editingGrouping.id).map(g => g.name);
+    return new Set([...real, ...others]);
+  }, [datasetRaw, groupings, editingGrouping]);
 
   const layoutRef = useRef(layout);
   useEffect(() => { layoutRef.current = layout; }, [layout]);
@@ -1780,63 +1867,114 @@ function ExploreTab({ profile, csvStore, csvId, onCsvIdChange, riskMetric, onRis
     fontSize: 12.5, color: "#1e293b", fontFamily: "inherit", outline: "none", cursor: "pointer" };
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", background: "#f8fafc" }}>
-      <div style={{ flexShrink: 0, padding: "20px 28px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-        <div>
-          <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>🔎 Explorar a Base</h1>
-          <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
-            A análise que um analista sênior faria antes do primeiro galho — funciona com o canvas vazio.
-          </p>
-        </div>
-        {hasData && (
-          <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <select value={csvId || ""} onChange={(e) => onCsvIdChange(e.target.value)} style={selStyle} title="Base analisada">
-              {csvOptions.map(([id, c]) => <option key={id} value={id}>{c.name || id}</option>)}
-            </select>
-            <select value={riskMetric} onChange={(e) => onRiskMetricChange(e.target.value)} style={selStyle} title="Métrica-alvo">
-              <option value="inadReal">Inad. Real</option>
-              <option value="inadInferida">Inad. Inferida</option>
-            </select>
-            <button onClick={onRegenerate}
-              title="Recria os cards gerados automaticamente (origin AUTO), preservando os que você criou ou editou"
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
-                border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
-              <span style={{ fontSize: 14, lineHeight: 1 }}>↻</span> Regenerar análise
-            </button>
-            <button onClick={exportExplorePDF} disabled={layout.length === 0}
-              title="Exporta os componentes desta análise como PDF (via impressão do navegador)"
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
-                border: "1px solid #cbd5e1", background: "#fff", color: layout.length === 0 ? "#cbd5e1" : "#475569",
-                cursor: layout.length === 0 ? "not-allowed" : "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
-              <span style={{ fontSize: 14, lineHeight: 1 }}>📄</span> Exportar PDF
-            </button>
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row", overflow: "hidden", background: "#f8fafc" }}>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {/* Aviso efêmero do CTA "➕ Usar como 1º galho" quando o canvas já não estava vazio
+            (nó criado SOLTO — DEC-EB-010). */}
+        {actionNotice && (
+          <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, padding: "8px 28px",
+            background: "#eff6ff", borderBottom: "1px solid #bfdbfe", fontSize: 11.5, color: "#1d4ed8", lineHeight: 1.5 }}>
+            <span style={{ fontSize: 14, flexShrink: 0 }}>💡</span>
+            <span style={{ flex: 1 }}>{actionNotice}</span>
+            <button onClick={onDismissActionNotice} title="Dispensar aviso"
+              style={{ border: "none", background: "transparent", color: "#2563eb", cursor: "pointer", fontSize: 13, padding: "0 2px", lineHeight: 1, flexShrink: 0 }}>✕</button>
           </div>
         )}
+        <div style={{ flexShrink: 0, padding: "20px 28px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+          <div>
+            <h1 style={{ fontSize: 18, fontWeight: 600, color: "#1e293b", letterSpacing: 0.2 }}>🔎 Explorar a Base</h1>
+            <p style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 3 }}>
+              A análise que um analista sênior faria antes do primeiro galho — funciona com o canvas vazio.
+            </p>
+          </div>
+          {hasData && (
+            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <select value={csvId || ""} onChange={(e) => onCsvIdChange(e.target.value)} style={selStyle} title="Base analisada">
+                {csvOptions.map(([id, c]) => <option key={id} value={id}>{c.name || id}</option>)}
+              </select>
+              <select value={riskMetric} onChange={(e) => onRiskMetricChange(e.target.value)} style={selStyle} title="Métrica-alvo">
+                <option value="inadReal">Inad. Real</option>
+                <option value="inadInferida">Inad. Inferida</option>
+              </select>
+              <button onClick={onRegenerate}
+                title="Recria os cards gerados automaticamente (origin AUTO), preservando os que você criou ou editou"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 14, lineHeight: 1 }}>↻</span> Regenerar análise
+              </button>
+              <button onClick={exportExplorePDF} disabled={layout.length === 0}
+                title="Exporta os componentes desta análise como PDF (via impressão do navegador)"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #cbd5e1", background: "#fff", color: layout.length === 0 ? "#cbd5e1" : "#475569",
+                  cursor: layout.length === 0 ? "not-allowed" : "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 14, lineHeight: 1 }}>📄</span> Exportar PDF
+              </button>
+              <button onClick={addTextWidget}
+                title="Adiciona uma caixa de texto livre para anotações sobre a análise"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #f59e0b", background: "#fffbeb", color: "#b45309", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 14, lineHeight: 1 }}>📝</span> Adicionar texto
+              </button>
+              <button onClick={addChartWidget}
+                title="Adiciona um gráfico livre sobre a base (dimensões/métricas no painel à direita)"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid #2563eb", background: "#2563eb", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
+                <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> Adicionar gráfico
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "auto" }}>
+          {!hasData ? (
+            <AWEmptyState icon="🔎" title="Nenhuma base carregada"
+              hint="Importe um CSV para a análise exploratória aparecer aqui automaticamente." />
+          ) : !profile ? (
+            <AWEmptyState icon="⏳" title="Calculando o perfil da base…" hint="Isso é rápido — só agregação exata sobre a base." />
+          ) : profile.error ? (
+            <AWEmptyState icon="⚠️" title="Não foi possível calcular o perfil" hint={`Erro: ${profile.error}`} />
+          ) : layout.length === 0 ? (
+            <AWEmptyState icon="⏳" title="Gerando a análise…" hint="O layout automático aparece assim que o perfil da base terminar de calcular." />
+          ) : (
+            <div style={{ position: "relative", minHeight: canvasH, minWidth: canvasW }}>
+              {layout.map(w => (
+                <div key={w.id} data-explore-widget-id={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 1100, height: w.h ?? 360 }}>
+                  {EXPLORE_FREE_TYPES.has(w.type) ? (
+                    <div data-explore-capture style={{ height: "100%" }}>
+                      {w.type === "text" ? (
+                        <TextWidget widget={w}
+                          onConfigChange={changeConfig} onDelete={removeWidget} onDuplicate={duplicateWidget}
+                          onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
+                          onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+                      ) : (
+                        <AnalyticsWidget widget={w} analyticsDataset={datasetGrouped} pageFilters={pageFilters}
+                          onConfigChange={changeConfig} onTypeChange={changeType} onDelete={removeWidget} onDuplicate={duplicateWidget}
+                          onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
+                          onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+                      )}
+                    </div>
+                  ) : (
+                    <ExploreWidget widget={w} profile={profile} csvId={csvId} actions={actions}
+                      onConfigChange={changeConfig} onDelete={removeWidget} onDuplicate={duplicateWidget}
+                      onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
+                      onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "auto" }}>
-        {!hasData ? (
-          <AWEmptyState icon="🔎" title="Nenhuma base carregada"
-            hint="Importe um CSV para a análise exploratória aparecer aqui automaticamente." />
-        ) : !profile ? (
-          <AWEmptyState icon="⏳" title="Calculando o perfil da base…" hint="Isso é rápido — só agregação exata sobre a base." />
-        ) : profile.error ? (
-          <AWEmptyState icon="⚠️" title="Não foi possível calcular o perfil" hint={`Erro: ${profile.error}`} />
-        ) : layout.length === 0 ? (
-          <AWEmptyState icon="⏳" title="Gerando a análise…" hint="O layout automático aparece assim que o perfil da base terminar de calcular." />
-        ) : (
-          <div style={{ position: "relative", minHeight: canvasH, minWidth: canvasW }}>
-            {layout.map(w => (
-              <div key={w.id} data-explore-widget-id={w.id} style={{ position: "absolute", left: w.x ?? 24, top: w.y ?? 24, width: w.w ?? 1100, height: w.h ?? 360 }}>
-                <ExploreWidget widget={w} profile={profile}
-                  onConfigChange={changeConfig} onDelete={removeWidget} onDuplicate={duplicateWidget}
-                  onDragStart={(e) => startWidgetInteract(w.id, e, 'move', null)}
-                  onResizeStart={(e, dir) => startWidgetInteract(w.id, e, 'resize', dir)} />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {/* Painel de campos (builder livre, DEC-EB-011) — MESMO chassi do Dashboard. */}
+      {hasData && <FieldPanel analyticsDataset={datasetGrouped} groupings={groupings}
+        onNewGrouping={newGrouping} onEditGrouping={editGrouping} onDeleteGrouping={deleteGrouping}
+        pageFilters={pageFilters} onPageFiltersChange={setPageFilters} />}
+
+      {editingGrouping && (
+        <GroupingModal draft={editingGrouping} baseDataset={datasetRaw} existingNames={existingNames}
+          onSave={saveGrouping} onClose={() => setEditingGrouping(null)} />
+      )}
     </div>
   );
 }

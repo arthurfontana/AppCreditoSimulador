@@ -195,6 +195,39 @@ describe('5B · computeAnalyticsDataset', () => {
     expect(computeAnalyticsDataset([], noAsIs)).toBeNull();
   });
 
+  // ── Épico EB, EB4 (DEC-EB-011) — `options.csvId` escopa o dataset largo a UMA base,
+  // usado por COMPUTE_EXPLORE_DATASET (builder livre da aba Explorar, sem canvases). ──
+  it('options.csvId escopa o dataset largo a uma única base (aditivo, sem canvases)', () => {
+    const twoCsv = {
+      ...csvStore,
+      c2: {
+        name: 'outra base',
+        headers: ['regiao', 'volume', '__DECISAO_ORIGINAL'],
+        rows: [['SUL', '20', 'APROVADO'], ['SUL', '30', 'REPROVADO']],
+        columnTypes: { volume: 'qty' },
+        varTypes: {},
+        asIsConfig: { col: 'dec', mapping: {} },
+      },
+    };
+    __setWorkerCsvStoreForTest(twoCsv);
+    const ds = computeAnalyticsDataset([], twoCsv, { csvId: 'c1' });
+    expect(ds.rowCount).toBe(3); // só as 3 linhas de c1, não as 2 de c2
+    expect(ds.dimensions.sort()).toEqual(['mes', 'score']); // 'regiao' (só em c2) fica de fora
+    expect(ds.scenarios).toEqual([{ id: 'as_is', nome: 'AS IS', decisionCol: '__DECISAO_AS_IS' }]);
+  });
+
+  it('sem options.csvId, comportamento idêntico ao caminho original (união de todas as bases com AS IS)', () => {
+    const twoCsv = {
+      ...csvStore,
+      c2: { name: 'outra base', headers: ['regiao', 'volume', '__DECISAO_ORIGINAL'], rows: [['SUL', '20', 'APROVADO']], columnTypes: { volume: 'qty' }, varTypes: {}, asIsConfig: { col: 'dec', mapping: {} } },
+    };
+    __setWorkerCsvStoreForTest(twoCsv);
+    const withOptions = computeAnalyticsDataset([], twoCsv, {});
+    const withoutOptions = computeAnalyticsDataset([], twoCsv);
+    expect(withOptions.rowCount).toBe(withoutOptions.rowCount);
+    expect(withOptions.rowCount).toBe(4); // 3 (c1) + 1 (c2)
+  });
+
   // M15 — regressão: `dimConst`/`dimTranslate` (tabelas de tradução código→código) usam
   // objetos JS crus como cache por nome de dimensão. Um nome de dimensão que colide com
   // uma propriedade herdada de Object.prototype (ex.: "constructor") não pode ser

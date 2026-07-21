@@ -38,6 +38,9 @@ describe('M3 · buildProjectJSONChunks', () => {
       analyticsPageFilters: [],
       // Explorar a Base (Épico EB, EB2) — layout por base, schema 3.2.
       exploreLayouts: { base: [{ id: 'auto_insight_asis', type: 'insight', origin: 'auto', x: 24, y: 24, w: 1100, h: 130, config: { title: 'Retrato da Operação (AS IS)', preset: 'asis' } }] },
+      // Explorar a Base — builder livre (Épico EB, EB4) — agrupamentos/filtro de página por base, schema 3.3.
+      exploreGroupings: { base: [{ id: 'g1', name: 'Faixa Score', source: 'score', buckets: [{ id: 'b1', label: 'Baixo', values: ['R1'] }], unmatched: 'other', otherLabel: 'Outros' }] },
+      explorePageFilters: { base: [{ id: 'f1', dim: 'score', mode: 'basic', values: ['R1'] }] },
       cinemaLibrary: [],
       businessWidget: { visible: false, x: 0, y: 0, w: 0, h: 0 },
       preferences: { enableDynThickness: true, showEdgeVol: false, showEdgeInadReal: false, showEdgeInadInf: false },
@@ -59,6 +62,14 @@ describe('M3 · buildProjectJSONChunks', () => {
     const chunks = buildProjectJSONChunks(payload);
     const parsed = JSON.parse(chunks.join(''));
     expect(parsed.exploreLayouts).toEqual(payload.exploreLayouts);
+  });
+
+  it('exploreGroupings/explorePageFilters (Épico EB, EB4) sobrevivem ao round-trip via chunks, byte a byte', () => {
+    const payload = makePayload();
+    const chunks = buildProjectJSONChunks(payload);
+    const parsed = JSON.parse(chunks.join(''));
+    expect(parsed.exploreGroupings).toEqual(payload.exploreGroupings);
+    expect(parsed.explorePageFilters).toEqual(payload.explorePageFilters);
   });
 
   it('cada chunk de coluna é individualmente pequeno (não monta o csvStore inteiro de uma vez)', () => {

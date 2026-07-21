@@ -12,6 +12,8 @@
 // substitui só esses, preservando os promovidos a `origin:'user'` por edição.
 
 export const EXPLORE_TOP_N_VARS = 5; // teto declarado de variáveis com perfil próprio
+const FIRST_BRANCH_OFFSET_X = 220; // distância do losango solto à direita da bounding box
+const FIRST_BRANCH_OFFSET_Y = 80;  // distância do losango solto acima do topo da bounding box
 
 const W_FULL = 1100;
 const GAP = 20;
@@ -66,4 +68,23 @@ export function buildDefaultExploreLayout(profile) {
   push("insight", "auto_insight_warnings", { title: "Avisos e leituras", preset: "warnings" });
 
   return widgets;
+}
+
+// Posição do novo losango para "➕ Usar como 1º galho" (DEC-EB-010, EB4). Puro/testável —
+// canvas ativo vazio ⇒ centro do viewport atual (mesmo cálculo do nó de csv recém-importado
+// em App.jsx); canvas não-vazio ⇒ ao lado da bounding box dos shapes existentes, nunca
+// sobrepondo (nó SOLTO). Em ambos os ramos o chamador (App.jsx) cria o nó via
+// `createDecisionNode(col, csvId, wx, wy)` — nenhum caminho novo de materialização
+// (DEC-IA-002); só a posição muda.
+export function computeFirstBranchPosition(shapes, viewport, svgSize) {
+  const list = Array.isArray(shapes) ? shapes : [];
+  if (list.length === 0) {
+    const vp = viewport || { x: 0, y: 0, s: 1 };
+    const size = svgSize || { width: 800, height: 600 };
+    const s = vp.s || 1;
+    return { wx: (size.width / 2 - vp.x) / s, wy: (size.height / 2 - vp.y) / s, empty: true };
+  }
+  const maxX = list.reduce((acc, sh) => Math.max(acc, (sh.x ?? 0) + (sh.w ?? 0)), -Infinity);
+  const minY = list.reduce((acc, sh) => Math.min(acc, sh.y ?? 0), Infinity);
+  return { wx: maxX + FIRST_BRANCH_OFFSET_X, wy: minY + FIRST_BRANCH_OFFSET_Y, empty: false };
 }

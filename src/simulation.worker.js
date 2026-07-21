@@ -3061,7 +3061,10 @@ const ANALYTICS_NUM_FIELDS = ['qty', 'qtdAltas', 'inadRRaw', 'qtdAltasInfer', 'i
 // de lens são derivadas no worker a partir das regras dos shapes (M10), não vêm da main.
 // Métricas intrínsecas vêm do agrupamento (uma vez); cada canvas emite sua coluna de decisão,
 // unidas por (csvId, rowIdx) — datasets compartilhados ⇒ agrupamentos idênticos entre cenários.
-function computeAnalyticsDataset(canvasInputs, csvStore) {
+// `options.csvId` (Explorar a Base, Épico EB, EB4, DEC-EB-011): escopa o dataset largo a
+// UMA base — usado pelo builder livre da aba Explorar (dataset da base selecionada, nunca
+// a união de todas). Ausente ⇒ comportamento original (todas as bases com AS IS, Dashboard).
+function computeAnalyticsDataset(canvasInputs, csvStore, options = {}) {
   const inputs = Array.isArray(canvasInputs) ? canvasInputs : [];
 
   // Poda entradas de canvases que não estão mais marcados (evita crescimento do cache).
@@ -3081,6 +3084,7 @@ function computeAnalyticsDataset(canvasInputs, csvStore) {
   const csvList = [];
   let totalN = 0;
   for (const [csvId, csv] of Object.entries(csvStore)) {
+    if (options.csvId && csvId !== options.csvId) continue; // escopo de UMA base (EB4)
     const dOrigIdx = csv.headers.indexOf('__DECISAO_ORIGINAL');
     if (dOrigIdx < 0) continue; // só datasets com AS IS configurado são analíticos
     const types = csv.columnTypes || {};
@@ -7411,6 +7415,15 @@ function handleMessage(e) {
     // Transfere os ArrayBuffers das colunas (zero-cópia) — o dataset largo não é retido
     // no worker, então neutralizá-los aqui é seguro e evita a cópia do structured clone.
     self.postMessage({ type: 'ANALYTICS_RESULT', dataset }, analyticsDatasetTransfer(dataset));
+    return;
+  }
+
+  // Explorar a Base (Épico EB, EB4, DEC-EB-011) — builder livre: MESMO dataset largo
+  // colunar do Dashboard, mas escopado a UMA base (sem canvases — cenário fixo AS IS,
+  // a aba analisa a base observada, não a política simulada).
+  if (type === 'COMPUTE_EXPLORE_DATASET') {
+    const dataset = computeAnalyticsDataset([], workerCsvStore, { csvId: e.data.csvId });
+    self.postMessage({ type: 'EXPLORE_DATASET_RESULT', dataset }, analyticsDatasetTransfer(dataset));
     return;
   }
 
