@@ -163,6 +163,7 @@ npm test          # roda a suíte Vitest (tests/*.test.js, jsdom) uma vez
 | `tests/rangeVar.test.js` | Variável de Faixas — materialização (`deriveRangeColumn`, fronteiras `[min,max)`/±∞/unmatched/ordinal), rótulos pt-BR, edição de cortes, round-trip de persistência, integração `computeRiskBands` real → def → coluna |
 | `tests/baseProfile.test.js` | Perfil da Base (Explorar a Base, EB1) — agregados/IV ≡ manual; ranking global ≡ porta-100% (DEC-EB-008); PSI (ε e null); `immature_vintage`/`unstable_psi`/`dominant_value`/`low_coverage` disparam plantados e não limpos; degradações `no_temporal_column`/`no_asis`; determinismo |
 | `tests/explore.test.js` | Layout automático da aba Explorar (`buildDefaultExploreLayout`, EB2) — 6 seções na ordem da DEC-EB-006; teto de top-N; ids únicos/`origin:'auto'`; determinismo; layout vazio sem perfil válido |
+| `tests/nextActions.test.js` | Feed de Próxima Melhor Ação (Jornada NB1) — DEC-NB-009 (lint consciente de tráfego: `dead_branch` consolidado, nunca `error` com 0 chegadas, colapso por causa-raiz, contagens ≡ `nodeArrivals`); `computeNextActions` (Tier 1 ≡ motor, costura Tier 2, priorização severidade>score>id, `policyIRFingerprint` estável, staleness, nó travado, feed nunca vazio) |
 | `tests/workerPool.test.js` | Pool de Workers (H3) — pool ≡ single-worker número a número; determinismo; fallback |
 | `tests/computeRouter.test.js` | ComputeRouter (H4) — Classe A jamais roteia; detecção silenciosa; fallback transparente Classe B |
 | `tests_python/*.py` | Protocolo do sidecar (health/token/caps/dataset/job) + paridade número a número dos motores numpy (Descoberta H7, Clusterização H8) |
@@ -203,7 +204,7 @@ ser só estrutural/documentação, pare e investigue antes de regenerar.
 | Base de Testes Oficial — inventário, dicionário, matriz de cobertura, gerador de CSV; **feature nova/ajustada ⇒ atualizar docs + regras do gerador na mesma sessão; NUNCA regenerar o CSV sem pedido do usuário** | `docs/wiki/Dados_Teste/README.md` (§ Contrato de manutenção) |
 | UX 2.0 — Ribbon, registro de comandos, ⚙ Hub de Configurações, Busca Ctrl+K, Status Bar, painel Ativos/Inspetor/Copiloto, mini-flutuante de seleção, touch/mobile (8 sessões, entregue) | `docs/wiki/Ribbon-Prompts-Sessoes.md` |
 | Explorar a Base — motor do perfil (EB1) + aba/layout automático (EB2) + camada interpretativa (EB3) + pontes para o fluxo/builder livre/convite pós-import (EB4) entregues; EB5 (sincronização documental) planejada (Épico EB, DEC-EB-001..012) | `docs/claude/Explorar-Base.md` (implementação) + `docs/wiki/Epicos-ExplorarBase.md` (normativo) |
-| Jornada de Construção peças 2–3 — Feed de Próxima Melhor Ação (Épico NB) + Etapas/Prontidão (Épico EP), planejados, prompts por sessão | `docs/wiki/Jornada-Prompts-Sessoes.md` |
+| Jornada de Construção peças 2–3 — Feed de Próxima Melhor Ação (Épico NB: NB1 motor entregue — `computeNextActions`/`policyIRFingerprint`/lint consciente de tráfego DEC-NB-009; NB2–NB4 planejadas) + Etapas/Prontidão (Épico EP, planejado) | `docs/wiki/Jornada-Prompts-Sessoes.md` + `docs/claude/Worker-Protocolo.md` (mensagens) |
 | Diagnóstico de consumo de contexto e plano de emagrecimento deste CLAUDE.md | `docs/wiki/Contexto-Claude.md` |
 | Manutenção do CLAUDE.md (regra de tamanho, poda, spillover, guard de CI) | `docs/claude/Manutencao-CLAUDE-md.md` |
 
