@@ -1,9 +1,10 @@
-# Explorar a Base (Épico EB, EB1+EB2 — DEC-EB-001..012)
+# Explorar a Base (Épico EB, EB1+EB2+EB3 — DEC-EB-001..012)
 
 > Ponteiro a partir de: `CLAUDE.md` § "Onde vive o quê". Leia antes de mexer na aba
-> **Explorar** (3ª aba da barra inferior), no `BaseProfileModel` (worker) ou no layout
-> automático. Referência normativa completa (DEC-EB-001..012, filosofia, sessões
-> planejadas EB3–EB5): `docs/wiki/Epicos-ExplorarBase.md`.
+> **Explorar** (3ª aba da barra inferior), no `BaseProfileModel` (worker), no layout
+> automático ou na camada interpretativa (`src/exploreInsights.js`). Referência
+> normativa completa (DEC-EB-001..012, filosofia, sessões planejadas EB4–EB5):
+> `docs/wiki/Epicos-ExplorarBase.md`.
 
 Terceira aba da aplicação (`activeTab:'explore'`, label "Explorar", leftmost na barra —
 "conhecer a matéria-prima" abre a jornada Explorar → Canvas → Dashboard). Não depende de
@@ -114,24 +115,51 @@ Degradação sempre declarada: sem AS IS ⇒ `insight` preset `asis` lê o achad
 `no_asis`; sem coluna ⏱ ⇒ `stability` mostra o estado vazio dedicado (nunca inventa
 série) e o `insight` preset `stability` lê `no_temporal_column`.
 
-## Camada interpretativa — STUB da EB2 (`src/exploreInsights.js`)
+## Camada interpretativa completa (EB3 — `src/exploreInsights.js`)
 
 Módulo **folha** (não importa `App.jsx` nem o worker — mesmo padrão de `src/segVar.js`),
-com dois exports:
+com quatro exports. Nunca LLM, sempre determinístico (mesma entrada ⇒ mesma prosa, byte
+a byte — DEC-EB-004 in fine).
+
+**1ª altura — Leitura** (herdada da EB2, assinaturas inalteradas):
 
 - `describeFinding({code, facts})` — 1 frase por código de achado do v1 (`high_iv`,
   `suspect_score`, `suspect_temporal`, `low_coverage`, `dominant_value`,
   `high_cardinality`, `immature_vintage`, `unstable_psi`, `no_temporal_column`,
-  `no_asis`). Código sem template conhecido degrada declaradamente (nunca `undefined`
-  solto na tela).
+  `no_asis`). Todo campo de `facts` passa por um formatador (`str`/`pct`/`qty`/`iv2`)
+  antes de entrar na frase — nunca interpolado cru — para que `facts` incompleto nunca
+  vaze `"undefined"`/`NaN` para a tela. Código sem template conhecido degrada
+  declaradamente (nunca `undefined` solto na tela).
 - `describeSection(preset, profile)` — 1–2 frases por seção do layout default (`asis`,
   `ranking`, `varprofile`, `quality`, `stability`, `warnings`), lendo o
   `BaseProfileModel` inteiro.
 
-**É um stub deliberado** (DEC-EB-004 in fine): só a "Leitura" (1ª altura de texto) —
-sem "ⓘ Como ler" pedagógico, sem GATE de cobertura exaustiva. A EB3 expande este MESMO
-módulo (mantém as duas assinaturas) para as 3 alturas completas + `tests/exploreInsights.test.js`.
-Nunca LLM, sempre determinístico (mesma entrada ⇒ mesma prosa, byte a byte).
+**2ª altura — "ⓘ Como ler" pedagógico** (novo na EB3, texto FIXO por tópico — não
+depende de `facts`, é o conceito por trás do indicador, não o resultado):
+
+- `describeHowToRead(topic)` — texto pedagógico por tópico (`asis`, `ranking`,
+  `varprofile`, `quality`, `stability`, `warnings` — mesmo vocabulário dos presets de
+  seção). Tópico desconhecido/nulo degrada declaradamente (`HOWTOREAD_FALLBACK`).
+- `howToReadTopic(widget)` — resolve `{type, config}` de um `WidgetConfig` para o
+  tópico certo: o card `insight` usa o próprio `config.preset`; os widgets dedicados
+  mapeiam para o tópico do conceito que ilustram (`ivrank` → `ranking`, `varprofile` →
+  `varprofile`, `quality` → `quality`, `stability` → `stability`) — é o MESMO indicador,
+  só muda a visualização, então reusam o mesmo texto pedagógico. Widget nulo/sem
+  `type`/de tipo desconhecido ⇒ `null` (que `describeHowToRead` também degrada
+  declaradamente, nunca quebra a UI).
+
+**3ª altura — Avisos**: já coberta pelo widget `insight` preset `warnings`, que lista
+`profile.insights[]` via `describeFinding` (sem módulo adicional).
+
+**UI** (`src/dashboardComponents.jsx`, `ExploreWidgetShell`): botão `ⓘ` no cabeçalho de
+TODO widget da aba (incl. os 4 tipos dedicados, não só `insight`) alterna um painel
+expansível com `describeHowToRead(topic)`, `topic` calculado por `ExploreWidget` via
+`howToReadTopic(widget)` e repassado como prop `topic` ao shell.
+
+GATE dedicado `tests/exploreInsights.test.js`: cobertura total código→template e
+preset/tópico→template; nenhum placeholder vazado (`undefined`/`NaN`/`[object Object]`)
+mesmo com `facts` ausente/incompleto; determinismo byte a byte; resolução
+widget→tópico para os 4 tipos dedicados + os 6 presets do `insight`.
 
 ## Persistência (DEC-EB-007, schema 3.2)
 
@@ -161,11 +189,14 @@ fixa antes desta sessão).
 - `tests/projectSave.test.js` — round-trip de `exploreLayouts` via
   `buildProjectJSONChunks`.
 - `tests/baseProfile.test.js` (EB1, sem mudança) — GATE do `BaseProfileModel`.
+- `tests/exploreInsights.test.js` (EB3) — cobertura total código/preset/tópico→template,
+  nenhum placeholder vazado, determinismo, resolução widget→tópico do "ⓘ Como ler".
 
-## Fora de escopo desta sessão (EB2)
+## Fora de escopo desta sessão (EB3)
 
-- Templates completos de `exploreInsights.js` + "ⓘ Como ler" + GATE dedicado (EB3).
 - Pontes para o fluxo ("➕ Usar como 1º galho", "📐 Criar faixas", "🧩 Clusterizar") e
   builder livre (`FieldPanel`/filtros/agrupamentos) sobre o dataset largo (EB4).
+- Convite pós-import (toast "🔎 Análise da base pronta") e card de Dicas do canvas vazio
+  apontando para Explorar (EB4, DEC-EB-012).
 - Convite pós-import (toast "🔎 Análise da base pronta") e card de Dicas do canvas vazio
   apontando para Explorar (EB4, DEC-EB-012).

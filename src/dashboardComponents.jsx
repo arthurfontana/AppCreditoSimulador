@@ -22,7 +22,7 @@ import {
   SERIE_CENARIO, SERIE_NONE, XDIM_CENARIO, GROUPING_OTHER_DEFAULT,
 } from "./analytics.js";
 import { buildDefaultExploreLayout } from "./explore.js";
-import { describeFinding, describeSection } from "./exploreInsights.js";
+import { describeFinding, describeSection, describeHowToRead, howToReadTopic } from "./exploreInsights.js";
 import { fmtQty, fmtPct, uid, escHtml, LENS_OPERATORS, exportAnalyticsDatasetCSV } from "./App.jsx";
 
 // MIME do drag de campos (dimensões/métricas) no FieldPanel/FieldWell (estilo Power BI).
@@ -1446,9 +1446,10 @@ const EXPLORE_FLAG_META = {
 // Casca comum (título editável + AUTO badge + duplicar/remover/arrastar/redimensionar) —
 // mesmo padrão de AnalyticsWidget/TextWidget. `data-explore-capture` marca o corpo para
 // a exportação em PDF (captura genérica de DOM, sem branch por tipo).
-function ExploreWidgetShell({ widget, accent, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart, children }) {
+function ExploreWidgetShell({ widget, accent, topic, onConfigChange, onDelete, onDuplicate, onDragStart, onResizeStart, children }) {
   const cfg = widget.config || {};
   const set = (patch) => onConfigChange(widget.id, patch);
+  const [howOpen, setHowOpen] = useState(false);
   return (
     <div style={{ position: "relative", background: "#fff", borderRadius: 14, border: `1px solid ${accent || "#e2e8f0"}`,
       boxShadow: "0 1px 3px rgba(0,0,0,.04)", padding: "14px 16px 12px", display: "flex", flexDirection: "column",
@@ -1464,6 +1465,11 @@ function ExploreWidgetShell({ widget, accent, onConfigChange, onDelete, onDuplic
           <span title="Gerado automaticamente pela análise — editar promove este card a seu (não é recriado ao Regenerar)"
             style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 700, color: "#94a3b8", background: "#f1f5f9", borderRadius: 6, padding: "2px 6px", letterSpacing: 0.3 }}>AUTO</span>
         )}
+        <button onClick={() => setHowOpen(v => !v)} title="Como ler este card"
+          aria-expanded={howOpen}
+          style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: `1px solid ${howOpen ? "#c7d2fe" : "#e2e8f0"}`,
+            background: howOpen ? "#eef2ff" : "#fff", color: howOpen ? "#4338ca" : "#64748b", cursor: "pointer", fontSize: 13,
+            lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>ⓘ</button>
         {onDuplicate && (
           <button onClick={() => onDuplicate(widget.id)} title="Duplicar"
             style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #e2e8f0", background: "#fff",
@@ -1473,6 +1479,13 @@ function ExploreWidgetShell({ widget, accent, onConfigChange, onDelete, onDuplic
           style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2",
             color: "#dc2626", cursor: "pointer", fontSize: 13, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
       </div>
+      {howOpen && (
+        <div style={{ flexShrink: 0, marginBottom: 10, padding: "9px 11px", borderRadius: 9, background: "#eef2ff",
+          border: "1px solid #c7d2fe", fontSize: 12, color: "#3730a3", lineHeight: 1.55 }}>
+          <strong style={{ display: "block", marginBottom: 3, fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.4 }}>ⓘ Como ler</strong>
+          {describeHowToRead(topic)}
+        </div>
+      )}
       <div data-explore-capture style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "auto" }}>
         {children}
       </div>
@@ -1667,7 +1680,7 @@ function ExploreWidget({ widget, profile, onConfigChange, onDelete, onDuplicate,
     : <ExploreInsightBody widget={widget} profile={profile} />;
   const accent = widget.type === "insight" ? "#ddd6fe" : "#e2e8f0";
   return (
-    <ExploreWidgetShell widget={widget} accent={accent} onConfigChange={onConfigChange} onDelete={onDelete}
+    <ExploreWidgetShell widget={widget} accent={accent} topic={howToReadTopic(widget)} onConfigChange={onConfigChange} onDelete={onDelete}
       onDuplicate={onDuplicate} onDragStart={onDragStart} onResizeStart={onResizeStart}>
       {body}
     </ExploreWidgetShell>
