@@ -14,6 +14,10 @@ import { formatBandLabel, describeRangeRules } from './rangeVar.js';
 // compartilhado com App.jsx (Explorar a Base, DEC-EB-008/009). Antes só existiam em
 // App.jsx, invisíveis ao worker; agora o perfil da base os reusa direto.
 import { segVarDefaultReason, parseTemporalKey } from './segVar.js';
+// Fingerprint canônico do PolicyIR — módulo folha compartilhado com o main (Jornada NB,
+// DEC-NB-003). O worker NÃO pode importar policyIR.js (que importa App.jsx), então o hash
+// vive num leaf próprio; os dois lados computam o mesmo valor para o staleness do feed.
+import { policyIRFingerprint } from './policyFingerprint.js';
 
 const CINEMINHA_TYPES = {
   eligibility: {
@@ -6154,16 +6158,64 @@ function computePolicyInsights(shapes, conns, nodeArrivals = {}, lensCounts = {}
   const { out, inc } = buildFlowGraph(shapes, conns);
   const portIds = new Set(shapes.filter(s => s.type === 'port').map(s => s.id));
 
-  // Regra 1 — porta solta: sem NENHUMA conexão de saída, a população daquele valor
-  // não é roteada — "some" silenciosamente da simulação (traverseRow retorna null).
+  // DEC-NB-009 — lint consciente de tráfego. O valor que uma porta representa vem da
+  // aresta de entrada rotulada vinda de um losango (decision --valor--> port). Só
+  // losangos roteiam por valor único; portas vindas de Cineminha (Elegível/Não Elegível)
+  // ou lens não têm chegada por-valor em `nodeArrivals`, então caem no caminho legado.
+  const portValueParent = {}; // portId -> { parentId, value }
+  for (const c of conns) {
+    if (!portIds.has(c.to)) continue;
+    const from = shapesMap[c.from];
+    if (from && from.type === 'decision') portValueParent[c.to] = { parentId: c.from, value: (c.label ?? '').trim() };
+  }
+  // Chegadas de um valor num losango pai: `null` = SEM DADO (nodeArrivals não cobre o nó,
+  // não dá para provar ramo morto ⇒ caminho legado), `0` = valor sem tráfego (ramo morto
+  // candidato), `>0` = tráfego real. (`nodeArrivals` real traz uma entrada por losango,
+  // mesmo com `val` vazio; fixtures de teste esparsas sem a entrada ⇒ sem dado.)
+  const portValueArrivals = (pp) => {
+    if (!pp) return null;
+    const arr = nodeArrivals[pp.parentId];
+    if (!arr || !arr.val) return null;
+    return arr.val[pp.value] || 0;
+  };
+
+  // Regra 1 — porta solta: sem NENHUMA conexão de saída, a população daquele valor não é
+  // roteada — "some" silenciosamente da simulação (traverseRow retorna null). DEC-NB-009:
+  // porta solta cujo valor tem 0 chegadas funde port_dangling + zero_arrival num único
+  // achado `dead_branch` (higiene/info); só porta solta COM tráfego (ou sem dado de
+  // chegada) segue como `port_dangling` error, agora com a contagem de linhas na mensagem.
+  const deadBranchValues = new Set(); // `${parentId}|${value}` fundidos em dead_branch
   for (const s of shapes) {
     if (s.type !== 'port') continue;
     if ((out[s.id] || []).length > 0) continue;
-    findings.push({
-      severity: 'error', code: 'port_dangling', nodeId: s.id,
-      msg: `Porta "${s.label || '?'}" sem conexão de saída — a população que chega aqui não é roteada (some da simulação).`,
-      fix: { kind: 'connect_terminal', nodeId: s.id },
-    });
+    const pp = portValueParent[s.id];
+    const av = portValueArrivals(pp); // null | 0 | >0
+    if (av === 0) {
+      // Ramo morto: sem tráfego na base atual E sem rota. Pode voltar a receber volume se a
+      // política a montante mudar — o achado informa (não esconde); severidade info/higiene.
+      deadBranchValues.add(`${pp.parentId}|${pp.value}`);
+      findings.push({
+        severity: 'info', code: 'dead_branch', nodeId: s.id, arrivals: 0,
+        parentId: pp.parentId, value: pp.value,
+        msg: `Porta "${s.label || pp.value || '?'}" — valor "${pp.value}" não tem tráfego na base atual (0 propostas) e a porta não está conectada: ramo morto.`,
+        // "conectar mesmo assim" reusa o mesmo aplicador do lint atual (connect_terminal);
+        // "remover do domínio" é a segunda opção (materializada pelo feed, DEC-NB-008).
+        fix: { kind: 'connect_terminal', nodeId: s.id },
+        fixes: [
+          { kind: 'remove_from_domain', nodeId: pp.parentId, value: pp.value },
+          { kind: 'connect_terminal', nodeId: s.id },
+        ],
+      });
+    } else {
+      const n = (av != null && av > 0) ? av : null;
+      findings.push({
+        severity: 'error', code: 'port_dangling', nodeId: s.id, arrivals: n,
+        msg: n != null
+          ? `Porta "${s.label || '?'}" sem conexão de saída — ${n === 1 ? '1 proposta que chega' : `${n} propostas que chegam`} aqui não ${n === 1 ? 'é roteada' : 'são roteadas'} (some da simulação).`
+          : `Porta "${s.label || '?'}" sem conexão de saída — a população que chega aqui não é roteada (some da simulação).`,
+        fix: { kind: 'connect_terminal', nodeId: s.id },
+      });
+    }
   }
 
   // Regra 2 — nós inalcançáveis a partir das raízes (MESMO critério de entrada do
@@ -6233,8 +6285,11 @@ function computePolicyInsights(shapes, conns, nodeArrivals = {}, lensCounts = {}
         if (!val || seen.has(val)) continue;
         seen.add(val);
         if (!arr[val]) {
+          // DEC-NB-009: se a porta desse valor é ramo morto (solta + 0 chegadas), o
+          // zero_arrival já foi fundido no dead_branch — não emite o achado redundante.
+          if (deadBranchValues.has(`${s.id}|${val}`)) continue;
           findings.push({
-            severity: 'warning', code: 'zero_arrival', nodeId: s.id,
+            severity: 'warning', code: 'zero_arrival', nodeId: s.id, arrivals: 0, value: val,
             msg: `"${s.label || s.variableCol || 'Decisão'}" — valor "${val}" nunca chega a este nó (0 propostas).`,
             fix: { kind: 'open_domain_modal', nodeId: s.id },
           });
@@ -6245,14 +6300,14 @@ function computePolicyInsights(shapes, conns, nodeArrivals = {}, lensCounts = {}
       const arr = nodeArrivals[s.id] || { row: {}, col: {} };
       if (s.rowVar) for (const v of (s.rowDomain || [])) {
         if (!arr.row?.[v]) findings.push({
-          severity: 'warning', code: 'zero_arrival', nodeId: s.id,
+          severity: 'warning', code: 'zero_arrival', nodeId: s.id, arrivals: 0,
           msg: `"${s.label || 'Cineminha'}" — linha "${v}" (${s.rowVar.col}) nunca chega a este nó (0 propostas).`,
           fix: { kind: 'open_domain_modal', nodeId: s.id },
         });
       }
       if (s.colVar) for (const v of (s.colDomain || [])) {
         if (!arr.col?.[v]) findings.push({
-          severity: 'warning', code: 'zero_arrival', nodeId: s.id,
+          severity: 'warning', code: 'zero_arrival', nodeId: s.id, arrivals: 0,
           msg: `"${s.label || 'Cineminha'}" — coluna "${v}" (${s.colVar.col}) nunca chega a este nó (0 propostas).`,
           fix: { kind: 'open_domain_modal', nodeId: s.id },
         });
@@ -6303,16 +6358,334 @@ function computePolicyInsights(shapes, conns, nodeArrivals = {}, lensCounts = {}
   for (const s of shapes) {
     if (!DECISION_LIKE_TYPES.has(s.type)) continue;
     if ((out[s.id] || []).length > 0) continue;
+    const arrN = totalArrivalOf(s, nodeArrivals[s.id]);
     findings.push({
       severity: 'error', code: 'path_without_terminal', nodeId: s.id,
+      arrivals: nodeArrivals[s.id] ? arrN : null,
       msg: `"${s.label || s.type}" não tem nenhuma saída conectada — todo o volume que chega aqui é perdido.`,
       fix: { kind: 'connect_terminal', nodeId: s.id },
     });
   }
 
+  // DEC-NB-009 — colapso por causa-raiz: achados sobre nós inteiramente a jusante de um nó
+  // de chegada zero não geram cards próprios; o achado da CAUSA-RAIZ (o zero_arrival de um
+  // valor num losango que RECEBE volume por outros valores — o ponto onde o tráfego parou)
+  // os representa, com um contador `coversDerived` (dominância — mesmo espírito do dedup da
+  // Descoberta). Só roda quando há de fato um nó morto no fluxo (fixtures/lint sem
+  // `nodeArrivals` passam intocados — não há como saber o que é morto sem dado de chegada).
+  {
+    const isDeadNode = (id) => {
+      const node = shapesMap[id];
+      if (!node || (node.type !== 'decision' && node.type !== 'cineminha')) return false;
+      const arr = nodeArrivals[id];
+      return !!arr && totalArrivalOf(node, arr) === 0;
+    };
+    // "Vivo" = losango/Cineminha com dado de chegada e volume > 0. Um nó em região morta que
+    // ALÉM DISSO é alimentado por outro ramo vivo (diamante) não é morto — seu achado fica.
+    const isLiveNode = (id) => {
+      const node = shapesMap[id];
+      if (!node || (node.type !== 'decision' && node.type !== 'cineminha')) return false;
+      const arr = nodeArrivals[id];
+      return !!arr && totalArrivalOf(node, arr) > 0;
+    };
+    if (shapes.some(s => isDeadNode(s.id))) {
+      const suppressed = new Set(); // índices de findings colapsados
+      const coverCount = new Map(); // idx da causa-raiz -> nº de derivados cobertos
+      for (let i = 0; i < findings.length; i++) {
+        const f = findings[i];
+        if (f.code !== 'zero_arrival') continue;
+        const p = shapesMap[f.nodeId];
+        if (!p || p.type !== 'decision') continue; // âncoras: zero_arrival de losango
+        if (isDeadNode(f.nodeId)) continue; // o próprio nó é morto ⇒ é derivado, não causa-raiz
+        const edge = (out[f.nodeId] || []).find(e => (e.label ?? '').trim() === f.value);
+        if (!edge) continue;
+        // Região morta = tudo a jusante da aresta de valor sem tráfego (todos recebem 0).
+        const region = new Set();
+        const stack = [edge.to];
+        while (stack.length) {
+          const id = stack.pop();
+          if (region.has(id)) continue;
+          region.add(id);
+          for (const e of (out[id] || [])) if (!region.has(e.to)) stack.push(e.to);
+        }
+        let covered = 0;
+        for (let j = 0; j < findings.length; j++) {
+          if (j === i || suppressed.has(j)) continue;
+          const g = findings[j];
+          if (region.has(g.nodeId) && !isLiveNode(g.nodeId)) { suppressed.add(j); covered++; }
+        }
+        if (covered > 0) coverCount.set(i, (coverCount.get(i) || 0) + covered);
+      }
+      if (suppressed.size > 0) {
+        for (const [i, n] of coverCount) findings[i].coversDerived = n;
+        const kept = findings.filter((_, i) => !suppressed.has(i));
+        findings.length = 0;
+        findings.push(...kept);
+      }
+    }
+  }
+
   const SEV_ORDER = { error: 0, warning: 1, info: 2 };
   findings.sort((a, b) => (SEV_ORDER[a.severity] ?? 3) - (SEV_ORDER[b.severity] ?? 3));
   return findings;
+}
+
+// ── COMPUTE_NEXT_ACTIONS — Feed de Próxima Melhor Ação (Jornada NB, Sessão NB1) ──────
+// Orquestrador determinístico que converte as saídas dos motores JÁ existentes num
+// `NextActionsModel` de cards priorizados (DEC-NB-001..004, 008). É a "conversa contínua"
+// que responde "o que eu faço agora?" — mas AQUI é só o MOTOR (zero UI; a aba Copiloto vira
+// o feed na NB2). Contrato central (DEC-NB-001): FATOS CRUS + CÓDIGOS, NUNCA PROSA — a prosa
+// pt-BR nasce só no render (nextActionInsights.js, NB2), sobre `title.facts`. E: DELTA SÓ
+// QUANDO VALIDADO por re-simulação real (padrão da Descoberta) — card sem delta validado
+// não exibe delta.
+//
+// Duas camadas de fonte (DEC-NB-002):
+//   - Tier 1 (barato, sempre fresco — recalculado no debounce, SEM motor caro no tick):
+//     lint (computePolicyInsights, já consciente de tráfego pós DEC-NB-009), portas
+//     desconectadas com top-3 do ranking da porta (computeVariableRanking), e o estado
+//     estrutural (canvas vazio, AS IS ausente, variável pendente de biblioteca, doc nunca
+//     gerada / desatualizada por fingerprint do PolicyIR).
+//   - Tier 2 (caro, NUNCA automático): a Descoberta de Segmentos e a Simplificação — o
+//     orquestrador NÃO as executa; recebe os achados JÁ calculados (`tier2`) e os COSTURA
+//     como cards carimbados com o `policyFingerprint` do momento do cálculo (staleness,
+//     DEC-NB-003). O disparo sob demanda e a invalidação são da NB3.
+//
+// Priorização unificada (DEC-NB-004): classe de severidade (blocker > opportunity > hygiene
+// > journey) ANTES do score; ordem total determinística com tie-break estável por id.
+const NEXT_ACTIONS_VERSION = 1;
+const NEXT_ACTION_SEV_ORDER = { blocker: 0, opportunity: 1, hygiene: 2, journey: 3 };
+
+function nextActionsCompare(a, b) {
+  const sa = NEXT_ACTION_SEV_ORDER[a.severity] ?? 9;
+  const sb = NEXT_ACTION_SEV_ORDER[b.severity] ?? 9;
+  if (sa !== sb) return sa - sb;
+  const scA = a.priority?.score ?? 0, scB = b.priority?.score ?? 0;
+  if (scB !== scA) return scB - scA;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; // tie-break estável (fingerprint == id)
+}
+
+function computeNextActions(shapes, conns, csvStore, ir, nodeArrivals = {}, lensCounts = {}, context = {}, tier2 = {}) {
+  const ctx = context || {};
+  const t2 = tier2 || {};
+  const shapesMap = Object.fromEntries((shapes || []).map(s => [s.id, s]));
+  const lockedIds = new Set(Array.isArray(ctx.lockedNodeIds) ? ctx.lockedNodeIds : []);
+  const policyFingerprint = policyIRFingerprint(ir);
+
+  const actions = [];
+  const diagnostics = { sources: {}, discarded: {} };
+
+  const fp = (kind, target) => `${kind}::${target ?? ''}`;
+  const lockOf = (nodeId) => (nodeId != null && lockedIds.has(nodeId))
+    ? { actionable: false, reason: 'node_locked' }
+    : { actionable: true, reason: null };
+  const add = (kind, target, sev, facts, priority, cta, extra = {}) => {
+    const id = fp(kind, target);
+    actions.push({
+      id, fingerprint: id, kind, tier: extra.tier ?? 1, severity: sev,
+      title: { code: extra.titleCode ?? kind, facts: facts || {} },
+      priority: priority || { score: 0, impact: null, confidence: 1, effort: 1 },
+      delta: extra.delta ?? null,
+      cta: cta || [],
+      staleness: extra.staleness ?? null,
+      ...lockOf(target != null && shapesMap[target] ? target : extra.lockNodeId ?? null),
+    });
+  };
+
+  const decisionLike = (shapes || []).filter(s => DECISION_LIKE_TYPES.has(s.type));
+  const canvasEmpty = decisionLike.length === 0;
+  const irNodes = (ir && Array.isArray(ir.nodes)) ? ir.nodes.filter(n => n.kind !== 'terminal') : [];
+  const policyEmpty = canvasEmpty && irNodes.length === 0;
+
+  // ── Tier 1 · lint estrutural (computePolicyInsights) ──────────────────────────────
+  const lint = computePolicyInsights(shapes || [], conns || [], nodeArrivals, lensCounts);
+  diagnostics.sources.lint = lint.length;
+  for (const f of lint) {
+    if (f.code === 'port_dangling') {
+      // connect_port — porta solta COM tráfego: embute o top-3 do ranking da PORTA (o que
+      // testar a seguir na população que chega ali). Ranking é o motor existente, sem cópia.
+      const rk = computeVariableRanking(shapes, conns, csvStore, f.nodeId);
+      const top3 = (rk && Array.isArray(rk.ranking) ? rk.ranking : [])
+        .slice(0, 3).map(r => ({ col: r.col, csvId: r.csvId, iv: r.iv ?? null }));
+      add('connect_port', f.nodeId, 'blocker',
+        { nodeId: f.nodeId, label: shapesMap[f.nodeId]?.label ?? null, arrivals: f.arrivals ?? null, top3, rankingError: rk?.error ?? null },
+        { score: (f.arrivals || 0) + 1, impact: { lostQty: f.arrivals ?? null }, confidence: 1, effort: 1 },
+        [{ commandId: 'copilot.connectTerminal', args: { nodeId: f.nodeId }, labelCode: 'connect_terminal' }],
+        { titleCode: 'connect_port' });
+    } else {
+      const sev = f.severity === 'error' ? 'blocker' : 'hygiene';
+      const cta = f.fix?.kind === 'connect_terminal'
+        ? [{ commandId: 'copilot.connectTerminal', args: { nodeId: f.fix.nodeId }, labelCode: 'connect_terminal' }]
+        : f.fix?.kind === 'open_domain_modal'
+        ? [{ commandId: 'copilot.openDomainModal', args: { nodeId: f.fix.nodeId }, labelCode: 'open_domain' }]
+        : [];
+      // dead_branch carrega a segunda opção "remover do domínio" (DEC-NB-009) via `fixes`.
+      if (Array.isArray(f.fixes)) {
+        for (const fx of f.fixes) {
+          if (fx.kind === 'remove_from_domain') cta.unshift({ commandId: 'copilot.removeFromDomain', args: { nodeId: fx.nodeId, value: fx.value }, labelCode: 'remove_from_domain' });
+        }
+      }
+      add(`fix_lint_${f.code}`, f.nodeId, sev,
+        { nodeId: f.nodeId, code: f.code, arrivals: f.arrivals ?? null, coversDerived: f.coversDerived ?? 0, value: f.value ?? null },
+        { score: (f.arrivals || 0), impact: { qty: f.arrivals ?? null }, confidence: 1, effort: 1 },
+        cta, { titleCode: `lint_${f.code}` });
+    }
+  }
+
+  // ── Tier 1 · estado estrutural ────────────────────────────────────────────────────
+  // Canvas vazio: sempre um convite de jornada (o feed nunca fica vazio, DEC-NB-005). Base
+  // explorada (perfil EB) ⇒ `first_branch` com o TOPO do ranking global (DEC-EB-008) como
+  // sugestão de raiz — o passo mínimo, não a árvore inteira (deliberadamente fora de escopo).
+  if (canvasEmpty) {
+    if (ctx.baseExplored) {
+      const metricOpt = ctx.riskMetric === 'inadInferida' ? 'inferida' : (ctx.riskMetric === 'inadReal' ? 'real' : undefined);
+      const rk = computeVariableRanking(shapes || [], conns || [], csvStore, null, metricOpt ? { metric: metricOpt } : {});
+      const top = (rk && Array.isArray(rk.ranking) && rk.ranking.length) ? rk.ranking[0] : null;
+      add('first_branch', 'canvas', 'journey',
+        { top: top ? { col: top.col, csvId: top.csvId, iv: top.iv ?? null } : null, rankingError: rk?.error ?? null },
+        { score: 3, impact: null, confidence: 1, effort: 1 },
+        [{ commandId: 'copilot.firstBranch', args: top ? { col: top.col, csvId: top.csvId } : {}, labelCode: 'first_branch' }],
+        { titleCode: 'first_branch' });
+    } else {
+      add('explore_base', 'canvas', 'journey',
+        { baseLoaded: !!ctx.baseLoaded },
+        { score: 2, impact: null, confidence: 1, effort: 1 },
+        [{ commandId: 'copilot.exploreBase', args: {}, labelCode: 'explore_base' }],
+        { titleCode: 'explore_base' });
+    }
+  }
+
+  // Variável pendente de mapeamento de biblioteca — a política referencia colunas que a base
+  // atual não tem mapeadas: o roteamento fica quebrado até resolver (bloqueante).
+  const pending = Array.isArray(ctx.pendingVars) ? ctx.pendingVars : [];
+  diagnostics.sources.pendingVars = pending.length;
+  for (const pv of pending) {
+    const name = typeof pv === 'string' ? pv : (pv?.name ?? pv?.col ?? '?');
+    add('map_pending_var', name, 'blocker',
+      { name },
+      { score: 1e6, impact: null, confidence: 1, effort: 2 },
+      [{ commandId: 'copilot.mapPendingVar', args: { name }, labelCode: 'map_pending_var' }],
+      { titleCode: 'map_pending_var' });
+  }
+
+  // AS IS ausente — sem `__DECISAO_ORIGINAL` não há baseline de comparação (todo delta do
+  // app fica sem referência). Só faz sentido cobrar quando há base carregada.
+  if (ctx.baseLoaded && ctx.hasAsIs === false) {
+    add('configure_asis', 'asis', 'hygiene',
+      {},
+      { score: 1, impact: null, confidence: 1, effort: 2 },
+      [{ commandId: 'copilot.configureAsIs', args: {}, labelCode: 'configure_asis' }],
+      { titleCode: 'configure_asis' });
+  }
+
+  // Documentação nunca gerada / desatualizada — fingerprint do IR atual vs. o carimbado na
+  // última geração (DEC-NB-002). Só quando há política (canvas não vazio).
+  if (!policyEmpty) {
+    const last = ctx.lastDocFingerprint ?? null;
+    const docState = last == null ? 'never' : (last !== policyFingerprint ? 'outdated' : null);
+    if (docState) {
+      add('document', 'doc', 'hygiene',
+        { state: docState, lastDocFingerprint: last, currentFingerprint: policyFingerprint },
+        { score: docState === 'outdated' ? 2 : 1, impact: null, confidence: 1, effort: 1 },
+        [{ commandId: 'copilot.generateDoc', args: {}, labelCode: 'document' }],
+        { titleCode: 'document' });
+    }
+  }
+
+  // Política madura ainda não salva na biblioteca (governança/reuso) — convite de jornada.
+  if (ctx.policyMature && !ctx.hasLibraryTemplate && !policyEmpty) {
+    add('save_library', 'library', 'journey',
+      {},
+      { score: 1, impact: null, confidence: 1, effort: 1 },
+      [{ commandId: 'copilot.saveLibrary', args: {}, labelCode: 'save_library' }],
+      { titleCode: 'save_library' });
+  }
+
+  // ── Tier 2 · costura (achados JÁ calculados — o orquestrador NÃO roda os motores) ───
+  // Descoberta de Segmentos: cada achado acionável vira `apply_opportunity` (ou `add_break`
+  // p/ heterogeneidade). DELTA só quando o achado traz `recommendation.delta` validado por
+  // re-simulação real. Carimbo de staleness: fingerprint do IR no cálculo vs. o atual.
+  if (t2.discovery && Array.isArray(t2.discovery.findings)) {
+    const stampFp = t2.discovery.policyFingerprint ?? null;
+    const staleness = { computedAt: t2.discovery.computedAt ?? null, policyFingerprint: stampFp, stale: stampFp !== policyFingerprint };
+    let count = 0;
+    for (const f of t2.discovery.findings) {
+      if (f.code === 'asis_divergence' || f.code === 'anomaly') continue; // só navegação (rec null)
+      const rec = f.recommendation || null;
+      const kind = f.code === 'heterogeneous_block' ? 'add_break' : 'apply_opportunity';
+      const target = f.id;
+      const delta = (rec && rec.delta) ? {
+        approvalDelta: rec.delta.approvalDelta ?? null,
+        inadRealDelta: rec.delta.inadRealDelta ?? null,
+        inadInfDelta: rec.delta.inadInfDelta ?? null,
+        movedQty: rec.delta.movedQty ?? null,
+      } : null;
+      const lg = (rec && rec.actionable === false) || f.locked
+        ? { actionable: false, reason: rec?.reason ?? 'node_locked' }
+        : { actionable: true, reason: null };
+      const id = fp(kind, target);
+      actions.push({
+        id, fingerprint: id, kind, tier: 2, severity: 'opportunity',
+        title: { code: kind, facts: { findingId: f.id, findingCode: f.code, segment: f.segment ?? null } },
+        priority: {
+          score: f.priority?.score ?? 0,
+          impact: f.priority?.impact ?? null,
+          confidence: f.priority?.confidence ?? null,
+          effort: rec?.kind === 'add_break' ? 2 : 1,
+        },
+        delta, // só quando validado
+        cta: [{ commandId: 'copilot.applyOpportunity', args: { findingId: f.id }, labelCode: kind }],
+        staleness,
+        ...lg,
+      });
+      count++;
+    }
+    diagnostics.sources.discovery = count;
+  }
+
+  // Simplificação: proposta com candidatos aceitos ⇒ um card `simplify`. A prova de
+  // equivalência traz o delta (diff = 0 ⇒ delta zero PROVADO; lossy ⇒ delta re-simulado).
+  if (t2.simplify && t2.simplify.proposal && Array.isArray(t2.simplify.proposal.candidates) && t2.simplify.proposal.candidates.length > 0) {
+    const stampFp = t2.simplify.policyFingerprint ?? null;
+    const eq = t2.simplify.equivalence || {};
+    const delta = eq.identical
+      ? { proven: true, approvalDelta: 0 }
+      : (eq.delta ? { proven: false, ...eq.delta } : null);
+    const target = 'proposal';
+    const id = fp('simplify', target);
+    actions.push({
+      id, fingerprint: id, kind: 'simplify', tier: 2, severity: 'opportunity',
+      title: { code: 'simplify', facts: {
+        removedNodeCount: t2.simplify.proposal.removedNodeCount ?? null,
+        candidateCount: t2.simplify.proposal.candidates.length,
+        identical: eq.identical ?? null,
+      } },
+      priority: { score: (t2.simplify.proposal.removedNodeCount || 0) + 1, impact: { removedNodeCount: t2.simplify.proposal.removedNodeCount ?? null }, confidence: 1, effort: 1 },
+      delta,
+      cta: [{ commandId: 'copilot.applySimplify', args: {}, labelCode: 'simplify' }],
+      staleness: { computedAt: t2.simplify.computedAt ?? null, policyFingerprint: stampFp, stale: stampFp !== policyFingerprint },
+      actionable: true, reason: null,
+    });
+    diagnostics.sources.simplify = 1;
+  }
+
+  // Feed nunca vazio (DEC-NB-005): sem nada acionável, o próximo passo da jornada.
+  if (actions.length === 0) {
+    add('journey_next', 'next', 'journey',
+      { policyEmpty },
+      { score: 0, impact: null, confidence: 1, effort: 1 },
+      [], { titleCode: 'journey_next' });
+  }
+
+  actions.sort(nextActionsCompare);
+
+  return {
+    version: NEXT_ACTIONS_VERSION,
+    generatedAt: Date.now(),
+    canvasId: ctx.canvasId ?? null,
+    policyFingerprint,
+    actions,
+    diagnostics,
+  };
 }
 
 // ── COMPUTE_SIMPLIFY — Copiloto Sessão 5 (simplificação com prova de equivalência) ──
@@ -7437,6 +7810,20 @@ function handleMessage(e) {
     return;
   }
 
+  // Feed de Próxima Melhor Ação (Jornada NB, Sessão NB1) — orquestrador determinístico que
+  // devolve o NextActionsModel. FORA do cache do tick (não é um gesto de edição cacheado),
+  // mas REUSA `getTickResult` para ler `nodeArrivals`/`lensCounts` já produzidos pelo último
+  // tick (leitura de cache, sem nova varredura — mesmo padrão de COMPUTE_POLICY_INSIGHTS).
+  // Tier 2 (Descoberta/Simplificação) chega PRONTO em `tier2` — o orquestrador nunca o roda.
+  // `ir` chega pronto no payload (buildPolicyIR só existe em App.jsx). Classe A: nunca sidecar.
+  if (type === 'COMPUTE_NEXT_ACTIONS') {
+    const { shapes = [], conns = [], ir = null, context = {}, tier2 = {} } = e.data;
+    const { nodeArrivals, lensCounts } = getTickResult(shapes, conns);
+    const model = computeNextActions(shapes, conns, workerCsvStore, ir, nodeArrivals, lensCounts, context, tier2);
+    self.postMessage({ type: 'NEXT_ACTIONS_RESULT', model });
+    return;
+  }
+
   // Simplificação com prova de equivalência (Copiloto Sessão 5) — busca on-demand, como o
   // Goal Seek; reusa o `nodeArrivals` do tick (normalmente uma leitura de cache) para os
   // candidatos de chegada zero de losango/Cineminha.
@@ -7699,6 +8086,8 @@ export {
   computeSimulationTick,
   computeLensPopulations,
   computePolicyInsights,
+  computeNextActions,
+  policyIRFingerprint,
   computeVariableRanking,
   computeBaseProfile,
   computeJohnnyData,
