@@ -1722,16 +1722,26 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
   const CTX_ACCENT = '#7c3aed'; // violeta — cor da aba contextual (destaque "Contextual Tabs")
   const modeMeta = RIBBON_MODE_META[mode] || RIBBON_MODE_META.fixed;
 
-  // Cluster QAT + ciclo de modo + ⚙ — visível nos 3 modos (na faixa de abas em fixed/compact;
+  // Cluster QAT (Sessão 9: realocado para o INÍCIO da faixa de abas, antes de "Início") —
+  // Desfazer/Refazer/Deletar/Salvar + Abrir Projeto (reusa o onRun do descritor
+  // `project.open` via qat.onOpen — sem lógica de arquivo duplicada). Visível nos 3 modos
+  // (na faixa de abas em fixed/compact; flutuante em auto). Não faz parte do conteúdo
+  // colapsável.
+  const leftCluster = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2, paddingRight: 8, marginRight: 6, borderRight: '1px solid #f1f5f9' }}>
+      {qBtn('↩', 'Desfazer (Ctrl+Z)', qat.undo, qat.canUndo, false)}
+      {qBtn('↪', 'Refazer (Ctrl+Y)', qat.redo, qat.canRedo, false)}
+      {qBtn('🗑', 'Deletar (Del)', qat.onDelete, qat.canDelete, true)}
+      {qBtn('💾', 'Salvar Projeto', qat.onSave, true, false)}
+      {qBtn('📁', 'Abrir Projeto', qat.onOpen, true, false)}
+    </div>
+  );
+
+  // Cluster ciclo de modo + Busca + ⚙ — CONTINUAM à direita da faixa de abas, como hoje
+  // (Sessão 9 não move este bloco). Visível nos 3 modos (na faixa de abas em fixed/compact;
   // flutuante em auto). Não faz parte do conteúdo colapsável.
   const rightCluster = (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 2, paddingLeft: 8, borderLeft: '1px solid #f1f5f9' }}>
-        {qBtn('↩', 'Desfazer (Ctrl+Z)', qat.undo, qat.canUndo, false)}
-        {qBtn('↪', 'Refazer (Ctrl+Y)', qat.redo, qat.canRedo, false)}
-        {qBtn('🗑', 'Deletar (Del)', qat.onDelete, qat.canDelete, true)}
-        {qBtn('💾', 'Salvar Projeto', qat.onSave, true, false)}
-      </div>
       {/* Botão de ciclo de colapso do Ribbon (fixed → compact → auto → fixed). */}
       <button className="wbt" onClick={onCycleMode} title={modeMeta.hint}
         style={{ display: 'flex', alignItems: 'center', gap: 4, height: 28, padding: '0 8px', marginLeft: 6,
@@ -1760,16 +1770,18 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
     </>
   );
 
-  // Faixa de abas (tabs + contextual, num filho rolável | rightCluster fixo). `withCluster`
-  // controla se o cluster QAT/⚙ vem embutido (fixed/compact) ou não (auto usa o flutuante).
-  // Touch/mobile (Sessão 8): `onTouchStart` espelha `onMouseEnter` (revela por toque, já
-  // que hover não existe em touchscreen) e as abas ficam num filho `overflowX:auto` próprio
-  // — em telas estreitas com muitas abas, o rightCluster (QAT + ⚙) nunca fica fora da tela,
-  // só as abas rolam.
+  // Faixa de abas (leftCluster fixo | tabs + contextual, num filho rolável | rightCluster
+  // fixo). `withCluster` controla se os clusters QAT (esquerda, Sessão 9) e ciclo/Busca/⚙
+  // (direita) vêm embutidos (fixed/compact) ou não (auto usa o flutuante). Touch/mobile
+  // (Sessão 8): `onTouchStart` espelha `onMouseEnter` (revela por toque, já que hover não
+  // existe em touchscreen) e as abas ficam num filho `overflowX:auto` próprio — em telas
+  // estreitas com muitas abas, nem o leftCluster (QAT) nem o rightCluster (ciclo/Busca/⚙)
+  // ficam fora da tela, só as abas rolam.
   const tabStrip = (withCluster) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', borderBottom: '1px solid #f1f5f9', background: '#fff' }}
       onMouseEnter={mode === 'compact' ? openReveal : undefined}
       onTouchStart={mode === 'compact' ? openReveal : undefined}>
+      {withCluster && <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>{leftCluster}</div>}
       <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 1, minWidth: 0, overflowX: 'auto' }}>
         {RIBBON_TABS.map(t => {
           const on = !isCtx && activeTab === t.id;
@@ -1870,10 +1882,10 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
         title="Passe o mouse ou toque para revelar o Ribbon"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 6,
           background: 'linear-gradient(#e2e8f0,#f1f5f9)', borderBottom: '1px solid #e2e8f0', cursor: 'default' }} />
-      {/* Cluster flutuante QAT + ciclo + ⚙ — mantém QAT/⚙ visíveis no modo auto sem reflow.
-          Recolhe enquanto o Ribbon está revelado (a faixa revelada já os contém). O botão ⌄
-          (Sessão 8) é o alvo de toque explícito e confiável para revelar o Ribbon — um alvo de
-          ~30px é ergonômico em touch; a hotzone de 6px sozinha não é. */}
+      {/* Cluster flutuante QAT + ciclo + ⚙ — mantém QAT/Abrir Projeto/⚙ visíveis no modo auto
+          sem reflow. Recolhe enquanto o Ribbon está revelado (a faixa revelada já os contém).
+          O botão ⌄ (Sessão 8) é o alvo de toque explícito e confiável para revelar o Ribbon —
+          um alvo de ~30px é ergonômico em touch; a hotzone de 6px sozinha não é. */}
       {!reveal && (
         <div style={{ position: 'absolute', top: 8, right: 14, zIndex: 320, display: 'flex', alignItems: 'center',
           gap: 2, padding: '2px 4px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10,
@@ -1885,6 +1897,7 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
             ⌄
           </button>
           <div style={{ width: 1, height: 16, background: '#f1f5f9', flexShrink: 0 }} />
+          {leftCluster}
           {rightCluster}
         </div>
       )}
@@ -8509,6 +8522,9 @@ export default function App() {
           qat={{
             undo, redo, canUndo: undoStack.length > 0, canRedo: redoStack.length > 0,
             onDelete: deleteSelected, canDelete: (!!sel || multiSel.size > 0), onSave: saveProject,
+            // Sessão 9: reusa o onRun já registrado no descritor `project.open` — sem duplicar
+            // a lógica de abrir arquivo (input file + projectInputRef já existentes).
+            onOpen: COMMANDS.find(c => c.id === 'project.open')?.onRun,
           }}
         />
       )}
@@ -15094,19 +15110,6 @@ export default function App() {
       })()}
       </div>{/* ── fim CANVAS PANE ── */}
 
-      {/* ═══════════════ STATUS BAR (UX 2.0 — Sessão 5) ═══════════════ */}
-      <StatusBar
-        indicators={statusBarIndicators}
-        values={statusBarValues}
-        onToggleIndicator={toggleStatusBarIndicator}
-        computeSidecar={computeSidecar}
-        computeSidecarStatus={computeSidecarStatus}
-        computeSidecarChecking={computeSidecarChecking}
-        onOpenSettings={() => openSettings('motor-python')}
-        zoomPct={Math.round(vp.s * 100)}
-        onZoomClick={() => setVp({ x: 20, y: 40, s: 1 })}
-      />
-
       {/* ═══════════════ TAB BAR (BOTTOM LEFT) — multi-canvas ═══════════════ */}
       <div style={{display:"flex",alignItems:"flex-start",gap:2,background:"#e2e8f0",borderTop:"1px solid #cbd5e1",padding:"0 8px 0",flexShrink:0,alignSelf:"flex-start",overflowX:"auto",maxWidth:"100%"}}>
 
@@ -15223,6 +15226,20 @@ export default function App() {
         </>,
         document.body
       )}
+
+      {/* ═══════════════ STATUS BAR (UX 2.0 — Sessão 5) — depois da barra de abas
+          de canvas (Sessão 9, ordem invertida em relação à v2 original) ═══════════════ */}
+      <StatusBar
+        indicators={statusBarIndicators}
+        values={statusBarValues}
+        onToggleIndicator={toggleStatusBarIndicator}
+        computeSidecar={computeSidecar}
+        computeSidecarStatus={computeSidecarStatus}
+        computeSidecarChecking={computeSidecarChecking}
+        onOpenSettings={() => openSettings('motor-python')}
+        zoomPct={Math.round(vp.s * 100)}
+        onZoomClick={() => setVp({ x: 20, y: 40, s: 1 })}
+      />
 
       {/* H0 — painel dev de telemetria local de custo (?debug=perf) */}
       {debugPerf && <PerfDebugPanel telemetryRef={perfTelemetryRef} />}
