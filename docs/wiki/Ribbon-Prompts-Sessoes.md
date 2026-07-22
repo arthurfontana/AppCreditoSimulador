@@ -856,6 +856,159 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 
 ---
 
+## Sessões adicionais (pós-v2 — pedido do usuário, 2026-07-22)
+
+As 8 sessões acima entregaram a migração completa da v2 (2026-07-20) e estão fechadas. As
+sessões abaixo **não fazem parte da v2** — são ajustes visuais/ergonômicos adicionais,
+pedidos pelo usuário depois de ver o Ribbon em uso na prática, validados antes com uma
+prévia visual (mockup HTML estático, fora do repositório, sem tocar em código-fonte). Mesmo
+template de execução das Sessões 1–8 (releia "Padrões Gerais" antes de rodar qualquer uma).
+
+---
+
+## Sessão 9 — QAT à esquerda + Abrir Projeto + Status Bar após a barra de abas
+
+**Modelo**: 🏷️ `Sonnet 5` — reordenação de JSX e realocação de um cluster de botões já existente; nenhuma matemática de viewport nem estado persistido novo (o botão novo reusa um handler já registrado).
+
+**Pré-requisitos**: Sessões 1–8 (Ribbon, QAT e Status Bar já existem como estão hoje).
+
+**O que vai entregar**:
+- A **QAT** (hoje: Desfazer/Refazer/Deletar/Salvar, alinhada à **direita** da faixa de abas
+  do Ribbon, junto do botão de ciclo de colapso/Busca/⚙) passa a ficar alinhada à
+  **esquerda** da faixa de abas (antes da aba "Início"), com um botão novo: **📁 Abrir
+  Projeto** — reusa o mesmo `onRun` do descritor `project.open` já existente no registro
+  (`projectInputRef.current?.click()`), sem duplicar lógica de abrir arquivo.
+- Busca de comandos, ciclo de colapso (⌃/⌄) e ⚙ **continuam** onde estão hoje, à direita —
+  não fazem parte do bloco que está sendo movido.
+- A **Status Bar** e a **barra de abas de canvas** (Explorar/Dashboard/Canvas) trocam de
+  ordem visual: hoje a Status Bar vem **antes** da barra de abas; passa a vir **depois**.
+- Nenhuma mudança de nome ou agrupamento de comando; nenhum estado novo a persistir (é
+  reordenação de JSX + realocação de um cluster de botões existente).
+
+**Prompt**:
+```
+Vamos à Sessão 9 da evolução de UX (QAT + Status Bar), conforme
+docs/wiki/Ribbon-Prompts-Sessoes.md — a seção "Sessão 9" é normativa. Releia o documento
+(em especial "Sessões adicionais") e o CLAUDE.md. Localize por âncora de texto, não por
+número de linha: (1) o cluster QAT (Desfazer/Refazer/Deletar/Salvar) hoje renderizado à
+direita da faixa de abas do Ribbon, junto do botão de ciclo de colapso/Busca/⚙ — mova esse
+cluster para o INÍCIO (esquerda) da faixa de abas, antes da aba "Início", e adicione um
+botão 📁 "Abrir Projeto" a ele, reusando o mesmo onRun do descritor `project.open` já
+existente no registro COMMANDS (projectInputRef.current?.click()) — não duplique a lógica
+de input de arquivo. O botão de ciclo de colapso, o campo de Busca e o ⚙ CONTINUAM à
+direita, como estão hoje — não fazem parte deste bloco. (2) Inverta a ordem visual entre a
+Status Bar e a barra de abas de canvas (Explorar/Dashboard/Canvas): hoje a Status Bar
+renderiza antes da barra de abas; passe a renderizar depois. Não mude nome nem agrupamento
+de nenhum comando, não introduza estado novo a persistir. Ao fim, app 100% funcional e
+npm test verde.
+```
+
+**Checklist**:
+- [ ] QAT (Desfazer/Refazer/Deletar/Salvar/**Abrir Projeto**) alinhado à esquerda da faixa de abas
+- [ ] Botão "Abrir Projeto" reusa o handler do descritor `project.open` (sem lógica duplicada)
+- [ ] Busca/ciclo de colapso/⚙ inalterados, continuam à direita
+- [ ] Status Bar renderiza **depois** da barra de abas de canvas (ordem invertida)
+- [ ] Nenhum nome/agrupamento de comando alterado; nenhum estado novo a persistir
+- [ ] `npm test` verde; app funcional
+
+---
+
+## Sessão 10 — Ribbon: botões primários/secundários (componente base + Início/Inserir/Dados)
+
+**Modelo**: 🏷️ `Opus 4.8` — primeira fiação de um padrão visual novo no componente compartilhado `RibbonCmdButton` (usado por todas as abas fixas e contextuais); precisa preservar `enabledWhen`/`activeWhen`/`disabledReason` exatos e o invariante de reflow do Ribbon.
+
+**Pré-requisitos**: Sessões 1–4 (registro `COMMANDS`, abas contextuais, colapso em 3 estados).
+
+**O que vai entregar**:
+- Nova variante de botão no Ribbon: **primário** (ícone bem maior, com o rótulo embaixo —
+  ícone e rótulo empilhados verticalmente) para o comando mais usado de cada grupo, e
+  **secundário** (compacto, ícone+rótulo lado a lado — o leiaute atual do `RibbonCmdButton`)
+  para o resto. **Sem** mudar nomes de aba, nomes de grupo, nem reagrupar comandos — só o
+  tamanho/leiaute do botão dentro do grupo já existente muda.
+- Critério primário/secundário por grupo (decisão do Claude, documentada no changelog desta
+  sessão para revisão do usuário) aplicado nas abas **Início** (Edição/Organizar/Ver),
+  **Inserir** (Nós/Terminais/Painéis) e **Dados**.
+- Altura da faixa de grupos (`minHeight:58` hoje) ajustada para acomodar o botão primário
+  maior, sem quebrar o modo `fixed` nem o reflow do canvas (o invariante de posicionamento
+  deste documento continua valendo).
+- ⚠️ **Atenção a um bug já encontrado num mockup de prévia**: para ícones emoji, um
+  `font-size` só um pouco maior não é percebido como "maior" pelo usuário — teste
+  visualmente rodando o app (não confie só no número de CSS); se necessário, use um
+  `font-size` propositalmente bem maior (ex. 22–24px) nos ícones primários.
+
+**Prompt**:
+```
+Vamos à Sessão 10 da evolução de UX (Ribbon: botões primários/secundários), conforme
+docs/wiki/Ribbon-Prompts-Sessoes.md — a seção "Sessão 10" é normativa. Releia o documento
+(em especial "Sessões adicionais") e o CLAUDE.md. Localize RibbonCmdButton e a faixa de
+grupos do componente Ribbon por âncora de texto. Implemente uma variante "primária" de
+botão (ícone consideravelmente maior — teste visualmente que a diferença de tamanho é
+perceptível de verdade, inclusive para ícones emoji, que não escalam com font-size do jeito
+que símbolos de texto escalam — empilhado verticalmente com o rótulo embaixo) ao lado da
+variante "secundária" atual (ícone+rótulo lado a lado, compacto). NÃO mude nomes de aba,
+nomes de grupo, nem a composição/ordem dos grupos — só o tamanho/leiaute do botão dentro do
+grupo já existente. Escolha você mesmo qual comando de cada grupo é o primário (o mais
+usado/mais representativo do grupo) nas abas Início (grupos Edição/Organizar/Ver), Inserir
+(Nós/Terminais/Painéis) e Dados — documente a escolha no changelog desta sessão para eu
+revisar. Ajuste a altura da faixa de grupos para acomodar o botão primário sem quebrar o
+modo fixed nem o reflow do canvas (releia o "Invariante de posicionamento" deste documento
+— svgPt/toWorld continuam lendo getBoundingClientRect ao vivo, confirme que nada mudou
+isso). Nenhuma feature de domínio nova. Ao fim, app 100% funcional e npm test verde.
+```
+
+**Checklist**:
+- [ ] Variante "primária" (ícone grande perceptível + rótulo embaixo) e "secundária" (compacta, como hoje) coexistem no mesmo grupo
+- [ ] Diferença de tamanho testada visualmente no app rodando (não só no valor de CSS), inclusive com ícones emoji
+- [ ] Nomes de aba/grupo e composição dos grupos inalterados nas abas Início/Inserir/Dados
+- [ ] Critério primário/secundário por grupo documentado no changelog da sessão
+- [ ] Altura da faixa de grupos ajustada sem quebrar reflow/invariante de posicionamento
+- [ ] `npm test` verde; app funcional
+
+---
+
+## Sessão 11 — Ribbon: botões primários/secundários (restante das abas + validação de colapso/touch)
+
+**Modelo**: 🏷️ `Sonnet 5` — aditivo, aplica o padrão já fiado na Sessão 10 sobre as abas restantes.
+
+**Pré-requisitos**: Sessão 10 (variante primária/secundária já existe e está validada em Início/Inserir/Dados).
+
+**O que vai entregar**:
+- Aplicar a mesma variante primário/secundário (componente e critério da Sessão 10) nas abas
+  **Analisar**, **Otimizar**, **Política**, **Projeto** e nas 6 abas contextuais (**Matriz**,
+  **Decisão**, **Lens**, **Terminal**, **Porta**, **Seleção**) — mesma regra: sem renomear
+  aba/grupo, sem reagrupar.
+- Validar os 3 modos de colapso do Ribbon (`fixed`/`compact`/`auto`) e o breakpoint
+  touch/mobile (`NARROW_SCREEN_BREAKPOINT`) com a nova altura de grupo: em `fixed`/`compact`
+  o canvas reflowa e o cálculo de mundo/tela precisa continuar correto; na revelação por
+  hover/toque (`compact`/`auto`) o conteúdo maior continua **overlay sem reflow**.
+
+**Prompt**:
+```
+Vamos à Sessão 11 da evolução de UX (Ribbon: primários/secundários nas abas restantes),
+conforme docs/wiki/Ribbon-Prompts-Sessoes.md — a seção "Sessão 11" é normativa. A Sessão 10
+já entregou a variante primária/secundária do RibbonCmdButton, validada em Início/Inserir/
+Dados. Releia o documento e o CLAUDE.md. Aplique a MESMA variante (não crie uma segunda)
+nas abas Analisar, Otimizar, Política, Projeto e nas 6 abas contextuais (Matriz, Decisão,
+Lens, Terminal, Porta, Seleção) — escolha o comando primário de cada grupo pelo mesmo
+critério da Sessão 10 (mais usado/mais representativo) e documente no changelog. NÃO mude
+nome de aba/grupo nem reagrupe comandos em nenhuma delas. Valide os 3 modos de colapso
+(fixed/compact/auto) e o breakpoint touch/mobile (NARROW_SCREEN_BREAKPOINT) com a nova
+altura de grupo: fixed/compact reflowam o canvas normalmente (clique/drag/zoom sem
+desvio); a revelação por hover/toque em compact/auto continua sendo overlay position:
+absolute SEM reflow, mesmo com o conteúdo mais alto. Nenhuma feature de domínio nova. Ao
+fim, app 100% funcional e npm test verde.
+```
+
+**Checklist**:
+- [ ] Variante primário/secundário aplicada em Analisar/Otimizar/Política/Projeto + 6 abas contextuais
+- [ ] Nomes de aba/grupo e composição dos grupos inalterados
+- [ ] Critério primário/secundário documentado no changelog
+- [ ] 3 modos de colapso testados com a nova altura (clique/drag/zoom sem desvio em fixed/compact)
+- [ ] Revelação por hover/toque em compact/auto continua overlay sem reflow
+- [ ] `npm test` verde; app funcional
+
+---
+
 ## Checklist de Execução
 
 - [x] **Sessão 1** — Registro de Comandos + casca do Ribbon (fixed) 🏷️ `Opus 4.8`
@@ -866,6 +1019,9 @@ de domínio nova. Ao fim, app 100% funcional, npm test verde e sem código morto
 - [x] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
 - [x] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
 - [x] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
+- [ ] **Sessão 9** — QAT à esquerda + Abrir Projeto + Status Bar após abas 🏷️ `Sonnet 5`
+- [ ] **Sessão 10** — Ribbon primário/secundário (base + Início/Inserir/Dados) 🏷️ `Opus 4.8`
+- [ ] **Sessão 11** — Ribbon primário/secundário (restante + colapso/touch) 🏷️ `Sonnet 5`
 
 ---
 
@@ -887,6 +1043,12 @@ Sessão 6 (Ativos/Inspetor/Copiloto) ← painel já só tem o que resta após S1
 Sessão 7 (Busca Ctrl+K) ← registro completo (S1–S2); paralelizável com S5–S6
     ↓
 Sessão 8 (Ergonomia + limpeza) ← remove o que as anteriores tornaram morto
+    ↓
+Sessão 9 (QAT à esquerda + Abrir Projeto + Status Bar após abas) ← reordena UI já existente, independente de 1–8
+    ↓
+Sessão 10 (Ribbon primário/secundário — base + Início/Inserir/Dados) ← primeira fiação da variante
+    ↓
+Sessão 11 (Ribbon primário/secundário — restante + validação colapso/touch) ← aplica o padrão da Sessão 10
 ```
 
 ---
@@ -925,3 +1087,14 @@ mobile no Ribbon compact/auto e ribbonMode padrão `compact` em tela estreita, D
 canvas migrada para a Sobre em tela estreita, e remoção de código morto — `TOOLS`, dropdown
 do Cineminha antigo, `deleteShape`, `SimIndicators` —, tudo sem bump de schema). A v1, de
 2026-07-09, nunca foi executada e está substituída por esta.)
+
+**Adendo 2026-07-22**: Sessões **9–11 adicionadas** (planejadas, ainda não entregues) —
+ajustes visuais/ergonômicos pedidos pelo usuário após ver a Ribbon em uso, validados antes
+com um mockup HTML estático (fora do repositório, sem código-fonte alterado): Sessão 9
+(QAT realocada para a esquerda da faixa de abas + botão "Abrir Projeto" + Status Bar
+passando a vir depois da barra de abas de canvas, invertendo a ordem atual), Sessão 10
+(variante primária/secundária de botão no Ribbon — ícone maior + rótulo embaixo para o
+comando mais usado de cada grupo, compacto para o resto — aplicada primeiro em Início/
+Inserir/Dados, sem renomear/reagrupar nada) e Sessão 11 (o mesmo padrão aplicado nas abas
+restantes — Analisar/Otimizar/Política/Projeto + as 6 contextuais — com validação dos 3
+modos de colapso e do breakpoint touch/mobile). Não fazem parte do escopo da v2 original.
