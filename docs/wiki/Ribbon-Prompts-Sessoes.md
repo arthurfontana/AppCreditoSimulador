@@ -957,12 +957,44 @@ isso). Nenhuma feature de domínio nova. Ao fim, app 100% funcional e npm test v
 ```
 
 **Checklist**:
-- [ ] Variante "primária" (ícone grande perceptível + rótulo embaixo) e "secundária" (compacta, como hoje) coexistem no mesmo grupo
-- [ ] Diferença de tamanho testada visualmente no app rodando (não só no valor de CSS), inclusive com ícones emoji
-- [ ] Nomes de aba/grupo e composição dos grupos inalterados nas abas Início/Inserir/Dados
-- [ ] Critério primário/secundário por grupo documentado no changelog da sessão
-- [ ] Altura da faixa de grupos ajustada sem quebrar reflow/invariante de posicionamento
-- [ ] `npm test` verde; app funcional
+- [x] Variante "primária" (ícone grande perceptível + rótulo embaixo) e "secundária" (compacta, como hoje) coexistem no mesmo grupo
+- [x] Diferença de tamanho testada visualmente no app rodando (não só no valor de CSS), inclusive com ícones emoji
+- [x] Nomes de aba/grupo e composição dos grupos inalterados nas abas Início/Inserir/Dados
+- [x] Critério primário/secundário por grupo documentado no changelog da sessão
+- [x] Altura da faixa de grupos ajustada sem quebrar reflow/invariante de posicionamento
+- [x] `npm test` verde; app funcional
+
+**Changelog Sessão 10 (entregue 2026-07-22)** — para revisão do usuário:
+
+*Implementação*
+- `RibbonCmdButton` (âncora `function RibbonCmdButton`) ganhou a variante **primária**
+  (`cmd.primary`): ícone `font-size:24px` empilhado **verticalmente** sobre o rótulo
+  (`flexDirection:column`, `minWidth:60`), contra a **secundária** histórica (ícone
+  `font-size:14px` + rótulo lado a lado, `font-size:12.5`). Os 24px são propositais: emoji
+  não ganha destaque perceptível com aumento pequeno de font-size (bug do mockup) — validado
+  visualmente no app rodando com ícones-texto (↖ ⊹ ⌂ ▭) **e** emoji (✅ 📊 📂 🔎).
+- Leiaute do grupo (âncora `minHeight`, faixa de grupos): dentro de cada grupo o(s)
+  primário(s) renderizam à esquerda (grande) e os secundários num bloco `flexWrap` à direita.
+  É só leiaute local do Ribbon — **o registro `COMMANDS` (composição/ordem dos grupos) é
+  intocado**; grupos sem nenhum `primary` (Analisar/Otimizar/contextuais) caem no caminho
+  histórico (só o bloco compacto).
+- `minHeight` da faixa de grupos: **58 → 82** para acomodar o botão primário empilhado.
+  Só deixa o Ribbon `fixed` mais alto; `svgPt`/`toWorld`/`getBR` continuam lendo
+  `getBoundingClientRect()` **ao vivo** (nenhum cache introduzido) — reflow do canvas
+  autocorrige (invariante de posicionamento intacto). Modos `compact`/`auto` são overlays
+  absolutos, sem reflow.
+
+*Critério primário/secundário por grupo (o mais usado/representativo — escolha do Claude)*
+| Aba | Grupo | Primário (id) | Por quê |
+|-----|-------|---------------|---------|
+| Início | Edição | Selecionar (`tool.select`) | ferramenta-ponteiro default, a mais acionada do grupo |
+| Início | Organizar | Reorganizar (`org.reorganize`) | ação-assinatura de organizar o canvas (auto-layout) |
+| Início | Ver | Centralizar (`view.zoomReset`) | "enquadrar/home" — o gesto de Ver mais representativo (vs. o par +/−) |
+| Inserir | Nós | Losango (`insert.decision`) | nó de decisão é o bloco mais inserido do fluxo |
+| Inserir | Terminais | Aprovado (`insert.approved`) | terminal mais comum de uma política de crédito |
+| Inserir | Painéis | Painel de Simulação (`insert.simPanel`) | painel-núcleo (taxa de aprovação/inad. em tempo real) |
+| Dados | Bases | Importar CSV (`data.importCsv`) | ponto de partida de toda análise (único comando do grupo) |
+| Dados | Explorar | Abrir Explorar (`data.openExplore`) | entrada principal da aba Explorar (vs. o "Regenerar") |
 
 ---
 
@@ -1020,7 +1052,7 @@ fim, app 100% funcional e npm test verde.
 - [x] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
 - [x] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
 - [x] **Sessão 9** — QAT à esquerda + Abrir Projeto + Status Bar após abas 🏷️ `Sonnet 5`
-- [ ] **Sessão 10** — Ribbon primário/secundário (base + Início/Inserir/Dados) 🏷️ `Opus 4.8`
+- [x] **Sessão 10** — Ribbon primário/secundário (base + Início/Inserir/Dados) 🏷️ `Opus 4.8`
 - [ ] **Sessão 11** — Ribbon primário/secundário (restante + colapso/touch) 🏷️ `Sonnet 5`
 
 ---
@@ -1092,9 +1124,10 @@ do Cineminha antigo, `deleteShape`, `SimIndicators` —, tudo sem bump de schema
 pelo usuário após ver a Ribbon em uso, validados antes com um mockup HTML estático (fora do
 repositório, sem código-fonte alterado). **Sessão 9 entregue** (QAT realocada para a
 esquerda da faixa de abas + botão "Abrir Projeto" + Status Bar passando a vir depois da
-barra de abas de canvas, invertendo a ordem anterior). Sessões 10–11 ainda não entregues:
-Sessão 10 (variante primária/secundária de botão no Ribbon — ícone maior + rótulo embaixo
-para o comando mais usado de cada grupo, compacto para o resto — aplicada primeiro em
-Início/Inserir/Dados, sem renomear/reagrupar nada) e Sessão 11 (o mesmo padrão aplicado nas
+barra de abas de canvas, invertendo a ordem anterior). **Sessão 10 entregue** (variante
+primária/secundária de botão no Ribbon — `cmd.primary`: ícone 24px + rótulo embaixo para o
+comando mais usado de cada grupo, compacto para o resto — aplicada em Início/Inserir/Dados,
+sem renomear/reagrupar nada; `minHeight` da faixa de grupos 58→82; invariante de
+posicionamento intacto). Sessão 11 ainda não entregue (o mesmo padrão aplicado nas
 abas restantes — Analisar/Otimizar/Política/Projeto + as 6 contextuais — com validação dos
 3 modos de colapso e do breakpoint touch/mobile). Não fazem parte do escopo da v2 original.

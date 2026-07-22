@@ -1648,16 +1648,36 @@ const CANVAS_TIPS = [
   'Clique na seta → deletar conexão',
 ];
 
+// Botão de comando do Ribbon em duas variantes (UX 2.0 Sessão 10):
+//  • secundária (default): ícone+rótulo LADO A LADO, compacto — o leiaute histórico.
+//  • primária (`cmd.primary`): ícone GRANDE empilhado VERTICALMENTE sobre o rótulo, para o
+//    comando mais usado/representativo de cada grupo. O ícone primário usa font-size bem
+//    maior (24px vs 14px) — proposital: emoji NÃO ganha destaque perceptível com um aumento
+//    pequeno de font-size (bug visto num mockup de prévia), então a diferença precisa ser
+//    grande de verdade. Ambos preservam enabledWhen/activeWhen/title exatos.
 function RibbonCmdButton({ cmd }) {
   const enabled = cmd.enabledWhen ? !!cmd.enabledWhen() : true;
   const active  = cmd.activeWhen  ? !!cmd.activeWhen()  : false;
+  const title   = (cmd.title || cmd.label) + (cmd.shortcut ? ` (${cmd.shortcut})` : '');
+  const border  = active ? '1px solid #2563eb' : '1px solid transparent';
+  const bg      = active ? '#2563eb' : 'transparent';
+  const color   = !enabled ? '#cbd5e1' : active ? '#fff' : '#475569';
+  if (cmd.primary) {
+    return (
+      <button className="wbt" disabled={!enabled} onClick={enabled ? cmd.onRun : undefined} title={title}
+        style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: 4, padding: '4px 12px', minWidth: 60, alignSelf: 'stretch', borderRadius: 8, border,
+          background: bg, color, cursor: enabled ? 'pointer' : 'default', fontFamily: 'inherit',
+          whiteSpace: 'nowrap', flexShrink: 0 }}>
+        {cmd.icon && <span style={{ fontSize: 24, lineHeight: 1 }}>{cmd.icon}</span>}
+        <span className="wbl" style={{ fontSize: 11, fontWeight: 600 }}>{cmd.label}</span>
+      </button>
+    );
+  }
   return (
-    <button className="wbt" disabled={!enabled} onClick={enabled ? cmd.onRun : undefined}
-      title={(cmd.title || cmd.label) + (cmd.shortcut ? ` (${cmd.shortcut})` : '')}
+    <button className="wbt" disabled={!enabled} onClick={enabled ? cmd.onRun : undefined} title={title}
       style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px', borderRadius: 8,
-        border: active ? '1px solid #2563eb' : '1px solid transparent',
-        background: active ? '#2563eb' : 'transparent',
-        color: !enabled ? '#cbd5e1' : active ? '#fff' : '#475569',
+        border, background: bg, color,
         cursor: enabled ? 'pointer' : 'default', fontSize: 12.5, fontWeight: 500,
         fontFamily: 'inherit', whiteSpace: 'nowrap', flexShrink: 0 }}>
       {cmd.icon && <span style={{ fontSize: 14, lineHeight: 1 }}>{cmd.icon}</span>}
@@ -1816,20 +1836,39 @@ function Ribbon({ commands, activeTab, onTab, qat, contextTab, contextCommands, 
 
   // Grupos de comandos da aba ativa (fundo levemente tingido quando contextual).
   const groups = (
-    <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 58,
+    // minHeight subiu de 58 → 82 (Sessão 10) para acomodar o botão primário empilhado
+    // (ícone 24px + rótulo + label do grupo). Só torna o Ribbon fixo mais alto; a conversão
+    // tela→mundo (svgPt/toWorld) lê getBoundingClientRect AO VIVO — nenhum cache foi
+    // introduzido — logo o reflow do canvas se autocorrige (invariante de posicionamento).
+    <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, padding: '6px 8px', overflowX: 'auto', minHeight: 82,
       background: isCtx ? '#fbfaff' : '#fff' }}>
       {groupOrder.length === 0 ? (
         <div style={{ fontSize: 11.5, color: '#cbd5e1', padding: '10px 6px' }}>—</div>
-      ) : groupOrder.map((g, gi) => (
-        <div key={g} style={{ display: 'flex', flexDirection: 'column', padding: '0 10px',
-          borderRight: gi < groupOrder.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
-          <div style={{ display: 'flex', gap: 2, alignItems: 'center', flex: 1, flexWrap: 'wrap' }}>
-            {byGroup.get(g).map(c => <RibbonCmdButton key={c.id} cmd={c} />)}
+      ) : groupOrder.map((g, gi) => {
+        // Dentro do grupo: o(s) botão(ões) primário(s) (leiaute vertical grande) à esquerda,
+        // os secundários (compactos) num bloco que embrulha à direita. Isto NÃO altera a
+        // composição nem a ordem dos grupos (o registro COMMANDS é intocado) — é só o
+        // leiaute do botão dentro do grupo já existente. Grupos sem nenhum `primary` caem no
+        // caminho de sempre (só o bloco compacto, idêntico ao histórico).
+        const cmds = byGroup.get(g);
+        const primaries = cmds.filter(c => c.primary);
+        const secondaries = cmds.filter(c => !c.primary);
+        return (
+          <div key={g} style={{ display: 'flex', flexDirection: 'column', padding: '0 10px',
+            borderRight: gi < groupOrder.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 1 }}>
+              {primaries.map(c => <RibbonCmdButton key={c.id} cmd={c} />)}
+              {secondaries.length > 0 && (
+                <div style={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+                  {secondaries.map(c => <RibbonCmdButton key={c.id} cmd={c} />)}
+                </div>
+              )}
+            </div>
+            <div style={{ fontSize: 9.5, color: isCtx ? '#8b5cf6' : '#94a3b8', textAlign: 'center', marginTop: 3,
+              textTransform: 'uppercase', letterSpacing: .4, fontWeight: 600 }}>{g}</div>
           </div>
-          <div style={{ fontSize: 9.5, color: isCtx ? '#8b5cf6' : '#94a3b8', textAlign: 'center', marginTop: 3,
-            textTransform: 'uppercase', letterSpacing: .4, fontWeight: 600 }}>{g}</div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 
@@ -8101,7 +8140,7 @@ export default function App() {
   const _scopeNode     = (t) => ['decision', 'cineminha', 'decision_lens'].includes(t);
   const COMMANDS = [
     // ─── INÍCIO / Edição (toolbar de topo #1) ───
-    { id: 'tool.select', label: 'Selecionar', icon: '↖', tab: 'inicio', group: 'Edição', keywords: ['selecionar', 'seta', 'mover shapes', 'ponteiro', 'cursor'], activeWhen: () => tool === 'select', onRun: () => { setTool('select'); setFromId(null); } },
+    { id: 'tool.select', label: 'Selecionar', icon: '↖', tab: 'inicio', group: 'Edição', primary: true, keywords: ['selecionar', 'seta', 'mover shapes', 'ponteiro', 'cursor'], activeWhen: () => tool === 'select', onRun: () => { setTool('select'); setFromId(null); } },
     { id: 'tool.hand', label: 'Mover', icon: '✋', tab: 'inicio', group: 'Edição', keywords: ['mão', 'pan', 'arrastar canvas', 'navegar', 'panorâmica'], activeWhen: () => tool === 'hand', onRun: () => { setTool('hand'); setFromId(null); } },
     { id: 'tool.connect', label: 'Conectar', icon: '⟶', tab: 'inicio', group: 'Edição', keywords: ['conexão', 'aresta', 'ligar', 'seta', 'fluxo', 'linha'], activeWhen: () => tool === 'connect', onRun: () => { setTool('connect'); setFromId(null); } },
     { id: 'edit.undo', label: 'Desfazer', icon: '↩', tab: 'inicio', group: 'Edição', shortcut: 'Ctrl+Z', keywords: ['undo', 'voltar', 'desfazer'], enabledWhen: () => undoStack.length > 0, disabledReason: 'nada para desfazer', onRun: undo },
@@ -8109,32 +8148,32 @@ export default function App() {
     { id: 'edit.delete', label: 'Deletar', icon: '🗑', tab: 'inicio', group: 'Edição', shortcut: 'Del', keywords: ['excluir', 'remover', 'apagar', 'deletar'], enabledWhen: () => _hasSel, disabledReason: 'selecione algo para deletar', onRun: deleteSelected },
     { id: 'edit.duplicate', label: 'Duplicar', icon: '⧉', tab: 'inicio', group: 'Edição', keywords: ['duplicar', 'clonar', 'copiar'], enabledWhen: () => _hasSel, disabledReason: 'selecione algo para duplicar', onRun: duplicateSelected },
     // ─── INÍCIO / Organizar ───
-    { id: 'org.reorganize', label: 'Reorganizar', icon: '⊹', tab: 'inicio', group: 'Organizar', keywords: ['auto layout', 'organizar', 'arrumar', 'camadas', 'reorganizar', 'sugiyama'], onRun: autoLayout },
+    { id: 'org.reorganize', label: 'Reorganizar', icon: '⊹', tab: 'inicio', group: 'Organizar', primary: true, keywords: ['auto layout', 'organizar', 'arrumar', 'camadas', 'reorganizar', 'sugiyama'], onRun: autoLayout },
     { id: 'org.color', label: 'Cor', icon: '🎨', tab: 'inicio', group: 'Organizar', keywords: ['cor', 'paleta', 'pintar'], enabledWhen: () => !!selShape && selShape.type !== 'csv', disabledReason: 'selecione um shape para colorir', onRun: () => setPalette(v => !v) },
     // ─── INÍCIO / Ver (zoom, canto do canvas #10) ───
     { id: 'view.zoomIn', label: 'Zoom +', icon: '➕', tab: 'inicio', group: 'Ver', keywords: ['aproximar', 'ampliar', 'zoom in'], onRun: () => zoomCenter(1.2) },
     { id: 'view.zoomOut', label: 'Zoom −', icon: '➖', tab: 'inicio', group: 'Ver', keywords: ['afastar', 'reduzir', 'zoom out'], onRun: () => zoomCenter(1 / 1.2) },
-    { id: 'view.zoomReset', label: 'Centralizar', icon: '⌂', tab: 'inicio', group: 'Ver', keywords: ['reset', 'início', 'home', 'centralizar', 'enquadrar'], onRun: () => setVp({ x: 20, y: 40, s: 1 }) },
+    { id: 'view.zoomReset', label: 'Centralizar', icon: '⌂', tab: 'inicio', group: 'Ver', primary: true, keywords: ['reset', 'início', 'home', 'centralizar', 'enquadrar'], onRun: () => setVp({ x: 20, y: 40, s: 1 }) },
 
     // ─── INSERIR / Nós ───
-    { id: 'insert.decision', label: 'Losango', icon: '▭', tab: 'inserir', group: 'Nós', keywords: ['losango', 'decisão', 'retângulo', 'nó', 'regra', 'diamante'], activeWhen: () => tool === 'rect', onRun: () => { setTool('rect'); setFromId(null); } },
+    { id: 'insert.decision', label: 'Losango', icon: '▭', tab: 'inserir', group: 'Nós', primary: true, keywords: ['losango', 'decisão', 'retângulo', 'nó', 'regra', 'diamante'], activeWhen: () => tool === 'rect', onRun: () => { setTool('rect'); setFromId(null); } },
     { id: 'insert.cineminha', label: 'Cineminha', icon: '⊞', tab: 'inserir', group: 'Nós', keywords: ['matriz', 'cineminha', 'cruzada', 'cinema', 'tabela cruzada'], activeWhen: () => tool === 'cineminha', onRun: () => { setTool('cineminha'); setFromId(null); } },
     { id: 'insert.cineminhaLibrary', label: 'Cineminha da Biblioteca', icon: '📥', tab: 'inserir', group: 'Nós', keywords: ['importar cineminha', 'biblioteca', 'modelos salvos'], onRun: () => openCinemaLibrary(null, 'browse') },
     { id: 'insert.lensTool', label: 'Decision Lens', icon: '🔎', tab: 'inserir', group: 'Nós', keywords: ['lens', 'segmentação', 'regras', 'ferramenta lens', 'população'], activeWhen: () => tool === 'decision_lens', onRun: () => { setTool('decision_lens'); setFromId(null); } },
     { id: 'insert.lensAdd', label: 'Adicionar Lens', icon: '🛢', tab: 'inserir', group: 'Nós', keywords: ['decision lens', 'segmentação', 'adicionar lens'], enabledWhen: () => Object.keys(csvStore).length > 0, disabledReason: 'carregue uma base primeiro', onRun: addDecisionLens },
     { id: 'insert.frame', label: 'Frame', icon: '⬚', tab: 'inserir', group: 'Nós', keywords: ['moldura', 'grupo', 'área', 'frame'], activeWhen: () => tool === 'frame', onRun: () => { setTool('frame'); setFromId(null); } },
     // ─── INSERIR / Terminais ───
-    { id: 'insert.approved', label: 'Aprovado', icon: '✅', tab: 'inserir', group: 'Terminais', keywords: ['aprovar', 'terminal aprovado'], activeWhen: () => tool === 'approved', onRun: () => { setTool('approved'); setFromId(null); } },
+    { id: 'insert.approved', label: 'Aprovado', icon: '✅', tab: 'inserir', group: 'Terminais', primary: true, keywords: ['aprovar', 'terminal aprovado'], activeWhen: () => tool === 'approved', onRun: () => { setTool('approved'); setFromId(null); } },
     { id: 'insert.rejected', label: 'Reprovado', icon: '❌', tab: 'inserir', group: 'Terminais', keywords: ['reprovar', 'recusar', 'terminal reprovado'], activeWhen: () => tool === 'rejected', onRun: () => { setTool('rejected'); setFromId(null); } },
     { id: 'insert.asIs', label: 'AS IS', icon: '⟳', tab: 'inserir', group: 'Terminais', keywords: ['as is', 'política atual', 'baseline'], activeWhen: () => tool === 'as_is', onRun: () => { setTool('as_is'); setFromId(null); } },
     // ─── INSERIR / Painéis ───
-    { id: 'insert.simPanel', label: _simPanelExists ? 'Painel ativo' : 'Painel de Simulação', icon: '📊', tab: 'inserir', group: 'Painéis', keywords: ['simulação', 'painel', 'indicadores', 'kpi', 'taxa de aprovação'], enabledWhen: () => !_simPanelExists, disabledReason: 'painel já ativo no canvas', onRun: addSimPanel },
+    { id: 'insert.simPanel', label: _simPanelExists ? 'Painel ativo' : 'Painel de Simulação', icon: '📊', tab: 'inserir', group: 'Painéis', primary: true, keywords: ['simulação', 'painel', 'indicadores', 'kpi', 'taxa de aprovação'], enabledWhen: () => !_simPanelExists, disabledReason: 'painel já ativo no canvas', onRun: addSimPanel },
     { id: 'insert.businessImpact', label: businessWidget.visible ? 'Widget ativo' : 'Business Impact', icon: '⬡', tab: 'inserir', group: 'Painéis', keywords: ['business impact', 'widget', 'impacto', 'negócio'], enabledWhen: () => !businessWidget.visible, disabledReason: 'widget já ativo no canvas', onRun: () => setBusinessWidget(p => ({ ...p, visible: true })) },
 
     // ─── DADOS ───
-    { id: 'data.importCsv', label: 'Importar CSV', icon: '📂', tab: 'dados', group: 'Bases', keywords: ['csv', 'importar', 'carregar base', 'dados', 'planilha'], onRun: () => fileInputRef.current?.click() },
+    { id: 'data.importCsv', label: 'Importar CSV', icon: '📂', tab: 'dados', group: 'Bases', primary: true, keywords: ['csv', 'importar', 'carregar base', 'dados', 'planilha'], onRun: () => fileInputRef.current?.click() },
     // Explorar a Base (Épico EB, EB2) — DEC-EB-001 (aba) + DEC-EB-005 (regenerar layout).
-    { id: 'data.openExplore', label: 'Abrir Explorar', icon: '🔎', tab: 'dados', group: 'Explorar', keywords: ['explorar', 'explorar a base', 'análise exploratória', 'perfil da base', 'conhecer a base'], onRun: () => setActiveTab('explore') },
+    { id: 'data.openExplore', label: 'Abrir Explorar', icon: '🔎', tab: 'dados', group: 'Explorar', primary: true, keywords: ['explorar', 'explorar a base', 'análise exploratória', 'perfil da base', 'conhecer a base'], onRun: () => setActiveTab('explore') },
     { id: 'data.regenerateExplore', label: 'Regenerar análise da base', icon: '↻', tab: 'dados', group: 'Explorar', keywords: ['regenerar', 'explorar', 'atualizar análise', 'perfil da base'], enabledWhen: () => !!baseProfileResult && !baseProfileResult.error, disabledReason: 'carregue uma base para gerar a análise', onRun: regenerateExploreLayout },
 
     // ─── ANALISAR ───
