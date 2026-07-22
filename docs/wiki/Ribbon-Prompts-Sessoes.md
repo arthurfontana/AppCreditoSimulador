@@ -904,12 +904,12 @@ npm test verde.
 ```
 
 **Checklist**:
-- [ ] QAT (Desfazer/Refazer/Deletar/Salvar/**Abrir Projeto**) alinhado à esquerda da faixa de abas
-- [ ] Botão "Abrir Projeto" reusa o handler do descritor `project.open` (sem lógica duplicada)
-- [ ] Busca/ciclo de colapso/⚙ inalterados, continuam à direita
-- [ ] Status Bar renderiza **depois** da barra de abas de canvas (ordem invertida)
-- [ ] Nenhum nome/agrupamento de comando alterado; nenhum estado novo a persistir
-- [ ] `npm test` verde; app funcional
+- [x] QAT (Desfazer/Refazer/Deletar/Salvar/**Abrir Projeto**) alinhado à esquerda da faixa de abas
+- [x] Botão "Abrir Projeto" reusa o handler do descritor `project.open` (sem lógica duplicada)
+- [x] Busca/ciclo de colapso/⚙ inalterados, continuam à direita
+- [x] Status Bar renderiza **depois** da barra de abas de canvas (ordem invertida)
+- [x] Nenhum nome/agrupamento de comando alterado; nenhum estado novo a persistir
+- [x] `npm test` verde; app funcional
 
 ---
 
@@ -1019,7 +1019,7 @@ fim, app 100% funcional e npm test verde.
 - [x] **Sessão 6** — Painel: Ativos/Inspetor/Copiloto 🏷️ `Opus 4.8` → `Sonnet 5`
 - [x] **Sessão 7** — Busca de comandos (Ctrl+K) 🏷️ `Sonnet 5`
 - [x] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
-- [ ] **Sessão 9** — QAT à esquerda + Abrir Projeto + Status Bar após abas 🏷️ `Sonnet 5`
+- [x] **Sessão 9** — QAT à esquerda + Abrir Projeto + Status Bar após abas 🏷️ `Sonnet 5`
 - [ ] **Sessão 10** — Ribbon primário/secundário (base + Início/Inserir/Dados) 🏷️ `Opus 4.8`
 - [ ] **Sessão 11** — Ribbon primário/secundário (restante + colapso/touch) 🏷️ `Sonnet 5`
 
@@ -1088,13 +1088,13 @@ canvas migrada para a Sobre em tela estreita, e remoção de código morto — `
 do Cineminha antigo, `deleteShape`, `SimIndicators` —, tudo sem bump de schema). A v1, de
 2026-07-09, nunca foi executada e está substituída por esta.)
 
-**Adendo 2026-07-22**: Sessões **9–11 adicionadas** (planejadas, ainda não entregues) —
-ajustes visuais/ergonômicos pedidos pelo usuário após ver a Ribbon em uso, validados antes
-com um mockup HTML estático (fora do repositório, sem código-fonte alterado): Sessão 9
-(QAT realocada para a esquerda da faixa de abas + botão "Abrir Projeto" + Status Bar
-passando a vir depois da barra de abas de canvas, invertendo a ordem atual), Sessão 10
-(variante primária/secundária de botão no Ribbon — ícone maior + rótulo embaixo para o
-comando mais usado de cada grupo, compacto para o resto — aplicada primeiro em Início/
-Inserir/Dados, sem renomear/reagrupar nada) e Sessão 11 (o mesmo padrão aplicado nas abas
-restantes — Analisar/Otimizar/Política/Projeto + as 6 contextuais — com validação dos 3
-modos de colapso e do breakpoint touch/mobile). Não fazem parte do escopo da v2 original.
+**Adendo 2026-07-22**: Sessões **9–11 adicionadas** — ajustes visuais/ergonômicos pedidos
+pelo usuário após ver a Ribbon em uso, validados antes com um mockup HTML estático (fora do
+repositório, sem código-fonte alterado). **Sessão 9 entregue** (QAT realocada para a
+esquerda da faixa de abas + botão "Abrir Projeto" + Status Bar passando a vir depois da
+barra de abas de canvas, invertendo a ordem anterior). Sessões 10–11 ainda não entregues:
+Sessão 10 (variante primária/secundária de botão no Ribbon — ícone maior + rótulo embaixo
+para o comando mais usado de cada grupo, compacto para o resto — aplicada primeiro em
+Início/Inserir/Dados, sem renomear/reagrupar nada) e Sessão 11 (o mesmo padrão aplicado nas
+abas restantes — Analisar/Otimizar/Política/Projeto + as 6 contextuais — com validação dos
+3 modos de colapso e do breakpoint touch/mobile). Não fazem parte do escopo da v2 original.
