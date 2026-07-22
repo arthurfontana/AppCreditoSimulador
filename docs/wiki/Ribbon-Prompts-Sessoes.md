@@ -1032,12 +1032,62 @@ fim, app 100% funcional e npm test verde.
 ```
 
 **Checklist**:
-- [ ] Variante primário/secundário aplicada em Analisar/Otimizar/Política/Projeto + 6 abas contextuais
-- [ ] Nomes de aba/grupo e composição dos grupos inalterados
-- [ ] Critério primário/secundário documentado no changelog
-- [ ] 3 modos de colapso testados com a nova altura (clique/drag/zoom sem desvio em fixed/compact)
-- [ ] Revelação por hover/toque em compact/auto continua overlay sem reflow
-- [ ] `npm test` verde; app funcional
+- [x] Variante primário/secundário aplicada em Analisar/Otimizar/Política/Projeto + 6 abas contextuais
+- [x] Nomes de aba/grupo e composição dos grupos inalterados
+- [x] Critério primário/secundário documentado no changelog
+- [x] 3 modos de colapso testados com a nova altura (clique/drag/zoom sem desvio em fixed/compact)
+- [x] Revelação por hover/toque em compact/auto continua overlay sem reflow
+- [x] `npm test` verde; app funcional
+
+**Changelog Sessão 11 (entregue 2026-07-22)** — para revisão do usuário:
+
+*Implementação*
+- Nenhuma mudança em `RibbonCmdButton` nem na faixa de grupos do `Ribbon` (`docs/wiki` §
+  invariante de posicionamento intacto) — o leiaute primário/secundário já era genérico por
+  grupo (`primaries`/`secondaries` a partir de `cmd.primary`), então a Sessão 11 é só a
+  marcação `primary: true` nos descritores do registro `COMMANDS` das abas restantes. Grupo
+  com um único comando (regra já usada na Sessão 10 para "Dados/Bases") também marca esse
+  comando como primário nesta sessão.
+- Abas contextuais (`ctx-matriz`/`ctx-decisao`/`ctx-lens`/`ctx-terminal`/`ctx-porta`/
+  `ctx-selecao`): `contextCommands` é montado por `contextWhen(selShape)`, não por `tab` — os
+  grupos "Analisar aqui" (`ctx.scope.*`) e "Trava" (`ctx.node.lock`) são **compartilhados**
+  entre losango/Cineminha/Lens/terminal (mesmo descritor, mesmo `primary`), e "Configurar"
+  (`ctx.node.domain`) é compartilhado entre Cineminha e Decisão — por isso marcar o
+  descritor certo já cobre várias abas contextuais de uma vez (Decisão e Terminal não têm
+  nenhum descritor próprio: herdam o primário via os grupos compartilhados).
+- Validação de colapso/touch (Playwright headless contra `npm run dev`, sem `chromium-cli`
+  disponível neste ambiente): `fixed`→`compact`→`auto` ciclados nas abas Analisar/Otimizar;
+  revelação por hover (compact) e por hotzone (auto) confirmada como overlay `position:
+  absolute` — o cartão "Dicas" do canto do canvas não se move ao revelar. Colocação de shape
+  por clique (`Losango`, aba Inserir) testada em modo `fixed` após alternar os 3 modos: o
+  shape aparece sob o ponto clicado, sem desvio vertical introduzido pela altura maior do
+  grupo. Breakpoint `NARROW_SCREEN_BREAKPOINT` (viewport 400px + `hasTouch`) testado: Ribbon
+  nasce em `compact`, toque na aba Política revela os grupos (Biblioteca/Documento/Fluxo) como
+  overlay sem empurrar o canvas.
+
+*Critério primário/secundário por grupo (o mais usado/representativo — escolha do Claude)*
+| Aba | Grupo | Primário (id) | Por quê |
+|-----|-------|---------------|---------|
+| Analisar | Descoberta | Descobrir Segmentos (`analyze.discover`) | entrada mais geral da Descoberta (vs. Clusterizar/Faixas, mais específicos) |
+| Analisar | Copiloto | Copiloto (`analyze.copilot`) | abre o painel-base; as outras ações (Buscar oportunidades/Ver descartados) partem dele |
+| Otimizar | Política | Atingir Objetivo (`optimize.goalSeek`) | otimizador-assinatura (Goal Seek/MILP profundo) vs. Simplificar, mais pontual |
+| Otimizar | Matrizes | Otimização Johnny (`optimize.johnny`) | único comando do grupo |
+| Política | Biblioteca | Biblioteca de Políticas (`policy.library`) | único comando do grupo |
+| Política | Documento | Documentar Política (`policy.doc`) | único comando do grupo |
+| Política | Fluxo | Exportar Fluxo (`policy.export`) | fluxo típico é construir e exportar; importar é o caminho reverso, menos frequente |
+| Projeto | Arquivo | Salvar Projeto (`project.save`) | ação mais frequente do grupo (mesmo ícone 💾 já é o 1º item da QAT) |
+| Projeto | Sistema | Configurações (`project.settings`) | único comando do grupo |
+| ctx-matriz | Tipo | Tipo: Elegibilidade (`ctx.cinema.type.eligibility`) | tipo default da Cineminha (`getCinemaType` cai em `eligibility`) |
+| ctx-matriz / ctx-decisao | Configurar | Domínio (`ctx.node.domain`) | configuração fundamental, compartilhada entre Cineminha e Decisão (vs. Resultado, só Cineminha) |
+| ctx-matriz | Otimizar | Otimizar Decisão (`ctx.cinema.optimize`) | otimização de 1 Cineminha é o caso comum; Johnny (multi) é o avançado |
+| ctx-matriz | Biblioteca | Biblioteca (`ctx.cinema.library`) | entrada para reaproveitar Cineminhas existentes (mesmo padrão do "Abrir Explorar" da Sessão 10) |
+| ctx-lens | Configurar | Configurar regras (`ctx.lens.configure`) | único comando do grupo |
+| ctx-matriz/decisao/lens/terminal | Analisar aqui | Descobrir aqui (`ctx.scope.discover`) | espelha a escolha do grupo "Descoberta" da aba Analisar; único comando que também aparece em terminais |
+| ctx-matriz/decisao/lens | Trava | Travar / Destravar (`ctx.node.lock`) | único comando do grupo |
+| ctx-porta | Sugestão | Sugerir próximo passo (`ctx.port.suggest`) | único comando do grupo |
+| ctx-selecao | Alinhar | Alinhar à esquerda (`ctx.align.left`) | alinhamento mais comum (1º da lista, padrão de toolbars) |
+| ctx-selecao | Matrizes | Otimização Johnny (`ctx.sel.johnny`) | único comando do grupo |
+| ctx-selecao | Ações | Deletar (`ctx.sel.delete`) | único comando do grupo |
 
 ---
 
@@ -1053,7 +1103,7 @@ fim, app 100% funcional e npm test verde.
 - [x] **Sessão 8** — Ergonomia + atalhos + touch + limpeza 🏷️ `Sonnet 5`
 - [x] **Sessão 9** — QAT à esquerda + Abrir Projeto + Status Bar após abas 🏷️ `Sonnet 5`
 - [x] **Sessão 10** — Ribbon primário/secundário (base + Início/Inserir/Dados) 🏷️ `Opus 4.8`
-- [ ] **Sessão 11** — Ribbon primário/secundário (restante + colapso/touch) 🏷️ `Sonnet 5`
+- [x] **Sessão 11** — Ribbon primário/secundário (restante + colapso/touch) 🏷️ `Sonnet 5`
 
 ---
 
@@ -1128,6 +1178,8 @@ barra de abas de canvas, invertendo a ordem anterior). **Sessão 10 entregue** (
 primária/secundária de botão no Ribbon — `cmd.primary`: ícone 24px + rótulo embaixo para o
 comando mais usado de cada grupo, compacto para o resto — aplicada em Início/Inserir/Dados,
 sem renomear/reagrupar nada; `minHeight` da faixa de grupos 58→82; invariante de
-posicionamento intacto). Sessão 11 ainda não entregue (o mesmo padrão aplicado nas
-abas restantes — Analisar/Otimizar/Política/Projeto + as 6 contextuais — com validação dos
-3 modos de colapso e do breakpoint touch/mobile). Não fazem parte do escopo da v2 original.
+posicionamento intacto). **Sessão 11 entregue** (o mesmo padrão aplicado nas abas restantes
+— Analisar/Otimizar/Política/Projeto + as 6 contextuais, via marcação `primary: true` nos
+descritores do registro `COMMANDS`, sem mudar `RibbonCmdButton`/faixa de grupos — com
+validação dos 3 modos de colapso e do breakpoint touch/mobile). Não fazem parte do escopo da
+v2 original.
