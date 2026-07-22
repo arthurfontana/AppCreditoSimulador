@@ -8177,10 +8177,10 @@ export default function App() {
     { id: 'data.regenerateExplore', label: 'Regenerar análise da base', icon: '↻', tab: 'dados', group: 'Explorar', keywords: ['regenerar', 'explorar', 'atualizar análise', 'perfil da base'], enabledWhen: () => !!baseProfileResult && !baseProfileResult.error, disabledReason: 'carregue uma base para gerar a análise', onRun: regenerateExploreLayout },
 
     // ─── ANALISAR ───
-    { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura', 'oportunidade'], onRun: () => openSegmentDiscoveryModal(null) },
+    { id: 'analyze.discover', label: 'Descobrir Segmentos', icon: '🔍', tab: 'analisar', group: 'Descoberta', primary: true, keywords: ['segmentos', 'descobrir', 'subgroup', 'varredura', 'oportunidade'], onRun: () => openSegmentDiscoveryModal(null) },
     { id: 'analyze.cluster', label: 'Clusterizar Segmentos', icon: '🧩', tab: 'analisar', group: 'Descoberta', keywords: ['cluster', 'clusterizar', 'k-means', 'agrupar', 'agrupamento'], onRun: () => openClusterModal(null) },
     { id: 'analyze.range', label: 'Criar Faixas por Risco', icon: '📐', tab: 'analisar', group: 'Descoberta', keywords: ['faixas', 'binning', 'risco', 'iv', 'woe', 'bandas', 'faixa etária', 'faixa de renda', 'cortes'], onRun: () => openRangeModal() },
-    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', keywords: ['copiloto', 'lint', 'achados', 'diagnóstico', 'assistente', 'feed', 'próxima melhor ação'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
+    { id: 'analyze.copilot', label: 'Copiloto', icon: '🧭', tab: 'analisar', group: 'Copiloto', primary: true, keywords: ['copiloto', 'lint', 'achados', 'diagnóstico', 'assistente', 'feed', 'próxima melhor ação'], onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); } },
     // "Buscar oportunidades" (DEC-NB-002/003, Sessão NB3): roda a Descoberta de Segmentos
     // (global, params default do modal) + a Simplificação FORA do tick e injeta os achados
     // como cards Tier 2 carimbados no feed do Copiloto (staleness derivado quando o IR muda).
@@ -8216,56 +8216,58 @@ export default function App() {
     { id: 'copilot.reviewCoverage', label: 'Revisar cobertura', icon: '🕳', tab: 'feed', contextWhen: () => false, onRun: () => { setPanelCollapsed(false); setRightPanelMode('copilot'); setJourneyStageFilter(null); } },
 
     // ─── OTIMIZAR ───
-    { id: 'optimize.goalSeek', label: 'Atingir Objetivo', icon: '🎯', tab: 'otimizar', group: 'Política', keywords: ['goal seek', 'objetivo', 'meta', 'milp', 'profundo'], onRun: openGoalSeekModal },
+    { id: 'optimize.goalSeek', label: 'Atingir Objetivo', icon: '🎯', tab: 'otimizar', group: 'Política', primary: true, keywords: ['goal seek', 'objetivo', 'meta', 'milp', 'profundo'], onRun: openGoalSeekModal },
     { id: 'optimize.simplify', label: 'Simplificar', icon: '🧹', tab: 'otimizar', group: 'Política', keywords: ['simplificar', 'reduzir', 'equivalência', 'limpar', 'enxugar política'], onRun: openSimplifyModal },
-    { id: 'optimize.johnny', label: 'Otimização Johnny', icon: '⚡', tab: 'otimizar', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha', 'pareto'], enabledWhen: () => _allCinemas, disabledReason: 'requer 2+ Cineminhas selecionadas', onRun: () => openJohnnyModal([...multiSel]) },
+    { id: 'optimize.johnny', label: 'Otimização Johnny', icon: '⚡', tab: 'otimizar', group: 'Matrizes', primary: true, keywords: ['johnny', 'otimizar', 'multi cineminha', 'pareto'], enabledWhen: () => _allCinemas, disabledReason: 'requer 2+ Cineminhas selecionadas', onRun: () => openJohnnyModal([...multiSel]) },
 
     // ─── POLÍTICA ───
-    { id: 'policy.library', label: 'Biblioteca de Políticas', icon: '📚', tab: 'politica', group: 'Biblioteca', keywords: ['políticas', 'biblioteca', 'templates', 'policy', 'político', 'regra', 'modelos de política'], onRun: () => openPolicyLibrary('browse') },
-    { id: 'policy.doc', label: 'Documentar Política', icon: '📄', tab: 'politica', group: 'Documento', keywords: ['documentar', 'documentação', 'relatório', 'executivo', 'político', 'regra'], onRun: openDocModal },
-    { id: 'policy.export', label: 'Exportar Fluxo', icon: '⬇', tab: 'politica', group: 'Fluxo', keywords: ['exportar', 'policyir', 'json', 'fluxo', 'política', 'regra'], onRun: exportFlow },
+    { id: 'policy.library', label: 'Biblioteca de Políticas', icon: '📚', tab: 'politica', group: 'Biblioteca', primary: true, keywords: ['políticas', 'biblioteca', 'templates', 'policy', 'político', 'regra', 'modelos de política'], onRun: () => openPolicyLibrary('browse') },
+    { id: 'policy.doc', label: 'Documentar Política', icon: '📄', tab: 'politica', group: 'Documento', primary: true, keywords: ['documentar', 'documentação', 'relatório', 'executivo', 'político', 'regra'], onRun: openDocModal },
+    { id: 'policy.export', label: 'Exportar Fluxo', icon: '⬇', tab: 'politica', group: 'Fluxo', primary: true, keywords: ['exportar', 'policyir', 'json', 'fluxo', 'política', 'regra'], onRun: exportFlow },
     { id: 'policy.import', label: 'Importar Fluxo', icon: '⬆', tab: 'politica', group: 'Fluxo', keywords: ['importar', 'fluxo', 'carregar política', 'regra'], onRun: () => flowImportRef.current?.click() },
 
     // ─── PROJETO ───
-    { id: 'project.save', label: 'Salvar Projeto', icon: '💾', tab: 'projeto', group: 'Arquivo', shortcut: '', keywords: ['salvar', 'projeto', 'credito', 'gravar'], onRun: saveProject },
+    { id: 'project.save', label: 'Salvar Projeto', icon: '💾', tab: 'projeto', group: 'Arquivo', shortcut: '', primary: true, keywords: ['salvar', 'projeto', 'credito', 'gravar'], onRun: saveProject },
     { id: 'project.open', label: 'Abrir Projeto', icon: '📁', tab: 'projeto', group: 'Arquivo', keywords: ['abrir', 'carregar projeto', 'credito'], onRun: () => projectInputRef.current?.click() },
-    { id: 'project.settings', label: 'Configurações', icon: '⚙', tab: 'projeto', group: 'Sistema', shortcut: 'Ctrl+,', keywords: ['configurações', 'preferências', 'ajustes', 'settings', 'motor python', 'visualização', 'hub'], onRun: () => openSettings() },
+    { id: 'project.settings', label: 'Configurações', icon: '⚙', tab: 'projeto', group: 'Sistema', shortcut: 'Ctrl+,', primary: true, keywords: ['configurações', 'preferências', 'ajustes', 'settings', 'motor python', 'visualização', 'hub'], onRun: () => openSettings() },
 
     // ─── CONTEXTUAIS (surfaces #3–#8) — nascem agora; abas contextuais renderizam na Sessão 2 ───
     // Matriz (Cineminha): seletor de tipo (×3), Resultado, Domínio, Otimizar, Johnny, Exportar/
     // Importar, Biblioteca, Salvar. contextWhen por tipo.
     ...Object.values(CINEMINHA_TYPES).map(t => ({
       id: `ctx.cinema.type.${t.id}`, label: `Tipo: ${t.label}`, icon: t.icon, tab: 'ctx-matriz', group: 'Tipo',
+      primary: t.id === 'eligibility',
       keywords: ['tipo de cineminha', t.label], contextWhen: (s) => s?.type === 'cineminha',
       activeWhen: () => (selShape?.cinemaType ?? 'eligibility') === t.id, onRun: () => changeCinemaType(sel, t.id),
     })),
     { id: 'ctx.cinema.result', label: 'Resultado', icon: '⊞', tab: 'ctx-matriz', group: 'Configurar', keywords: ['variável de resultado', 'coluna', 'casela'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => setResultVarModal({ shapeId: sel }) },
-    { id: 'ctx.node.domain', label: 'Domínio', icon: '⚙', tab: 'ctx-matriz', group: 'Configurar', keywords: ['domínio', 'valores', 'linhas colunas', 'configurar nó'], contextWhen: (s) => s?.type === 'cineminha' || s?.type === 'decision', onRun: () => openDomainModal(sel) },
-    { id: 'ctx.cinema.optimize', label: 'Otimizar Decisão', icon: '⚙', tab: 'ctx-matriz', group: 'Otimizar', keywords: ['otimizar decisão', 'pareto'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openOptimModal(sel) },
+    { id: 'ctx.node.domain', label: 'Domínio', icon: '⚙', tab: 'ctx-matriz', group: 'Configurar', primary: true, keywords: ['domínio', 'valores', 'linhas colunas', 'configurar nó'], contextWhen: (s) => s?.type === 'cineminha' || s?.type === 'decision', onRun: () => openDomainModal(sel) },
+    { id: 'ctx.cinema.optimize', label: 'Otimizar Decisão', icon: '⚙', tab: 'ctx-matriz', group: 'Otimizar', primary: true, keywords: ['otimizar decisão', 'pareto'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openOptimModal(sel) },
     { id: 'ctx.cinema.johnny', label: 'Otimização Johnny', icon: '⚡', tab: 'ctx-matriz', group: 'Otimizar', keywords: ['johnny'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openJohnnyModal([sel]) },
     { id: 'ctx.cinema.export', label: 'Exportar', icon: '⬇', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['exportar cineminha'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => exportCinema(sel) },
     { id: 'ctx.cinema.import', label: 'Importar', icon: '⬆', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['importar cineminha'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => startCinemaImport(sel) },
-    { id: 'ctx.cinema.library', label: 'Biblioteca', icon: '📚', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['biblioteca de cineminhas'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openCinemaLibrary(sel, 'browse') },
+    { id: 'ctx.cinema.library', label: 'Biblioteca', icon: '📚', tab: 'ctx-matriz', group: 'Biblioteca', primary: true, keywords: ['biblioteca de cineminhas'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openCinemaLibrary(sel, 'browse') },
     { id: 'ctx.cinema.save', label: 'Salvar na Biblioteca', icon: '💾', tab: 'ctx-matriz', group: 'Biblioteca', keywords: ['salvar cineminha'], contextWhen: (s) => s?.type === 'cineminha', onRun: () => openCinemaLibrary(sel, 'save') },
     // Decisão (losango): Configurar (domínio) — já coberto por ctx.node.domain acima.
     // Lens (Decision Lens): Configurar regras.
-    { id: 'ctx.lens.configure', label: 'Configurar regras', icon: '🔎', tab: 'ctx-lens', group: 'Configurar', keywords: ['configurar lens', 'regras', 'população'], contextWhen: (s) => s?.type === 'decision_lens', onRun: () => openLensModal(sel) },
+    { id: 'ctx.lens.configure', label: 'Configurar regras', icon: '🔎', tab: 'ctx-lens', group: 'Configurar', primary: true, keywords: ['configurar lens', 'regras', 'população'], contextWhen: (s) => s?.type === 'decision_lens', onRun: () => openLensModal(sel) },
     // "Analisar aqui" — UM descritor cada, contextWhen aceitando os tipos aplicáveis (fim da
     // triplicação losango/Cineminha/Lens). 🔍 aceita também terminais (Aprovado/Reprovado/AS IS).
-    { id: 'ctx.scope.discover', label: 'Descobrir aqui', icon: '🔍', tab: 'ctx-analisar', group: 'Analisar aqui', keywords: ['descobrir segmentos', 'escopo do nó', 'aqui'], contextWhen: (s) => _scopeNode(s?.type) || ['approved', 'rejected', 'as_is'].includes(s?.type), onRun: () => openSegmentDiscoveryModal({ nodeId: sel }) },
+    { id: 'ctx.scope.discover', label: 'Descobrir aqui', icon: '🔍', tab: 'ctx-analisar', group: 'Analisar aqui', primary: true, keywords: ['descobrir segmentos', 'escopo do nó', 'aqui'], contextWhen: (s) => _scopeNode(s?.type) || ['approved', 'rejected', 'as_is'].includes(s?.type), onRun: () => openSegmentDiscoveryModal({ nodeId: sel }) },
     { id: 'ctx.scope.cluster', label: 'Clusterizar aqui', icon: '🧩', tab: 'ctx-analisar', group: 'Analisar aqui', keywords: ['clusterizar', 'escopo do nó', 'aqui'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => openClusterModal({ nodeId: sel }) },
     { id: 'ctx.scope.range', label: 'Faixas aqui', icon: '📐', tab: 'ctx-analisar', group: 'Analisar aqui', keywords: ['faixas por risco', 'escopo do nó', 'aqui', 'binning'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => openRangeModal({ scope: { nodeId: sel } }) },
     // Trava (Goal Seek) — losango/Cineminha/Lens.
-    { id: 'ctx.node.lock', label: 'Travar / Destravar', icon: '🔒', tab: 'ctx-analisar', group: 'Trava', keywords: ['travar', 'destravar', 'goal seek', 'lock'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => toggleShapeLock(sel) },
+    { id: 'ctx.node.lock', label: 'Travar / Destravar', icon: '🔒', tab: 'ctx-analisar', group: 'Trava', primary: true, keywords: ['travar', 'destravar', 'goal seek', 'lock'], contextWhen: (s) => _scopeNode(s?.type), onRun: () => toggleShapeLock(sel) },
     // Porta solta: sugerir próximo passo (só faz sentido em porta sem conexão de saída).
-    { id: 'ctx.port.suggest', label: 'Sugerir próximo passo', icon: '💡', tab: 'ctx-porta', group: 'Sugestão', keywords: ['sugerir', 'próximo passo', 'ranking de variáveis'], contextWhen: (s) => s?.type === 'port', enabledWhen: () => conns.filter(c => c.from === sel).length === 0, disabledReason: 'porta já conectada', onRun: () => openVariableRanking(sel) },
+    { id: 'ctx.port.suggest', label: 'Sugerir próximo passo', icon: '💡', tab: 'ctx-porta', group: 'Sugestão', primary: true, keywords: ['sugerir', 'próximo passo', 'ranking de variáveis'], contextWhen: (s) => s?.type === 'port', enabledWhen: () => conns.filter(c => c.from === sel).length === 0, disabledReason: 'porta já conectada', onRun: () => openVariableRanking(sel) },
     // Seleção múltipla: alinhar/distribuir (8). Mesmo grupo da toolbar flutuante #2.
     ...[['left', 'Alinhar à esquerda', '⊢'], ['right', 'Alinhar à direita', '⊣'], ['top', 'Alinhar ao topo', '⊤'], ['bottom', 'Alinhar à base', '⊥'], ['centerH', 'Centralizar H', '↔'], ['centerV', 'Centralizar V', '↕'], ['distH', 'Distribuir H', '⇹'], ['distV', 'Distribuir V', '⤡']].map(([d, l, ic]) => ({
-      id: `ctx.align.${d}`, label: l, icon: ic, tab: 'ctx-selecao', group: 'Alinhar', keywords: ['alinhar', 'distribuir', l], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, disabledReason: 'selecione 2+ shapes', onRun: () => applyAlign(d),
+      id: `ctx.align.${d}`, label: l, icon: ic, tab: 'ctx-selecao', group: 'Alinhar', primary: d === 'left',
+      keywords: ['alinhar', 'distribuir', l], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, disabledReason: 'selecione 2+ shapes', onRun: () => applyAlign(d),
     })),
     // Otimização Johnny em massa (habilita só com todos Cineminhas) + Deletar em massa.
-    { id: 'ctx.sel.johnny', label: `Otimização Johnny (${multiSel.size})`, icon: '⚡', tab: 'ctx-selecao', group: 'Matrizes', keywords: ['johnny', 'otimizar', 'multi cineminha'], contextWhen: () => multiSel.size > 1, enabledWhen: () => _allCinemas, disabledReason: 'requer 2+ Cineminhas selecionadas', onRun: () => openJohnnyModal([...multiSel]) },
-    { id: 'ctx.sel.delete', label: `Deletar (${multiSel.size})`, icon: '🗑', tab: 'ctx-selecao', group: 'Ações', keywords: ['deletar', 'excluir', 'remover em massa'], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, disabledReason: 'selecione 2+ shapes', onRun: deleteSelected },
+    { id: 'ctx.sel.johnny', label: `Otimização Johnny (${multiSel.size})`, icon: '⚡', tab: 'ctx-selecao', group: 'Matrizes', primary: true, keywords: ['johnny', 'otimizar', 'multi cineminha'], contextWhen: () => multiSel.size > 1, enabledWhen: () => _allCinemas, disabledReason: 'requer 2+ Cineminhas selecionadas', onRun: () => openJohnnyModal([...multiSel]) },
+    { id: 'ctx.sel.delete', label: `Deletar (${multiSel.size})`, icon: '🗑', tab: 'ctx-selecao', group: 'Ações', primary: true, keywords: ['deletar', 'excluir', 'remover em massa'], contextWhen: () => multiSel.size > 1, enabledWhen: () => multiSel.size > 1, disabledReason: 'selecione 2+ shapes', onRun: deleteSelected },
   ];
 
   // Dispara a CTA de um card do feed (DEC-NB-008) — resolve o commandId no registro acima
